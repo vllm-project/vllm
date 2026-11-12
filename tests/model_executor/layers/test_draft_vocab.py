@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -12,10 +13,14 @@ from vllm.model_executor.layers.draft_vocab import (
     load_draft_token_map,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import modelopt
 from vllm.model_executor.layers.quantization.online.lm_head import (
     refresh_quantized_lm_heads,
     restore_quantized_lm_heads,
     share_source_lm_heads,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -198,3 +203,150 @@ def test_quantized_listed_rows_follow_target_head(
     refresh_quantized_lm_heads(drafter)
     assert torch.equal(drafter.draft_vocab.compute_logits(head, hidden), expected)
     assert {k: t.data_ptr() for k, t in rows.state_dict().items()} == ptrs
+
+
+def _nvfp4_checkpoint(vocab: int, hidden: int) -> dict[str, torch.Tensor]:
+    """A ModelOpt NVFP4 lm_head as stored in the checkpoint."""
+    gen = torch.Generator().manual_seed(3)
+    return {
+        "weight": torch.randint(
+            0, 256, (vocab, hidden // 2), dtype=torch.uint8, generator=gen
+        ),
+        "weight_scale": (torch.rand(vocab, hidden // 16, generator=gen) + 0.5).to(
+            torch.float8_e4m3fn
+        ),
+        "weight_scale_2": torch.tensor(0.01),
+    }
+
+
+def _dequant(packed, scales, global_scale) -> torch.Tensor:
+    return dequantize_to_dtype(
+        packed, scales, global_scale, torch.float32, swizzle=False
+    )
+
+
+class _DequantKernel:
+    """Stands in for the NVFP4 kernel, which needs CUDA."""
+
+    def input_quant_key(self):
+        return None
+
+    def process_weights_after_loading(self, layer):
+        pass
+
+    def apply_weights(self, layer, x, bias=None):
+        w = _dequant(layer.weight, layer.weight_scale, layer.weight_global_scale)
+        return x @ w.t().to(x.dtype)
+
+
+def _nvfp4_head(
+    weights: dict[str, torch.Tensor], quant_method: str, device: str = "cpu"
+) -> ParallelLMHead:
+    quant_config = modelopt.ModelOptNvFp4Config(
+        quant_method=quant_method, is_checkpoint_nvfp4_serialized=True
+    )
+    vocab, hidden = weights["weight"].shape[0], weights["weight"].shape[1] * 2
+    with torch.device(device):
+        head = ParallelLMHead(
+            vocab,
+            hidden,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix="lm_head",
+            disable_tp=True,
+        )
+    params = dict(head.named_parameters())
+    for name, weight in weights.items():
+        params[name].weight_loader(params[name], weight.to(device))
+    head.quant_method.process_weights_after_loading(head)
+    return head
+
+
+def _keep(draft_vocab: DraftVocab, checkpoint, head) -> None:
+    weights = [("lm_head." + n, w) for n, w in checkpoint.items()]
+    weights.append(("model.fc.weight", torch.zeros(1)))
+    assert list(draft_vocab.keep_head_weights(weights, head)) == weights
+
+
+@pytest.mark.cpu_test
+def test_quantized_head_drafts_over_checkpoint_rows(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """A quantized lm_head drafts over its own checkpoint rows, with the logits
+    of the full head on them, and releases the kept tensors once loaded."""
+    monkeypatch.setattr(
+        modelopt, "select_linear_kernel", lambda *a, **kw: _DequantKernel()
+    )
+    checkpoint = _nvfp4_checkpoint(VOCAB, HIDDEN)
+    head = _nvfp4_head(checkpoint, "W4A16_NVFP4")
+    hidden = _hidden().bfloat16()
+    full = LogitsProcessor(VOCAB)(head, hidden)
+
+    draft_vocab = DraftVocab(LogitsProcessor(VOCAB), VOCAB, keep_quantized_head=True)
+    # Serving sets head_dtype to the model dtype.
+    draft_vocab.logits_processor.head_dtype = torch.bfloat16
+    _keep(draft_vocab, checkpoint, head)
+    kept = [weakref.ref(w) for w in draft_vocab.head_weights.values()]
+    assert len(kept) == len(checkpoint)
+    draft_vocab.load_token_map(head, torch.tensor(DRAFT_IDS))
+    assert not draft_vocab.head_weights
+    assert all(ref() is None for ref in kept)
+
+    logits = draft_vocab.compute_logits(head, hidden)
+    expected = torch.full_like(full, float("-inf"))
+    expected[:, DRAFT_IDS] = full[:, DRAFT_IDS]
+    torch.testing.assert_close(logits, expected)
+    assert torch.equal(draft_vocab.get_top_tokens(head, hidden), logits.argmax(-1))
+
+    def load(checkpoint, **kwargs):
+        draft_vocab = DraftVocab(LogitsProcessor(VOCAB), VOCAB, True)
+        _keep(draft_vocab, checkpoint, head)
+        draft_vocab.load_token_map(head, torch.tensor(DRAFT_IDS), **kwargs)
+
+    with pytest.raises(ValueError, match="quantized in the checkpoint"):
+        load(checkpoint, quantization="fp8")
+    # 128x128 block scales are not indexed by output row.
+    with pytest.raises(ValueError, match="not indexed by output row"):
+        load({**checkpoint, "weight_scale": torch.ones(2, 1)})
+    with pytest.raises(ValueError, match="keep_head_weights"):
+        DraftVocab(LogitsProcessor(VOCAB), VOCAB).load_token_map(
+            head, torch.tensor(DRAFT_IDS)
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 kernels need CUDA")
+@pytest.mark.parametrize("quant_method", ["W4A16_NVFP4", "NVFP4"])
+def test_nvfp4_checkpoint_head_rows_match_full_head(
+    default_vllm_config, dist_init, quant_method
+):
+    """Listed and dynamic rows of an NVFP4 checkpoint head on the real kernels."""
+    vocab, hidden_size, num_rows = 4096, 512, 256
+    checkpoint = _nvfp4_checkpoint(vocab, hidden_size)
+    if quant_method == "NVFP4":
+        checkpoint["input_scale"] = torch.tensor(0.01)
+    head = _nvfp4_head(checkpoint, quant_method, "cuda")
+    hidden = torch.randn(64, hidden_size, device="cuda", dtype=torch.bfloat16)
+    token_ids = torch.arange(0, vocab, 4)
+    full = LogitsProcessor(vocab)(head, hidden).float()
+    weight = _dequant(
+        checkpoint["weight"], checkpoint["weight_scale"], checkpoint["weight_scale_2"]
+    )
+    reference = hidden.float() @ weight.cuda().t()
+
+    def draft(dynamic_rows):
+        draft_vocab = DraftVocab(LogitsProcessor(vocab), vocab, True)
+        _keep(draft_vocab, checkpoint, head)
+        draft_vocab.load_token_map(head, token_ids, dynamic_rows)
+        return draft_vocab.compute_logits(head, hidden).float()
+
+    logits = draft(0)
+    kept = logits.isfinite()
+    assert torch.all(kept.sum(dim=-1) == token_ids.numel())
+    torch.testing.assert_close(logits[kept], full[kept], atol=1e-2, rtol=1e-2)
+
+    logits = draft(num_rows)
+    kept = logits.isfinite()
+    assert torch.all(kept.sum(dim=-1) == token_ids.numel() + num_rows)
+    # The dynamic rows run with unquantized activations.
+    rel_err = (logits[kept] - reference[kept]).norm() / reference[kept].norm()
+    assert rel_err < (0.02 if quant_method == "W4A16_NVFP4" else 0.2)

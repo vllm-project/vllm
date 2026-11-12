@@ -87,8 +87,13 @@ vllm serve <mtp-model> \
 - The list is SGLang's `--speculative-token-map` file (`.pt`) or a JSON list of
   ids, for example the most frequent ids in text the model generated. EOS ids
   are always added.
-- Requires Model Runner V2, an MTP drafter that shares an unquantized lm_head
+- Requires Model Runner V2, an MTP drafter that shares the target's lm_head
   (Qwen3.5, Qwen4Exp, NemotronH) and tensor parallel size 1.
+- A lm_head quantized in the checkpoint (for example ModelOpt NVFP4) keeps its
+  format: the listed rows are cut from the checkpoint tensors and run on the
+  head's own kernel. This needs a drafter that loads the lm_head itself
+  (Qwen3.5 MTP); dynamic rows need the ModelOpt NVFP4 format, and
+  `draft_lm_head_quantization` is rejected.
 - The dynamic rows are read per draft token, so the gain shrinks with batch
   size. Measure decode speed and acceptance length at your concurrency.
 - With `draft_lm_head_quantization` (see the notes below), only the listed and

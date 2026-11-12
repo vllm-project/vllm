@@ -596,9 +596,10 @@ class SpeculativeConfig:
     cuts its cost per draft token; the target still verifies with the full
     vocabulary, so outputs follow the usual speculative decoding guarantees.
     Accepts SGLang's `--speculative-token-map` file (`.pt`) or a JSON list.
-    EOS ids are always included. The rows follow
-    `draft_lm_head_quantization`. Requires an MTP drafter that shares an
-    unquantized lm_head and tensor parallel size 1."""
+    EOS ids are always included. The rows of an unquantized lm_head follow
+    `draft_lm_head_quantization`; a lm_head quantized in the checkpoint keeps
+    its format, and needs ModelOpt NVFP4 for dynamic rows. Requires an MTP
+    drafter that shares the target lm_head and tensor parallel size 1."""
 
     draft_token_map_dynamic_rows: int = Field(default=0, ge=0)
     """Extra draft tokens picked per draft token on top of `draft_token_map`.
