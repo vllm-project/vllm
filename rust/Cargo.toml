@@ -67,6 +67,8 @@ minijinja = { version = "2.24", features = ["unstable_machinery", "json", "built
 minijinja-contrib = { version = "2.24", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
 ndarray = { version = "0.17", features = ["serde"] }
+# Exact pin, as for the Python `nixl` package: the NIXL reader works around 1.5 behavior.
+nixl-sys = "=1.5.2"
 openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmony/harmony", tag = "v0.0.11", default-features = false }
 openai-protocol = "1.6.0"
 openssl = "0.10"
