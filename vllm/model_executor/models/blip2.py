@@ -693,15 +693,18 @@ class Blip2ForConditionalGeneration(
         mm_kwargs: MultiModalKwargsItem | None,
         num_mm_embeds: int,
     ) -> tuple[int, int | None]:
-        del modality, mm_kwargs
+        del modality
         if num_mm_embeds <= 0:
             return 0, 0
-        assert num_mm_embeds % self.config.num_query_tokens == 0, (
-            "The number of image tokens must be a multiple of "
-            "the number of query tokens."
-        )
-        num_images = num_mm_embeds // self.config.num_query_tokens
+        num_query_tokens = self.config.num_query_tokens
+        # A sizing budget can include leftover tokens that cannot fit an image.
+        if mm_kwargs is not None:
+            assert num_mm_embeds % num_query_tokens == 0, (
+                "The number of image tokens must be a multiple of "
+                "the number of query tokens."
+            )
+        num_images = num_mm_embeds // num_query_tokens
         return (
             num_images * self._vision_tokens_per_image,
-            num_images * self.config.num_query_tokens,
+            num_images * num_query_tokens,
         )
