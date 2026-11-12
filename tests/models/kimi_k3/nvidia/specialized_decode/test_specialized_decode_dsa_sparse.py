@@ -394,7 +394,7 @@ def test_dcp_value_rows_policy():
     assert value(DCP16, 8, rows_per_cta=1).grid == (6, 8, 1)
 
 
-def _value_outputs(batch, rows_per_cta, seed=4):
+def _value_outputs(batch, rows_per_cta, seed=4, poll_all=None):
     """DcpValue `pushed` (DCP16, owner of 6 heads) over a filled "bf16" mailbox of
     16 sources (source 3 of row 2 empty: LSE only; row 1 inactive): the gated
     output and the mailbox after the merge (re-armed)."""
@@ -444,7 +444,14 @@ def _value_outputs(batch, rows_per_cta, seed=4):
     gate = projected[:, 2112:]
     args = heads, size, batch, CAP, layout(w_uv), pitch, 0, 148, 1, PADDED
     kernel = compile_value(
-        *args, False, False, "bf16", False, True, rows_per_cta=rows_per_cta
+        *args,
+        False,
+        False,
+        "bf16",
+        False,
+        True,
+        rows_per_cta=rows_per_cta,
+        poll_all=poll_all,
     )
     kernel(
         to_cute(latent),
@@ -473,14 +480,16 @@ def cutlass_int(value):
     return cutlass.Int32(value)
 
 
+@pytest.mark.parametrize("poll_all", [False, True])
 @pytest.mark.parametrize("rows_per_cta", [1, 2, 3, 4])
 @pytest.mark.parametrize("batch", [3, 8])
-def test_dcp_value_rows_match_tiles(batch, rows_per_cta):
+def test_dcp_value_rows_match_tiles(batch, rows_per_cta, poll_all):
     """DcpValue `pushed` with one CTA per (head, rows_per_cta rows) merges every
-    value with the operations and order of one CTA per (head, 16 rows): the gated
-    output and the re-armed mailbox match byte for byte."""
+    value with the operations and order of one CTA per (head, 16 rows), whether it
+    polls a row's sources one by one or together: the gated output and the
+    re-armed mailbox match byte for byte."""
     want = _value_outputs(batch, 0)
-    got = _value_outputs(batch, rows_per_cta)
+    got = _value_outputs(batch, rows_per_cta, poll_all=poll_all)
     assert torch.equal(got[0].view(torch.int16), want[0].view(torch.int16))
     assert torch.all(got[0][1] == 0)  # the inactive row
     for tensor, ref in zip(got[1:], want[1:]):
