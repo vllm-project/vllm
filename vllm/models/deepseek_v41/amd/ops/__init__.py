@@ -12,10 +12,6 @@ launch, and `draft_lm_head` keeps the DSpark draft's 5-row logits GEMM off
 wvSplitK. All of them run only when `enabled()` is true, except
 `swa_decode_meta` and `fused_markov`, which run when
 `monokernel_cdna3_or_4()` is true.
-
-`mhc_seam` runs the decoder's delayed mHC seams as one AITER launch on
-prefill-sized steps, with or without --monokernel, wherever AITER's probe
-accepts the shape.
 """
 
 import functools
