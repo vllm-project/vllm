@@ -69,7 +69,6 @@ CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
 ```bash
 CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
   --port 19537 \
-  --gpu-memory-utilization 0.75 \
   --enable-mm-embeds \
   --enable-request-id-headers \
   --disable-prefix-caching \

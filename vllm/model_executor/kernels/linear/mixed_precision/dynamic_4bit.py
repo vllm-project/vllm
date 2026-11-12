@@ -5,6 +5,7 @@
 import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.utils import retire_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
@@ -47,15 +48,19 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
         ):
             return (
                 False,
-                "Dynamic4bitLinearKernel on Arm requires Float32 or"
-                " BFloat16 or Float16 activations",
+                (
+                    "Dynamic4bitLinearKernel on Arm requires Float32 or"
+                    " BFloat16 or Float16 activations"
+                ),
             )
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) does not evenly divide"
-                " the number of input features "
-                f"({c.full_weight_shape[0]})",
+                (
+                    f"Group size ({c.group_size}) does not evenly divide"
+                    " the number of input features "
+                    f"({c.full_weight_shape[0]})"
+                ),
             )
         if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
             try:
@@ -64,8 +69,10 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
             except AttributeError:
                 return (
                     False,
-                    f"PyTorch {torch.__version__} does not support"
-                    " _dyn_quant_matmul_4bit. Install a newer version",
+                    (
+                        f"PyTorch {torch.__version__} does not support"
+                        " _dyn_quant_matmul_4bit. Install a newer version"
+                    ),
                 )
         return True, None
 
@@ -111,7 +118,8 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
         replace_parameter(
             layer, self.w_q_name, torch.nn.Parameter(w, requires_grad=False)
         )
-        setattr(layer, self.w_s_name, None)
+        # Scales are packed into the weight; the loaded param keeps its data.
+        retire_parameter(layer, self.w_s_name)
 
     def apply_weights(
         self,

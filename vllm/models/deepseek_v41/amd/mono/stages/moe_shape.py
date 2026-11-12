@@ -3,10 +3,10 @@
 # Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM) at 97359d6, MIT License,
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/models/deepseek_v41/mono/kernels/moe_shape.py
-"""The MoE stages' build key and route shape: what they are built for (``MoeBuild``),
+"""The MoE stages' build key and route shape: what they are built for (`MoeBuild`),
 and the task counts, placements and LDS route table that follow from its
-routing (``RouteShape``), with the table's readers. Plain Python but for the
-readers; the kernel's stages are in ``moe``."""
+routing (`RouteShape`), with the table's readers. Plain Python but for the
+readers; the kernel's stages are in `moe`."""
 
 from dataclasses import dataclass, field
 
@@ -53,13 +53,15 @@ class MoeBuild:
     timeline: bool = field(default=False, metadata={"sym": "tl"})
     # FP4 groups an ug task (``RouteShape.ug_groups``)
     ug_groups: int = 2
+    # a tuned build's paths (``layer.MonoBuild.tuned``)
+    tuned: bool = False
 
 
 @dataclass(frozen=True)
 class RouteShape:
-    """A build's routing: ``experts`` routed experts, ``topk`` a token of
-    ``tokens``, the task counts and placements that follow, and the route table
-    ``load_route`` lays out in LDS: every token's (ids, weights), |U|, the
+    """A build's routing: `experts` routed experts, `topk` a token of
+    `tokens`, the task counts and placements that follow, and the route table
+    `load_route` lays out in LDS: every token's (ids, weights), |U|, the
     experts of U, each (t, k)'s slot in U, each expert's slot, the picks in slot
     order and each slot's first position in it (past one token tile also each
     slot's first pick tile and each pick tile's slot)."""
@@ -73,6 +75,7 @@ class RouteShape:
     # closer together: faster at the draft's widths (40 rows -4 us), slower at
     # the target's (48 rows +3 us; the runners pick)
     ug_groups: int = 2
+    tuned: bool = False  # ``MoeBuild.tuned``
 
     @property
     def dims(self) -> Dims:
@@ -80,7 +83,7 @@ class RouteShape:
 
     @property
     def ug_parts(self) -> int:
-        """An expert's ug tasks (``moe_plan.ug_parts``)."""
+        """An expert's ug tasks (`moe_plan.ug_parts`)."""
         return mplan.ug_parts(self.dims.inter_real // UG_PART, self.ug_groups)
 
     @property
@@ -99,7 +102,7 @@ class RouteShape:
 
     @property
     def router_groups(self) -> tuple[int, int]:
-        """``stage_router``'s token groups and their tokens: a group a token
+        """`stage_router`'s token groups and their tokens: a group a token
         tile, as many as one round of CTAs holds (a CTA running two serialized
         them: the route waited on the 32 that did at 48 rows)."""
         per_group = self.experts // ROWS * ROUTER_PARTS
@@ -128,7 +131,7 @@ class RouteShape:
 
     @property
     def shared_units(self) -> int:
-        """The shared expert's (task, token tile) units (``stage_shared``)."""
+        """The shared expert's (task, token tile) units (`stage_shared`)."""
         return self.dims.shared_tasks * len(token_tiles(self.tokens))
 
     @property
@@ -147,7 +150,7 @@ class RouteShape:
     @property
     def multi(self) -> bool:
         """More than one token tile: an ug task is a (tile of a slot's picks,
-        part) (``stage_ug``)."""
+        part) (`stage_ug`)."""
         return self.tokens > TILE
 
     @property
@@ -173,7 +176,7 @@ class RouteShape:
 
     @property
     def queue0(self) -> int:
-        """The ug task this CTA took from the queue (``take_ug_task``)."""
+        """The ug task this CTA took from the queue (`take_ug_task`)."""
         return self.mask0 + MASK_WORDS * self.experts
 
     @property
@@ -193,7 +196,7 @@ class RouteShape:
 
     @property
     def mask0(self) -> int:
-        """Each expert's tokens that picked it, a bit a token (``MASK_WORDS``)."""
+        """Each expert's tokens that picked it, a bit a token (`MASK_WORDS`)."""
         return self.first0 + self.max_u + 1
 
     @property
@@ -208,7 +211,7 @@ class RouteShape:
         )
 
     def pick_w(self, tab, p):
-        """The route weight of pick ``p`` (t topk + k), as ``route_w`` reads it."""
+        """The route weight of pick `p` (t topk + k), as `route_w` reads it."""
         t = p // self.topk
         return self.route_w(tab, None, t, p - t * self.topk)
 
@@ -232,4 +235,6 @@ class RouteShape:
 
 
 def route_shape(key: MoeBuild) -> RouteShape:
-    return RouteShape(key.experts, key.topk, key.tokens, key.tp, key.ug_groups)
+    return RouteShape(
+        key.experts, key.topk, key.tokens, key.tp, key.ug_groups, key.tuned
+    )
