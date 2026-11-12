@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor, _topk
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.xpress import kernels
 from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 
@@ -59,7 +60,6 @@ class XPressRefinerHead(nn.Module):
         self.w2 = nn.Linear(r, vocab_size, bias=False)
         self._scratch: dict | None = None
         self._fused_buf: dict | None = None
-        self._mix_L_loaded = False
 
     def _scratch_buffers(self, dtype: torch.dtype, device: torch.device) -> dict:
         """Buffers for the fused Jacobi passes, allocated once at max_num_reqs.
@@ -94,7 +94,6 @@ class XPressRefinerHead(nn.Module):
         tril = torch.tril(torch.ones(B, B, dtype=raw_L.dtype, device=raw_L.device))
         eye = torch.eye(B, dtype=raw_L.dtype, device=raw_L.device)
         self.mix_L.copy_(raw_L * tril + eye)
-        self._mix_L_loaded = True
 
     def hidden_cache(self, h_full: torch.Tensor) -> torch.Tensor:
         # Pass-invariant: only prev_ids changes between Jacobi passes, so compute the
@@ -181,6 +180,7 @@ class XPressRefinerHead(nn.Module):
                     buf["wg_t"],
                     buf["wu_t"],
                     buf["wd_t"],
+                    buf.get("wgu_t"),
                 )
                 bias_c = torch.bmm(w2c, lat0.view(rows, self.rank, 1)).view(N, B - 1, c)
                 # One launch for add + argmax + the candidate-to-vocab gather.
@@ -209,6 +209,7 @@ class XPressRefinerHead(nn.Module):
                 buf["wg_t"],
                 buf["wu_t"],
                 buf["wd_t"],
+                buf.get("wgu_t"),
             )
             torch.mm(lat.view(rows, self.rank), buf["w2_t"], out=bias)
             kernels.fused_add_argmax_to_blk(base, bias, ov, oi, blk)
@@ -235,6 +236,8 @@ class XPressRefinerHead(nn.Module):
             "wd_t": self.mlp_down.weight.detach().t().contiguous(),
             "w2_t": self.w2.weight.detach().t().contiguous(),
         }
+        if current_platform.is_rocm():
+            fused["wgu_t"] = torch.cat([fused["wg_t"], fused["wu_t"]], dim=1)
         if self._fused_buf is None:
             self._fused_buf = fused
         else:
@@ -374,5 +377,3 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
         head = self.model.xpress_head
         if raw_mix_L is not None:
             head.fold_from_raw_(raw_mix_L.to(head.mix_L.dtype))
-        elif not head._mix_L_loaded:
-            raise ValueError("XPress checkpoint is missing xpress_head.mix.L")
