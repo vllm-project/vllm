@@ -63,11 +63,6 @@ from vllm.v1.worker.utils import allocate_kv_cache
 
 DEVICE = current_platform.device_type
 
-xpu_stream_priority_bug = pytest.mark.skipif(
-    current_platform.is_xpu(),
-    reason="torch.xpu.Stream.priority_range() reports an unusable lowest priority",
-)
-
 
 @pytest.fixture(autouse=True)
 def _xpu_torch_cuda_aliases():
@@ -119,7 +114,7 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
             (NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu", pin_memory=True
         )
     }
-    low_pri, _ = torch.cuda.Stream.priority_range()
+    low_pri = 0 if current_platform.is_xpu() else torch.cuda.Stream.priority_range()[0]
     backend = DmaCopyBackend()
     backend.init(
         gpu,
@@ -131,7 +126,6 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     return backend, gpu["k"], cpu["k"]
 
 
-@xpu_stream_priority_bug
 def test_no_forward_step_completes_cpu_store(monkeypatch):
     """A finished request's final store must drain without another model step."""
     backend, gpu, cpu = _make_backend()
@@ -171,7 +165,6 @@ def test_no_forward_step_completes_cpu_store(monkeypatch):
         backend.shutdown()
 
 
-@xpu_stream_priority_bug
 def test_deferred_store_waits_for_draft_forward(monkeypatch):
     """Target completion must not submit the store before draft finalization."""
     backend, gpu, cpu = _make_backend()
@@ -857,7 +850,6 @@ def test_disk_backend_alignment_only_required_for_direct_io(
         backend.shutdown()
 
 
-@xpu_stream_priority_bug
 @pytest.mark.parametrize("hugepages", [False, True])
 def test_cpu_caches_round_trip_on_pinned_host_buffer(hugepages, hugepage_with_free):
     """Store then load returns the same bytes on ordinary or HugeTLB pages."""
