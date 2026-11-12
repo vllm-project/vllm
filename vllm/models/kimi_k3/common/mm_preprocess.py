@@ -113,15 +113,47 @@ class KimiK3MultiModalDataParser(MultiModalDataParser):
         "image": {
             "image_embeds": "values",
             "image_sizes": "metadata",
-            "image_num_tokens": "metadata",
         },
     }
 
+    def __init__(self, media_proc_cfg: Mapping[str, Any], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.media_proc_cfg = media_proc_cfg
+
     def _parse_image_data(self, data):
         if isinstance(data, dict):
+            sizes = data.get("image_sizes")
+            if (
+                not isinstance(sizes, torch.Tensor)
+                or sizes.dtype not in (torch.int32, torch.int64)
+                or sizes.ndim != 2
+                or sizes.shape[1] != 2
+                or not torch.all(sizes > 0)
+            ):
+                raise ValueError(
+                    "image_sizes must contain positive integer [width, height] pairs"
+                )
+            cfg = self.media_proc_cfg
+            num_tokens = torch.tensor(
+                [
+                    [
+                        navit_resize_image(
+                            width,
+                            height,
+                            cfg["patch_size"],
+                            cfg["merge_kernel_size"],
+                            cfg["in_patch_limit"],
+                            cfg["patch_limit_on_one_side"],
+                            cfg["fixed_output_tokens"],
+                        )["num_tokens"]
+                    ]
+                    for width, height in sizes.tolist()
+                ],
+                dtype=torch.int64,
+            )
             required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
-                data,
+                {**data, "image_num_tokens": num_tokens},
                 modality="image",
                 required_fields=required,
                 optional_fields=optional,
@@ -196,6 +228,7 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
 
     def get_data_parser(self) -> KimiK3MultiModalDataParser:
         return KimiK3MultiModalDataParser(
+            media_proc_cfg=self.image_processor.media_proc_cfg,
             expected_hidden_size=self._get_expected_hidden_size(),
             allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )

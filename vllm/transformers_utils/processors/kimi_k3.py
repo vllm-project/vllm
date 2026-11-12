@@ -54,10 +54,6 @@ class KimiK3Processor(ProcessorMixin):
                 do_normalize=do_normalize,
             )
             mm_inputs["image_sizes"] = [list(media["image"].size) for media in medias]
-            mm_inputs["image_num_tokens"] = [
-                [self.image_processor.media_tokens_calculator(media)]
-                for media in medias
-            ]
         else:
             mm_inputs = {}
 

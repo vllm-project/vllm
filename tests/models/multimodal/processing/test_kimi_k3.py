@@ -9,7 +9,13 @@ import torch
 from PIL import Image
 from transformers import AutoImageProcessor
 
-from vllm.config import DeviceConfig, ECTransferConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    ECTransferConfig,
+    ModelConfig,
+    VllmConfig,
+)
 from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
     collect_ec_item_metadata,
@@ -45,7 +51,8 @@ def _noise_image(width: int, height: int) -> Image.Image:
     return Image.fromarray(rng.integers(0, 256, (height, width, 3), dtype=np.uint8))
 
 
-def test_image_metadata_only_roundtrip():
+@pytest.mark.parametrize("with_embeddings", [False, True])
+def test_image_metadata_only_roundtrip(with_embeddings: bool):
     """EC metadata preserves original dimensions and repeated-image placeholders."""
     ctx = build_model_context(_MODEL_ID, limit_mm_per_prompt={"image": 4})
     mm_config = ctx.model_config.multimodal_config
@@ -73,22 +80,41 @@ def test_image_metadata_only_roundtrip():
     metadata = json.loads(
         json.dumps([entry["metadata"] for entry in published.values()])
     )
-    for image, item, position in zip(images, metadata, raw["mm_placeholders"]["image"]):
-        assert item["image_sizes"] == list(image.size)
-        assert item["image_num_tokens"] == [position.get_num_embeds()]
+    for image, item in zip(images, metadata):
+        assert item == {"image_sizes": list(image.size)}
 
-    remote_data = _get_embeds_data("image", metadata, processor)
+    if with_embeddings:
+        embeddings = [
+            torch.full(
+                (position.get_num_embeds(), ctx.model_config.get_hidden_size()),
+                float(index),
+            )
+            for index, position in enumerate(raw["mm_placeholders"]["image"])
+        ]
+        remote_items = [
+            {**item, "image_embeds": embedding}
+            for item, embedding in zip(metadata, embeddings)
+        ]
+    else:
+        remote_items = metadata
+    remote_data = _get_embeds_data("image", remote_items, processor)
     remote = processor(
         prompt, mm_items=processor.info.parse_mm_data({"image": remote_data})
     )
     assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
     assert remote["mm_placeholders"] == raw["mm_placeholders"]
     assert "pixel_values" not in remote["mm_kwargs"].get_data()
+    if with_embeddings:
+        for item, embedding in zip(remote["mm_kwargs"]["image"], embeddings):
+            assert item is not None
+            torch.testing.assert_close(item["image_embeds"].data, embedding)
 
     mm_config.allow_missing_mm_embeddings = False
     ordinary_processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     with pytest.raises(ValueError, match="should contain the fields"):
-        ordinary_processor.info.parse_mm_data({"image": remote_data})
+        ordinary_processor.info.parse_mm_data(
+            {"image": {"image_sizes": remote_data["image_sizes"]}}
+        )
 
 
 def test_image_metadata_only_chat():
@@ -102,6 +128,8 @@ def test_image_metadata_only_chat():
             limit_mm_per_prompt={"image": 3},
             mm_processor_cache_gb=0,
         ),
+        # Rendering needs no KV cache; keep CPU MLA and hybrid-cache defaults aligned.
+        cache_config=CacheConfig(enable_prefix_caching=False),
         ec_transfer_config=ECTransferConfig(
             ec_connector="ECExampleConnector", ec_role="ec_consumer"
         ),
@@ -117,10 +145,9 @@ def test_image_metadata_only_chat():
             "type": "image_embeds",
             "image_embeds": {
                 "image_sizes": list(image.size),
-                "image_num_tokens": [count],
             },
         }
-        for image, count in zip(images, [4, 6, 4])
+        for image in images
     ]
     renderer = renderer_from_config(config)
     try:
