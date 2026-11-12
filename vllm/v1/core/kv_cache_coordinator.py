@@ -266,7 +266,7 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                     prefill_end=prefill_end,
                 )
-        hot_managers = getattr(self, "hisparse_hot_managers", ())
+        hot_managers = self.hisparse_hot_managers
         if hot_managers and num_blocks_to_allocate <= self.block_pool.num_gpu_blocks:
             coordinator = hot_managers[0].coordinator
             assert coordinator is not None
@@ -352,7 +352,7 @@ class KVCacheCoordinator(ABC):
 
         """
         hot_blocks: dict[int, list[KVCacheBlock]] = {}
-        hot_managers = getattr(self, "hisparse_hot_managers", ())
+        hot_managers = self.hisparse_hot_managers
         if hot_managers:
             coordinator = hot_managers[0].coordinator
             assert coordinator is not None
