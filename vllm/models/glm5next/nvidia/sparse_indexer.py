@@ -158,7 +158,9 @@ def sparse_attn_indexer_kpool(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
-    fused_mqa_topk = use_fused_mqa_topk(
+    # q_quant is None when every row is filled causally: nothing is scored, so
+    # there is no query shape for the fused top-k path.
+    fused_mqa_topk = q_quant is not None and use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
         topk=topk_tokens // max(index_kpool, 1),
         fp4_cache=use_fp4_cache,
@@ -167,6 +169,8 @@ def sparse_attn_indexer_kpool(
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # A profiling run scores, so it has the q side.
+        assert q_quant is not None
         # Reserve workspace for indexer during profiling run
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
@@ -352,6 +356,8 @@ def sparse_attn_indexer_kpool(
             _pos = positions[num_decode_tokens:num_tokens].to(torch.int32)
             _buf = topk_indices_buffer[num_decode_tokens:num_tokens]
             _fill_causal_indices(_buf, _pos)
+        # A batch with prefills is always scored.
+        assert q_quant is not None and weights is not None
         # Under ShardQ the chunks index the shardq_gather_indices tokens.
         prefill_q, prefill_q_scale = q_quant, q_scale
         prefill_weights, prefill_positions = weights, positions
@@ -374,7 +380,6 @@ def sparse_attn_indexer_kpool(
             scales_spec,
         )
         for chunk in prefill_metadata.chunks if not short_prefill else ():
-            assert q_quant is not None and weights is not None
             # Under DCP this rank only gathers the pools it owns.
             assert chunk.local_cu_seq_lens is not None
             k_quant = k_quant_full[: chunk.max_local_total_seq_lens]

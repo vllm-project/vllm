@@ -186,6 +186,8 @@ def sparse_attn_indexer_kpool(
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # A profiling run scores, so it has the q side.
+        assert q_quant is not None
         # Reserve workspace for indexer during profiling run
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
