@@ -105,13 +105,13 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
         slot_mappings=torch.tensor([[10, 20, -1, -1]]),
     )
     speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+    builder = SimpleNamespace(build=build, supports_update_block_table=False)
     speculator.attn_groups = [
         [
-            # Stand-in group: build_attn_metadata only reads these two members.
+            # Stand-in group: build_attn_metadata only reads these members.
             SimpleNamespace(  # type: ignore[list-item]  # stand-in group
-                get_metadata_builder=lambda _: SimpleNamespace(
-                    build=build, supports_update_block_table=False
-                ),
+                metadata_builders=[builder],
+                get_metadata_builder=lambda _: builder,
                 build_metadata=lambda cm, ubatch_idx=0, **_: build(0, cm),
                 layer_names=["draft"],
             )

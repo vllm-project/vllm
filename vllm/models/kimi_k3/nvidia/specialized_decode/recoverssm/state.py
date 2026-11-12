@@ -59,6 +59,8 @@ class DeferredRecoverSSMState(RecoverSSMState):
         Only ubatch 0's builders: the hybrid state does not support DBO."""
         for group_list in attn_groups:
             for group in group_list:
+                if not group.metadata_builders:
+                    continue
                 builder = group.get_metadata_builder(0)
                 if not isinstance(builder, KimiK3KDAMetadataBuilder):
                     continue

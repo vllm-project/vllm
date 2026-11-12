@@ -407,6 +407,11 @@ class DraftModelSpeculator(BaseSpeculator):
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            no_attn_metadata_layer_names=(
+                self.draft_attn_layer_names
+                if self.speculative_config.prefill_context_kv_only
+                else ()
+            ),
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft

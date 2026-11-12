@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -202,6 +202,7 @@ def init_attn_backend(
     device: torch.device,
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
+    no_attn_metadata_layer_names: Collection[str] = (),
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -286,7 +287,13 @@ def init_attn_backend(
                 # Microbatches build attention metadata concurrently, and some
                 # builders keep the prepared metadata on themselves (MLA stores
                 # it on the prefill backend), so each ubatch needs its own.
-                num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
+                # Layers in no_attn_metadata_layer_names get none and keep their
+                # kernel-block layout.
+                num_metadata_builders=(
+                    0
+                    if set(group.layer_names).issubset(no_attn_metadata_layer_names)
+                    else get_num_ubatches(vllm_config.parallel_config)
+                ),
             )
             # The microbatches' builders share the workspace: they all issue
             # attention on the one compute stream the threads hand off, so the
@@ -311,6 +318,8 @@ def get_attn_cg_support(
     min_cg_attn_backend = None
     for groups in attn_groups:
         for group in groups:
+            if not group.metadata_builders:
+                continue
             if checked_layer_names is not None and checked_layer_names.isdisjoint(
                 group.layer_names
             ):
@@ -501,7 +510,8 @@ def build_attn_metadata(
     cached_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
-        if not attn_groups[i]:
+        groups = [g for g in attn_groups[i] if g.metadata_builders]
+        if not groups:
             continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
@@ -549,7 +559,7 @@ def build_attn_metadata(
             **common_attn_metadata_extra_kwargs,
         )
 
-        for attn_group in attn_groups[i]:
+        for attn_group in groups:
             attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             reuse_key = None
             if attn_metadata_builder.supports_update_block_table and isinstance(

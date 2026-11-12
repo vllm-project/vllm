@@ -449,7 +449,10 @@ class AttentionGroup:
 
     @property
     def supports_draft_decode_metadata_update(self) -> bool:
-        return self.get_metadata_builder().supports_draft_decode_metadata_update
+        return (
+            not self.metadata_builders
+            or self.get_metadata_builder().supports_draft_decode_metadata_update
+        )
 
     def update_draft_decode_metadata(
         self,

@@ -316,6 +316,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         # whether the target also runs FlashAttention. Decide it here instead.
         for groups in self.attn_groups:
             for group in groups:
+                if not group.metadata_builders:
+                    continue
                 builder = group.get_metadata_builder()
                 kv_group = kv_cache_config.kv_cache_groups[group.kv_cache_group_id]
                 if getattr(builder, "aot_schedule", False) and issubclass(

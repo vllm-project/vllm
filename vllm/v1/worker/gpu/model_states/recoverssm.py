@@ -30,7 +30,7 @@ class RecoverSSMState:
         step: list[RecoverSSMMetadata] = []
         for group_list in attn_groups:
             for group in group_list:
-                metadata = attn_metadata[group.layer_names[0]]
+                metadata = attn_metadata.get(group.layer_names[0])
                 if isinstance(metadata, RecoverSSMMetadata):
                     step.append(metadata)
         self._step = tuple(step)
