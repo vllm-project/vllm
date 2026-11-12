@@ -106,7 +106,7 @@ def _dspark_dcp_vllm_config(
         speculative_config=SimpleNamespace(
             method=method,
             num_speculative_tokens=num_speculative_tokens,
-            parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=2,
