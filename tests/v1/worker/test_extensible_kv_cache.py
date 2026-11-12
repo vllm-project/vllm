@@ -217,6 +217,7 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(multimodal_config=None),
         parallel_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(gpu_memory_utilization=None),
         kv_transfer_config=None,
     )
 
@@ -232,6 +233,64 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     # 6 GiB free, of which extending to 4 blocks takes 3 and IPC keeps 1.
     left_free = 2 * gib - extensible_kv_cache.KV_CACHE_NON_TORCH_RESERVE_BYTES
     assert limits == [2 * gib + left_free]
+
+
+@pytest.mark.parametrize(
+    ("utilization", "init_free_gib", "warns"),
+    [
+        (0.9, 80, True),
+        (0.75, 80, True),
+        (None, 80, False),
+        (0.5, 80, False),
+        (0.9, 50, False),
+    ],
+)
+def test_measured_sizing_warns_when_utilization_withholds_memory(
+    monkeypatch, caplog_vllm, utilization, init_free_gib, warns
+):
+    """An explicit gpu_memory_utilization just under 1.0 warns only when it
+    keeps free memory out of the KV cache: not when another process already
+    holds that memory (50 of the 80 GiB free at startup)."""
+    gib = 1 << 30
+    kv_cache = SimpleNamespace(
+        reserved_headroom_bytes=0,
+        physical_bytes=gib,
+        bytes_per_block=gib,
+        blocks_within=lambda num_bytes: num_bytes // gib,
+        physical_bytes_for=lambda num_blocks: num_blocks * gib,
+        set_torch_memory_limit=lambda limit: None,
+    )
+    accelerator = extensible_kv_cache.torch.accelerator
+    monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
+    monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 0)
+    # The model took 20 GiB since startup, 1 GiB of it the committed KV prefix.
+    monkeypatch.setattr(
+        extensible_kv_cache.current_platform,
+        "free_device_memory",
+        lambda device: (init_free_gib - 20) * gib,
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "reserve_mm_ipc_gpu_memory",
+        lambda available, *args: available,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(gpu_memory_utilization=utilization),
+        kv_transfer_config=None,
+    )
+
+    extensible_kv_cache.measure_kv_cache_blocks(
+        kv_cache,  # type: ignore[arg-type]
+        vllm_config,  # type: ignore[arg-type]
+        torch.device("cpu"),
+        init_free_memory=init_free_gib * gib,
+        requested_memory=int(80 * gib * (utilization or 1.0)),
+    )
+
+    assert ("keeping" in caplog_vllm.text) == warns
 
 
 def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch):
@@ -279,6 +338,7 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(multimodal_config=None),
         parallel_config=SimpleNamespace(),
+        cache_config=SimpleNamespace(gpu_memory_utilization=None),
         kv_transfer_config=None,
     )
     measure = functools.partial(
@@ -738,3 +798,105 @@ def test_committed_kv_cache_tensors_match_views(vmm, layout):
                 assert view.stride(0) * view.element_size() == tensor.block_stride
     finally:
         kv_cache.free()
+
+
+@requires_cuda
+def test_capture_gets_the_memory_warmup_committed(vmm, vllm_runner, monkeypatch):
+    """Warmup's KV blocks are released before CUDA graph capture, so large
+    graphs (e.g. encoder graphs) fit; the cache regrows after capture."""
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    committed_at_capture = []
+    capture_model = GPUModelRunner.capture_model
+
+    def recording_capture_model(self, *args, **kwargs):
+        if self.extensible_kv_cache is not None:
+            committed_at_capture.append(self.extensible_kv_cache.num_committed_blocks)
+        return capture_model(self, *args, **kwargs)
+
+    monkeypatch.setattr(GPUModelRunner, "capture_model", recording_capture_model)
+    prompts = ["The capital of France is", "One, two, three,"]
+    outputs = {}
+    for extensible in (True, False):
+        with vllm_runner(
+            "Qwen/Qwen3-0.6B",
+            max_model_len=256,
+            enable_extensible_kv_cache=extensible,
+            # The second engine starts in a process that still holds some of
+            # the first's memory: leave headroom on small (e.g. MIG) devices.
+            # TODO: drop once #67081 frees the first engine's compiled model.
+            gpu_memory_utilization=0.5,
+        ) as runner:
+            outputs[extensible] = runner.generate_greedy(prompts, max_tokens=16)
+            num_blocks = runner.llm.llm_engine.vllm_config.cache_config.num_gpu_blocks
+            assert num_blocks > 1
+    # Only the null block stays committed for capture.
+    assert committed_at_capture == [1]
+    assert outputs[True] == outputs[False]
+
+
+@requires_cuda
+def test_adaptive_verification_profiles_against_the_final_cache(
+    vmm, vllm_runner, monkeypatch
+):
+    """Capture releases warmup's KV blocks, so the step costs profiled there
+    read a block or two from L2; the cost curves kept for serving are profiled
+    again once the cache has its final size."""
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    committed_when_profiled = []
+    profile = GPUModelRunner.profile_adaptive_verification
+
+    def recording_profile(self):
+        committed_when_profiled.append(self.extensible_kv_cache.num_committed_blocks)
+        return profile(self)
+
+    monkeypatch.setattr(
+        GPUModelRunner, "profile_adaptive_verification", recording_profile
+    )
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B",
+        max_model_len=1024,
+        enable_chunked_prefill=True,
+        enable_extensible_kv_cache=True,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+            "enable_adaptive_verification": True,
+        },
+    ) as runner:
+        num_blocks = runner.llm.llm_engine.vllm_config.cache_config.num_gpu_blocks
+    assert committed_when_profiled == [1, num_blocks]
+
+
+@requires_cuda
+def test_drafter_capture_writes_kv_only_to_the_null_block(
+    vmm, vllm_runner, monkeypatch
+):
+    """CUDA graph capture's dummy steps, the drafter's included, write KV only
+    to the null block: with warmup's blocks unmapped, a write through the
+    block-table rows warmup left behind faults."""
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    capture_model = GPUModelRunner.capture_model
+
+    def capture_with_only_the_null_block(self, *args, **kwargs):
+        self.extensible_kv_cache.commit(1, shrink=True)
+        return capture_model(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        GPUModelRunner, "capture_model", capture_with_only_the_null_block
+    )
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B",
+        max_model_len=1024,
+        max_num_seqs=1,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        enable_extensible_kv_cache=True,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
+    ) as runner:
+        runner.generate_greedy(["The capital of France is"], max_tokens=16)
