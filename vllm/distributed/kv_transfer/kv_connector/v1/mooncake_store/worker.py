@@ -11,6 +11,7 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
+import itertools
 import math
 import os
 import queue
@@ -2576,12 +2577,19 @@ class LookupKeyServer:
         vllm_config: VllmConfig,
         serve_lookups: bool,
     ):
-        self._lookup_socket_path = get_zmq_rpc_path_lookup(vllm_config)
-        self.lookup_process = (
-            LookupProcess(store_worker.lookup_process_spec(vllm_config))
-            if serve_lookups
-            else None
-        )
+        self._lookup_socket_paths = [
+            get_zmq_rpc_path_lookup(vllm_config, channel)
+            for channel in range(get_lookup_parallelism(vllm_config))
+        ]
+        self.lookup_processes: list[LookupProcess] = []
+        if serve_lookups:
+            spec = store_worker.lookup_process_spec(vllm_config)
+            # One process per channel: a lookup holds its process's GIL for
+            # the whole store RPC, so channels cannot share a process.
+            self.lookup_processes = [
+                LookupProcess(dataclasses.replace(spec, socket_path=path))
+                for path in self._lookup_socket_paths
+            ]
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_admin(vllm_config)
         self._ipc_path = socket_path.removeprefix("ipc://")
@@ -2628,16 +2636,18 @@ class LookupKeyServer:
         self.thread.start()
 
     def wait_ready(self) -> None:
-        if self.lookup_process is not None:
-            self.lookup_process.wait_ready()
+        for process in self.lookup_processes:
+            process.wait_ready()
 
     def close(self):
-        if self.lookup_process is not None:
-            self.lookup_process.close()
-            self.lookup_process = None
-            lookup_ipc_path = self._lookup_socket_path.removeprefix("ipc://")
+        for process, path in zip(
+            self.lookup_processes, self._lookup_socket_paths, strict=True
+        ):
+            process.close()
+            lookup_ipc_path = path.removeprefix("ipc://")
             if os.path.exists(lookup_ipc_path):
                 os.unlink(lookup_ipc_path)
+        self.lookup_processes = []
         self.socket.close(linger=0)
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
@@ -2706,17 +2716,23 @@ class LookupKeyClient:
             probe_window_s=self._lookup_timeout_s,
         )
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        self.socket = self._make_socket(get_zmq_rpc_path_lookup(vllm_config))
+        num_channels = get_lookup_parallelism(vllm_config)
+        self._lookup_sockets = [
+            self._make_socket(get_zmq_rpc_path_lookup(vllm_config, channel))
+            for channel in range(num_channels)
+        ]
+        self._thread_channel = threading.local()
+        self._next_channel = itertools.count()
         self.admin_socket = self._make_socket(get_zmq_rpc_path_admin(vllm_config))
         # Telemetry of the lookup process's store RPCs, reported by the
         # scheduler-side connector.
         self._stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
 
-        # Async lookup support
-        # One shared ZMQ REQ socket requires serial send/receive operations.
+        # Async lookup support. A ZMQ REQ socket requires serial send/receive,
+        # so each executor thread owns one channel's socket.
         self.executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="MooncakeLookupClient"
+            max_workers=num_channels, thread_name_prefix="MooncakeLookupClient"
         )
         self._lookups: dict[str, LookupState] = {}
         prefetch_limit = extra_config.get("lookup_prefetch_limit", 0)
@@ -2763,7 +2779,12 @@ class LookupKeyClient:
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
         )
-        response, *stats = self._request(self.socket, all_frames, deadline)
+        sock = getattr(self._thread_channel, "socket", None)
+        if sock is None:  # first lookup on this executor thread
+            sock = self._thread_channel.socket = self._lookup_sockets[
+                next(self._next_channel)
+            ]
+        response, *stats = self._request(sock, all_frames, deadline)
         if stats:
             data = msgspec.msgpack.decode(stats[0])
             with self._stats_lock:
@@ -2898,12 +2919,22 @@ class LookupKeyClient:
         for req_id in list(self._lookups):
             self.discard(req_id)
         self.executor.shutdown(wait=False, cancel_futures=True)
-        self.socket.close(linger=0)
+        for sock in self._lookup_sockets:
+            sock.close(linger=0)
         self.admin_socket.close(linger=0)
 
 
-def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
-    """Construct IPC path for ZMQ lookup socket."""
+def get_lookup_parallelism(vllm_config: VllmConfig) -> int:
+    """Number of lookup channels (lookup processes on rank 0, client threads)."""
+    assert vllm_config.kv_transfer_config is not None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    num_channels = int(extra_config.get("lookup_parallelism", 1))
+    assert num_channels >= 1, "lookup_parallelism must be at least 1"
+    return num_channels
+
+
+def get_zmq_rpc_path_lookup(vllm_config: VllmConfig, channel: int = 0) -> str:
+    """Construct IPC path for ZMQ lookup socket of a lookup channel."""
     assert vllm_config.kv_transfer_config is not None
     dp_rank = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
@@ -2913,8 +2944,10 @@ def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     if "lookup_rpc_port" in extra_config:
         rpc_port = extra_config["lookup_rpc_port"]
     logger.debug("Base URL: %s, RPC Port: %s", base_url, rpc_port)
+    suffix = f"_channel{channel}" if channel else ""
     return (
         f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_host_{hostname}_dp_rank{dp_rank}"
+        f"{suffix}"
     )
 
 
