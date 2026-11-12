@@ -254,6 +254,7 @@ def make_hisparse_kv_cache_manager(
     max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
     num_prefill_lookahead: int = 0,
+    num_hash_lookahead_tokens: int = 0,
     vllm_config: VllmConfig | None = None,
     **config_kwargs,
 ) -> KVCacheManager:
@@ -266,6 +267,7 @@ def make_hisparse_kv_cache_manager(
         enable_caching=enable_caching,
         hash_block_size=HISPARSE_BLOCK_SIZE,
         num_prefill_lookahead=num_prefill_lookahead,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -692,9 +694,10 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert not coordinator.build_offload_command().page_transfers
 
     coordinator.finish_host_import(request.request_id, failed=False)
-    transfers = coordinator.build_offload_command().page_transfers
-    assert len(transfers) == 1
-    restore = transfers[0]
+    # The tail comes first; the pool has room to promote the rest.
+    restore, *promotions = coordinator.build_offload_command().page_transfers
+    assert len(promotions) == len(source) - 1
+    assert all(promotion.restore for promotion in promotions)
     assert restore.restore
     assert restore.host_block_id == source[-1].block_id
     assert restore.resident_block_ids == (resident[-1].block_id,)
@@ -741,13 +744,86 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     host_tail, gpu_tail = source[-1], resident[-1]
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
-    restore = coordinator.build_offload_command().page_transfers[0]
+    transfers = coordinator.build_offload_command().page_transfers
     manager.free(request)
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
-    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    coordinator.update_spills(
+        {t.transfer_id: 2 for t in transfers}, {t.transfer_id: 1 for t in transfers}
+    )
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
-    coordinator.update_spills({}, {restore.transfer_id: 1})
+    coordinator.update_spills({}, {t.transfer_id: 1 for t in transfers})
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 0
+    assert not coordinator.has_pending_work()
+
+
+@pytest.mark.parametrize("has_room", [True, False])
+def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
+    """An import lands on host; spare GPU pages bring its whole prefix back."""
+    manager = make_hisparse_kv_cache_manager(256, 16)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE + 1
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, request, num_tokens) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    coordinator = get_hisparse_coordinator(manager)
+    pool = coordinator.gpu_pool
+    if not has_room:
+        # Other requests hold everything above the transition watermark.
+        pool.get_new_blocks(
+            pool.get_num_free_blocks() - coordinator.transition_watermark
+        )
+
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert all(transfer.restore for transfer in transfers)
+    promoted = range(4) if has_room else range(0)
+    assert [t.host_block_id for t in transfers] == [
+        source[-1].block_id,
+        *(source[page].block_id for page in promoted),
+    ]
+    row = _resident_block_ids(manager, request.request_id)
+    assert [block_id != 0 for block_id in row] == [has_room] * 4 + [True]
+    assert [t.resident_block_ids for t in transfers[1:]] == [
+        (row[page],) for page in promoted
+    ]
+    # The worker reads promoted pages only once the residency update ships with
+    # the restores that fill them.
+    updates = coordinator.take_residency_updates([request.request_id])
+    assert updates[request.request_id].block_ids == (row,)
+
+    gpu_blocks = [pool.blocks[block_id] for block_id in row]
+    counts = {t.transfer_id: 1 for t in transfers}
+    coordinator.update_spills(counts, counts)
+    # Promoted pages are clean copies of host pages, so the residency policy
+    # treats them like any other clean page: readable, but reclaimable.
+    state = coordinator.request_states[request.request_id]
+    assert state.pinned_clean | state.unpinned_pages == set(promoted)
+
+    manager.free(request)
+    assert all(block.ref_cnt == 0 for block in gpu_blocks if not block.is_null)
+    assert not coordinator.has_pending_work()
+
+
+def test_hisparse_aborted_promotion_keeps_pages_until_restored():
+    """An abort cannot recycle GPU pages a queued promotion still writes."""
+    manager = make_hisparse_kv_cache_manager(256, 16)
+    num_tokens = 2 * HISPARSE_BLOCK_SIZE + 1
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, request, num_tokens) is not None
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 3
+    row = _resident_block_ids(manager, request.request_id)
+    gpu_blocks = [coordinator.gpu_pool.blocks[block_id] for block_id in row]
+    manager.free(request)
+    assert all(block.ref_cnt == 1 for block in gpu_blocks)
+    counts = {t.transfer_id: 1 for t in transfers}
+    coordinator.update_spills(counts, counts)
+    assert all(block.ref_cnt == 0 for block in gpu_blocks)
     assert not coordinator.has_pending_work()
 
 
@@ -1268,7 +1344,8 @@ def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     get_hisparse_coordinator(manager).update_spills(counts, counts)
 
 
-def test_hisparse_events_report_host_and_device_placement():
+@pytest.mark.parametrize("lookahead", [0, 1])
+def test_hisparse_events_report_host_and_device_placement(lookahead):
     """Host publication and eviction must not advertise GPU-resident KV."""
     manager = make_kv_cache_manager(
         make_hisparse_kv_cache_config(32, 16),
@@ -1276,8 +1353,16 @@ def test_hisparse_events_report_host_and_device_placement():
         enable_caching=True,
         hash_block_size=HISPARSE_BLOCK_SIZE,
         enable_kv_cache_events=True,
+        num_hash_lookahead_tokens=lookahead,
     )
-    request = make_request("request", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    tokens = list(range(64 + lookahead))
+    request = make_request(
+        "request",
+        tokens,
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
     assert _allocate_scheduled(manager, request, 64) is not None
     _publish_hisparse_pages(manager)
 
@@ -1288,6 +1373,16 @@ def test_hisparse_events_report_host_and_device_placement():
         (0, MEDIUM_CPU),
         (1, MEDIUM_GPU),
     }
+
+    for event in stored:
+        assert event.lookahead_token_ids == (
+            [
+                tokens[end : end + lookahead]
+                for end in range(HISPARSE_BLOCK_SIZE, 65, HISPARSE_BLOCK_SIZE)
+            ]
+            if lookahead
+            else None
+        )
 
     host_block = manager.get_blocks(request.request_id).blocks[0][0]
     get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
@@ -1464,13 +1559,25 @@ def test_hisparse_finished_request_leaves_free_copies():
     ],
     ids=["stopped", "aborted", "running"],
 )
+@pytest.mark.parametrize("lookahead", [0, 3])
 def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
-    status, expected_cached_pages
+    status, expected_cached_pages, lookahead
 ):
     """Only terminal cleanup may publish completed, finalized pages."""
-    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    manager = make_hisparse_kv_cache_manager(
+        32, 16, enable_caching=True, num_hash_lookahead_tokens=lookahead
+    )
     coordinator = get_hisparse_coordinator(manager)
-    request = make_request("terminal", list(range(33)), HISPARSE_BLOCK_SIZE, sha256)
+    request = make_request(
+        "terminal",
+        list(range(33)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    expected_cached_pages = min(
+        expected_cached_pages, (33 - lookahead) // HISPARSE_BLOCK_SIZE
+    )
     request.spec_token_ids = list(range(33, 49))
     assert (
         _allocate_scheduled(manager, request, 49, num_lookahead_tokens=16) is not None
@@ -4393,6 +4500,33 @@ def test_eagle_identical_prompt_hit(
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
     assert len(computed_blocks.blocks[0]) == expected_blocks
     assert num_tokens == expected_blocks * block_size
+
+
+@pytest.mark.parametrize("lookahead", [1, 3])
+def test_sparse_retention_keeps_the_lookahead_replay_boundary(lookahead: int):
+    """A resend reaches only the blocks whose lookahead tokens are known."""
+    block_size, num_tokens = 16, 66
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(block_size, 64, 2),
+        max_model_len=1024,
+        enable_caching=True,
+        hash_block_size=block_size,
+        num_hash_lookahead_tokens=lookahead,
+        retention_interval=0,
+    )
+    token_ids = list(range(num_tokens))
+    prime = make_request(
+        "prime", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    assert manager.allocate_slots(prime, num_tokens) is not None
+    manager.free(prime)
+
+    resend = make_request(
+        "resend", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    _, num_computed_tokens, _ = manager.get_computed_blocks(resend)
+    # With three lookahead tokens, the block ending at 64 has no hash.
+    assert num_computed_tokens == (64 if lookahead == 1 else 48)
 
 
 @pytest.mark.parametrize("lookahead", [1, 2])
