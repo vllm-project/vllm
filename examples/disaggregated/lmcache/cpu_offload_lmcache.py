@@ -46,7 +46,6 @@ def build_llm_with_lmcache(model: str):
         model=model,
         kv_transfer_config=ktc,
         max_model_len=8000,
-        gpu_memory_utilization=0.8,
     )
 
     llm = LLM(**asdict(llm_args))
