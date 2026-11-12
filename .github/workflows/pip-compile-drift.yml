@@ -1,0 +1,36 @@
+name: pip-compile drift check
+
+# pre-commit only runs the pip-compile hooks when their inputs change. This
+# re-resolves every lockfile daily so a stale one on main does not go unnoticed.
+on:
+  schedule:
+    # Daily at 3:30 AM UTC
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-compile:
+    if: github.repository_owner == 'vllm-project'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        python-version: "3.12"
+    - name: Re-resolve all lockfiles (retries index errors)
+      run: |
+        for attempt in 1 2 3; do
+          if uvx pre-commit run pip-compile --hook-stage manual --all-files --show-diff-on-failure --color=always; then
+            exit 0
+          fi
+          # A failed attempt may have rewritten the lockfiles; reset them so a
+          # retry cannot pass on files the previous attempt fixed up.
+          git checkout -- requirements
+          if [ "$attempt" -lt 3 ]; then
+            sleep 60
+          fi
+        done
+        exit 1

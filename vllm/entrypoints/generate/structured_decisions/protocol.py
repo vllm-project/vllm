@@ -5,13 +5,10 @@
 import time
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, StrictBool, model_validator
 
-from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.utils import random_uuid
 
 
@@ -22,6 +19,8 @@ class QuestionSpec(OpenAIBaseModel):
 
 
 class StructuredDecisionRequest(OpenAIBaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     model: str | None = None
     state: Any = Field(..., description="What the questions are about: text or JSON.")
     questions: dict[str, QuestionSpec] = Field(
@@ -40,6 +39,10 @@ class StructuredDecisionRequest(OpenAIBaseModel):
         default=None, description="Video URLs or data URLs, for models that see."
     )
     chat_template_kwargs: dict[str, Any] | None = None
+    joint: StrictBool = Field(
+        default=False,
+        description="Answer the questions jointly; diffusion models only.",
+    )
     cache_salt: str | None = Field(
         default=None,
         description=(
@@ -76,6 +79,16 @@ class QuestionDiagnostics(OpenAIBaseModel):
     argmax_is_label: bool
 
 
+class JointCanvas(OpenAIBaseModel):
+    questions: list[str] = Field(description="The question ids this canvas read.")
+    width: int
+    slots: list[int] = Field(description="Each question's canvas position.")
+
+
+class JointDiagnostics(OpenAIBaseModel):
+    canvases: list[JointCanvas]
+
+
 class StructuredDecisionResponse(OpenAIBaseModel):
     id: str
     object: Literal["structured_decision"] = "structured_decision"
@@ -84,34 +97,4 @@ class StructuredDecisionResponse(OpenAIBaseModel):
     answers: dict[str, dict[str, Any]]
     usage: DecisionUsage
     diagnostics: dict[str, QuestionDiagnostics]
-
-
-class ReadPromptRequest(OpenAIBaseModel):
-    """Chat options for one read's prompt: the state and the question in the
-    user turn, ending at the generation prompt so the label is the reply's
-    first token. Thinking is off unless the request turns it on, or the label
-    would follow a thought rather than start the reply."""
-
-    chat_template_kwargs: dict[str, Any] | None = None
-    cache_salt: str | None = None
-
-    def build_chat_params(
-        self,
-        default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
-    ) -> ChatParams:
-        return ChatParams(
-            chat_template=default_template,
-            chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=merge_kwargs(
-                merge_kwargs({"enable_thinking": False}, self.chat_template_kwargs),
-                dict(add_generation_prompt=True, continue_final_message=False),
-            ),
-        )
-
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            max_output_tokens=1,
-            add_special_tokens=False,
-        )
+    joint: JointDiagnostics | None = None

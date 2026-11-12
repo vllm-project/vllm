@@ -12,10 +12,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionStreamResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
+    json_or_sse_responses,
     load_aware_call,
     validate_json_request,
     with_cancellation,
@@ -41,13 +43,16 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 @router.post(
     "/v1/chat/completions",
     dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
-    },
+    **json_or_sse_responses(
+        ChatCompletionResponse,
+        ChatCompletionStreamResponse,
+        {
+            HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+            HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+        },
+    ),
 )
 @with_cancellation
 @load_aware_call

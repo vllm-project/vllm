@@ -12,6 +12,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_scalar_specialization_rep,
 )
+from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
@@ -28,10 +29,30 @@ def _maybe_dequant(tile):
         # e4m3 bytes below sm_89 (no Triton fp8e4nv pointer type): sign to bit
         # 15, exp+mantissa to bits 13..7 gives the fp16 of x * 2^-8. Exact for
         # every finite code; the two NaN codes decode to +-480 after the host
-        # scale instead of NaN.
-        code = tile.to(tl.uint16)
-        bits = ((code & 0x80) << 8) | ((code & 0x7F) << 7)
-        return bits.to(tl.float16, bitcast=True)
+        # scale instead of NaN. Decodes four bytes per 32-bit register: the
+        # rotate moves each byte's bits 6..1 to 5..0 and its bit 0 to bit 7 of
+        # the byte below, lop3 restores the sign bits, prmt pairs high and low
+        # bytes, and the mask clears the sign copy at bit 14 and bits 6..0.
+        # pack=4 puts element k in byte k of $2 and half k of ($0, $1), the
+        # same lane mapping as Triton's own sm<89 fp8 -> fp16 asm.
+        return tl.inline_asm_elementwise(
+            asm="""
+            {
+            .reg .b32 rot, high;
+            shf.r.wrap.b32 rot, $2, $2, 1;
+            lop3.b32 high, $2, rot, 0x80808080, 0xE4;
+            prmt.b32 $0, rot, high, 0x5043;
+            prmt.b32 $1, rot, high, 0x7261;
+            and.b32 $0, $0, 0xBF80BF80;
+            and.b32 $1, $1, 0xBF80BF80;
+            }
+            """,
+            constraints="=r,=r,r",
+            args=[tile],
+            dtype=tl.float16,
+            is_pure=True,
+            pack=4,
+        )
     elif tile.dtype == tl.float8e4nv:
         return tile.to(tl.float16)
     else:
@@ -640,8 +661,9 @@ def qsa_sparse_paged_attention(
     logical_indices is the PACKED selection buffer: [rows, selection_width + 1]
     with the trailing column holding each row's valid-entry count (written by
     the expand kernel; never a token index). The kernel reads it as the
-    tile-loop bound. use_prefill_config only steers the top of the config table; see
-    _select_config.
+    tile-loop bound. use_prefill_config steers the top of the config table (see
+    _select_config). Large fp8 batches, prefill or decode, take the Blackwell
+    kernel in qsa_fp8 (see qsa_fp8.use_fp8_decode_kernel).
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -698,6 +720,49 @@ def qsa_sparse_paged_attention(
     if not q.shape[0]:
         return out
 
+    if qsa_fp8.use_fp8_decode_kernel(q.shape[0] * k_cache.shape[2], k_cache.dtype):
+        return qsa_fp8.qsa_sparse_paged_decode(
+            q,
+            k_cache,
+            v_cache,
+            logical_indices,
+            block_table,
+            token_to_req,
+            out,
+            output_gate_view,
+            softmax_scale,
+            output_scale,
+        )
+    return _qsa_sparse_paged_splitk(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        use_prefill_config,
+        out,
+        output_gate_view,
+        softmax_scale,
+        output_scale,
+    )
+
+
+def _qsa_sparse_paged_splitk(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    use_prefill_config: bool,
+    out: torch.Tensor,
+    output_gate_view: torch.Tensor,
+    softmax_scale: float,
+    output_scale: float,
+) -> torch.Tensor:
+    """The split-K kernel (and merge) at _select_config's config."""
+    is_fp8 = k_cache.dtype != torch.bfloat16
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
     selection_width = logical_indices.shape[1] - 1  # trailing column is the count
@@ -794,8 +859,9 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
-) -> tuple[tuple[int, int, int], ...]:
-    """Compile every production-reachable split-K/merge specialization."""
+) -> tuple[tuple[int | str, ...], ...]:
+    """Compile every production-reachable split-K/merge and decode
+    specialization."""
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     # An fp8 cache is allocated as uint8 storage; warm the dtype the impl hands
@@ -857,7 +923,7 @@ def warmup_qsa_sparse_paged_attention(
     row_stride = num_query_heads * head_dim
     num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
 
-    warmed = []
+    warmed: list[tuple[int | str, ...]] = []
     for block_n, warps, num_tiles, num_splits in sorted(profiles):
         if num_splits == 1:
             partial_output_ptr = output_ptr
@@ -934,6 +1000,13 @@ def warmup_qsa_sparse_paged_attention(
                 grid=(num_rows, num_query_heads),
             )
         warmed.append((block_n, num_splits, warps))
+
+    warmed += qsa_fp8.warmup_qsa_fp8_decode(
+        kv_cache,
+        block_table,
+        num_query_heads=num_query_heads,
+        selection_width=selection_width,
+    )
     return tuple(warmed)
 
 

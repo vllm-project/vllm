@@ -14,12 +14,19 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
     swizzle_blockscale,
 )
+from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
+
+    def __init__(self, config: NvFp4LinearLayerConfig) -> None:
+        super().__init__(config)
+        # The SM120 GEMM can add the bias in its epilogue.
+        self.bias_epilogue = current_platform.is_device_capability_family(120)
 
     @classmethod
     def is_supported(
@@ -34,11 +41,13 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        replace_parameter(
+            layer,
+            "weight_scale",
+            swizzle_blockscale(layer.weight_scale.data),
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
-        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
+        replace_parameter(layer, "weight", padded_weight)
 
     def apply_weights(
         self,
@@ -59,6 +68,12 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
 
+        # A padded N leaves the bias shorter than the GEMM output.
+        fuse_bias = (
+            bias is not None
+            and self.bias_epilogue
+            and layer.weight.shape[0] == output_size
+        )
         out = cutlass_scaled_fp4_mm(
             x_fp4,
             layer.weight,
@@ -66,10 +81,11 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight_scale,
             layer.alpha,
             output_dtype,
+            bias=bias if fuse_bias else None,
         )
 
         out = slice_nvfp4_output(out, output_size)
 
-        if bias is not None:
+        if bias is not None and not fuse_bias:
             out = out + bias
         return out.view(*output_shape)
