@@ -599,6 +599,39 @@ class TestSlidingWindowBucketCap:
             f"layers.{i}.swa" for i in range(43)
         )
 
+    def test_sliding_window_groups_fill_the_stride_alignment_padding(self):
+        """A 128 KiB stride alignment rounds the 160 KiB MLA block up to
+        256 KiB; the sliding-window groups must fill that block rather than
+        split at the unrounded 160 KiB."""
+        config = _shared_layout_config()
+        alignment = 128 * 1024
+        specs: dict[str, KVCacheSpec] = {
+            "mla": MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=640,
+                dtype=torch.uint8,
+                block_stride_alignment=alignment,
+            )
+        }
+        for i in range(8):
+            specs[f"swa.{i}"] = SlidingWindowMLASpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.bfloat16,
+                sliding_window=128,
+                block_stride_alignment=alignment,
+            )
+        groups = get_kv_cache_groups(config, specs)
+        assert (
+            _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == 2 * alignment
+        )
+        swa = [
+            len(g.layer_names) for g in groups if g.layer_names[0].startswith("swa.")
+        ]
+        assert swa == [4, 4]
+
 
 class TestDensePacking:
     def test_bytes_per_block_is_largest_group(self):

@@ -1055,6 +1055,12 @@ def _get_packed_kv_cache_groups(
         ),
         default=0,
     )
+    # `_get_kv_cache_bytes_per_block` rounds the block up to the layers' stride
+    # alignment; let state groups fill that padding instead of adding groups.
+    anchor_bytes = round_up(
+        anchor_bytes,
+        math.lcm(*(s.get_block_stride_alignment() for s in kv_cache_spec.values())),
+    )
 
     groups = []
     for spec, page_size_layers, balanced in bucketed:
