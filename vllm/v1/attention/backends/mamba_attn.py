@@ -152,8 +152,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 (bc_scratch_bs,), dtype=torch.int8, device=device
             )
             # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
-            # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
-            bc_ngroups = kv_cache_spec.shapes[4][0]
+            # layout is (conv_state, ssm_state, x_cache, B_cache, dt_cache).
+            bc_ngroups = kv_cache_spec.shapes[3][0]
             self.decode_bc_pre_scratch = torch.empty(
                 (
                     bc_scratch_bs,
