@@ -4913,6 +4913,7 @@ steps:
   - tests/models/test_vision.py
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v4_vl.py
+  - tests/models/test_muse_spark_fp32_rope.py
   - tests/models/test_utils.py
   commands:
   - >-
@@ -4922,6 +4923,7 @@ steps:
     models/test_registry.py
     models/test_deepseek_v4_vl_rocm.py
     models/test_deepseek_v4_vl.py
+    models/test_muse_spark_fp32_rope.py
     models/test_utils.py::test_merge_multimodal_embeddings_no_sync
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
