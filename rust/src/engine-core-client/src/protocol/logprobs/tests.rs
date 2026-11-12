@@ -6,8 +6,9 @@ use std::collections::BTreeSet;
 use bytes::Bytes;
 use rmpv::Value;
 
-use super::{Logprobs, PositionLogprobs, TokenLogprob};
+use super::{Logprobs, PositionLogprobs, TokenLogprob, WireLogprobs};
 use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutputs};
+use crate::protocol::tensor::WireNdArray;
 
 fn encode_value(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -514,4 +515,29 @@ fn zero_sampled_rank_does_not_fail_frame_mates() {
         )
     "#]]
     .assert_debug_eq(&(&**bad, &**prompt, &**good));
+}
+
+#[test]
+fn wire_logprobs_encode_fits_both_python_tuples() {
+    // `LogprobsLists` takes at most four elements; only a set
+    // `cu_num_generated_tokens_tensor` makes a fifth.
+    let mut wire = WireLogprobs {
+        logprob_token_ids: WireNdArray::from_i64(vec![1, 1], vec![7]).unwrap(),
+        logprobs: WireNdArray::from_f32(vec![1, 1], vec![-0.5]).unwrap(),
+        token_ranks: WireNdArray::from_i64(vec![1], vec![1]).unwrap(),
+        cu_num_generated_tokens: None,
+        cu_num_generated_tokens_tensor: None,
+    };
+    let len = |wire: &WireLogprobs| {
+        let bytes = rmp_serde::to_vec(wire).unwrap();
+        match rmpv::decode::read_value(&mut bytes.as_slice()).unwrap() {
+            Value::Array(items) => items.len(),
+            other => panic!("expected an array, got {other:?}"),
+        }
+    };
+    assert_eq!(len(&wire), 4);
+    wire.cu_num_generated_tokens = Some(vec![0, 1]);
+    assert_eq!(len(&wire), 4);
+    wire.cu_num_generated_tokens_tensor = Some(Value::Nil);
+    assert_eq!(len(&wire), 5);
 }
