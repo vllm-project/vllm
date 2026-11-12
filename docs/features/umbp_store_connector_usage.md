@@ -91,6 +91,7 @@ vllm serve <model> \
 | `endpoint` | required | Server socket path, or `unix://` address. TCP is rejected. |
 | `startup_timeout_ms` | `30000` | How long a client waits for the server at startup. |
 | `lookup_timeout_ms` | `1000` | Deadline for each lookup, enforced by vLLM. A lookup past it is a cache miss, and later lookups miss at once until the server answers it. Also passed to MORI bindings that expose this option. |
+| `dedup_tp_replicated_kv` | `true` | Store KV that is identical on every TP rank once, written by TP rank 0 and loaded by every rank. It applies to cache groups whose layers all set `max_tp_shards=1`, such as MLA latents, when TP > 1 without context parallelism. |
 
 The connector never launches the server. Since the server owns the pool, the
 connector rejects `capacity_bytes`, `total_capacity_bytes`, and `dram_*`
@@ -100,7 +101,11 @@ options. Use the [shared options](#shared-options) for transfer settings.
 
 Objects are keyed by the model, revision, effective model config (dtype,
 quantization, and `hf_config` with `hf_overrides` applied), KV layout, cache
-groups, TP/PCP/DCP topology, and block hash. The data-parallel rank is
+groups, TP/PCP/DCP topology, and block hash. Engines that combine UMBP with a
+connector that may load KV vLLM did not write (in `MultiConnector`) use separate
+keys, so that KV never reaches UMBP-only engines. In standalone mode, KV that is
+identical on every TP rank is keyed without the TP rank, so the pool holds one
+copy (see `dedup_tp_replicated_kv`). The data-parallel rank is
 excluded, so DP ranks and engines serving the same model with the same layout
 share objects. Different layouts use different keys. Use `key_namespace` to
 separate weight versions that share a model path. There is no per-engine quota; engines can evict each
@@ -125,10 +130,12 @@ Set these options in `kv_connector_extra_config`:
 | `lookup_async` | `false` | Look up the pool off the scheduler thread; the request waits until the lookup completes. |
 | `kv_event_max_objects` | `65536` | Maximum objects tracked for KV events. When full, new stored-object notifications are suppressed until tracked objects leave the pool. Storage and lookup continue normally. |
 | `enable_lookup` | `true` | Restore from the pool. With `false` the connector only stores. |
-| `save_decode_cache` | `false` | Also store blocks produced by decoding. |
+| `save_decode_cache` | `false` | Also store blocks produced by decoding. Does not apply with `lazy_offload`. |
+| `lazy_offload` | `false` | Store reusable blocks selected from the GPU free queue instead of storing them eagerly after each forward step. The scan runs when that queue changes, and blocks already known to be in the pool are not looked up again until a later recheck. Lazy stores follow the GPU prefix cache, so they include blocks produced by decoding. A lookup that cannot reach the pool, or a failed lazy store, backs off instead of storing the window again. |
+| `lazy_offload_max_blocks` | derived | Maximum number of free-queue blocks examined by each lazy scan. |
 | `enable_partial_hash_hits` | `false` | Allow hits that end inside a block, at core's prefix-match unit (`cache_config.prefix_match_unit`). |
 | `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and the transfer timeout. A synchronous wait that times out fails the step rather than reusing its blocks. |
-| `key_namespace` | derived | Overrides the namespace derived from the model, revision, KV layout, cache groups, parallel topology and draft model. |
+| `key_namespace` | derived | Overrides the namespace derived from the model, revision, KV layout, cache groups, parallel topology and draft model. The pool can then hold KV from a different layout, so attention backends that require KV written by their own cache layout fall back as with other connectors. |
 
 Use `kv_load_failure_policy: "recompute"` in `kv_transfer_config`, as in the
 examples above. An object can be evicted between lookup and load; the default
