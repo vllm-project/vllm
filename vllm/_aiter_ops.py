@@ -535,22 +535,25 @@ def _rocm_aiter_topk_gating_impl(
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
     score_func: str = "softmax",
+    correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     # Callers pick this op only for launches AITER's topk_gating supports (see
-    # dispatch_topk_softmax_func/dispatch_topk_sigmoid_func); everything else
-    # goes to topk_softmax (softmax) or vllm_topk_sigmoid (sigmoid).
+    # dispatch_topk_softmax_func/dispatch_topk_sigmoid_func and fused_topk_bias);
+    # everything else goes to topk_softmax (softmax) or vllm_topk_sigmoid (sigmoid).
     from aiter.ops.topk import topk_gating
 
     # AITER renormalizes the selected softmax/sigmoid mass inside this launch,
     # preserving vLLM's `renormalize=True` semantics without a second
-    # pointwise kernel, and sigmoids the trailing shared-expert columns.
+    # pointwise kernel, scales it by `routed_scaling_factor`, and sigmoids the
+    # trailing shared-expert columns.
     topk_gating(
         topk_weights,
         topk_indices,
         gating_output,
-        correction_bias=None,
+        correction_bias=correction_bias,
         need_renorm=renormalize,
-        routed_scaling_factor=1.0,
+        routed_scaling_factor=routed_scaling_factor,
         score_func=score_func,
         num_shared_experts=num_shared_experts,
     )
@@ -565,6 +568,8 @@ def _rocm_aiter_topk_gating_fake(
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
     score_func: str = "softmax",
+    correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     pass
 
@@ -3745,6 +3750,8 @@ class rocm_aiter_ops:
         num_shared_experts: int = 0,
         shared_expert_scoring_func: str = "",
         score_func: str = "softmax",
+        correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float = 1.0,
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_gating(
             topk_weights,
@@ -3755,6 +3762,8 @@ class rocm_aiter_ops:
             num_shared_experts,
             shared_expert_scoring_func,
             score_func,
+            correction_bias,
+            routed_scaling_factor,
         )
         return topk_weights, topk_indices
 
