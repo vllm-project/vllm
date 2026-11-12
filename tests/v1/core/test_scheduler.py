@@ -994,6 +994,74 @@ def test_max_loras_counts_running_request_skipped_for_encoder_budget():
     assert req_c.status == RequestStatus.WAITING
 
 
+def test_encoder_inputs_in_one_step_stay_within_profiled_tokens():
+    scheduler = create_scheduler()
+    scheduler.max_num_encoder_input_tokens = 300
+    scheduler.encoder_profile_tokens = 200
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=1000)
+    requests = create_requests(
+        num_requests=3,
+        num_tokens=300,
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=150)],
+            [PlaceholderRange(offset=0, length=150)],
+            [PlaceholderRange(offset=0, length=250)],
+        ],
+        req_ids=["a", "b", "c"],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduled_encoder_inputs = []
+    for _ in range(3):
+        output = scheduler.schedule()
+        scheduled_encoder_inputs.append(output.scheduled_encoder_inputs)
+        req_ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[[1] for _ in req_ids],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    assert scheduled_encoder_inputs == [{"a": [0]}, {"b": [0]}, {"c": [0]}]
+
+
+def test_external_encoder_cache_loads_ignore_profiled_tokens():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    scheduler.max_num_encoder_input_tokens = 300
+    scheduler.encoder_profile_tokens = 200
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=1000)
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=300,
+        mm_hashes_list=[["local"], ["remote"]],
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=150)],
+            [PlaceholderRange(offset=0, length=150)],
+        ],
+        req_ids=["a", "b"],
+    )
+    scheduler.ec_connector.has_cache_item = Mock(
+        side_effect=lambda identifier: identifier == "remote"
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {"a": 300, "b": 300}
+    assert output.scheduled_encoder_inputs == {"a": [0]}
+
+
 @pytest.mark.parametrize("long_prefill_token_threshold", [0, 128])
 @pytest.mark.parametrize("cached_first_image", [False, True])
 def test_encoder_cache_pressure_respects_disabled_chunked_prefill(

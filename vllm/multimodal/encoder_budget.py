@@ -139,6 +139,16 @@ class MultiModalBudget:
         self.mm_max_items_per_prompt: Mapping[str, int] = mm_max_items_per_prompt
         self.mm_max_items_per_batch: Mapping[str, int] = mm_max_items_per_batch
 
+        self.encoder_profile_tokens = encoder_compute_budget
+        if tower_mm_max_toks_per_item and not (
+            mm_config is not None and mm_config.skip_mm_profiling
+        ):
+            modality = self.get_modality_with_max_tokens()
+            self.encoder_profile_tokens = min(
+                encoder_compute_budget,
+                mm_max_items_per_batch[modality] * tower_mm_max_toks_per_item[modality],
+            )
+
     def _get_max_items(
         self,
         modality: str,

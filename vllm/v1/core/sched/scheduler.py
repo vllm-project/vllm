@@ -281,6 +281,9 @@ class Scheduler(SchedulerInterface):
         self.max_num_encoder_input_tokens = (
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
+        self.encoder_profile_tokens = (
+            mm_budget.encoder_profile_tokens if mm_budget else 0
+        )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
         manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
         if manager_cls_obj is None:
@@ -2161,8 +2164,25 @@ class Scheduler(SchedulerInterface):
                     # previous step.
                     continue
 
+            external_load = (
+                self.ec_connector is not None
+                and self.ec_connector.has_cache_item(item_identifier)
+            )
+            item_compute_budget = encoder_compute_budget
+            scheduled_encoder_tokens = (
+                self.max_num_encoder_input_tokens - encoder_compute_budget
+            )
+            if (
+                not external_load
+                and scheduled_encoder_tokens > 0
+                and self.encoder_profile_tokens > 0
+            ):
+                item_compute_budget = min(
+                    item_compute_budget,
+                    self.encoder_profile_tokens - scheduled_encoder_tokens,
+                )
             if not self.encoder_cache_manager.can_allocate(
-                request, i, encoder_compute_budget, num_embeds_to_schedule
+                request, i, item_compute_budget, num_embeds_to_schedule
             ):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
@@ -2197,9 +2217,7 @@ class Scheduler(SchedulerInterface):
             if curr_embeds_end - curr_embeds_start == 0:
                 continue
 
-            if self.ec_connector is not None and self.ec_connector.has_cache_item(
-                item_identifier
-            ):
+            if external_load:
                 mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds
