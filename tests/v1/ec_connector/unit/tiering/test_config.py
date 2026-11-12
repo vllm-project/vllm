@@ -13,6 +13,16 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.config import (
 )
 
 
+def test_tiering_factory_registered():
+    from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+    from vllm.distributed.ec_transfer.ec_connector.tiering.connector import (
+        ECTieringConnector,
+    )
+
+    cls = ECConnectorFactory._registry["ECTieringConnector"]()
+    assert cls is ECTieringConnector
+
+
 def _vllm_config(extra_config: object) -> SimpleNamespace:
     ec_config = SimpleNamespace(ec_connector_extra_config=extra_config)
     return SimpleNamespace(ec_transfer_config=ec_config)
