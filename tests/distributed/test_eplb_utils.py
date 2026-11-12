@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -11,14 +13,22 @@ import torch.multiprocessing as mp
 
 import vllm.config.parallel as parallel_config_module
 import vllm.distributed.eplb.eplb_state as eplb_state_module
-from vllm.config.parallel import EPLBConfig, ParallelConfig
+from vllm.config import ParallelConfig
+from vllm.config.parallel import EPLBConfig
 from vllm.config.utils import hash_config_cached
 from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.rebalance_execute import (
+    AsyncEplbLayerResult,
+    TransferMetadata,
+)
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.worker.gpu.eplb_utils import draft_model_supports_eplb
 
 
@@ -418,6 +428,120 @@ def test_allreduce_heterogeneous_loads_across_two_ranks(tmp_path):
         nprocs=2,
         join=True,
     )
+
+
+def test_async_rearrangement_interval_starts_after_last_layer_commit(dist_init):
+    """An async cycle longer than step_interval must not start the next
+    rearrangement in the step its last layer commits.
+    """
+    num_layers, num_experts, interval, steps_per_layer = 3, 4, 4, 2
+    device = torch.device(current_platform.device_type)
+    phy2log = torch.arange(num_experts).repeat(num_layers, 1)
+    model_state = _make_model_state(
+        phy2log=phy2log.to(device),
+        log2phy=phy2log.unsqueeze(-1).to(device),
+        logcnt=torch.ones(num_layers, num_experts, dtype=torch.long, device=device),
+    )
+    model_state.model.num_moe_layers = num_layers
+    model_state.model.num_logical_experts = num_experts
+    model_state.rebalanced = False
+    model_state.pending_result = None
+    model_state.expert_load_pass = torch.zeros(
+        num_layers, num_experts, dtype=torch.int32, device=device
+    )
+    model_state.expert_load_window = torch.zeros(
+        interval, num_layers, num_experts, dtype=torch.int32, device=device
+    )
+
+    state = EplbState(ParallelConfig(), device)
+    state.is_async = True
+    state.expert_load_window_size = interval
+    state.expert_rearrangement_step_interval = interval
+    state.expert_rearrangement_step = interval - 1
+    state.model_states = {"m": model_state}
+
+    unchanged = TransferMetadata(
+        is_unchanged=np.ones(num_experts, dtype=bool),
+        is_received_locally=np.zeros(num_experts, dtype=bool),
+        recv_primary_mask=np.zeros(num_experts, dtype=bool),
+        recv_count=0,
+        recv_expert_ids=np.full(num_experts, -1),
+        recv_dst_rows=np.full(num_experts, -1),
+    )
+    rearrange_steps = []
+    next_layer = 0
+    last_commit_step = num_layers * steps_per_layer
+    for step in range(last_commit_step + interval + 1):
+        # Play the async worker: publish one layer every steps_per_layer steps.
+        if model_state.rebalanced and step % steps_per_layer == 0:
+            if next_layer == 0:
+                state.rearrange_event.wait()
+            model_state.pending_result = AsyncEplbLayerResult(
+                layer_idx=next_layer,
+                new_physical_to_logical_map=phy2log[next_layer],
+                transfer_metadata=unchanged,
+                consumed_event=CpuGpuEvent(),
+            )
+            next_layer = (next_layer + 1) % num_layers
+        state.step()
+        if model_state.rebalanced and state.expert_rearrangement_step == 0:
+            rearrange_steps.append(step)
+
+    assert rearrange_steps == [0, last_commit_step + interval]
+
+
+def _overrun_warning_worker(rank: int, world_size: int, port: int):
+    dist.init_process_group(
+        "gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+    ep_group = GroupCoordinator(
+        group_ranks=[list(range(world_size))],
+        local_rank=0,
+        torch_distributed_backend="gloo",
+        use_device_communicator=False,
+        group_name="eplb_overrun_warning_test",
+    )
+    # A rank that skips the collective fails the test instead of hanging it.
+    ep_group.cpu_timeout = timedelta(seconds=30)
+
+    interval = 4
+    model_state = MagicMock()
+    model_state.model_name = "m"
+    model_state.model.num_moe_layers = 3
+    model_state.rebalanced = True
+    model_state.pending_result = None
+    model_state.num_committed_layers = 1
+    # Rank 0 has published layer 1; rank 1 is still transferring it.
+    model_state.worker_progress = 3 - rank
+    state = EplbState(ParallelConfig(), torch.device("cpu"))
+    state.is_async = True
+    state.expert_rearrangement_step_interval = interval
+    state.expert_rearrangement_step = interval - 1
+    state.model_states = {"m": model_state}
+
+    with (
+        patch.object(eplb_state_module, "get_ep_group", return_value=ep_group),
+        patch.object(eplb_state_module.logger, "warning") as warning,
+    ):
+        state.step()
+
+    if rank == 0:
+        warning.assert_called_once()
+        message = warning.call_args.args[0] % warning.call_args.args[1:]
+        assert message.endswith("slowest EP ranks [1]: transferring layer 1")
+    else:
+        warning.assert_not_called()
+    dist.destroy_process_group()
+
+
+def test_async_rearrangement_overrun_warning_names_slowest_rank():
+    """When an async cycle overruns step_interval, every EP rank must enter
+    the progress all-reduce, and only rank 0 logs the rank that is behind.
+    """
+    mp.spawn(_overrun_warning_worker, args=(2, get_open_port()), nprocs=2, join=True)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
