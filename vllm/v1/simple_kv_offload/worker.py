@@ -9,7 +9,6 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.host_memory import (
     host_registration_ranges,
     pin_tensor,
@@ -56,8 +55,7 @@ class SimpleCPUOffloadWorker:
         self.disk_capacity_bytes = disk_capacity_bytes
         self.disk_buffer_slots = disk_buffer_slots
         self.use_page_cache = use_page_cache
-        self.hybrid_mode = kv_offload_backend == "hybrid"
-        self.disk_mode = kv_offload_backend in ("disk", "hybrid")
+        self.kv_offload_backend = kv_offload_backend
         self.max_load_slots = max_load_slots
         self.cpu_hugepage_size = cpu_hugepage_size
 
@@ -175,7 +173,9 @@ class SimpleCPUOffloadWorker:
         total_bytes_per_block = sum(per_tensor_bpb)
 
         self.num_cpu_blocks = self._resolve_num_cpu_blocks(
-            self.disk_capacity_bytes if self.disk_mode else self.cpu_capacity_bytes,
+            self.disk_capacity_bytes
+            if self.kv_offload_backend in ("disk", "hybrid")
+            else self.cpu_capacity_bytes,
             total_bytes_per_block,
         )
 
@@ -186,7 +186,7 @@ class SimpleCPUOffloadWorker:
 
         self.gpu_kv_caches = unique_gpu_caches
 
-        if self.disk_mode:
+        if self.kv_offload_backend in ("disk", "hybrid"):
             self._init_disk_mode(unique_gpu_caches, total_bytes_per_block, self.device)
         else:
             self._init_cpu_mode(unique_gpu_caches, total_bytes_per_block, self.device)
@@ -218,11 +218,7 @@ class SimpleCPUOffloadWorker:
 
         assert self.disk_path is not None
         num_hot_slots = 0
-        if self.hybrid_mode:
-            if not current_platform.is_cuda() or any(
-                t.stride(0) % 4096 for t in unique_gpu_caches.values()
-            ):
-                raise ValueError("Hybrid requires CUDA and 4096-aligned KV pages")
+        if self.kv_offload_backend == "hybrid":
             alignment_bytes = 3 * 4096 * len(unique_gpu_caches)
             num_hot_slots = (
                 self.cpu_capacity_bytes - alignment_bytes
@@ -242,7 +238,9 @@ class SimpleCPUOffloadWorker:
             self.disk_buffer_slots,
             self.use_page_cache,
             num_hot_slots=num_hot_slots,
-            max_load_slots=self.max_load_slots if self.hybrid_mode else None,
+            max_load_slots=(
+                self.max_load_slots if self.kv_offload_backend == "hybrid" else None
+            ),
         )
 
     def _init_cpu_mode(
@@ -360,7 +358,7 @@ class SimpleCPUOffloadWorker:
                 wait_event=self._store_compute_done,
                 **(
                     {"hot_blocks": metadata.store_hot_blocks}
-                    if self.hybrid_mode
+                    if self.kv_offload_backend == "hybrid"
                     else {}
                 ),
             )
