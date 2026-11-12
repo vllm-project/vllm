@@ -20,9 +20,11 @@ model:
   model_id: "thinkingmachines/Inkling-2-Small"
   min_vllm_version: "nightly"
   nightly_required: true
+  docker_image: "vllm/vllm-openai:inkling-2-small"
   install:
     docker:
-    pip:
+      note: "Serve from the `vllm/vllm-openai:inkling-2-small` image; no pip wheel is available yet."
+    pip: false
   architecture: moe
   parameter_count: "594B"
   active_parameters: "17B"
@@ -120,6 +122,10 @@ guide: |
 
   Inkling 2 Small runs its MoE expert-parallel across the tensor-parallel group, so TP4 means
   TP4 attention with EP4 experts, and TP8 means TP8 attention with EP8 experts.
+
+  ## Runtime
+
+  Use the `vllm/vllm-openai:inkling-2-small` image until Inkling 2 Small support is in a vLLM release.
 
   ## Configurations
 
