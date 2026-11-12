@@ -207,6 +207,10 @@ class PassConfig:
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom Attention and MLAAttention + quant ops."""
+    fuse_attn_output_gate: bool = None  # type: ignore[assignment]
+    """Fuse the sigmoid output gate of gated attention (e.g. Qwen3-Next) into the
+    custom Attention op. Auto-enabled at O2+ on ROCm with AITER for models with
+    attn_output_gate."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
@@ -228,6 +232,10 @@ class PassConfig:
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
     for layers that support it. Auto-enabled at O2+ on ROCm for models
     with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
+
+    attn_output_gate_fusion_max_token_num: int = 256
+    """The threshold for the attention output-gate fusion, e.g. for small batch
+    decode. Larger batch sizes e.g. during prefill keep the unfused gate."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
@@ -295,6 +303,7 @@ class PassConfig:
         "fuse_norm_quant",
         "fuse_act_quant",
         "fuse_attn_quant",
+        "fuse_attn_output_gate",
         "fuse_allreduce_rms",
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
@@ -324,6 +333,11 @@ class PassConfig:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
+                )
+            if self.fuse_attn_output_gate:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Attention + output gate fusion might not work"
                 )
             if self.fuse_allreduce_rms:
                 logger.warning_once(
@@ -1329,7 +1343,9 @@ class CompilationConfig:
                 self.splitting_ops = []
             return
 
-        if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
+        if (
+            self.pass_config.fuse_attn_quant or self.pass_config.fuse_attn_output_gate
+        ) and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
         else:
             if self.splitting_ops is None:
@@ -1418,13 +1434,15 @@ class CompilationConfig:
             self.cudagraph_mode = CUDAGraphMode.NONE
 
     def set_splitting_ops_for_attn_fusion(self):
-        assert self.pass_config.fuse_attn_quant
+        assert (
+            self.pass_config.fuse_attn_quant or self.pass_config.fuse_attn_output_gate
+        )
         if self.splitting_ops is None:
             self.splitting_ops = []
             if self.cudagraph_mode.has_piecewise_cudagraphs():
                 logger.warning_once(
-                    "fuse_attn_quant is incompatible with piecewise "
-                    "cudagraph when use_inductor_graph_partition is off. "
+                    "fuse_attn_quant and fuse_attn_output_gate are incompatible with "
+                    "piecewise cudagraph when use_inductor_graph_partition is off. "
                     "In this case, splitting_ops will be set to empty "
                     "list, and cudagraph_mode will be set to FULL. "
                     "Please ensure you are using attention backends that "
@@ -1434,7 +1452,8 @@ class CompilationConfig:
                 self.cudagraph_mode = CUDAGraphMode.FULL
 
         assert not self.splitting_ops_contain_attention(), (
-            "attention ops should not be in splitting_ops when fuse_attn_quant is True"
+            "attention ops should not be in splitting_ops when fuse_attn_quant or "
+            "fuse_attn_output_gate is True"
         )
 
     def splitting_ops_contain_attention(self) -> bool:
@@ -1454,6 +1473,7 @@ class CompilationConfig:
             not self.use_inductor_graph_partition
             and self.splitting_ops is None
             and not self.pass_config.fuse_attn_quant
+            and not self.pass_config.fuse_attn_output_gate
         ):
             return True
 

@@ -24,6 +24,7 @@ or just on the low or high end.
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
 | [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | MLA Attention output → FP8/NVFP4 quant         | Off by default                 | TBD                | Yes       | Always       |
 | [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
+| [Attention + Output Gate](#attention--output-gate-fuse_attn_output_gate)       | `fuse_attn_output_gate`      | Attention output → sigmoid(gate) multiply      | O2 (ROCm/AITER, gated attn)    | 0-0.3%             | Yes       | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
@@ -42,6 +43,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
 | `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                  |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `fuse_attn_output_gate`\*    | —                                        | —                                        | —                                        | —             | BF16\*                                   |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
 | `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
 | `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
@@ -50,7 +52,8 @@ The table below lists the quantization schemes supported by each fusion on each 
 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
-for per-backend details.
+for per-backend details. The same applies to `fuse_attn_output_gate`; see its
+[section](#attention--output-gate-fuse_attn_output_gate).
 
 ## Enabling / Disabling Fusions
 
@@ -177,6 +180,27 @@ If these conditions are set, the fusion is enabled automatically for optimizatio
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rope_kvcache_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rope_kvcache_fusion.py)
+
+### Attention + Output Gate (`fuse_attn_output_gate`)
+
+!!! info
+    ROCm/AITER-only, for attention backends whose `fused_output_gate_supported()` returns True
+    (currently `ROCM_AITER_FA_GLUON`). The fusion is only enabled for `num_tokens ≤ 256` by default;
+    larger batches keep the unfused gate. This threshold is configurable via
+    `PassConfig.attn_output_gate_fusion_max_token_num`.
+
+**What it fuses.** Gated attention (e.g. Qwen3-Next and Qwen3.5) multiplies the attention output by
+`sigmoid(gate)`. The pass hands the gate to the attention op as `output_gate`, so the backend applies
+it in its decode kernel instead of in a separate elementwise kernel, and the copy that flattens the
+gate goes too.
+
+Requires: AMD ROCm with AITER enabled, a model with `attn_output_gate`, and the attention op visible
+in the graph: either by using Inductor graph partition or removed from `splitting_ops`.
+If these conditions are set, the fusion is enabled automatically for optimization level O2 and above.
+
+**Code locations.**
+
+- Pass: [`vllm/compilation/passes/fusion/attn_output_gate_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/attn_output_gate_fusion.py)
 
 ### QK Norm + RoPE (`enable_qk_norm_rope_fusion`)
 
