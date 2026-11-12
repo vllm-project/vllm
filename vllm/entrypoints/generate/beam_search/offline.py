@@ -204,7 +204,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
             for beam in best_beams:
                 if (
-                    beam.finish_reason == "stop"
+                    beam.stop_reason in eos_token_ids
                     and not params.include_stop_str_in_output
                 ):
                     beam.tokens = beam.tokens[:-1]

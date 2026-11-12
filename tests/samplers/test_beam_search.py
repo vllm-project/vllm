@@ -21,7 +21,6 @@ from transformers import (
 )
 
 from tests.utils import RemoteOpenAIServer
-
 from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.llm import LLM
@@ -412,6 +411,7 @@ def test_beam_search_structured_output(
             parsed = json.loads(generated)
             jsonschema.validate(instance=parsed, schema=json_schema)
 
+
 @pytest.fixture(scope="module")
 def beam_eos_model(tmp_path_factory):
     model_path = tmp_path_factory.mktemp("beam-eos-model")
@@ -471,13 +471,15 @@ def test_beam_eos_offline_output(
                     skip_special_tokens=skip_special,
                     ignore_eos=ignore_eos,
                 )
-                beam = model.llm.beam_search(
-                    [{"prompt_token_ids": prompt}], params
-                )[0].sequences[0]
+                beam = model.llm.beam_search([{"prompt_token_ids": prompt}], params)[
+                    0
+                ].sequences[0]
                 generated = (
                     [terminal_id] * 3
                     if ignore_eos
-                    else [terminal_id] if include_stop else []
+                    else [terminal_id]
+                    if include_stop
+                    else []
                 )
                 assert beam.tokens == prompt + generated
                 assert beam.text == tokenizer.decode(
@@ -498,13 +500,18 @@ def test_beam_eos_offline_output(
 def beam_eos_server(beam_eos_model):
     model_path, _ = beam_eos_model
     args = [
-        "--dtype", "float32",
-        "--max-model-len", "32",
-        "--max-num-seqs", "2",
+        "--dtype",
+        "float32",
+        "--max-model-len",
+        "32",
+        "--max-num-seqs",
+        "2",
         "--enforce-eager",
         "--no-enable-prefix-caching",
-        "--gpu-memory-utilization", "0.1",
-        "--served-model-name", "beam-eos-model",
+        "--gpu-memory-utilization",
+        "0.1",
+        "--served-model-name",
+        "beam-eos-model",
     ]
     with RemoteOpenAIServer(model_path, args) as server:
         yield server
@@ -541,7 +548,9 @@ def test_beam_eos_online_output(
             generated = (
                 [terminal_id] * 3
                 if ignore_eos
-                else [terminal_id] if include_stop else []
+                else [terminal_id]
+                if include_stop
+                else []
             )
             assert choice.token_ids == generated
             assert choice.text == tokenizer.decode(
