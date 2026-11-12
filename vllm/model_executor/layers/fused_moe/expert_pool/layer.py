@@ -58,15 +58,13 @@ def physical_block_experts(
     return torch.where(valid, expert_map[safe.long()], torch.full_like(logical_ids, -1))
 
 
-def marlin_block_size(tokens, top_k, local_experts, global_experts, input_dtype):
+def marlin_block_size(tokens, top_k, local_experts, global_experts):
     """The stock fused_marlin_moe M-block choice for one expert partition."""
     estimated = math.ceil(tokens * local_experts / global_experts)
     block = 8
     for block in (8, 16, 32, 48, 64):
         if estimated * top_k / local_experts / block < 0.9:
             break
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        block = max(block, 16)
     return block
 
 
@@ -187,9 +185,7 @@ class PoolLayer:
         )
         rows.zero_()
         for tensors, expert_map, slots in partitions:
-            block = marlin_block_size(
-                tokens, top_k, slots, self.num_experts, experts.input_dtype
-            )
+            block = marlin_block_size(tokens, top_k, slots, self.num_experts)
             routed = ids
             if slots > self.num_experts:
                 # Align by logical id (absent experts already padding), then
@@ -229,8 +225,6 @@ class PoolLayer:
                 activation=self.activation,
                 activation_func=experts.activation,
                 topk_ids=routed,
-                input_global_scale1=experts.a1_gscale,
-                input_global_scale2=experts.a2_gscale,
                 global_scale1=self._scale(tensors, "w13_weight_scale_2"),
                 global_scale2=self._scale(tensors, "w2_weight_scale_2"),
                 w1_zeros=experts.w1_zp,
@@ -239,7 +233,6 @@ class PoolLayer:
                 intermediate_cache13=cache13,
                 intermediate_cache2=cache2,
                 output=rows,
-                input_dtype=experts.input_dtype,
                 activation_config=experts.activation_config,
             )
         # Rows already carry the router weights (second GEMM multiplies them).

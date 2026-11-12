@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Global expert pool tables and the per-layer step program.
 
-One VRAM bank shared by every MoE layer: row ``r`` holds the expert whose
-key is ``row_key[r]`` (key = layer * E + expert) or is free. ``hot_phys[key]``
+One VRAM bank shared by every MoE layer: row `r` holds the expert whose
+key is `row_key[r]` (key = layer * E + expert) or is free. `hot_phys[key]`
 is the row or -1; each layer's slice is the expert map its kernel reads.
-``cold_phys[key]`` is the expert's host row (its expert id) while it is not
+`cold_phys[key]` is the expert's host row (its expert id) while it is not
 resident, so evictions never copy out (the pinned host source is the
 backing store).
 
@@ -14,12 +14,12 @@ are stamped with the step clock; each miss takes the row of the least
 recently used resident expert of any layer (ties by row), copying in from
 this layer's host rows; a miss that finds no victim, or any miss while the
 gate is closed, is staged into the shared staging rows for this step only.
-The step map is this layer's ``hot_phys`` slice with the staged experts
+The step map is this layer's `hot_phys` slice with the staged experts
 overlaid. Everything runs on the compute stream with fixed shapes and
 addresses, so it can be captured in a CUDA graph; the host reads the
 tables only at stats reports.
 
-``step_reference`` (torch, synchronizing) defines the semantics; the CPU
+`step_reference` (torch, synchronizing) defines the semantics; the CPU
 device and the tests run it, and the Triton program must match it exactly.
 Ported from the lab expert tier (global_pool.py) without the control file.
 """

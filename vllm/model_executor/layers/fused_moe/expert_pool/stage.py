@@ -8,11 +8,11 @@ M-block, so a host row would cross PCIe once per block; staged, it crosses
 once. Two full-layer buffers alternate by layer (residency per layer moves
 under the global LRU, so a layer may have any number of non-resident rows).
 
-The tables only change in decode steps, so at the first layer of a step the
-non-resident rows of every layer are read back once (one host sync per
-prefill step) and copied by DMA on a side stream: layer i+1's rows land while
-layer i computes. DMA, not a copy kernel, so the copies do not compete with
-the expert kernel for SMs.
+Every layer's full pinned source is copied by DMA on a side stream: layer
+i+1's rows land while layer i computes. Copying resident rows too avoids a
+host readback of the device-managed placement. The GEMM still selects only
+non-resident rows from these buffers. DMA copies do not compete with the
+expert kernel for SMs.
 """
 
 from __future__ import annotations
@@ -22,22 +22,8 @@ from typing import Any
 import torch
 
 
-def _runs(mask: list[bool]) -> list[tuple[int, int]]:
-    """[start, stop) runs of True."""
-    runs, start = [], None
-    for i, value in enumerate(mask):
-        if value and start is None:
-            start = i
-        elif not value and start is not None:
-            runs.append((start, i))
-            start = None
-    if start is not None:
-        runs.append((start, len(mask)))
-    return runs
-
-
 class PrefillStage:
-    """Two staging buffers, the copy stream and the per-step row lists."""
+    """Two full-layer staging buffers and their copy stream."""
 
     def __init__(
         self,
@@ -47,6 +33,7 @@ class PrefillStage:
         min_tokens: int,
     ) -> None:
         self.min_tokens = min_tokens
+        self.num_experts = num_experts
         self.buffers = [
             {
                 name: torch.empty(
@@ -62,7 +49,6 @@ class PrefillStage:
         self.stream = torch.cuda.Stream(device)
         self.ready = [torch.cuda.Event(), torch.cuda.Event()]
         self.layers: list[Any] = []  # PoolLayers in forward order (install)
-        self.runs: list[list[tuple[int, int]]] = []
         self.staged = 0
         self.copied_rows = 0
 
@@ -78,9 +64,6 @@ class PrefillStage:
         index = layer.index
         compute = torch.cuda.current_stream()
         if index == 0:
-            tables = layer.pool.tables
-            cold = (tables.cold_phys.view(-1, tables.num_experts) >= 0).cpu()
-            self.runs = [_runs(row) for row in cold.tolist()]
             self._fill(0, compute)
         compute.wait_event(self.ready[index % 2])
         if index + 1 < len(self.layers):
@@ -95,7 +78,6 @@ class PrefillStage:
         buffer = self.buffers[index % 2]
         with torch.cuda.stream(self.stream):
             for name, src in self.layers[index].sources.items():
-                for start, stop in self.runs[index]:
-                    buffer[name][start:stop].copy_(src[start:stop], non_blocking=True)
+                buffer[name].copy_(src, non_blocking=True)
             self.ready[index % 2].record(self.stream)
-        self.copied_rows += sum(stop - start for start, stop in self.runs[index])
+        self.copied_rows += self.num_experts

@@ -252,14 +252,14 @@ class GlobalPoolTests(unittest.TestCase):
 
     def test_random_steps_keep_ownership_consistent(self):
         rng = random.Random(3)
-        for trial in range(20):
+        for _trial in range(20):
             layers = rng.choice([1, 2, 3])
             experts = rng.choice([4, 6, 8])
             staging = rng.randint(1, 3)
             slots = tuple(rng.randint(1, experts - 1) for _ in range(layers))
             pool, sources, buffers = self.setup(layers, experts, slots, staging)
             gp.set_gate(pool.tables, rng.random() < 0.8)
-            for step in range(30):
+            for _step in range(30):
                 layer = rng.randrange(layers)
                 ids = [rng.choice([-1, rng.randrange(experts)]) for _ in range(staging)]
                 b = self.run_step(pool, sources, buffers, layer, ids)

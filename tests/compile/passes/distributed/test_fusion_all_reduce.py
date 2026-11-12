@@ -177,10 +177,12 @@ class TestAllReduceGemmaRMSNormModel(torch.nn.Module):
         token_num=16,
         eps=1e-6,
         dtype: torch.dtype = torch.float16,
+        use_aiter: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
+        self.use_aiter = use_aiter
         self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
         # Non-trivial weight (~Gemma range) so (1 + w) exercises the scale path.
         for n in self.norm:
@@ -210,6 +212,8 @@ class TestAllReduceGemmaRMSNormModel(torch.nn.Module):
         return [torch.ops.vllm.all_reduce.default]
 
     def ops_in_model_after(self):
+        if self.use_aiter:
+            return [rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()]
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
@@ -289,18 +293,18 @@ class TestAllReduceGemmaRMSNormStaticQuantFP8Model(
 class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
     """Exercises the new ROCm AITER AR+RMS+per-group-FP8-quant patterns.
 
-    Four ``rms_norm`` sites that together hit every pattern registered by
-    ``RocmAiterAllReduceFusionPass`` for the per-group FP8 quant path:
+    Four `rms_norm` sites that together hit every pattern registered by
+    `RocmAiterAllReduceFusionPass` for the per-group FP8 quant path:
 
-    * ``norm[0]``: ``all_reduce -> rms_norm -> group_fp8_quant`` (no residual)
-      -> ``AiterAllreduceFusedRMSNormGroupQuantFP8Pattern``
-    * ``norm[1]``: ``all_reduce -> fused_add_rms_norm -> group_fp8_quant``
-      (single ``rms`` consumer)
-      -> ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern``
-    * ``norm[2..3]``: ``all_reduce -> fused_add_rms_norm
-      -> (group_fp8_quant + rocm_unquantized_gemm)`` (two ``rms`` consumers,
+    * `norm[0]`: `all_reduce -> rms_norm -> group_fp8_quant` (no residual)
+      -> `AiterAllreduceFusedRMSNormGroupQuantFP8Pattern`
+    * `norm[1]`: `all_reduce -> fused_add_rms_norm -> group_fp8_quant`
+      (single `rms` consumer)
+      -> `AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`
+    * `norm[2..3]`: `all_reduce -> fused_add_rms_norm
+      -> (group_fp8_quant + rocm_unquantized_gemm)` (two `rms` consumers,
       modeling the DSv3.2 indexer fan-out)
-      -> ``AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern``
+      -> `AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern`
 
     Each site starts from the same bf16 activation and is returned separately.
     This avoids compounding four quantize/dequantize errors while still testing
@@ -383,6 +387,32 @@ class TestAiterAllReduceRMSNormGroupQuantFP8Model(torch.nn.Module):
         ]
 
 
+class TestAiterAllReduceGemmaRMSNormGroupQuantFP8Model(
+    TestAiterAllReduceRMSNormGroupQuantFP8Model
+):
+    """Gemma norms feeding the per-group FP8 quant sites.
+
+    The fused AR+RMS+quant op has no `gemma_norm` mode, so these sites must
+    keep matching the quant-fused patterns with the pre-added `1 + weight`.
+    The Gemma AR+RMS-only patterns match a prefix of the same subgraph, so if
+    they were registered ahead of the quant-fused ones they would consume the
+    `all_reduce` and strand `rocm_aiter_group_fp8_quant` as a separate
+    kernel -- which the `fully_replaced=True` check below would catch.
+    """
+
+    def __init__(
+        self,
+        hidden_size=128,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__(hidden_size, token_num, eps, dtype)
+        self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
+        for norm in self.norm:
+            norm.weight.requires_grad_(False)
+
+
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     def __init__(
         self, hidden_size=16, token_num=16, eps=1e-6, dtype: torch.dtype = torch.float16
@@ -450,10 +480,10 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         pytest.param(
             TestAllReduceGemmaRMSNormModel,
             False,
-            False,
+            IS_AITER_FOUND,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason="Not supported on ROCm platform",
+                current_platform.is_rocm() and not IS_AITER_FOUND,
+                reason="AITER is required on ROCm",
             ),
         ),
         pytest.param(
@@ -646,7 +676,10 @@ def all_reduce_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        if test_model_cls is TestAllReduceRMSNormModel:
+        if test_model_cls in (
+            TestAllReduceRMSNormModel,
+            TestAllReduceGemmaRMSNormModel,
+        ):
             model = test_model_cls(
                 hidden_size, token_num, dtype=dtype, use_aiter=use_aiter
             )
@@ -667,9 +700,13 @@ def all_reduce_fusion_pass_on_test_model(
         )
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
-        if test_model_cls in (
-            TestAllReduceGemmaRMSNormModel,
-            TestAllReduceGemmaRMSNormStaticQuantFP8Model,
+        if (
+            test_model_cls
+            in (
+                TestAllReduceGemmaRMSNormModel,
+                TestAllReduceGemmaRMSNormStaticQuantFP8Model,
+            )
+            and not use_aiter
         ):
             fused_op = torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
             fused_nodes = list(find_op_nodes(fused_op, backend.graph_post_pass))
@@ -684,6 +721,13 @@ def all_reduce_fusion_pass_on_test_model(
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize(
+    "test_model_cls",
+    [
+        TestAiterAllReduceRMSNormGroupQuantFP8Model,
+        TestAiterAllReduceGemmaRMSNormGroupQuantFP8Model,
+    ],
+)
 @pytest.mark.skipif(
     not current_platform.is_rocm(),
     reason="ROCm AITER AR+RMS+per-group-FP8-quant fusion is ROCm-only",
@@ -695,21 +739,26 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
     hidden_size: int,
     dtype: torch.dtype,
     enable_rms_norm_custom_op: bool,
+    test_model_cls: type[torch.nn.Module],
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Sibling of ``test_all_reduce_fusion_pass_replace`` for the new
+    """Sibling of `test_all_reduce_fusion_pass_replace` for the new
     ROCm AITER AR+RMS+per-group-FP8-quant fusion patterns.
 
-    Validates the three new ``VllmPatternReplacement`` patterns added to
-    ``RocmAiterAllReduceFusionPass``:
+    Validates the three new `VllmPatternReplacement` patterns added to
+    `RocmAiterAllReduceFusionPass`:
 
-    * ``AiterAllreduceFusedRMSNormGroupQuantFP8Pattern`` (no-residual)
-    * ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`` (with-residual,
-      single ``rms`` consumer)
-    * ``AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern`` (with-
+    * `AiterAllreduceFusedRMSNormGroupQuantFP8Pattern` (no-residual)
+    * `AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern` (with-residual,
+      single `rms` consumer)
+    * `AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern` (with-
       residual, DSv3.2 indexer fan-out; parametrized over
-      ``rocm_aiter_group_fp8_quant``
+      `rocm_aiter_group_fp8_quant`
       producer).
+
+    Parametrized over plain and Gemma norms: the Gemma AR+RMS-only patterns
+    match a prefix of these subgraphs, so this also pins their registration
+    order behind the quant-fused ones.
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -730,7 +779,7 @@ def test_rocm_aiter_all_reduce_rmsnorm_group_quant_fp8_fusion_pass_replace(
             args=(
                 num_processes,
                 master_port,
-                TestAiterAllReduceRMSNormGroupQuantFP8Model,
+                test_model_cls,
                 batch_size,
                 seq_len,
                 hidden_size,

@@ -7,7 +7,9 @@ import json
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
@@ -20,8 +22,9 @@ from vllm.logger import init_logger
 
 from ...serve.engine.protocol import ErrorResponse
 from .protocol import (
+    AbortRequestsRequest,
     GenerateRequest,
-    GenerateResponse,
+    GenerateResponseBase,
 )
 from .serving import ServingTokens
 
@@ -67,36 +70,54 @@ async def generate(request: GenerateRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, GenerateResponse):
+    elif isinstance(generator, GenerateResponseBase):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
+abort_router = APIRouter()
+
+
+async def abort_requests(raw_request: Request):
+    """Abort one or more requests. To be used in a
+    Disaggregated Everything setup.
+    """
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=f"JSON decode error: {e}",
+        ) from e
+    # Validate the parsed body instead of declaring it as a FastAPI body param:
+    # FastAPI's strict content-type check would then reject clients that send
+    # no `Content-Type`, which the legacy `/abort_requests` path still allows.
+    try:
+        request = AbortRequestsRequest.model_validate(body)
+    except ValidationError as e:
+        raise RequestValidationError(
+            errors=[{**err, "loc": ("body", *err["loc"])} for err in e.errors()]
+        ) from e
+    # Abort requests in background
+    asyncio.create_task(engine_client(raw_request).abort(request.request_ids))
+    return Response(status_code=200)
+
+
+# Under the `/inference` prefix, so `--api-key` guards it.
+router.add_api_route("/inference/v1/abort_requests", abort_requests, methods=["POST"])
+# Unauthenticated legacy path, kept for existing `--tokens-only` deployments.
+abort_router.add_api_route("/abort_requests", abort_requests, methods=["POST"])
+
+
 def attach_router(app: FastAPI):
-    if getattr(app.state.args, "tokens_only", False):
-
-        @router.post("/abort_requests")
-        async def abort_requests(raw_request: Request):
-            """
-            Abort one or more requests. To be used in a
-            Disaggregated Everything setup.
-            """
-            try:
-                body = await raw_request.json()
-            except json.JSONDecodeError as e:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail=f"JSON decode error: {e}",
-                ) from e
-            request_ids = body.get("request_ids")
-            if request_ids is None:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail="Missing 'request_ids' in request body",
-                )
-            # Abort requests in background
-            asyncio.create_task(engine_client(raw_request).abort(request_ids))
-            return Response(status_code=200)
-
     app.include_router(router)
+    if not getattr(app.state.args, "tokens_only", False):
+        return
+    # The RLHF dev router registers its own /abort_requests first. Registering
+    # this one too would only add a shadowed route with a duplicate operation ID.
+    has_abort_route = any(
+        getattr(route, "path", None) == "/abort_requests" for route in app.routes
+    )
+    if not has_abort_route:
+        app.include_router(abort_router)

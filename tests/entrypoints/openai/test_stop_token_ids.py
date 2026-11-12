@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Unit tests for stop_token_ids propagation from default_sampling_params
+"""Unit tests for stop_token_ids propagation from default_sampling_params
 to SamplingParams in ChatCompletionRequest and CompletionRequest.
 
 Regression test for https://github.com/vllm-project/vllm/issues/22519

@@ -1,0 +1,133 @@
+meta:
+  title: "Ring-1T-FP8"
+  slug: "ring-1t-fp8"
+  provider: "inclusionAI"
+  description: "Ring-1T (BailingMoeV2) FP8 model (~1T total params) for 8xH200 or 8xMI300X deployment"
+  date_added: 2025-10-15
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "inclusionAI/Ring-1T-FP8"
+  min_vllm_version: "0.11.0"
+  architecture: moe
+  parameter_count: "1T"
+  active_parameters: "50B"
+  context_length: 65536
+  base_args:
+    - "--trust-remote-code"
+    - "--tensor-parallel-size"
+    - "8"
+    - "--max-num-seqs"
+    - "32"
+    - "--kv-cache-dtype"
+    - "fp8"
+    - "--served-model-name"
+    - "Ring-1T-FP8"
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 1200
+    description: "FP8 weights on 8x H200 (80 GB) with FP8 KV cache"
+    extra_args:
+      - "--gpu-memory-utilization"
+      - "0.97"
+      - "--compilation-config"
+      - '{"use_inductor": false}'
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Ring-1T-FP8 is inclusionAI's BailingMoeV2 FP8 model (~1T total parameters). This recipe
+  covers pure tensor-parallel deployment across 8 GPUs on NVIDIA H200 or AMD MI300X+.
+
+  ## Prerequisites
+
+  - Hardware: 8x H200 or 8x MI300X/MI325X/MI355X
+  - vLLM >= 0.11.0
+
+  ### Install vLLM (CUDA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
+  ```
+
+  ## Launch commands
+
+  8x H200 (FP8 KV cache):
+
+  ```bash
+  vllm serve inclusionAI/Ring-1T-FP8 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.97 \
+    --max-num-seqs 32 \
+    --kv-cache-dtype fp8 \
+    --compilation-config '{"use_inductor": false}' \
+    --served-model-name Ring-1T-FP8
+  ```
+
+  8x MI300X/MI325X/MI355X:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  vllm serve inclusionAI/Ring-1T-FP8 \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --max-num-seqs 32 \
+    --kv-cache-dtype fp8 \
+    --served-model-name Ring-1T-FP8
+  ```
+
+  Tuning flags:
+  - `--max-model-len=65536` works well for most scenarios.
+  - `--max-num-batched-tokens=32768` for prompt-heavy; 16384/8192 for lower latency.
+  - Reduce `--gpu-memory-utilization` below 0.97 if you hit OOM.
+
+  ## Client Usage
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "Ring-1T-FP8",
+      "messages": [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+    }'
+  ```
+
+  ## References
+
+  - [Ring-1T-FP8 on Hugging Face](https://huggingface.co/inclusionAI/Ring-1T-FP8)

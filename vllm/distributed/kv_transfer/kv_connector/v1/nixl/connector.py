@@ -6,17 +6,18 @@ This module hosts the thin facade classes that vLLM's KV-connector layer
 instantiates. Almost all the real work lives in the per-mode scheduler
 and worker classes; the connector classes here only forward calls.
 
-* :class:`NixlBaseConnector` – common logic shared by pull and push.
-* :class:`NixlPullConnector` – pull-based (READ) KV transfer.
-* :class:`NixlPushConnector` – push-based (WRITE) KV transfer.
-* ``NixlConnector`` – backward-compatible alias for :class:`NixlPullConnector`.
+* `NixlBaseConnector` – common logic shared by pull and push.
+* `NixlPullConnector` – pull-based (READ) KV transfer.
+* `NixlPushConnector` – push-based (WRITE) KV transfer.
+* `NixlConnector` – backward-compatible alias for `NixlPullConnector`.
 """
 
 from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -58,6 +59,7 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -76,6 +78,22 @@ logger = init_logger(__name__)
 
 class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
+
+    _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # With a CPU kv_buffer_device, NIXL registers host staging buffers.
+        if kv_transfer_config.kv_buffer_device == "cpu":
+            return KVCacheAccess.IN_PROCESS
+        # Peers within a host map it through UCX cuda_ipc.
+        return KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return True
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -138,6 +156,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     # Class Methods
     ############################################################
     @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Push producers keep the decoder's KV cache registration across its sleep.
+        return False
+
+    @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
         if vllm_config.model_config is None:
             logger.warning_once(
@@ -163,6 +186,9 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def get_finished_count(self) -> int | None:
         return None
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -214,12 +240,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set handshake metadata keyed by (pp_rank, tp_rank) so the side
+        """Set handshake metadata keyed by (pp_rank, tp_rank) so the side
         channel can serve every PP stage's agent metadata.
 
         Args:
             metadata (dict): the handshake metadata to set.
+
         """
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
@@ -317,14 +343,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler.shutdown()
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        """
-        Get the KVConnector handshake metadata for this connector.
+        """Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake
         between P/D workers.
 
         Returns:
             KVConnectorHandshakeMetadata: the handshake metadata.
             None if no handshake metadata is available.
+
         """
         assert self.connector_worker is not None
         if (
@@ -356,6 +382,19 @@ class NixlPullConnector(NixlBaseConnector):
             self.connector_worker = NixlPullConnectorWorker(
                 vllm_config, self.engine_id, kv_cache_config
             )
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Sleep mode is only validated with the UCX backend.
+        return kv_transfer_config.get_from_extra_config("backends", ["UCX"]) == ["UCX"]
+
+    def unregister_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -395,7 +434,7 @@ class NixlPushConnector(NixlBaseConnector):
         """Drive push processing on the worker.
 
         The worker enqueues registrations / finished blocks for the
-        background ``nixl-push-writer`` thread; the writer issues the
+        background `nixl-push-writer` thread; the writer issues the
         WRITE transfers and polls NIXL notifs without further
         engine-thread involvement.
         """

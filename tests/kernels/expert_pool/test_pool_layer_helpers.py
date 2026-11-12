@@ -30,9 +30,8 @@ def test_physical_block_experts_maps_used_blocks_only():
 
 
 def test_marlin_block_size_matches_stock_choice_shape():
-    assert marlin_block_size(1, 10, 9984, 512, None) == 8
-    assert marlin_block_size(4096, 10, 512, 512, None) == 64
-    assert marlin_block_size(1, 10, 512, 512, torch.int8) >= 16
+    assert marlin_block_size(1, 10, 9984, 512) == 8
+    assert marlin_block_size(4096, 10, 512, 512) == 64
 
 
 def test_copy_rows_reference_copies_every_tensor_in_order():

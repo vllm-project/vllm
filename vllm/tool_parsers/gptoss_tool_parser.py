@@ -15,8 +15,7 @@ if TYPE_CHECKING:
 
 
 class GptOssToolParser(ToolParser):
-    """
-    Stub tool parser for gpt-oss/harmony models.
+    """Stub tool parser for gpt-oss/harmony models.
 
     All output parsing is handled by HarmonyParser. This stub exists as a
     capability declaration via HarmonyParser.tool_parser_cls.

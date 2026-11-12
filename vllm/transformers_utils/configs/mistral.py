@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PretrainedConfig, WhisperConfig
+from transformers import PreTrainedConfig, WhisperConfig
 
 from vllm.logger import init_logger
 
@@ -12,7 +12,7 @@ logger = init_logger(__name__)
 def adapt_config_dict(
     config_dict: dict[str, Any],
     defaults: dict[str, Any],
-) -> PretrainedConfig:
+) -> PreTrainedConfig:
     config_dict = _remap_general_mistral_args(config_dict)
     config_dict = _remap_mistral_sliding_window(config_dict)
 
@@ -86,7 +86,7 @@ def adapt_config_dict(
     for k, v in defaults.items():
         config_dict.setdefault(k, v)
 
-    config = PretrainedConfig.from_dict(config_dict)
+    config = PreTrainedConfig.from_dict(config_dict)
 
     logger.debug("Initialized config %s", config)
 
@@ -103,8 +103,8 @@ def _remap_mistral_vision_args(config: dict) -> dict:
     config = {
         "model_type": "pixtral",
         "architectures": ["PixtralForConditionalGeneration"],
-        "text_config": PretrainedConfig.from_dict(config),
-        "vision_config": PretrainedConfig.from_dict(vision_config),
+        "text_config": PreTrainedConfig.from_dict(config),
+        "vision_config": PreTrainedConfig.from_dict(vision_config),
     }
     if quant_config:
         config["quantization_config"] = quant_config
@@ -248,7 +248,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
     config = {
         "model_type": "voxtral",
         "architectures": [architecture],
-        "text_config": PretrainedConfig.from_dict(config),
+        "text_config": PreTrainedConfig.from_dict(config),
         "audio_config": WhisperConfig(
             num_mel_bins=encoder_args["audio_encoding_args"]["num_mel_bins"],
             window_size=encoder_args["audio_encoding_args"]["window_size"],

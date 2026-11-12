@@ -58,7 +58,7 @@ def main():
             )
             result = dict(
                 schema_version=1,
-                timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                timestamp=datetime.datetime.now(datetime.UTC).isoformat(),
                 label=a.label,
                 sequence_index=index,
                 role=role,

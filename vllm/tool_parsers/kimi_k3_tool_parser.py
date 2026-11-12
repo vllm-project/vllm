@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tool-call parser for the Kimi K3 (XTML) chat format.
 
-This turns the generated XTML ``response`` and ``tools`` channels back into
-OpenAI-compatible ``content`` and ``tool_calls``.
+This turns the generated XTML `response` and `tools` channels back into
+OpenAI-compatible `content` and `tool_calls`.
 
-K3 assistant tool calls live in a nested ``tools`` channel::
+K3 assistant tool calls live in a nested `tools` channel::
 
     <|open|>tools<|sep|>
       <|open|>call tool="python" index="1"<|sep|>
@@ -14,28 +14,28 @@ K3 assistant tool calls live in a nested ``tools`` channel::
       <|close|>call<|sep|>
     <|close|>tools<|sep|>
 
-where ``<|open|>``, ``<|close|>``, ``<|sep|>`` are dedicated special tokens. The plain
-reply lives in a sibling ``response`` channel which is unwrapped into content.
-``response`` always precedes ``tools`` (see the protocol channel grammar).
+where `<|open|>`, `<|close|>`, `<|sep|>` are dedicated special tokens. The plain
+reply lives in a sibling `response` channel which is unwrapped into content.
+`response` always precedes `tools` (see the protocol channel grammar).
 
 Argument decoding mirrors the template's type tagging (inverse encoding):
   * type="string"  -> value is the RAW text, no unescaping (template emits it raw)
   * other types    -> value is JSON-decoded (number/boolean/null/object/array)
 
-Attribute values (``tool=``, ``index=``, ``key=``, ``type=``) ARE escaped on the
-encode side (``&`` -> ``&amp;``, ``"`` -> ``&quot;``), so ``_attrs`` reverses
-them on decode (``&quot;`` before ``&amp;`` -- reverse of encode order).
+Attribute values (`tool=`, `index=`, `key=`, `type=`) ARE escaped on the
+encode side (`&` -> `&amp;`, `"` -> `&quot;`), so `_attrs` reverses
+them on decode (`&quot;` before `&amp;` -- reverse of encode order).
 
 Known limitation: because string argument and response bodies are emitted raw,
-a value that literally contains ``<|close|>argument<|sep|>`` or
-``<|close|>response<|sep|>`` is indistinguishable from a real closing marker.
+a value that literally contains `<|close|>argument<|sep|>` or
+`<|close|>response<|sep|>` is indistinguishable from a real closing marker.
 """
 
 import json
 from collections.abc import Sequence
 
 import regex as re
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -133,10 +133,13 @@ class KimiK3ToolParser(ToolParser):
             _O + r"\s*response\s*" + _S + r"(?P<c>.*?)" + _C + r"\s*response\s*" + _S,
             re.DOTALL,
         )
+        self._call_close_re = re.compile(_C + r"\s*call\s*" + _S)
 
         # streaming state
         self._sent_content_idx = 0
         self._sent_tool_call_count = 0
+        self._stream_call_close_idx = 0
+        self._stream_call_parse_idx = 0
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -149,7 +152,11 @@ class KimiK3ToolParser(ToolParser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         named = isinstance(
             request.tool_choice,
-            (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            (
+                ChatCompletionNamedToolChoiceParam,
+                ToolChoiceFunction,
+                ToolChoiceCustom,
+            ),
         )
         structured_outputs = getattr(request, "structured_outputs", None)
         has_structural_tag = (
@@ -207,13 +214,13 @@ class KimiK3ToolParser(ToolParser):
         }
 
     def _decode_call(self, attrs: str, body: str) -> ToolCall | None:
-        """Decode one ``call`` block into a :class:`ToolCall`.
+        """Decode one `call` block into a `ToolCall`.
 
-        ``attrs`` is the text between ``<|open|>call `` and ``<|sep|>`` (carries
-        ``tool=`` / ``index=``); ``body`` is the sequence of ``argument`` blocks.
-        Each argument is re-typed per its ``type=`` tag: strings pass through
+        `attrs` is the text between `<|open|>call ` and `<|sep|>` (carries
+        `tool=` / `index=`); `body` is the sequence of `argument` blocks.
+        Each argument is re-typed per its `type=` tag: strings pass through
         raw, everything else is JSON-decoded (falling back to raw text if the
-        JSON is malformed, so a partial stream never raises). Returns ``None``
+        JSON is malformed, so a partial stream never raises). Returns `None`
         when no tool name is present (an empty/garbage block is dropped).
         """
         call_attrs = self._attrs(attrs)
@@ -244,10 +251,10 @@ class KimiK3ToolParser(ToolParser):
     def _strip_response_content(self, text: str) -> str | None:
         """Strip XTML response/message markers from generated response text.
 
-        In chat serving, ``<|open|>response<|sep|>`` is often part of the prompt
+        In chat serving, `<|open|>response<|sep|>` is often part of the prompt
         generation prefix, so the model output may only contain the body plus
-        ``<|close|>response<|sep|>``. Handle both that consumed-prefix shape and a
-        complete ``<|open|>response<|sep|>... <|close|>response<|sep|>`` wrapper.
+        `<|close|>response<|sep|>`. Handle both that consumed-prefix shape and a
+        complete `<|open|>response<|sep|>... <|close|>response<|sep|>` wrapper.
         """
         m_open = self._response_open_re.search(text)
         if m_open is not None:
@@ -361,24 +368,32 @@ class KimiK3ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        # Conservative streaming: stream unwrapped response-channel text, then
-        # buffer tool calls and emit each call once its block closes.
         content = self._extract_response_content(current_text)
-
-        # tools channel is open: parse fully-closed calls we have not emitted yet
         m_tools = self._tools_open_re.search(current_text)
         if m_tools is None:
             return DeltaMessage(content=content) if content else None
 
-        section = current_text[m_tools.end() :]
-        calls = [
-            tc
-            for m in self._call_re.finditer(section)
-            if (tc := self._decode_call(m["attrs"], m["body"])) is not None
-        ]
-        if len(calls) <= self._sent_tool_call_count:
+        self._stream_call_parse_idx = max(self._stream_call_parse_idx, m_tools.end())
+        self._stream_call_close_idx = max(self._stream_call_close_idx, m_tools.end())
+        new_calls: list[ToolCall] = []
+        while True:
+            m_close = self._call_close_re.search(
+                current_text, self._stream_call_close_idx, partial=True
+            )
+            if m_close.partial:
+                self._stream_call_close_idx = m_close.start()
+                break
+            self._stream_call_close_idx = m_close.end()
+            for call_match in self._call_re.finditer(
+                current_text, self._stream_call_parse_idx, m_close.end()
+            ):
+                tool_call = self._decode_call(call_match["attrs"], call_match["body"])
+                if tool_call is not None:
+                    new_calls.append(tool_call)
+                self._stream_call_parse_idx = call_match.end()
+
+        if not new_calls:
             return DeltaMessage(content=content) if content else None
-        new = calls[self._sent_tool_call_count :]
 
         deltas = [
             DeltaToolCall(
@@ -389,7 +404,7 @@ class KimiK3ToolParser(ToolParser):
                     name=tc.function.name, arguments=tc.function.arguments
                 ).model_dump(exclude_none=True),
             )
-            for i, tc in enumerate(new)
+            for i, tc in enumerate(new_calls)
         ]
-        self._sent_tool_call_count = len(calls)
+        self._sent_tool_call_count += len(new_calls)
         return DeltaMessage(content=content, tool_calls=deltas)

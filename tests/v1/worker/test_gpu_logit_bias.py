@@ -5,8 +5,10 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
         "CUDA required for Model Runner V2 logit bias tests",
         allow_module_level=True,
@@ -14,8 +16,13 @@ if not torch.cuda.is_available():
 
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
+from vllm.v1.worker.gpu.sample.logits_processor import (
+    LogitsContext,
+    LogitsProcRequestState,
+)
+from vllm.v1.worker.gpu.states import RequestState
 
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 VOCAB_SIZE = 128
 STOP_TOKEN = 3
 OTHER_TOKEN = 4
@@ -45,17 +52,35 @@ def _only_stop_token_left(num_rows: int) -> torch.Tensor:
 
 def _apply(logits: torch.Tensor, structured: list[bool]) -> torch.Tensor:
     """Run the fused bias kernel with one logits row per request."""
-    state = LogitBiasState(max_num_reqs=4, device=DEVICE)
+    req_states = RequestState(
+        max_num_reqs=4,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        num_speculative_steps=1,
+        vocab_size=VOCAB_SIZE,
+        device=DEVICE,
+    )
+    # add_request() reads prompt_len per slot; every slot here uses the same one.
+    req_states.prompt_len.np[:] = PROMPT_LEN
+
+    state = LogitBiasState(None, LogitsProcRequestState.from_request_state(req_states))
     for req_idx, is_structured in enumerate(structured):
-        state.add_request(req_idx, PROMPT_LEN, _params(is_structured))
+        state.add_request(req_idx, _params(is_structured))
     state.apply_staged_writes()
 
     num_reqs = len(structured)
-    state.apply_logit_bias(
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    state.apply(
         logits,
-        torch.arange(num_reqs, dtype=torch.int32, device=DEVICE),
-        np.arange(num_reqs, dtype=np.intp),
-        torch.full((num_reqs,), POS, dtype=torch.int32, device=DEVICE),
+        LogitsContext(
+            expanded_idx_mapping=idx_mapping,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=np.arange(num_reqs, dtype=np.intp),
+            expanded_local_pos=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
+            input_ids=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
+            pos=torch.full((num_reqs,), POS, dtype=torch.int32, device=DEVICE),
+            seq_lens_upper_bound_np=np.full(num_reqs, POS + 1, dtype=np.int64),
+        ),
     )
     return logits.cpu()
 

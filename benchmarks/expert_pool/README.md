@@ -25,7 +25,7 @@ two of its existing sanity tasks. This measures fix-proposal text
 generation only; the code-editing and official-grading quality checks are a
 separate procedure.
 
-## Code and environment measured
+## Historical code and environment measured
 
 | purpose | version |
 | --- | --- |
@@ -50,9 +50,13 @@ The expert pool holds 258 expert rows per layer for 48 layers, about
 physical GPU. Check the available memory and that the server is up before
 running the client.
 
-## Server launch
+## Historical server launch
 
-Same features as the measured combination, checkpoint path as needed.
+These commands describe the September measurement and its PLE patch;
+they are not launch instructions for current vLLM. Current vLLM uses
+`--engram-config '{"disk_offload":true}'` for this model's PLE table, with
+different staging behavior from the deferred PLE patch measured here.
+Use the checkpoint path appropriate to your host.
 `VLLM_USE_BREAKABLE_CUDAGRAPH` was unset (automatic selection).
 `VLLM_DEBUG_WORKSPACE`, `VLLM_LOGGING_LEVEL`, `PYTORCH_ALLOC_CONF` and the
 thread counts are the values used during measurement, not requirements.

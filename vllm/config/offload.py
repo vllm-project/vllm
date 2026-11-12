@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 OffloadBackend = Literal["auto", "uva", "prefetch"]
 
@@ -98,16 +98,17 @@ class OffloadConfig:
     """Serve MoE expert weights from a shared GPU expert pool: keep this many
     expert rows per MoE layer resident at startup in one VRAM bank shared by
     all MoE layers, with the rest of the experts in pinned host memory. A
-    device-side LRU planner moves rows between layers at run time and the
-    forward runs no host code, so the MoE op stays inside CUDA graphs.
+    device-side LRU planner moves rows between layers at run time without
+    host readback, so the decode MoE op stays inside CUDA graphs.
     0 (default) keeps every expert on the GPU. Supported for the ModelOpt
     NVFP4 Marlin MoE backend without expert/data parallelism."""
 
     moe_expert_pool_prefill_staging: bool = True
-    """With the expert pool, large prefill steps copy each layer's
-    non-resident expert rows into a device buffer (prefetched one layer
-    ahead) instead of letting the MoE kernel re-read them from host memory.
-    Costs two layers' worth of expert weights in GPU memory."""
+    """With the expert pool, large prefill steps copy each full layer into a
+    device buffer, prefetched one layer ahead without host synchronization.
+    Non-resident experts are read from this buffer instead of host memory.
+    Costs two layers' worth of expert weights in GPU memory and copies
+    resident rows too, avoiding a readback of the device-managed placement."""
 
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":
@@ -151,9 +152,8 @@ class OffloadConfig:
             )
         return self
 
-    def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the offload configs.
+    def compile_factors(self) -> CompileFactors:
+        """Provide a hash that uniquely identifies all the offload configs.
 
         All fields are included because PrefetchOffloader patches module
         forwards and inserts custom ops (wait_prefetch, start_prefetch)
@@ -161,8 +161,4 @@ class OffloadConfig:
         alter which layers are hooked and how prefetch indices are
         computed, so the compilation cache must distinguish them.
         """
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors=set())
-        hash_str = hash_factors(factors)
-        return hash_str
+        return get_compile_factors(self, ignored_factors=set())

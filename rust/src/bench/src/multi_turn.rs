@@ -30,7 +30,6 @@ use crate::ready_checker::{get_first_model, wait_for_endpoint};
 pub struct TurnOutput {
     pub turn_index: usize,
     pub request_output: RequestFuncOutput,
-    pub cumulative_input_tokens: usize,
 }
 
 /// Output from an entire conversation.
@@ -170,17 +169,15 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
                 "Random-MM multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
             ));
         }
-        DatasetName::Sonnet => {
-            return Err(BenchError::Config(
-                "Sonnet multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
-            ));
-        }
         DatasetName::SpeedBench => {
             return Err(BenchError::Config(
                 "SPEED-Bench multi-turn is not yet supported. Use 'random' or 'sharegpt' with --multi-turn.".into(),
             ));
         }
-        DatasetName::Custom | DatasetName::PrefixRepetition | DatasetName::RandomRerank => {
+        DatasetName::Custom
+        | DatasetName::PrefixRepetition
+        | DatasetName::RandomRerank
+        | DatasetName::TimedTrace => {
             return Err(BenchError::Config(
                 "This dataset does not support multi-turn. Use 'random' or 'sharegpt' with --multi-turn.".into(),
             ));
@@ -533,21 +530,20 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
     );
 
     // Build result JSON
-    let date_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let dt_filename = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let current_dt = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let result_json = build_multi_turn_result_json(
         config,
+        &model_id,
         &mt_metrics,
         &all_outputs,
         benchmark_duration,
-        &date_iso,
+        &current_dt,
         spec_decode_stats.as_ref(),
     );
 
     // Save if requested
     if config.save_result || config.append_result {
-        let model_for_filename = config.model.as_deref().unwrap_or(&model_id);
-        let file_name = compute_result_filename(config, model_for_filename, &dt_filename);
+        let file_name = compute_result_filename(config, &model_id, &current_dt);
 
         if let Some(ref dir) = config.result_dir {
             std::fs::create_dir_all(dir)?;
@@ -752,14 +748,12 @@ async fn run_conversation(
             turn_outputs.push(TurnOutput {
                 turn_index: turn_idx,
                 request_output: output,
-                cumulative_input_tokens: cumulative_tokens,
             });
         } else {
             all_success = false;
             turn_outputs.push(TurnOutput {
                 turn_index: turn_idx,
                 request_output: output,
-                cumulative_input_tokens: cumulative_tokens,
             });
             break; // Conversation stops on failure
         }

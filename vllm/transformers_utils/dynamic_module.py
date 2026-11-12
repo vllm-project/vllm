@@ -29,8 +29,7 @@ def try_get_class_from_dynamic_module(
     warn_on_fail: bool = True,
     **kwargs,
 ) -> type | None:
-    """
-    As `transformers.dynamic_module_utils.get_class_from_dynamic_module`,
+    """As `transformers.dynamic_module_utils.get_class_from_dynamic_module`,
     but ignoring any errors.
     """
     try:

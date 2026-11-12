@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use itertools::izip;
-use llm_multimodal::{FieldLayout, Modality, PreprocessedEncoderInputs, VideoClip};
+use llm_multimodal::{
+    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, VideoClip, VideoClipOptions,
+};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -16,7 +18,8 @@ use vllm_engine_core_client::protocol::multimodal::{
     SliceSpec,
 };
 
-use super::{ModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, tensor};
+use super::timing::MM_STAGE_TARGET;
+use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary video encoder input.
@@ -32,6 +35,12 @@ impl MultimodalModelInfo {
     /// Unlike images, each clip runs through the preprocessor independently
     /// (a batch of one), so its tensors are complete per item and need no
     /// cross-item slicing.
+    #[tracing::instrument(
+        name = "mm_stage",
+        target = MM_STAGE_TARGET,
+        skip_all,
+        fields(stage = "preprocess_video")
+    )]
     pub(super) async fn prepare_videos(
         &self,
         clips: Vec<Arc<VideoClip>>,
@@ -46,8 +55,20 @@ impl MultimodalModelInfo {
 
         for (clip, uuid) in izip!(&clips, uuids) {
             let preprocessed = self.preprocess_video_clip(support, Arc::clone(clip)).await?;
-            let mut clip_replacements =
-                support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
+            // Hand the replacement hook the clip's decoder-side sampling so
+            // temporal groups are stamped with the actually-sampled frames'
+            // times. A clip whose decoder reported no sampling (`None`)
+            // keeps the spec's per-grid synthetic stamps, and a spec without
+            // a media-aware hook ignores this entirely.
+            let media = [MediaItemInfo {
+                video_sampling: clip.sampling.clone(),
+            }];
+            let mut clip_replacements = support.spec.prompt_replacements_with_media(
+                &self.context,
+                &preprocessed,
+                &media,
+                &support.config,
+            )?;
             if clip_replacements.len() != 1 {
                 bail_multimodal!(
                     "expected exactly one prompt replacement per video clip, got {}",
@@ -76,24 +97,31 @@ impl MultimodalModelInfo {
     /// processor.
     async fn preprocess_video_clip(
         &self,
-        support: &ModalitySupport,
+        support: &VisionModalitySupport,
         clip: Arc<VideoClip>,
     ) -> Result<PreprocessedEncoderInputs> {
-        let config = support.config.clone();
-        let processor = support.processor;
+        let processor = Arc::clone(&support.processor);
 
         tokio::task::spawn_blocking(move || {
+            // Request-scoped clip facts travel per call; the checkpoint's
+            // config is bound in the processor.
+            let clip_options = VideoClipOptions {
+                sample_fps: clip.sample_fps,
+                max_long_side_pixel: clip.max_long_side_pixel,
+            };
             // Prefer the borrowed-RGB fast path, which avoids materializing a
             // `DynamicImage` per sampled frame after media decode.
             if let Some(rgb_video) = clip.rgb_video() {
                 match rgb_video.frame_refs() {
-                    Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs, &config) {
-                        Ok(preprocessed) => return Ok(preprocessed),
-                        Err(error) => warn!(
-                            error = %error.as_report(),
-                            "RGB video preprocessing fast path failed; falling back to materialized frames"
-                        ),
-                    },
+                    Ok(frame_refs) => {
+                        match processor.preprocess_video_rgb(&frame_refs, &clip_options) {
+                            Ok(preprocessed) => return Ok(preprocessed),
+                            Err(error) => warn!(
+                                error = %error.as_report(),
+                                "RGB video preprocessing fast path failed; falling back to materialized frames"
+                            ),
+                        }
+                    }
                     Err(error) => warn!(
                         error,
                         "RGB video frame refs are invalid; falling back to materialized frames"
@@ -102,7 +130,7 @@ impl MultimodalModelInfo {
             }
 
             let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            Ok(processor.preprocess_video(&frames, &config)?)
+            Ok(processor.preprocess_video(&frames, &clip_options)?)
         })
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
@@ -117,7 +145,7 @@ impl MultimodalModelInfo {
 /// `flat_from_sizes` treatment of video patches), and batched metadata
 /// tensors drop their singleton batch axis.
 fn build_video_item(
-    support: &ModalitySupport,
+    support: &VisionModalitySupport,
     preprocessed: PreprocessedEncoderInputs,
     hash: String,
     uuid: Option<String>,
@@ -270,7 +298,7 @@ mod tests {
         let info = qwen3_vl_info();
         // One clip flattened to 6 patches with 4 features each.
         let preprocessed = PreprocessedEncoderInputs {
-            encoder_input: ArrayD::zeros(vec![6, 4]),
+            encoder_input: ArrayD::zeros(vec![6, 4]).into(),
             feature_token_counts: vec![6],
             item_sizes: vec![(32, 32)],
             model_specific: HashMap::from([
@@ -313,5 +341,75 @@ mod tests {
         assert_eq!(grid_tensor.shape, vec![3]);
 
         assert_eq!(item.hash, "<hash>");
+    }
+
+    /// GLM-5.3-Flash stamps each temporal group with the whole second of its
+    /// first sampled frame when the decoder reported the sampling, and falls
+    /// back to per-grid synthetic stamps derived from the clip's sampled
+    /// rate when it did not.
+    #[tokio::test]
+    async fn glm_video_timestamps_follow_the_sampled_frames_or_fall_back() {
+        use image::{DynamicImage, Rgb, RgbImage};
+        use llm_multimodal::{VideoSamplingInfo, VideoSource};
+
+        use super::super::tests::{glm53_flash_info, glm53_flash_video_config};
+
+        let info = glm53_flash_info(glm53_flash_video_config());
+        let clip = |sampling: Option<VideoSamplingInfo>| {
+            let frames = (0..8)
+                .map(|_| DynamicImage::ImageRgb8(RgbImage::from_pixel(80, 40, Rgb([128; 3]))))
+                .collect::<Vec<_>>();
+            // The tracker samples at the spec's configured default rate
+            // (the video config's `fps`: 1), so the clip carries it.
+            Arc::new(
+                VideoClip::new_with_sample_fps(
+                    frames,
+                    bytes::Bytes::from_static(b"video"),
+                    VideoSource::InlineBytes,
+                    "<hash>".to_string(),
+                    1.0,
+                )
+                .with_sampling(sampling),
+            )
+        };
+
+        // Eight frames the loader picked from a 30 fps source; the temporal
+        // groups of two start at frames 0, 17, 35, 53.
+        let sampled = info
+            .prepare_videos(
+                vec![clip(Some(VideoSamplingInfo {
+                    source_fps: 30.0,
+                    frame_indices: vec![0, 8, 17, 26, 35, 44, 53, 62],
+                }))],
+                vec![None],
+                ModelDtype::Float32,
+            )
+            .await
+            .unwrap();
+        let fallback = info
+            .prepare_videos(vec![clip(None)], vec![None], ModelDtype::Float32)
+            .await
+            .unwrap();
+
+        let text = |prepared: &PreparedMedia| {
+            let ids: Vec<u32> =
+                prepared.replacements[0].tokens.iter().map(|&token| token as u32).collect();
+            info.context.tokenizer().decode(&ids, false).unwrap()
+        };
+        let sampled_text = text(&sampled);
+        let fallback_text = text(&fallback);
+
+        // Sampled: group-start frames 0, 17, 35, 53 at 30 fps land in whole
+        // seconds 0, 0, 1, 1.
+        assert!(sampled_text.contains("1.0 seconds"));
+        assert!(!sampled_text.contains("2.0 seconds"));
+        // Fallback: the clip's seconds per grid (temporal 2 at fps 1) stamp
+        // groups synthetically.
+        assert!(fallback_text.contains("2.0 seconds"));
+
+        expect_test::expect!["<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>0.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>0.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>1.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>1.0 seconds"]
+        .assert_eq(&sampled_text);
+        expect_test::expect!["<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>0.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>2.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>4.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>6.0 seconds"]
+        .assert_eq(&fallback_text);
     }
 }

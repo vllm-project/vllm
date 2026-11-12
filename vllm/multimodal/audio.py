@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
@@ -45,12 +45,13 @@ def get_audio_duration(*, y: npt.NDArray[np.floating], sr: float = 22050) -> flo
 
     Returns:
         Duration of the audio in seconds.
+
     """
     n_samples = y.shape[-1]
     return float(n_samples) / sr
 
 
-class ChannelReduction(str, Enum):
+class ChannelReduction(StrEnum):
     """Method to reduce multi-channel audio to target channels."""
 
     MEAN = "mean"  # Average across channels (default, preserves energy balance)
@@ -71,6 +72,7 @@ class AudioSpec:
             (no normalization). 1 = mono, 2 = stereo, etc.
         channel_reduction: Method to reduce channels when input has more
             channels than target. Only used when reducing channels.
+
     """
 
     target_channels: int | None = 1
@@ -119,6 +121,7 @@ def normalize_audio(
     Raises:
         ValueError: If audio has unsupported dimensions or channel expansion
             is requested (e.g., mono to stereo).
+
     """
     if not spec.needs_normalization:
         return audio
@@ -143,7 +146,7 @@ def normalize_audio(
 
     # No reduction needed if already at target
     if num_channels == spec.target_channels:
-        return audio
+        return audio[0] if num_channels == 1 else audio
 
     # Cannot expand channels
     if num_channels < spec.target_channels:
@@ -188,13 +191,14 @@ def resample_audio_pyav(
 
     Args:
         audio: Input audio. Can be:
-            - 1D array ``(samples,)``: mono audio
-            - 2D array ``(channels, samples)``: stereo audio
+            - 1D array `(samples,)`: mono audio
+            - 2D array `(channels, samples)`: stereo audio
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
     Returns:
         Resampled audio with the same shape as the input (1D → 1D, 2D → 2D).
+
     """
     orig_sr_int = int(round(orig_sr))
     target_sr_int = int(round(target_sr))
@@ -300,18 +304,19 @@ def resample_audio_torchaudio(
     """Resample audio using torchaudio's bandlimited sinc interpolation.
 
     Unlike the PyAV resampler, this handles any input length without padding
-    and applies the kernel over the trailing axis, so 2D ``(channels,
-    samples)`` input needs no per-channel loop.
+    and applies the kernel over the trailing axis, so 2D `(channels,
+    samples)` input needs no per-channel loop.
 
     Args:
         audio: Input audio. Can be:
-            - 1D array ``(samples,)``: mono audio
-            - 2D array ``(channels, samples)``: stereo audio
+            - 1D array `(samples,)`: mono audio
+            - 2D array `(channels, samples)`: stereo audio
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
     Returns:
         Resampled audio with the same shape as the input (1D → 1D, 2D → 2D).
+
     """
     orig_sr_int = int(round(orig_sr))
     target_sr_int = int(round(target_sr))
@@ -418,7 +423,7 @@ def split_audio(
         List of 1D audio chunks.
 
     Raises:
-        AssertionError: If ``audio_data`` is not 1D.
+        AssertionError: If `audio_data` is not 1D.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz
@@ -431,6 +436,7 @@ def split_audio(
         ... )
         >>> len(chunks)
         3
+
     """
     if audio_data.ndim > 1:
         raise ValueError(
@@ -500,6 +506,7 @@ def find_split_point(
         ... )
         >>> 16000 <= split_idx <= 17600
         True
+
     """
     segment = wav[start_idx:end_idx]
 

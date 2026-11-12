@@ -1,20 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Which rows the PP sampled-token broadcast must carry."""
+"""PP helpers of the V2 model runner: which rows the sampled-token broadcast
+must carry, and which received tensors do not match their buffers."""
 
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
+import torch
 
 from vllm.v1.worker.gpu import pp_utils
 
 
-def _batch(num_computed, prefill_len, num_scheduled):
+def _batch(
+    num_computed,
+    prefill_len,
+    num_scheduled,
+    is_prefilling=None,
+    max_seq_len=None,
+):
     return Mock(
         num_reqs=len(num_computed),
         num_computed_tokens_np=np.array(num_computed, dtype=np.int32),
         prefill_len_np=np.array(prefill_len, dtype=np.int32),
         num_scheduled_tokens=np.array(num_scheduled, dtype=np.int32),
+        is_prefilling_np=(
+            np.array(is_prefilling, dtype=np.bool_)
+            if is_prefilling is not None
+            else None
+        ),
+        max_seq_len_np=(
+            np.array(max_seq_len, dtype=np.int32) if max_seq_len is not None else None
+        ),
     )
 
 
@@ -81,3 +98,122 @@ def test_decode_row_ahead_of_a_prefill_chunk():
 
     assert mask is not None
     assert mask.tolist() == [True, False]
+
+
+def test_excludes_final_prefill_chunk_reaching_its_length_cap():
+    """A max_tokens=1 final chunk hands its token off and leaves the engine.
+
+    Disaggregated prefill submits max_tokens=1, so the request finishes with
+    the final chunk's single sample and no follow-up step on this engine
+    reads the broadcast payload.
+    """
+    batch = _batch(
+        num_computed=[1000],
+        prefill_len=[1004],
+        num_scheduled=[4],
+        is_prefilling=[True],
+        max_seq_len=[1005],
+    )
+
+    assert pp_utils.compute_need_sampled_mask(batch) is None
+
+
+def test_keeps_final_prefill_chunk_with_generation_budget_left():
+    """The same final chunk, but the request keeps decoding here."""
+    batch = _batch(
+        num_computed=[1000],
+        prefill_len=[1004],
+        num_scheduled=[4],
+        is_prefilling=[True],
+        max_seq_len=[1004 + 256],
+    )
+
+    mask = pp_utils.compute_need_sampled_mask(batch)
+
+    assert mask is not None
+    assert mask.tolist() == [True]
+
+
+def test_length_cap_overrun_decode_row_is_kept():
+    """Decoding rows are never excluded, even past their length cap.
+
+    Speculative decoding can transiently overrun prompt_len + max_tokens
+    while the scheduler still runs the request; dropping the row would
+    desynchronize the PP stages.
+    """
+    batch = _batch(
+        num_computed=[14176],
+        prefill_len=[12175],
+        num_scheduled=[8],
+        is_prefilling=[False],
+        max_seq_len=[12176],
+    )
+
+    mask = pp_utils.compute_need_sampled_mask(batch)
+
+    assert mask is not None
+    assert mask.tolist() == [True]
+
+
+def test_finishing_prefill_row_does_not_drop_a_sibling_row():
+    """Only finishing rows are excluded; a decoding sibling keeps its row."""
+    batch = _batch(
+        num_computed=[1000, 10],
+        prefill_len=[1004, 8],
+        num_scheduled=[4, 1],
+        is_prefilling=[True, False],
+        max_seq_len=[1005, 1024],
+    )
+
+    mask = pp_utils.compute_need_sampled_mask(batch)
+
+    assert mask is not None
+    assert mask.tolist() == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("received_dtype", "buffer_dtype", "lossy"),
+    [
+        # An FP32 residual stream received into a model-dtype buffer.
+        (torch.float32, torch.bfloat16, True),
+        # Same width, but BF16 has fewer mantissa bits and FP16 less range.
+        (torch.float16, torch.bfloat16, True),
+        (torch.bfloat16, torch.float16, True),
+        (torch.bfloat16, torch.bfloat16, False),
+        (torch.bfloat16, torch.float32, False),
+        (torch.float8_e4m3fn, torch.bfloat16, False),
+    ],
+)
+def test_warns_only_when_the_buffer_narrows(
+    caplog_vllm, received_dtype, buffer_dtype, lossy
+):
+    """A stage boundary may widen a received tensor, but not round it silently."""
+    received = {"hidden_states": torch.zeros(4, 8, dtype=received_dtype)}
+    buffers = {"hidden_states": torch.zeros(4, 8, dtype=buffer_dtype)}
+
+    pp_utils.check_received_tensors(received, buffers)
+
+    warnings = [r.getMessage() for r in caplog_vllm.records if r.levelname == "WARNING"]
+    assert len(warnings) == int(lossy)
+    assert all("'hidden_states'" in w for w in warnings)
+
+
+def test_rejects_a_missing_or_reshaped_tensor():
+    """A missing tensor would leave the buffer stale, and a per-token shape that
+    broadcasts into the buffer would fill it with wrong values."""
+    buffers = {"hidden_states": torch.zeros(4, 2, 8)}
+
+    with pytest.raises(ValueError, match="does not send"):
+        pp_utils.check_received_tensors({}, buffers)
+    with pytest.raises(ValueError, match="per-token shape"):
+        pp_utils.check_received_tensors({"hidden_states": torch.zeros(4, 8)}, buffers)
+
+
+def test_warns_about_a_tensor_without_a_buffer(caplog_vllm):
+    """The per-step copy drops a received tensor that has no buffer."""
+    received = {"hidden_states": torch.zeros(4, 8), "ds_3": torch.zeros(4, 8)}
+
+    pp_utils.check_received_tensors(received, {"hidden_states": torch.zeros(4, 8)})
+
+    warnings = [r.getMessage() for r in caplog_vllm.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "'ds_3'" in warnings[0]

@@ -36,7 +36,7 @@ def vllm_config(pool_rows: int) -> VllmConfig:
     return cfg
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def dist_env():
     cfg = vllm_config(0)
     _set_vllm_config(cfg, 1, rank=0, local_rank=0)

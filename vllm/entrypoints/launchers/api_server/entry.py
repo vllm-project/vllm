@@ -8,16 +8,15 @@ import signal
 import socket
 import tempfile
 from argparse import Namespace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, MutableSequence
 from contextlib import asynccontextmanager
 from typing import Any
 
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParserManager
-from vllm.tool_parsers import ToolParserManager
+from vllm.entrypoints.common.cli_args import init_parser_plugin
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
 
@@ -51,6 +50,9 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    from vllm.entrypoints.common.cli_args import propagate_flash_late_interaction
+
+    propagate_flash_late_interaction(args, engine_args)
     if client_config:
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
@@ -70,14 +72,12 @@ async def build_async_engine_client_from_engine_args(
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
-    """
-    Create EngineClient, either:
+    """Create EngineClient, either:
         - in-process using the AsyncLLMEngine Directly
         - multiprocess using AsyncLLMEngine RPC
 
     Returns the Client or None if the creation failed.
     """
-
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
@@ -117,13 +117,13 @@ async def build_and_serve(
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
+    peer_loads: tuple[MutableSequence[int], int] | None = None,
     **uvicorn_kwargs,
 ) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
 
     Returns the shutdown task for the caller to await.
     """
-
     # Get uvicorn log config (from file or with endpoint filter)
     log_config = get_uvicorn_log_config(args)
     if log_config is not None:
@@ -142,6 +142,7 @@ async def build_and_serve(
         app,
         sock=sock,
         enable_ssl_refresh=args.enable_ssl_refresh,
+        peer_loads=peer_loads,
         host=args.host,
         port=args.port,
         log_level=args.uvicorn_log_level,
@@ -162,7 +163,6 @@ async def build_and_serve(
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
-
     decorate_logs("APIServer", skip_if_decorated=True)
 
     # Interrupt initialization if SIGTERM arrives before uvicorn installs its
@@ -180,19 +180,19 @@ async def run_server_worker(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Run a single API server worker."""
+    init_parser_plugin(args)
 
-    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
-        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
-
-    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
+    peer_loads = None
+    if client_config and "api_server_loads" in client_config:
+        loads = client_config.pop("api_server_loads")
+        peer_loads = (loads, client_config["client_index"])
 
     async with build_async_engine_client(
         args,
         client_config=client_config,
     ) as engine_client:
         shutdown_task = await build_and_serve(
-            engine_client, listen_address, sock, args, **uvicorn_kwargs
+            engine_client, listen_address, sock, args, peer_loads, **uvicorn_kwargs
         )
     # NB: Await server shutdown only after the backend context is exited
     try:
@@ -204,13 +204,12 @@ async def run_server_worker(
 def main():
     import uvloop
 
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-    from ..cli_args import (
+    from vllm.entrypoints.common.cli_args import (
         make_arg_parser,
         validate_parsed_serve_args,
     )
+    from vllm.entrypoints.common.startup import cli_env_setup
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
@@ -221,6 +220,7 @@ def main():
     )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+    configure_logging_from_args(args)
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))

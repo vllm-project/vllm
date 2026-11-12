@@ -3,7 +3,7 @@
 """Model-level installation of the global expert pool.
 
 Runs once after every layer's process_weights_after_loading: with
-``moe_expert_pool_rows > 0`` the MoE layers keep their expert tensors in
+`moe_expert_pool_rows > 0` the MoE layers keep their expert tensors in
 pinned host memory (final kernel layout); this allocates one VRAM bank
 shared by all of them, fills each layer's initial rows, and binds a
 consumer (Marlin) to the bank.
@@ -190,7 +190,7 @@ def install_expert_pool(
         if stage_min_tokens > 0
         else None
     )
-    for index, ((name, layer), src) in enumerate(zip(layers, sources)):
+    for index, ((_name, layer), src) in enumerate(zip(layers, sources)):
         method = layer.quant_method
         start = pool.offset(index)
         for tensor_name in TENSORS:

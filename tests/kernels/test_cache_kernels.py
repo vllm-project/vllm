@@ -15,12 +15,10 @@ except ImportError:
 
 @pytest.mark.skipif(torch.accelerator.device_count() < 1, reason="Need CUDA device")
 def test_gather_cache_oob():
-    """
-    Tests for OOB read in gather_and_maybe_dequant_cache (Issue #27909).
+    """Tests for OOB read in gather_and_maybe_dequant_cache (Issue #27909).
     This test constructs a boundary case identified in the issue where
     seq_starts causes the block_table offset to read out of bounds.
     """
-
     block_size = 64
     # The kernel only supports the MLA entry sizes.
     entry_size = 576

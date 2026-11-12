@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.v1.core.kv_cache_utils import check_enough_kv_cache_memory
+from vllm.v1.core.kv_cache_planning import check_enough_kv_cache_memory
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
@@ -13,6 +13,7 @@ def test_kv_cache_oom_no_memory():
 
     config = MagicMock()
     config.model_config.max_model_len = 2048
+    config.cache_config.enable_extensible_kv_cache = False
 
     spec = {
         "layer_0": FullAttentionSpec(
@@ -36,9 +37,11 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
     config.parallel_config.tensor_parallel_size = 1
     config.parallel_config.pipeline_parallel_size = 1
     config.parallel_config.decode_context_parallel_size = 1
+    config.cache_config.enable_extensible_kv_cache = True
+    config.cache_config.resolved_gpu_memory_utilization = 0.9
 
     monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_utils.max_memory_usage_bytes",
+        "vllm.v1.core.kv_cache_planning.max_memory_usage_bytes",
         lambda c, s: 100 * 1024**3,  # 100 GiB
     )
 
@@ -51,5 +54,6 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
         )
     }
 
-    with pytest.raises(ValueError):
+    # An explicit utilization below 1.0, not the device, limits the cache.
+    with pytest.raises(ValueError, match=r"within `gpu_memory_utilization`=0\.9"):
         check_enough_kv_cache_memory(config, spec, 1024**3)  # 1 GiB

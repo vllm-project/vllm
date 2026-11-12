@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""moe_expert_pool_rows: config field, CLI -> EngineArgs, hash."""
+"""moe_expert_pool_rows: config field, CLI -> EngineArgs, compilation factors."""
 
 import pytest
 from pydantic import ValidationError
@@ -14,10 +14,10 @@ def test_default_is_off():
     assert OffloadConfig().moe_expert_pool_rows == 0
 
 
-def test_hash_distinguishes_the_pool_size():
+def test_compilation_factors_distinguish_the_pool_size():
     assert (
-        OffloadConfig().compute_hash()
-        != OffloadConfig(moe_expert_pool_rows=8).compute_hash()
+        OffloadConfig().compile_factors()
+        != OffloadConfig(moe_expert_pool_rows=8).compile_factors()
     )
 
 

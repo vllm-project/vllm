@@ -13,7 +13,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
@@ -47,7 +47,7 @@ NORM2FN = {
 
 
 class InternVisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -114,40 +114,12 @@ class InternVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class InternVisionPatchModel(nn.Module):
-    def __init__(self, config: PretrainedConfig):
-        super().__init__()
-        self.config = config
-        self.embeddings = InternVisionEmbeddings(config)
-
-    def get_input_embeddings(self):
-        return self.embeddings
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor | None = None,
-        pixel_embeds: torch.Tensor | None = None,
-    ) -> torch.FloatTensor:
-        if pixel_values is None and pixel_embeds is None:
-            raise ValueError("You have to specify pixel_values or pixel_embeds")
-
-        if pixel_embeds is not None:
-            hidden_states = pixel_embeds
-        elif pixel_values is not None:
-            if pixel_values.ndim == 4:
-                hidden_states = self.embeddings(pixel_values)
-            else:
-                raise ValueError(f"wrong pixel_values size: {pixel_values.shape}")
-
-        return hidden_states
-
-
 class InternParallelAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
@@ -250,7 +222,7 @@ class InternParallelAttention(nn.Module):
 class InternMLP(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -292,7 +264,7 @@ class InternMLP(nn.Module):
 class InternVisionEncoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
@@ -325,7 +297,7 @@ class InternVisionEncoderLayer(nn.Module):
 
     def _init_attn(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         num_dummy_heads: int,
@@ -352,7 +324,7 @@ class InternVisionEncoderLayer(nn.Module):
 class InternVisionEncoder(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -397,7 +369,7 @@ class InternVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,

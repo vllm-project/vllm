@@ -22,6 +22,7 @@
 from collections.abc import Iterable
 from itertools import islice
 
+import regex as re
 import torch
 from torch import nn
 from transformers import GPTJConfig
@@ -31,6 +32,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -163,7 +165,7 @@ class GPTJBlock(nn.Module):
     ):
         super().__init__()
         inner_dim = 4 * config.n_embd if config.n_inner is None else config.n_inner
-        self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
+        self.ln_1 = LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPTJAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.attn"
         )
@@ -206,7 +208,7 @@ class GPTJModel(nn.Module):
             lambda prefix: GPTJBlock(config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h",
         )
-        self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.n_embd
         )
@@ -239,6 +241,15 @@ class GPTJModel(nn.Module):
 
 class GPTJForCausalLM(nn.Module, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
+        # Checkpoints store attention quantization scales on the HF attention
+        # module (`attn`), but vLLM's Attention layer is its `attn` child. The
+        # default cache scale rule skips names already ending in
+        # `.attn.k_scale`, so map them here.
+        orig_to_new_regex={
+            re.compile(r"(?<!\.attn)\.attn\.([qkv]_(?:scale|zero_point))$"): (
+                r".attn.attn.\1"
+            ),
+        },
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
             ".q_proj": (".qkv_proj", "q"),

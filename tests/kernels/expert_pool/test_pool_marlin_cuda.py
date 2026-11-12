@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The expert pool through the real Marlin consumer (CUDA).
 
-A layer with a small ``moe_expert_pool_rows`` resident count: decode steps
+A layer with a small `moe_expert_pool_rows` resident count: decode steps
 (one token) must match the uncached layer while experts are promoted and
 evicted through the shared bank (bank rows > expert count, so the
 logical-align + physical-remap path is exercised), and a wider batch must
@@ -194,20 +194,19 @@ def test_prefill_staging_matches_the_host_view(dist_env):  # noqa: F811
         torch.accelerator.synchronize(device)
         return out
 
-    # Rows 0..3 of each layer are resident. Rows 4..7 are staged whether
-    # routed (4, 5) or not (6, 7); resident rows are not copied.
+    # Full layers are staged, including resident and unrouted rows, without
+    # reading the device-managed placement back to the host.
     logits = routing([0, 4, 1, 5, 2, 3, 0, 1], device)
     x = torch.randn(M, K, dtype=torch.bfloat16, device=device)
     for buffer in stage.buffers:
         for t in buffer.values():
             t.zero_()
     staged = [forward(i, x, logits) for i in (0, 1)]
-    assert stage.staged == 2 and stage.copied_rows == 8
+    assert stage.staged == 2 and stage.copied_rows == 2 * E
     for i, pl in enumerate(pls):
         for name in TENSORS:
             buf = stage.buffers[i][name].cpu()
-            assert torch.equal(buf[SLOTS:], pl.sources[name][SLOTS:]), (i, name)
-            assert not buf[:SLOTS].reshape(-1).view(torch.uint8).any(), (i, name)
+            assert torch.equal(buf, pl.sources[name]), (i, name)
     for i, pl in enumerate(pls):
         pl.stage = None
         assert torch.equal(staged[i], forward(i, x, logits))
@@ -220,5 +219,65 @@ def test_prefill_staging_matches_the_host_view(dist_env):  # noqa: F811
     assert pls[0].width < TOP_K * (M - 1)
     forward(0, x[: M - 1].contiguous(), logits[: M - 1].contiguous())
     assert stage.staged == 2 and pls[0].partition_steps == 3
+    check_global_tables(pool.tables)
+    assert int(pool.tables.error[0]) == 0
+
+
+def test_prefill_staging_reuses_buffers_across_layers_and_steps(dist_env):  # noqa: F811
+    """Reuse staging buffers across layers and steps without host synchronization."""
+    from vllm.forward_context import set_forward_context
+
+    device = torch.accelerator.current_accelerator()
+    cfgs, layers = [], []
+    for seed_offset in range(3):
+        cfgs.append(vllm_config(SLOTS))
+        params = quantized_weights(device, seed_offset=seed_offset)
+        layers.append(make_layer(cfgs[-1], params, host_source=True))
+    for layer in layers:
+        for name in ("w13_weight_scale_2", "w2_weight_scale_2"):
+            p = getattr(layer.routed_experts, name)
+            p.data = p.data.to(device)
+    pool = install_expert_pool(
+        torch.nn.ModuleList(layers),
+        device,
+        max_decode_tokens=1,
+        stage_min_tokens=M,
+    )
+    assert pool is not None
+    pls = [layer.routed_experts.expert_pool_layer for layer in layers]
+    stage = pls[0].stage
+    assert stage is not None and stage.layers == pls
+    batches = [
+        (
+            torch.randn(M, K, dtype=torch.bfloat16, device=device),
+            routing(order, device),
+        )
+        for order in (list(range(E)), list(reversed(range(E))))
+    ]
+
+    def run():
+        outputs = []
+        for x, logits in batches:
+            for cfg, layer in zip(cfgs, layers):
+                with set_forward_context(None, cfg, num_tokens=M):
+                    outputs.append(layer(x, logits))
+        return outputs
+
+    for pl in pls:
+        pl.stage = None
+    expected = run()
+    for pl in pls:
+        pl.stage = stage
+    sync_debug_mode = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        actual = run()
+    finally:
+        torch.cuda.set_sync_debug_mode(sync_debug_mode)
+
+    assert stage.staged == 6
+    assert stage.copied_rows == 6 * E
+    for got, want in zip(actual, expected):
+        assert torch.equal(got, want)
     check_global_tables(pool.tables)
     assert int(pool.tables.error[0]) == 0

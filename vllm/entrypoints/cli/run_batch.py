@@ -7,7 +7,7 @@ import importlib.metadata
 import typing
 
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
@@ -39,7 +39,9 @@ class RunBatchSubcommand(CLISubcommand):
             from prometheus_client import start_http_server
 
             logger.info("Prometheus metrics enabled")
-            start_http_server(port=args.port, addr=args.url)
+            # --url is deprecated in favour of --host, so prefer --host and fall
+            # back to it only when --host was not given.
+            start_http_server(port=args.port, addr=args.host or args.url)
         else:
             logger.info("Prometheus metrics disabled")
 

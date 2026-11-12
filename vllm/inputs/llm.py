@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, final
+from typing import TYPE_CHECKING, Any, NotRequired, TypeAlias, TypeVar, final
 
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import TypedDict
 
 if TYPE_CHECKING:
     import torch
@@ -62,8 +62,7 @@ The UUID will be used to identify the item for all caching purposes
 
 
 class _PromptOptions(TypedDict):
-    """
-    Additional options available to all
+    """Additional options available to all
     [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt] types.
     """
 
@@ -189,11 +188,11 @@ Note:
 
 
 class ExplicitEncoderDecoderPrompt(TypedDict):
-    """
-    Schema for a pair of encoder and decoder singleton prompts.
+    """Schema for a pair of encoder and decoder singleton prompts.
 
     Note:
         This schema is not valid for decoder-only models.
+
     """
 
     encoder_prompt: EncoderPrompt
@@ -233,8 +232,7 @@ This is the input format accepted by most [`LLM`][vllm.entrypoints.llm.LLM] APIs
 
 
 class DataPrompt(_PromptOptions):
-    """
-    Represents generic inputs that are converted to
+    """Represents generic inputs that are converted to
     [`PromptType`][vllm.inputs.llm.PromptType] by IO processor plugins.
     """
 

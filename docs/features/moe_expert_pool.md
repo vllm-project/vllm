@@ -39,11 +39,12 @@ allocations. Rows can move between layers at run time.
 - Wider batches (prefill): resident experts are read from the bank. Marlin
   reads its weights once per M-block, so a non-resident expert read through
   the host view would cross PCIe several times per step. Prefill steps of
-  at least 512 tokens therefore copy each layer's non-resident rows into a
-  device staging buffer by DMA, one layer ahead of the compute, and read
-  them from there; smaller wide batches read their routed rows through the
-  host view. `--no-moe-expert-pool-prefill-staging` turns staging off and
-  saves its two full-layer buffers of GPU memory.
+  at least 512 tokens therefore copy each full layer into a device staging
+  buffer by DMA, one layer ahead of the compute, and read non-resident rows
+  from there. Copying resident rows too avoids reading the device-managed
+  placement back to the host. Smaller wide batches read their routed rows
+  through the host view. `--no-moe-expert-pool-prefill-staging` turns staging
+  off and saves its two full-layer buffers of GPU memory.
 
 ## Requirements and limits
 
@@ -51,7 +52,8 @@ allocations. Rows can move between layers at run time.
   (`--moe-backend marlin`). NVFP4 layers on other backends are rejected
   when the layer is built; MoE layers with another quantization method
   (e.g. an MTP head the checkpoint leaves in BF16) are not pooled and keep
-  their experts on the GPU.
+  their experts on the GPU. Specialized ModelOpt MoE subclasses, such as
+  MuseSpark's post-expert normalization path, are not supported.
 - Speculative decoding: the decode lanes are sized for
   `1 + num_speculative_tokens` tokens per request. A BF16 draft MoE needs
   its own backend, e.g. `--speculative-config '{"method": "mtp",
@@ -62,10 +64,10 @@ allocations. Rows can move between layers at run time.
 - Each bank weight tensor must fit in 32 GiB, the range Marlin MoE indexes
   with 32-bit offsets (e.g. 8192 rows of 4 MiB gate/up weights); a larger
   bank is rejected at installation with the largest `N` that fits.
-- Every prefill step still moves each layer's non-resident experts over
-  PCIe once, so long inputs prefill faster with larger
-  `--max-num-batched-tokens`. Staging reads the placement back to the host
-  once per prefill step.
+- Every staged prefill step moves each full layer over PCIe once, including
+  resident rows, so staging can transfer more data when most experts are
+  resident. Larger `--max-num-batched-tokens` amortizes this transfer over
+  more tokens. Staging does not synchronize the host with the GPU.
 
 ## Example
 
