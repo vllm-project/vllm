@@ -3,10 +3,10 @@
 """Vocab-sharded speculative verification over the TP group.
 
 Stock verification all-gathers the target logits, so every TP rank holds
-``[num_logits, vocab]`` and then runs temperature, top-p and the rejection
+`[num_logits, vocab]` and then runs temperature, top-p and the rejection
 sampler over the whole vocabulary: the same work on every rank.
 
-Here TP rank ``r`` owns whole 8192-column blocks of the vocabulary (the
+Here TP rank `r` owns whole 8192-column blocks of the vocabulary (the
 rejection sampler's statistics blocks, also aligned to its 1024-column
 resampling blocks), split as evenly as possible, and processes only those:
 
@@ -14,7 +14,7 @@ resampling blocks), split as evenly as possible, and processes only those:
   owned range that sit in the right neighbour's shard, which that neighbour
   pushes. Nothing is all-gathered.
 * Top-p: an exact select of the smallest prefix (by logit, then token id)
-  whose probability mass reaches ``p``, run jointly on the owned columns of all
+  whose probability mass reaches `p`, run jointly on the owned columns of all
   ranks. Masses are summed in 64-bit fixed point, so the sums are exact and
   every rank (and every run) agrees on the kept set.
 * Rejection sampling: the rejection sampler's per-block kernels run on the
@@ -23,7 +23,7 @@ resampling blocks), split as evenly as possible, and processes only those:
   come from their owners. Given the same processed logits, the result is
   bitwise the stock one.
 
-Exchanges push 8-byte words ``[tag | 32-bit payload]`` into every peer's
+Exchanges push 8-byte words `[tag | 32-bit payload]` into every peer's
 symmetric memory buffer, and readers poll for the tag (NCCL's LL protocol), so
 no fence or flag is needed. Every verification step uses its own tag epoch and
 alternates between two buffer halves, so a rank never overwrites words a slower
@@ -70,7 +70,7 @@ _TOPP_CAP = 2048
 
 
 def vocab_shard_range(vocab_size: int, world: int, rank: int) -> tuple[int, int]:
-    """Columns [start, end) owned by ``rank``: whole VOCAB_BLOCK_SIZE blocks,
+    """Columns [start, end) owned by `rank`: whole VOCAB_BLOCK_SIZE blocks,
     spread as evenly as possible (lower ranks take the extra blocks)."""
     num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
     base, extra = divmod(num_blocks, world)
@@ -676,8 +676,8 @@ class VocabShard:
         logits_dtype: torch.dtype,
         verify: bool = True,
     ):
-        """``logits_dtype``: of the lm_head shards passed to `owned_logits`.
-        ``verify=False``: only `owned_logits` is used (smaller buffer)."""
+        """`logits_dtype`: of the lm_head shards passed to `owned_logits`.
+        `verify=False`: only `owned_logits` is used (smaller buffer)."""
         group = get_tp_group()
         self.group = group
         self.world = group.world_size
@@ -825,7 +825,7 @@ class VocabShard:
         self.epoch.add_(1)
 
     def _region(self, words: int, reuse: int | None = None) -> tuple[int, int]:
-        """A region of this step (fresh, or ``reuse``) and a fresh tag.
+        """A region of this step (fresh, or `reuse`) and a fresh tag.
 
         Reusing a region within a step is safe once every rank has read it:
         a peer only pushes the next exchange after pulling this one from all
@@ -912,7 +912,7 @@ class VocabShard:
     def allgather_cols(
         self, tensors: list[torch.Tensor], col_a: int, col_b: int
     ) -> None:
-        """In place: fill every column of each ``[rows, cols]`` tensor from its
+        """In place: fill every column of each `[rows, cols]` tensor from its
         owner; this rank's are [col_a, col_b). All pushes go out before the
         first pull, so the exchanges overlap."""
         pending = []
@@ -929,7 +929,7 @@ class VocabShard:
     def allgather_slots(
         self, t: torch.Tensor, reuse: int | None = None
     ) -> torch.Tensor:
-        """``[rows, w]`` per rank -> ``[world, rows, w]`` (slot = rank)."""
+        """`[rows, w]` per rank -> `[world, rows, w]` (slot = rank)."""
         t = t.contiguous()
         t32 = t.view(torch.int32)
         rows, w = t32.shape
@@ -943,8 +943,8 @@ class VocabShard:
     def owned_logits(
         self, local_logits: torch.Tensor, dtype: torch.dtype = torch.float32
     ) -> torch.Tensor:
-        """``[rows, num_cols]``: this rank's owned columns of the logits whose
-        TP shards are ``local_logits`` ([rows, local_vocab_size]), as ``dtype``
+        """`[rows, num_cols]`: this rank's owned columns of the logits whose
+        TP shards are `local_logits` ([rows, local_vocab_size]), as `dtype`
         (the values are exact in fp32 or the logits' own dtype)."""
         assert local_logits.shape[1] == self.local_vocab_size
         assert local_logits.dtype == self.logits_dtype
@@ -1006,8 +1006,8 @@ class VocabShard:
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> torch.Tensor:
-        """fp32 ``[num_logits, 2]``: the target and draft logits of each logit
-        row's drafted token (``draft_sampled[i + 1]``), from its owner."""
+        """fp32 `[num_logits, 2]`: the target and draft logits of each logit
+        row's drafted token (`draft_sampled[i + 1]`), from its owner."""
         n = target_logits.shape[0]
         mine = torch.empty(n, 2, dtype=torch.float32, device=target_logits.device)
         if n > 0:
@@ -1038,7 +1038,7 @@ class VocabShard:
     # -- top-p -----------------------------------------------------------------
 
     def top_p(self, logits: torch.Tensor, top_p: torch.Tensor) -> torch.Tensor:
-        """In place: mask the owned columns ``logits`` (fp32 [rows, num_cols])
+        """In place: mask the owned columns `logits` (fp32 [rows, num_cols])
         to each row's exact top-p set over the whole vocabulary."""
         rows, ncols = logits.shape
         assert ncols == self.num_cols and logits.dtype == torch.float32
@@ -1165,7 +1165,7 @@ def _tie_splits(rows: int) -> int:
 def warmup_num_logits(max_num_logits: int) -> list[int]:
     """Logit row counts for the load-time warmup: verification steps of these
     sizes launch every variant of the sharded kernels that any step size
-    (2 to ``max_num_logits`` rows) launches. Per tie-split count, one size
+    (2 to `max_num_logits` rows) launches. Per tie-split count, one size
     that is a multiple of 16 and one that is not: Triton specializes the
     exchange strides, which are multiples of the row count, on that."""
     bounds = [1, *(max_rows for max_rows, _ in _TIE_SPLITS), max_num_logits]

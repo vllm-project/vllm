@@ -517,7 +517,7 @@ class RejectionSampler:
         draft_logits: DraftLogitsCache,
         vocab_shard: VocabShard,
     ) -> SamplerOutput:
-        """Verify from this TP rank's lm_head shard ``local_logits`` without
+        """Verify from this TP rank's lm_head shard `local_logits` without
         gathering the full logits: temperature, top-p and rejection sampling
         run on this rank's owned vocabulary blocks (see vocab_shard.py)."""
         draft_sampled, pos = gather_draft_sampled(

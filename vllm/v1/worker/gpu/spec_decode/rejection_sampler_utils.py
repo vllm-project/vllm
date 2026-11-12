@@ -1206,8 +1206,8 @@ def rejection_sample(
     skip_masked_vocab_blocks: bool = False,
     vocab_shard: "VocabShard | None" = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """With ``vocab_shard``, verification is vocab-sharded over the TP group:
-    ``target_logits`` holds this rank's owned columns only, the per-block
+    """With `vocab_shard`, verification is vocab-sharded over the TP group:
+    `target_logits` holds this rank's owned columns only, the per-block
     kernels run on the owned blocks, and their partials are exchanged. The
     result is the same as with the full target logits."""
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1

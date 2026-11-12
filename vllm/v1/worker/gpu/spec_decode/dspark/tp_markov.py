@@ -3,16 +3,16 @@
 """Vocab-parallel DSpark Markov sampling over the TP group.
 
 The stock Markov loop runs replicated on every TP rank. Each of its
-``num_speculative_steps`` steps reads the whole ``markov_w2`` projection
+`num_speculative_steps` steps reads the whole `markov_w2` projection
 ([draft_vocab, rank] bf16, about 100 MB for a 200k vocabulary) for a few rows
 of bias, then Gumbel-samples the full vocabulary. Both are memory bound, so
 every rank pays the full cost.
 
-Here rank ``r`` owns a contiguous range of the sampler's 1024-column blocks.
+Here rank `r` owns a contiguous range of the sampler's 1024-column blocks.
 Per step it computes the bias of its columns only (a row slice of
-``markov_w2``), Gumbel-samples its blocks with the stock noise keys, and
-publishes one 8-byte word per block, ``[block max (fp32) | tag | index in the
-block]``, to every rank through symmetric memory. Each word carries its own
+`markov_w2`), Gumbel-samples its blocks with the stock noise keys, and
+publishes one 8-byte word per block, `[block max (fp32) | tag | index in the
+block]`, to every rank through symmetric memory. Each word carries its own
 tag, so no fence or flag is needed (NCCL's LL protocol), and its reader
 clears it, so a slot never holds a stale word. Every rank then picks the
 winner the way stock does: the first NaN block, else the first maximum.
@@ -22,13 +22,13 @@ identical.
 The draft-logits cache, which the rejection sampler reads at full vocabulary
 on every rank, is completed after the loop in one of two ways:
 
-* ``push`` (small batches): during the loop each rank also pushes its biased
+* `push` (small batches): during the loop each rank also pushes its biased
   logits, two bf16 per tagged 8-byte word, into its peers' staging buffers;
   one kernel unpacks them after the loop.
-* ``recompute`` (larger batches, where pushing would cost more NVLink time
+* `recompute` (larger batches, where pushing would cost more NVLink time
   than it saves): every rank recomputes the peers' columns for all steps at
   once from the sampled tokens, with one projection over all steps. That
-  reads the peers' rows of ``markov_w2`` once instead of once per step.
+  reads the peers' rows of `markov_w2` once instead of once per step.
 
 Either way the cache equals the stock cache bitwise, provided the projection
 slices compute the same values as the stock projection, which is checked on
@@ -357,7 +357,7 @@ class TPMarkovSampler:
         speculator: DSparkSpeculator,
         owned_ranges: list[tuple[int, int]] | None = None,
     ):
-        """``owned_ranges``: every rank's column range, aligned to blocks
+        """`owned_ranges`: every rank's column range, aligned to blocks
         (vocab-sharded verification). Each rank then samples its range from
         logits of those columns only and leaves the other columns of the
         draft-logits cache unwritten (see `complete_cache`)."""
@@ -484,10 +484,10 @@ class TPMarkovSampler:
     @torch.inference_mode()
     def _inexact_projection_reason(self) -> str | None:
         """Why the sliced and batched projections would differ from the
-        replicated loop's ``model.markov_bias``, or None if they match bitwise
+        replicated loop's `model.markov_bias`, or None if they match bitwise
         (agreed across the TP group).
 
-        A step's own columns come from a row slice of ``markov_w2``, and the
+        A step's own columns come from a row slice of `markov_w2`, and the
         recompute path projects the peers' rows for all steps at once. They
         match the stock projection only if the GEMM library reduces in the
         same order for these shapes (it does for 64-aligned vocabularies), so
@@ -730,7 +730,7 @@ class TPMarkovSampler:
 
     def complete_cache(self, cache: torch.Tensor, req_rows: torch.Tensor) -> None:
         """Owned-only mode: fill the other ranks' columns of the cache rows
-        ``req_rows`` (request state indices of a step's batch, all valid), for
+        `req_rows` (request state indices of a step's batch, all valid), for
         a consumer that reads the whole vocabulary. All-gathers every rank's
         columns, a bounded number of rows at a time."""
         if not self.owned_only or req_rows.numel() == 0:

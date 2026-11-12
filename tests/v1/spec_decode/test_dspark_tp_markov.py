@@ -268,6 +268,7 @@ def _worker(local_rank: int, world_size: int, port: int, vocab: int, q):
         c0, c1 = ranges[local_rank]
         owned, reason = TPMarkovSampler.create(spc, ranges)
         assert owned is not None, reason
+        assert spc.draft_logits is not None
         values = spc.draft_logits.values
         for num_reqs in (1, 5, MAX_REQS):
             _set_inputs(spc, num_reqs, vocab, num_reqs + 7, hidden)

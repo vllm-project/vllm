@@ -223,7 +223,7 @@ class DSparkSpeculator(DFlashSpeculator):
         return model
 
     def enable_vocab_sharded_drafting(self, vocab_shard: VocabShard | None) -> None:
-        """With vocab-sharded verification (``vocab_shard``), draft on the same
+        """With vocab-sharded verification (`vocab_shard`), draft on the same
         owned columns: each rank computes only its columns of the draft logits
         (its lm_head shard plus its right neighbour's boundary columns), runs
         the Markov loop on them and caches only them, as verification reads
@@ -287,7 +287,7 @@ class DSparkSpeculator(DFlashSpeculator):
     def complete_draft_logits(self, idx_mapping: torch.Tensor) -> None:
         """Fill the other ranks' columns of these requests' cached draft
         logits (vocab-sharded drafting), before a step verified in full.
-        ``idx_mapping``: the step's request state indices."""
+        `idx_mapping`: the step's request state indices."""
         if self._draft_vocab_shard is not None and self.draft_logits is not None:
             assert self._tp_markov_sampler is not None
             self._tp_markov_sampler.complete_cache(
