@@ -327,7 +327,7 @@ class _Width:
         self, step: MonoStep, slots: torch.Tensor, accepted: torch.Tensor
     ) -> torch.Tensor:
         """A verify step's KDA state slots, row by row (vLLM's
-        ``spec_state_indices`` [requests, tpr]), then every request's accepted-token
+        `spec_state_indices` [requests, tpr]), then every request's accepted-token
         count; padding rows -1, padding requests 1. One copy per cache group, in
         the same order every step."""
         if self.spec_step is not step:

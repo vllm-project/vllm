@@ -165,7 +165,7 @@ class _Dsa:
 
 class _Caches:
     """Random caches for S / tpr requests of up to MAX_LEN tokens, the block table,
-    and the step's row table: ``tpr`` rows a request (an MTP verify step: its
+    and the step's row table: `tpr` rows a request (an MTP verify step: its
     token and drafts at consecutive positions); the last request pads when there
     is more than one."""
 

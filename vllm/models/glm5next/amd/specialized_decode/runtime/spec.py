@@ -122,7 +122,7 @@ def mtp_tokens(vllm_config: VllmConfig) -> int:
 
 
 def tail_ring(tpr: int) -> int:
-    """The kpool tail ring vLLM sizes for ``tpr - 1`` drafts (``Glm5NextTailCache``)."""
+    """The kpool tail ring vLLM sizes for `tpr - 1` drafts (`Glm5NextTailCache`)."""
     span = -(-(KPOOL + tpr - 1) // KPOOL)
     return KPOOL * (1 << (span - 1).bit_length())
 
