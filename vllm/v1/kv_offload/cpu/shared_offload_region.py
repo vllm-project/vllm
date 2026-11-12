@@ -8,7 +8,7 @@ import mmap
 import os
 import time
 from collections.abc import Callable, Iterator
-from ctypes import c_int, c_long, c_size_t, c_void_p
+from ctypes import c_char_p, c_int, c_long, c_size_t, c_uint, c_void_p
 
 import numpy as np
 import torch
@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
 _MAP_FIXED = 0x10
+_MFD_CLOEXEC = 1
 # Page-cache inserts are serialized per shm file, capping pre-faulting of one
 # file near 10 GiB/s; smaller segments are not worth a file.
 _MIN_SEGMENT_BYTES = 1 << 30
@@ -56,6 +57,21 @@ def _libc_mmap() -> Callable[..., int | None]:
     mmap_fn.argtypes = [c_void_p, c_size_t, c_int, c_int, c_int, c_long]
     mmap_fn.restype = c_void_p
     return mmap_fn
+
+
+@functools.cache
+def _libc_memfd_create() -> Callable[[bytes, int], int]:
+    memfd_create_fn = ctypes.CDLL(None, use_errno=True).memfd_create
+    memfd_create_fn.argtypes = [c_char_p, c_uint]
+    memfd_create_fn.restype = c_int
+    return memfd_create_fn
+
+
+def _memfd_create(name: str) -> int:
+    fd = _libc_memfd_create()(name.encode(), _MFD_CLOEXEC)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), f"memfd_create({name!r}) failed")
+    return fd
 
 
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
@@ -199,7 +215,7 @@ class SharedOffloadRegion:
                     prot=mmap.PROT_READ | mmap.PROT_WRITE,
                 )
             else:
-                reservation = os.memfd_create("vllm_offload_reservation")
+                reservation = _memfd_create("vllm_offload_reservation")
                 try:
                     os.ftruncate(reservation, self.total_size_bytes)
                     self.mmap_obj = mmap.mmap(
