@@ -231,7 +231,8 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
         selected_files = hf_weights_files
-        # Other pipeline stages do not load a model built as a single stage.
+        # Other pipeline stages do not load a model built as a single stage, so
+        # collectives that include their ranks would hang.
         is_distributed = self._is_distributed and not in_single_pp_stage()
         if is_unused_weight is not None:
             if is_runai_obj_uri(model_or_path):

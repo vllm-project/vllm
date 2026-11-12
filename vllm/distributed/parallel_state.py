@@ -1659,8 +1659,10 @@ def single_pp_stage() -> Iterator[None]:
     Within the context, `get_pp_group()` returns a PP group that contains only
     this rank. Speculative decoding runs the draft model whole on the last PP
     rank: built and run in this context, model code that reads its stage from
-    the PP group, or communicates over it, behaves as at PP=1. Without a PP
-    group of more than one rank (PP=1, unit tests), the context does nothing.
+    the PP group, or communicates over it, behaves as at PP=1. Code in the
+    context that needs the target model's pipeline topology must not read it
+    from `get_pp_group()`. Without a PP group of more than one rank (PP=1, unit
+    tests), the context does nothing.
     """
     global _PP
     if _PP_SINGLE_STAGE is None or _PP is _PP_SINGLE_STAGE:

@@ -1318,7 +1318,8 @@ def fastsafetensors_weights_iterator(
     from fastsafetensors.parallel_loader import ParallelLoader
 
     distributed = torch.distributed.is_initialized()
-    # Other pipeline stages do not load a model built as a single stage.
+    # Other pipeline stages do not load a model built as a single stage, so
+    # collectives that include their ranks would hang.
     if distributed and not in_single_pp_stage():
         pg = torch.distributed.group.WORLD
     else:
@@ -1405,7 +1406,8 @@ def instanttensor_weights_iterator(
         # Entering here only in unit tests where the world group is not initialized.
         process_group = None
     else:
-        # Other pipeline stages do not load a model built as a single stage.
+        # Other pipeline stages do not load a model built as a single stage, so
+        # collectives that include their ranks would hang.
         distributed = world_group.world_size > 1 and not in_single_pp_stage()
         process_group = world_group.device_group if distributed else None
 
