@@ -129,8 +129,10 @@ class LogitsProcessor(PluggableLayer):
             # should execute the same operations after gathering the logits.
             # ROCm collectives are stream-ordered; make the logits producer
             # stream complete before the TP all-gather outside graph capture.
-            if (current_platform.is_rocm()
-                    and not torch.cuda.is_current_stream_capturing()):
+            if (
+                current_platform.is_rocm()
+                and not torch.cuda.is_current_stream_capturing()
+            ):
                 torch.cuda.current_stream(logits.device).synchronize()
             logits = tensor_model_parallel_all_gather(logits)
         else:
