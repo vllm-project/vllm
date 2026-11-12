@@ -787,8 +787,11 @@ class VllmConfig:
 
     def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
         """Avoid freezing runtime-M tile lookup in compiled forward (#54243).
-        Breakable graphs look up tuned bf16, unquantized qkv/o/gate_up/down tiles
-        at capture; lm_head runs outside compiled forward and does not benefit."""
+
+        Hopper's generic fallback also selects bf16, unquantized linear tiles by
+        runtime M, so every Hopper model can use that fallback. lm_head runs
+        outside compiled forward and does not benefit.
+        """
         from vllm.model_executor.determinism import batch_invariant_configs as bi
 
         model = self.model_config
@@ -807,6 +810,8 @@ class VllmConfig:
         if family is None or family not in bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
             return False
         table = bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS[family]
+        if family == "hopper":
+            return True
         parallel = self.parallel_config
         tp = parallel.tensor_parallel_size
         hidden = model.get_hidden_size()

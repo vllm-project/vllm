@@ -1224,7 +1224,24 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
 _TUNED_MATMUL_CONFIGS_FOR_DEVICE: dict[tuple[int, int], _MatmulShapeConfig] | None = (
     None
 )
+_TUNED_MATMUL_ARCH_FAMILY: str | None = None
 _TUNED_MATMUL_CONFIGS_RESOLVED = False
+
+_HOPPER_GENERIC_MATMUL_CONFIG = _MatmulShapeConfig(
+    block_k=128,
+    m_buckets=(
+        (1, _MatmulMConfig(16, 64, 4, 5)),
+        (4, _MatmulMConfig(16, 64, 4, 5)),
+        (8, _MatmulMConfig(16, 32, 4, 5)),
+        (16, _MatmulMConfig(16, 32, 4, 5)),
+        (32, _MatmulMConfig(32, 32, 4, 5)),
+        (64, _MatmulMConfig(64, 32, 4, 5)),
+        (256, _MatmulMConfig(64, 128, 4, 4)),
+        (512, _MatmulMConfig(64, 128, 4, 4)),
+        (1024, _MatmulMConfig(128, 128, 4, 3)),
+        (2048, _MatmulMConfig(128, 128, 4, 3)),
+    ),
+)
 
 
 class _MoEConfig(NamedTuple):
@@ -1283,6 +1300,7 @@ def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | 
 
 def resolve_tuned_matmul_configs() -> None:
     global _TUNED_MATMUL_CONFIGS_FOR_DEVICE
+    global _TUNED_MATMUL_ARCH_FAMILY
     global _TUNED_MATMUL_CONFIGS_RESOLVED
 
     if _TUNED_MATMUL_CONFIGS_RESOLVED:
@@ -1293,6 +1311,7 @@ def resolve_tuned_matmul_configs() -> None:
         current_platform.get_device_capability() if current_platform.is_cuda() else None
     )
     arch_family = _get_tuned_matmul_arch_family(capability)
+    _TUNED_MATMUL_ARCH_FAMILY = arch_family
     if arch_family is None:
         _TUNED_MATMUL_CONFIGS_FOR_DEVICE = None
     else:
@@ -1318,7 +1337,10 @@ def _get_matmul_config(
         return default
     shape_config = device_configs.get((N, K))
     if shape_config is None:
-        return default
+        if _TUNED_MATMUL_ARCH_FAMILY == "hopper":
+            shape_config = _HOPPER_GENERIC_MATMUL_CONFIG
+        else:
+            return default
     # Values above the tuned range reuse the largest bucket;
     # shape-wide BLOCK_K keeps this batch-invariant.
     m_config = shape_config.m_buckets[-1][1]

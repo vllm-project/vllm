@@ -1069,6 +1069,7 @@ def test_breakable_cudagraph_platform_default(
         ("fp16", 2048, (16, 8), 6144, 1, False),
         ("quantized", 2048, (16, 8), 6144, 1, False),
         ("untuned", 4096, (32, 32), 11008, 1, False),
+        ("hopper-untuned", 4096, (32, 32), 11008, 1, True),
         ("tp4-tuned", 4096, (8, 2), 12288, 4, True),
         ("list-intermediate", 2048, (16, 8), [2048, 4096], 1, False),
         ("no-table", 2048, None, 6144, 1, False),
@@ -1088,11 +1089,12 @@ def test_batch_invariant_breakable_cudagraph(
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     table = None if case == "no-table" else {(12288, 2048): None, (6144, 4096): None}
     monkeypatch.setattr(current_platform, "get_device_capability", lambda: None)
-    monkeypatch.setattr(bi_configs, "_get_tuned_matmul_arch_family", lambda cap: "test")
+    family = "hopper" if case == "hopper-untuned" else "test"
+    monkeypatch.setattr(bi_configs, "_get_tuned_matmul_arch_family", lambda cap: family)
     monkeypatch.setattr(
         bi_configs,
         "_BATCH_INVARIANT_MATMUL_TUNED_CONFIGS",
-        {"test": table} if table else {},
+        {family: table} if table else {},
     )
     default_breakable_cudagraph_architectures.cache_clear()
     config = object.__new__(VllmConfig)
