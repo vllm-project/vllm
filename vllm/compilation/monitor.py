@@ -27,7 +27,7 @@ def monitor_torch_compile(
     On normal exit: logs the compile time and exits depyf.
     On exception: cleans up depyf without logging (compilation failed).
 
-    ``announce_start=False`` suppresses the "Starting torch.compile" line;
+    `announce_start=False` suppresses the "Starting torch.compile" line;
     used by the AOT-load probe so a failed load attempt doesn't announce a
     compile it didn't perform.
     """
@@ -93,23 +93,3 @@ def monitor_profiling_run(tag: str = "") -> Generator[None, None, None]:
         log_prefix,
         elapsed,
     )
-
-
-cudagraph_capturing_enabled: bool = True
-
-
-def validate_cudagraph_capturing_enabled() -> None:
-    # used to monitor whether a cudagraph capturing is legal at runtime.
-    # should be called before any cudagraph capturing.
-    # if an illegal cudagraph capturing happens, raise an error.
-    global cudagraph_capturing_enabled
-    if not cudagraph_capturing_enabled:
-        raise RuntimeError(
-            "CUDA graph capturing detected at an inappropriate "
-            "time. This operation is currently disabled."
-        )
-
-
-def set_cudagraph_capturing_enabled(enabled: bool) -> None:
-    global cudagraph_capturing_enabled
-    cudagraph_capturing_enabled = enabled

@@ -137,7 +137,7 @@ def _scaled_tolerances(reference: torch.Tensor, frac: float) -> tuple[float, flo
 
     Measured max_err/std over the MNKs here peaks at 0.06 (bf16) and 0.33
     (fp8), creeping up with element count as more of the error tail gets
-    sampled; ``frac`` leaves roughly 2x headroom on top of that.
+    sampled; `frac` leaves roughly 2x headroom on top of that.
     """
     return frac * reference.std().item(), 6e-2
 
