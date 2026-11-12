@@ -354,10 +354,17 @@ def test_bi_gather_replay_batch_matches_reference(kept_rows, prev_kept_rows):
         assert select[:num_kept].tolist() == ref_select
     if kept_rows == WINDOW:
         triton_out = outputs()
+        # The Triton kernel takes the host-side KV floor: a trimmed request
+        # reads no replay-layer window KV below its kept rows.
+        query_lens = inputs["query_start_loc"].diff()
+        kept_lens = query_lens - inputs["dropped_before"].diff()
+        kv_floor = torch.where(
+            kept_lens < query_lens, inputs["seq_lens"] - WINDOW, 0
+        ).to(torch.int32)
         model_state._gather_replay_batch_kernel[(num_reqs,)](
             inputs["query_start_loc"],
             inputs["dropped_before"],
-            inputs["seq_lens"],
+            kv_floor,
             inputs["replay_start"],
             inputs["positions"],
             inputs["slot_mappings"],
@@ -368,7 +375,6 @@ def test_bi_gather_replay_batch_matches_reference(kept_rows, prev_kept_rows):
             triton_out["kept_slot_mappings"],
             triton_out["kept_slot_mappings"].stride(0),
             triton_out["kept_kv_start"],
-            WINDOW,
             NUM_GROUPS=3,
             BLOCK=1024,
         )
