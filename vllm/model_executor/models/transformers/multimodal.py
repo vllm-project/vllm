@@ -1364,7 +1364,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
         num_tokens = is_multimodal.numel()
         buffer = self.deepstack_input_embeds[:, 0, :num_tokens]
-        buffer.zero_()
         # If is_multimodal is on CPU this avoids a D2H sync
         buffer[:, is_multimodal] = deepstack_flat.to(buffer.dtype)
         self.deepstack_num_tokens = num_tokens
