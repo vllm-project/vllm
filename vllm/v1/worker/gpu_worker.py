@@ -11,7 +11,7 @@ from contextlib import AbstractContextManager, ExitStack, contextmanager, nullco
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
@@ -180,6 +180,12 @@ if TYPE_CHECKING:
     from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.pp_transport import (
+        PPTransport as RocmPPTransport,
+    )
+    from vllm.v1.worker.gpu.pp_transport import (
+        PPTransportMode,
+    )
 
 
 class AsyncIntermediateTensors(IntermediateTensors):
@@ -271,6 +277,7 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
 
+        self._rocm_pp_transport: RocmPPTransport | None = None
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
         # Chosen by VLLM_PP_TRANSPORT in load_model; None sends over NCCL.
@@ -327,6 +334,8 @@ class Worker(WorkerBase):
         return set(storage.values()) - preserved
 
     def sleep(self, level: int = 1) -> None:
+        if self._rocm_pp_transport is not None:
+            self._rocm_pp_transport.drain()
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
         # Level 2 keeps everything the weight update doesn't rewrite.
@@ -613,6 +622,7 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        self._init_pp_transport()
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
             logger.info(
@@ -620,7 +630,11 @@ class Worker(WorkerBase):
                 format_gib(self.requested_memory),
             )
 
-        if envs.VLLM_PP_TRANSPORT != "nccl" and self._pp_transport is None:
+        if (
+            envs.VLLM_PP_TRANSPORT != "nccl"
+            and self._pp_transport is None
+            and self._rocm_pp_transport is None
+        ):
             # After init_device, so memory profiling counts its buffers.
             from vllm.distributed.pp_transport import create_pp_transport
 
@@ -639,10 +653,51 @@ class Worker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
-        # Preserve parallel weight loading, then use serving's thread count
-        # for profiling and compilation so Dynamo's global-state guards remain
-        # valid when requests arrive.
-        set_torch_threads_for_runtime()
+    set_torch_threads_for_runtime()
+
+    def _init_pp_transport(self) -> None:
+        mode = envs.VLLM_ROCM_PP_TRANSPORT
+        if mode == "disabled":
+            return
+        if not current_platform.is_rocm():
+            raise ValueError("VLLM_ROCM_PP_TRANSPORT is only supported on ROCm")
+        if self.parallel_config.pipeline_parallel_size <= 1:
+            raise ValueError("VLLM_ROCM_PP_TRANSPORT requires pipeline parallelism")
+        if self.parallel_config.tensor_parallel_size != 1:
+            raise ValueError("VLLM_ROCM_PP_TRANSPORT currently requires TP=1")
+        if self.model_config.dtype != torch.bfloat16:
+            raise ValueError("VLLM_ROCM_PP_TRANSPORT requires BF16 hidden states")
+        if mode == "fp8":
+            from vllm.utils.import_utils import has_aiter
+
+            if not current_platform.supports_fp8():
+                raise ValueError("FP8 PP transport requires FP8-capable hardware")
+            if not envs.VLLM_ROCM_USE_AITER or not has_aiter():
+                raise ValueError(
+                    "FP8 PP transport requires VLLM_ROCM_USE_AITER and AITER"
+                )
+
+        from vllm.v1.worker.gpu.pp_transport import PPTransport as RocmPPTransport
+
+        chunk_tokens = self.scheduler_config.max_num_batched_tokens
+        model = self.model_runner.get_model()
+        schema = model.make_empty_intermediate_tensors(
+            batch_size=chunk_tokens,
+            dtype=self.model_config.dtype,
+            device=self.device,
+        )
+        self._rocm_pp_transport = RocmPPTransport(
+            mode=cast("PPTransportMode", mode),
+            schema=schema,
+            chunk_tokens=chunk_tokens,
+            ring_size=self.parallel_config.pipeline_parallel_size,
+            device=self.device,
+        )
+        logger.info(
+            "Enabled ROCm %s PP transport with %d-token chunks",
+            mode,
+            chunk_tokens,
+        )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the
@@ -1487,14 +1542,27 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        use_fixed_pp_transport = (
+            forward_pass
+            and self._rocm_pp_transport is not None
+            and self._rocm_pp_transport.can_transfer(num_scheduled_tokens)
+        )
         if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
             intermediate_tensors = self._pp_transport.recv(get_pp_group())
         elif forward_pass and not get_pp_group().is_first_rank:
-            tensor_dict, comm_handles, comm_postprocess = (
-                get_pp_group().irecv_tensor_dict(
-                    all_gather_group=get_tp_group(),
+            tensor_dict: dict[str, Any] | None
+            if use_fixed_pp_transport:
+                assert self._rocm_pp_transport is not None
+                tensor_dict, comm_handles, comm_postprocess = (
+                    self._rocm_pp_transport.receive()
                 )
-            )
+            else:
+                tensor_dict, comm_handles, comm_postprocess = (
+                    get_pp_group().irecv_tensor_dict(
+                        all_gather_group=get_tp_group(),
+                    )
+                )
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -1520,7 +1588,20 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        if self._pp_transport is not None:
+        if use_fixed_pp_transport:
+            assert self._rocm_pp_transport is not None
+            if set(output.tensors) != {"hidden_states"}:
+                raise ValueError(
+                    "Fixed PP transport requires a single hidden_states tensor"
+                )
+            self._rocm_pp_transport.send(output.tensors["hidden_states"])
+        elif self._rocm_pp_transport is not None:
+            self._rocm_pp_transport.send_generic(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+                all_gather_tensors={},
+            )
+        elif self._pp_transport is not None:
             self._pp_transport.send(output.tensors, get_pp_group())
         else:
             # Non-blocking send of the intermediate tensors. The metadata handle
@@ -1836,6 +1917,9 @@ class Worker(WorkerBase):
 
     def shutdown(self) -> None:
         gc.unfreeze()
+
+        if self._rocm_pp_transport is not None:
+            self._rocm_pp_transport.drain()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
