@@ -9,6 +9,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -161,6 +162,16 @@ class Executor(ABC):
 
     def disable_extensible_kv_cache(self, reason: str) -> None:
         """Turn the extensible KV cache off here and on every worker."""
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and KVCacheAccess.EXPORTS_FD in kv_transfer_config.kv_cache_access()
+        ):
+            raise RuntimeError(
+                "A KV connector (e.g. LMCacheMPConnector with "
+                "lmcache.mp.use_vmm_api) imports the KV cache through POSIX file "
+                f"descriptors, which needs the extensible KV cache, but {reason}."
+            )
         logger.warning(
             "Disabling the extensible KV cache: %s. The KV cache will be sized "
             "from profiling estimates instead of measured memory.",
