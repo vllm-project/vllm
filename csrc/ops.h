@@ -770,13 +770,15 @@ void hisparse_gather_plan(torch::stable::Tensor const& host_cache,
                           torch::stable::Tensor& hot_cache,
                           torch::stable::Tensor const& global_indices,
                           torch::stable::Tensor const& hot_indices,
-                          torch::stable::Tensor const& miss_mask);
+                          torch::stable::Tensor const& miss_mask,
+                          int64_t row_value_bytes);
 
 void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
                              torch::stable::Tensor& hot_cache,
                              torch::stable::Tensor const& miss_global_indices,
                              torch::stable::Tensor const& miss_hot_indices,
-                             torch::stable::Tensor const& miss_counts);
+                             torch::stable::Tensor const& miss_counts,
+                             int64_t row_value_bytes);
 
 #endif  // !USE_ROCM
 

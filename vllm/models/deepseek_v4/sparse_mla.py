@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4 FlashMLA sparse backend, metadata, and metadata builder."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import torch
@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.hisparse.runtime import HiSparsePrefillStagingPlan
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # Pad C128A topk width to this alignment. 128 covers both h_q=64 (B_TOPK=64) and
@@ -110,6 +111,8 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     req_id_per_token: torch.Tensor
     block_size: int
     topk_tokens: int
+    num_decodes: int = 0
+    num_decode_tokens: int = 0
 
     # Pre-computed C128A metadata (compress_ratio == 128 only).
     # Decode: global slot ids + valid-entry counts (fused from positions).
@@ -117,6 +120,9 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     c128a_decode_topk_lens: torch.Tensor | None = None
     # Prefill: local topk indices (used by combine_topk_swa_indices).
     c128a_prefill_topk_indices: torch.Tensor | None = None
+    hisparse_prefill_plans: dict[tuple[int, int], HiSparsePrefillStagingPlan] = field(
+        default_factory=dict
+    )
 
 
 class DeepseekV4SparseMLAMetadataBuilder(
@@ -190,6 +196,12 @@ class DeepseekV4SparseMLAMetadataBuilder(
     ) -> DeepseekV4FlashMLAMetadata:
         cm = common_attn_metadata
         req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
+        # Must match SWA's decode split (no `require_uniform=True`).
+        num_decodes, _, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                cm, decode_threshold=self.reorder_batch_threshold or 1
+            )
+        )
 
         slot_mapping = cm.slot_mapping
         if self.compress_ratio > 1:
@@ -206,7 +218,13 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
         c128a_fields: dict[str, torch.Tensor | None] = {}
         if self.compress_ratio == 128:
-            c128a_fields = self._build_c128a_metadata(cm, req_id_per_token)
+            c128a_fields = self._build_c128a_metadata(
+                cm,
+                req_id_per_token,
+                num_decodes,
+                num_decode_tokens,
+                num_prefill_tokens,
+            )
 
         return DeepseekV4FlashMLAMetadata(
             num_reqs=cm.num_reqs,
@@ -219,6 +237,8 @@ class DeepseekV4SparseMLAMetadataBuilder(
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
             c128a_global_decode_topk_indices=c128a_fields.get(
                 "c128a_global_decode_topk_indices"
             ),
@@ -230,19 +250,16 @@ class DeepseekV4SparseMLAMetadataBuilder(
         self,
         cm: CommonAttentionMetadata,
         req_id_per_token: torch.Tensor,
+        num_decodes: int,
+        num_decode_tokens: int,
+        num_prefill_tokens: int,
     ) -> dict[str, torch.Tensor | None]:
-        """Pre-compute C128A topk indices for DeepseekV4 (compress_ratio >= 128)."""
-        # Must match SWA's decode split (no `require_uniform=True`) so
-        # `c128a_global_decode_topk_indices.shape[0]` lines up with q in
-        # `_forward_decode`. The per-token C128A kernel handles non-uniform
-        # query lengths.
-        (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
-            split_decodes_and_prefills(
-                cm,
-                decode_threshold=self.reorder_batch_threshold or 1,
-            )
-        )
+        """Pre-compute C128A topk indices for DeepseekV4 (compress_ratio >= 128).
 
+        The decode split matches SWA's so `c128a_global_decode_topk_indices`
+        lines up with q in `_forward_decode`. The per-token C128A kernel
+        handles non-uniform query lengths.
+        """
         num_total = num_decode_tokens + num_prefill_tokens
         if num_total == 0:
             return {}

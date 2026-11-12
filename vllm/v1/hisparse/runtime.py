@@ -107,6 +107,66 @@ class PagedCacheView:
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 
+def compress_slot_mapping(
+    token_slots: torch.Tensor, tokens_per_row: int, out: torch.Tensor
+) -> None:
+    """Map token slots to the cache row their compressed state is written to:
+    each block's rows hold its tokens' states in order, one per
+    `tokens_per_row` tokens, written at the last token of each state."""
+    torch.floor_divide(token_slots, tokens_per_row, out=out)
+    out.masked_fill_(token_slots % tokens_per_row != tokens_per_row - 1, -1)
+
+
+class HiSparseRowSlotMappings:
+    """Row slot mappings of compressed caches, refreshed once per step."""
+
+    def __init__(self) -> None:
+        self._mappings: dict[
+            tuple[int, int], tuple[torch.Tensor, torch.Tensor, int]
+        ] = {}
+
+    def get(self, token_slots: torch.Tensor, tokens_per_row: int) -> torch.Tensor:
+        if tokens_per_row == 1:
+            return token_slots
+        key = (token_slots.data_ptr(), tokens_per_row)
+        if key not in self._mappings:
+            self._mappings[key] = (
+                token_slots,
+                torch.full_like(token_slots, -1),
+                tokens_per_row,
+            )
+        return self._mappings[key][1]
+
+    def update(self) -> None:
+        for token_slots, row_slots, tokens_per_row in self._mappings.values():
+            compress_slot_mapping(token_slots, tokens_per_row, row_slots)
+
+
+def split_row_planes(
+    cache: torch.Tensor, row_value_bytes: int
+) -> tuple[torch.Tensor, ...]:
+    """Views of a paged cache's row planes: `[num_blocks, block_size, width]`
+    for the value bytes, then the remaining bytes, of every row."""
+    if not row_value_bytes:
+        return (cache,)
+    num_blocks, block_size, row_width = cache.shape
+    assert cache.element_size() == 1 and cache.stride()[1:] == (row_width, 1)
+    planes = []
+    for offset, width in (
+        (0, row_value_bytes),
+        (block_size * row_value_bytes, row_width - row_value_bytes),
+    ):
+        planes.append(
+            torch.as_strided(
+                cache,
+                (num_blocks, block_size, width),
+                (cache.stride(0), width, 1),
+                cache.storage_offset() + offset,
+            )
+        )
+    return tuple(planes)
+
+
 @dataclass(frozen=True)
 class ResolvedHiSparseConfig:
     top_k: int
@@ -648,6 +708,7 @@ class HiSparseRuntime:
         index_group: HiSparseIndexGroup | None = None,
         copy_stream: torch.Stream | None = None,
         logical_topk_ready: torch.Event | None = None,
+        row_value_bytes: int = 0,
     ) -> None:
         self.backend = get_hisparse_backend()
         self.backend.check_available()
@@ -655,6 +716,11 @@ class HiSparseRuntime:
         self.row_width = row_width
         self.kv_dtype = kv_dtype
         self.device = torch.device(device)
+        # Rows whose first row_value_bytes sit in one plane of the page and
+        # the rest in a second plane (DeepSeek V4 fp8_ds_mla); 0 = packed rows.
+        self.row_value_bytes = row_value_bytes
+        # Tokens per cache row, set when the cache is bound.
+        self.tokens_per_row = 1
         # Logical slots per request. Physical rows come from its ephemeral HMA
         # block table and need not be contiguous in the shared slab.
         self.region_stride = config.device_buffer_size
@@ -663,7 +729,13 @@ class HiSparseRuntime:
             _check_residency_shared_memory(self.device, config)
 
         row_bytes = row_width * kv_dtype.itemsize
-        if row_bytes % 16 != 0:
+        if row_value_bytes:
+            if not 0 < row_value_bytes < row_bytes or row_value_bytes % 16:
+                raise ValueError(
+                    "HiSparse split rows need 16-byte aligned value bytes "
+                    f"within the row, got {row_value_bytes} of {row_bytes}B."
+                )
+        elif row_bytes % 16 != 0:
             raise ValueError(
                 f"HiSparse requires 16-byte aligned KV rows, got {row_bytes}B."
             )
@@ -791,15 +863,26 @@ class HiSparseRuntime:
             device=plan.block_table.device,
         )[:num_blocks]
         if plan.gpu_row_ids is not None and resident_cache is not None:
-            self.backend.gather_resident_rows(
-                resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
-            )
+            if self.row_value_bytes:
+                for source, destination in zip(
+                    split_row_planes(resident_cache, self.row_value_bytes),
+                    split_row_planes(staged, self.row_value_bytes),
+                    strict=True,
+                ):
+                    self.backend.gather_resident_rows(
+                        source, destination, plan.gpu_row_ids[0]
+                    )
+            else:
+                self.backend.gather_resident_rows(
+                    resident_cache, staged.view(-1, row_width), plan.gpu_row_ids[0]
+                )
         self.cache_ops.hisparse_gather_plan(
             kv_cache.view(-1, row_width),
             staged,
             plan.row_ids,
             plan.dst_rows,
             plan.miss_mask,
+            self.row_value_bytes,
         )
         return staged
 
@@ -927,6 +1010,7 @@ class HiSparseRuntime:
             shared.swap_host_physical_rows[shared_rows],
             shared.swap_device_physical_rows[shared_rows],
             shared.swap_counts[shared_rows],
+            self.row_value_bytes,
         )
 
     def _resolve_and_stage_group(
@@ -1127,6 +1211,10 @@ class HiSparseCacheHandle:
         self.residency: torch.Tensor | None = None
         self.block_table: torch.Tensor | None = None
         self.source_block_table: torch.Tensor | None = None
+        # Row slots of the token slot mappings; the same tensors unless
+        # several tokens share a row.
+        self.row_slot_mappings = HiSparseRowSlotMappings()
+        self.token_slot_mapping: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None
         self.dummy_batch = False
         self.decode_batch = False
@@ -1211,7 +1299,15 @@ class HiSparseCacheHandle:
             block_size=block_size,
         )
         self.block_table = block_table
-        self.slot_mapping = slot_mapping
+        self.token_slot_mapping = slot_mapping
+        self.slot_mapping = self.row_slot_mappings.get(
+            slot_mapping, self.runtime.tokens_per_row
+        )
+
+    def bind_mirror_slot_mapping(self, slot_mapping: torch.Tensor) -> None:
+        self.mirror_slot_mapping = self.row_slot_mappings.get(
+            slot_mapping, self.runtime.tokens_per_row
+        )
 
     def swap_in(
         self,
@@ -1264,6 +1360,7 @@ def create_hisparse_cache_handle(
     kv_dtype: torch.dtype,
     index_group: HiSparseMLAIndexGroup | None = None,
     device: torch.device | str | None = None,
+    row_value_bytes: int = 0,
 ) -> HiSparseCacheHandle | None:
     config = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k)
     if config is None:
@@ -1295,6 +1392,7 @@ def create_hisparse_cache_handle(
             if index_group is not None and index_group.has_indexer
             else None
         ),
+        row_value_bytes=row_value_bytes,
     )
     if is_index_group_leader and index_group is not None:
         index_group.hisparse_group = runtime.index_group

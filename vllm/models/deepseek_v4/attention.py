@@ -64,9 +64,11 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.hisparse.runtime import HiSparseCacheHandle, create_hisparse_cache_handle
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     get_kv_quant_mode,
 )
 
@@ -144,6 +146,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     # Provided by the platform subclass.
     backend_cls: ClassVar[type[AttentionBackend]]
+    supports_hisparse: ClassVar[bool] = False
     # Backend for the SWA cache layer; None uses the default SWA backend.
     swa_backend_cls: ClassVar[type[AttentionBackend] | None] = None
     # KV-cache per-token block format (both layouts are paged). True (default)
@@ -357,6 +360,27 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if prefix:
             compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])
+        self.hisparse_cache: HiSparseCacheHandle | None = None
+        if (
+            vllm_config.attention_config.hisparse_config is not None
+            and self.compress_ratio == 4
+        ):
+            if not self.supports_hisparse:
+                raise NotImplementedError(
+                    "DeepSeek V4 HiSparse requires the FlashMLA backend, got "
+                    f"{type(self).__name__}."
+                )
+            if self.kv_cache_dtype != "fp8_ds_mla":
+                raise ValueError("DeepSeek V4 HiSparse requires --kv-cache-dtype fp8.")
+            # 448B fp8 NoPE + 128B bf16 RoPE values, then 8B of scales, per row.
+            self.hisparse_cache = create_hisparse_cache_handle(
+                vllm_config,
+                config.index_topk,
+                is_index_group_leader=True,
+                row_width=584,
+                kv_dtype=torch.uint8,
+                row_value_bytes=576,
+            )
 
         # Create the compressor for layers with compress_ratio > 1; after the
         # attention setup above so its KV-cache prefix (self.prefix) is set.
@@ -703,6 +727,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         positions: torch.Tensor,
         out: "torch.Tensor | QuantizedActivation",
     ) -> None:
+        if self.hisparse_cache is not None:
+            self.hisparse_cache.finish_kv_update()
+            self.hisparse_cache.runtime.begin_forward()
         if self.indexer is not None and index_q is not None:
             assert index_weights is not None
             q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
@@ -837,6 +864,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token;
             # head_size stays semantic (512).
             state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
+            is_index_group_leader=self.indexer is not None,
         )
 
 
@@ -878,6 +906,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             tokens_per_state=self.compress_ratio,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+            cache_role=SparseCacheRole.INDEXER,
         )
 
     def forward(self): ...

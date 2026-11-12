@@ -47,6 +47,9 @@ class DeepseekV4CPUFlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
         self,
         cm: CommonAttentionMetadata,
         req_id_per_token: torch.Tensor,
+        num_decodes: int,
+        num_decode_tokens: int,
+        num_prefill_tokens: int,
     ) -> dict[str, torch.Tensor | None]:
         return {}
 

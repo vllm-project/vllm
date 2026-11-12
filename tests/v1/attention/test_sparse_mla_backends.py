@@ -126,6 +126,7 @@ from vllm.v1.hisparse.runtime import (
     _has_hisparse_ops,
     build_hisparse_prefill_staging_plan,
     hisparse_prefill_staging_remap,
+    split_row_planes,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
 
@@ -3116,6 +3117,44 @@ def test_hisparse_compact_gather_preserves_strided_payload(
 
 
 @requires_hisparse_ops
+def test_hisparse_compact_gather_moves_split_row_planes():
+    """Split rows land value and scale bytes in their own page planes."""
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_bytes, value_bytes, page_padding = 4, 48, 32, 16
+    num_host_blocks, num_hot_blocks = 3, 2
+    host = (
+        torch.arange(num_host_blocks * block_size * row_bytes)
+        .remainder_(251)
+        .to(torch.uint8)
+        .view(-1, row_bytes)
+        .pin_memory()
+    )
+    page_bytes = block_size * row_bytes + page_padding
+    storage = torch.full((num_hot_blocks * page_bytes,), 7, dtype=torch.uint8)
+    shape, stride = (num_hot_blocks, block_size, row_bytes), (page_bytes, row_bytes, 1)
+    expected = storage.clone()
+    storage = storage.to(device)
+    source, destination = [1, 6, 11], [7, 0, 2]
+    for host_plane, hot_plane in zip(
+        split_row_planes(host.view(-1, block_size, row_bytes), value_bytes),
+        split_row_planes(torch.as_strided(expected, shape, stride), value_bytes),
+    ):
+        for src, dst in zip(source, destination):
+            hot_plane[divmod(dst, block_size)] = host_plane[divmod(src, block_size)]
+
+    torch.ops._C_cache_ops.hisparse_gather_compact(
+        host,
+        torch.as_strided(storage, shape, stride),
+        torch.tensor([source], dtype=torch.int32, device=device),
+        torch.tensor([destination], dtype=torch.int32, device=device),
+        torch.tensor([len(source)], dtype=torch.int32, device=device),
+        value_bytes,
+    )
+
+    torch.testing.assert_close(storage.cpu(), expected, rtol=0, atol=0)
+
+
+@requires_hisparse_ops
 @pytest.mark.parametrize("use_graph", [False, True])
 def test_hisparse_speculative_prefetch_preserves_current_resident_kv(use_graph):
     """Prefetch historical misses before a follower writes verification KV."""
@@ -3486,6 +3525,7 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
     worker.backend = get_hisparse_backend()
     worker.is_host_writer = True
     worker.kernel_block_size = block_size
+    worker.row_value_bytes = 0
     worker.resident_caches = resident_caches
     worker.host_caches = host_caches
     worker.cache_handles = [
@@ -3517,6 +3557,65 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
         flat_resident = resident.view(num_rows, row_width).cpu()
         torch.testing.assert_close(host[5:7], flat_resident[1:3])
         torch.testing.assert_close(host[10:14], flat_resident[8:12])
+
+
+@requires_hisparse_ops
+def test_hisparse_row_dma_keeps_split_row_planes():
+    """Split-row mirrors copy each plane into the packed host page."""
+    device = torch.device(DEVICE_TYPE)
+    block_size, row_bytes, value_bytes, num_blocks = 4, 48, 32, 4
+    page_bytes = block_size * row_bytes + 16
+    storage = (
+        torch.arange(num_blocks * page_bytes, device=device)
+        .remainder_(251)
+        .to(torch.uint8)
+    )
+    resident = torch.as_strided(
+        storage, (num_blocks, block_size, row_bytes), (page_bytes, row_bytes, 1)
+    )
+    host = torch.zeros(
+        (num_blocks * block_size, row_bytes), dtype=torch.uint8, pin_memory=True
+    )
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.backend = get_hisparse_backend()
+    worker.is_host_writer = True
+    worker.kernel_block_size = block_size
+    worker.row_value_bytes = value_bytes
+    worker.resident_caches = (resident,)
+    worker.host_caches = (host,)
+    worker.cache_handles = [
+        _StubHiSparseCacheHandle(
+            decode_batch=True,
+            runtime=SimpleNamespace(resident_source_index=0),
+        )
+    ]
+    worker.dma_stream = torch.Stream(device=device)
+    worker.host_write_event = torch.Event()
+    worker._dma_free_descriptors = []
+    worker._pending_dma_descriptors = deque()
+    worker._pending_transfer_events = deque()
+    worker._enqueued_transfer_ids = []
+    worker._dma_submitted = False
+    worker._set_row_mirrors(
+        (
+            SparseKVRowMirror((1,), 5, 2),
+            SparseKVRowMirror((8,), 12, 4),
+        )
+    )
+
+    worker._enqueue_row_dma(range(1))
+    current_stream().wait_event(worker.host_write_event)
+    torch.accelerator.synchronize()
+
+    host_pages = host.view(num_blocks, block_size, row_bytes)
+    expected = torch.zeros_like(host_pages)
+    for source_plane, host_plane in zip(
+        split_row_planes(resident.cpu(), value_bytes),
+        split_row_planes(expected, value_bytes),
+    ):
+        host_plane[1, 1:3] = source_plane[0, 1:3]
+        host_plane[3] = source_plane[2]
+    torch.testing.assert_close(host_pages, expected, rtol=0, atol=0)
 
 
 @requires_hisparse_ops

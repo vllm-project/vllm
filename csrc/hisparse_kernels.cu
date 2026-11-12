@@ -126,22 +126,66 @@ __device__ __forceinline__ char* cache_row_ptr(char* cache, int64_t row,
          (row % block_size) * row_bytes;
 }
 
+// Split rows (row_value_bytes > 0) keep a page's value bytes for every row
+// ahead of its remaining bytes for every row, as DeepSeek V4's fp8_ds_mla
+// pages do. Host pages are packed: block_size rows of row_bytes each.
+__device__ __forceinline__ void copy_host_row_warp(
+    int lane_id, const char* host_cache, int64_t host_row, char* cache,
+    int64_t row, int32_t block_size, int64_t block_stride, int64_t row_bytes,
+    int64_t row_value_bytes) {
+  if (row_value_bytes == 0) {
+    copy_row_warp(
+        lane_id, host_cache + host_row * row_bytes,
+        cache_row_ptr(cache, row, block_size, block_stride, row_bytes),
+        row_bytes);
+    return;
+  }
+  const int64_t scale_bytes = row_bytes - row_value_bytes;
+  const int64_t host_offset = host_row % block_size;
+  const int64_t offset = row % block_size;
+  const char* host_page = host_cache + (host_row - host_offset) * row_bytes;
+  char* page = cache + (row / block_size) * block_stride;
+  copy_row_warp(lane_id, host_page + host_offset * row_value_bytes,
+                page + offset * row_value_bytes, row_value_bytes);
+  copy_row_warp(
+      lane_id,
+      host_page + block_size * row_value_bytes + host_offset * scale_bytes,
+      page + block_size * row_value_bytes + offset * scale_bytes, scale_bytes);
+}
+
+__device__ __forceinline__ void zero_cache_row_warp(
+    int lane_id, char* cache, int64_t row, int32_t block_size,
+    int64_t block_stride, int64_t row_bytes, int64_t row_value_bytes) {
+  if (row_value_bytes == 0) {
+    zero_row_warp(
+        lane_id, cache_row_ptr(cache, row, block_size, block_stride, row_bytes),
+        row_bytes);
+    return;
+  }
+  const int64_t scale_bytes = row_bytes - row_value_bytes;
+  const int64_t offset = row % block_size;
+  char* page = cache + (row / block_size) * block_stride;
+  zero_row_warp(lane_id, page + offset * row_value_bytes, row_value_bytes);
+  zero_row_warp(lane_id,
+                page + block_size * row_value_bytes + offset * scale_bytes,
+                scale_bytes);
+}
+
 // Load host row g into hot row dst. A g past the host pool has no source row,
 // so dst is zeroed rather than left serving stale bytes.
 __device__ __forceinline__ void load_hot_row_warp(
     int lane_id, const char* host_cache, char* hot_cache, int32_t g,
     int32_t dst, int64_t host_rows, int64_t hot_rows, int64_t row_bytes,
-    int64_t hot_block_stride, int32_t hot_block_size) {
+    int64_t row_value_bytes, int64_t hot_block_stride, int32_t hot_block_size) {
   if (g < 0 || dst < 0 || dst >= hot_rows) {
     return;
   }
-  char* dst_row = cache_row_ptr(hot_cache, dst, hot_block_size,
-                                hot_block_stride, row_bytes);
   if (g < host_rows) {
-    copy_row_warp(lane_id, host_cache + static_cast<int64_t>(g) * row_bytes,
-                  dst_row, row_bytes);
+    copy_host_row_warp(lane_id, host_cache, g, hot_cache, dst, hot_block_size,
+                       hot_block_stride, row_bytes, row_value_bytes);
   } else {
-    zero_row_warp(lane_id, dst_row, row_bytes);
+    zero_cache_row_warp(lane_id, hot_cache, dst, hot_block_size,
+                        hot_block_stride, row_bytes, row_value_bytes);
   }
 }
 
@@ -845,8 +889,8 @@ __global__ void hisparse_gather_plan_kernel(
     const int32_t* __restrict__ hot_indices,  // [num_rows, top_k] abs hot rows
     const int32_t* __restrict__ miss_mask,    // [num_rows, top_k]
     const int64_t host_rows, const int64_t hot_rows, const int64_t row_bytes,
-    const int64_t hot_block_stride, const int32_t hot_block_size,
-    const int32_t top_k) {
+    const int64_t row_value_bytes, const int64_t hot_block_stride,
+    const int32_t hot_block_size, const int32_t top_k) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   // Columns are interleaved across gridDim.y blocks per row so the staging
   // plan's single row still fills the device with outstanding host reads.
@@ -862,8 +906,8 @@ __global__ void hisparse_gather_plan_kernel(
     }
     load_hot_row_warp(lane_id, host_cache, hot_cache,
                       global_indices[base + col], hot_indices[base + col],
-                      host_rows, hot_rows, row_bytes, hot_block_stride,
-                      hot_block_size);
+                      host_rows, hot_rows, row_bytes, row_value_bytes,
+                      hot_block_stride, hot_block_size);
   }
 }
 
@@ -874,8 +918,8 @@ __global__ void hisparse_gather_compact_kernel(
     const int32_t* __restrict__ miss_hot_indices,
     const int32_t* __restrict__ miss_counts, const int64_t host_rows,
     const int64_t hot_rows, const int64_t row_bytes,
-    const int64_t hot_block_stride, const int32_t hot_block_size,
-    const int32_t top_k, const int32_t num_rows) {
+    const int64_t row_value_bytes, const int64_t hot_block_stride,
+    const int32_t hot_block_size, const int32_t top_k, const int32_t num_rows) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int warp_id = threadIdx.x / kWarpSize;
   const int lane_id = threadIdx.x % kWarpSize;
@@ -885,10 +929,10 @@ __global__ void hisparse_gather_compact_kernel(
     const int miss_count = min(max(miss_counts[row], 0), top_k);
     const int64_t base = static_cast<int64_t>(row) * top_k;
     for (int col = col_start; col < miss_count; col += col_stride) {
-      load_hot_row_warp(lane_id, host_cache, hot_cache,
-                        miss_global_indices[base + col],
-                        miss_hot_indices[base + col], host_rows, hot_rows,
-                        row_bytes, hot_block_stride, hot_block_size);
+      load_hot_row_warp(
+          lane_id, host_cache, hot_cache, miss_global_indices[base + col],
+          miss_hot_indices[base + col], host_rows, hot_rows, row_bytes,
+          row_value_bytes, hot_block_stride, hot_block_size);
     }
   }
 }
@@ -941,6 +985,20 @@ int64_t check_2d_rows(const torch::stable::Tensor& t, const char* name,
   STD_TORCH_CHECK(t.size(1) * t.element_size() == row_bytes, name,
                   " row width mismatch");
   return t.size(0);
+}
+
+void check_row_split(int64_t row_bytes, int64_t row_value_bytes,
+                     int64_t host_rows, int64_t block_size) {
+  if (row_value_bytes == 0) {
+    STD_TORCH_CHECK(row_bytes % 16 == 0, "KV rows must be 16-byte aligned");
+    return;
+  }
+  STD_TORCH_CHECK(
+      row_value_bytes > 0 && row_value_bytes < row_bytes &&
+          row_value_bytes % 16 == 0,
+      "split KV rows need 16-byte aligned value bytes within a row");
+  STD_TORCH_CHECK(host_rows % block_size == 0,
+                  "split KV rows need host pages of the hot block size");
 }
 
 }  // namespace
@@ -1074,7 +1132,6 @@ void hisparse_resolve_residency(
   STD_TORCH_CHECK(hot_cache.dim() == 3,
                   "hot_cache must be [num_blocks, block_size, row_width]");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
-  STD_TORCH_CHECK(row_bytes % 16 == 0, "KV rows must be 16-byte aligned");
   STD_TORCH_CHECK(hot_cache.stride(1) * hot_cache.element_size() == row_bytes,
                   "hot-cache rows must be contiguous");
   const int64_t hot_block_size = hot_cache.size(1);
@@ -1340,7 +1397,8 @@ void hisparse_gather_plan(torch::stable::Tensor const& host_cache,
                           torch::stable::Tensor& hot_cache,
                           torch::stable::Tensor const& global_indices,
                           torch::stable::Tensor const& hot_indices,
-                          torch::stable::Tensor const& miss_mask) {
+                          torch::stable::Tensor const& miss_mask,
+                          int64_t row_value_bytes) {
   STD_TORCH_CHECK(
       host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
       "host_cache must be pinned CPU memory");
@@ -1366,7 +1424,6 @@ void hisparse_gather_plan(torch::stable::Tensor const& host_cache,
   STD_TORCH_CHECK(hot_cache.dim() == 3,
                   "hot_cache must be [num_blocks, block_size, row_width]");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
-  STD_TORCH_CHECK(row_bytes % 16 == 0, "KV rows must be 16-byte aligned");
   STD_TORCH_CHECK(hot_cache.stride(1) * hot_cache.element_size() == row_bytes,
                   "hot-cache rows must be contiguous");
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
@@ -1387,6 +1444,7 @@ void hisparse_gather_plan(torch::stable::Tensor const& host_cache,
       std::min(max_chunks, std::max(1, kTargetBlocks / num_rows));
   const dim3 grid(num_rows, num_chunks);
   const int32_t hot_block_size = static_cast<int32_t>(hot_cache.size(1));
+  check_row_split(row_bytes, row_value_bytes, host_rows, hot_block_size);
   const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
   const int64_t hot_block_stride =
       hot_cache.stride(0) * hot_cache.element_size();
@@ -1399,14 +1457,15 @@ void hisparse_gather_plan(torch::stable::Tensor const& host_cache,
       global_indices.const_data_ptr<int32_t>(),
       hot_indices.const_data_ptr<int32_t>(),
       miss_mask.const_data_ptr<int32_t>(), host_rows, hot_rows, row_bytes,
-      hot_block_stride, hot_block_size, top_k);
+      row_value_bytes, hot_block_stride, hot_block_size, top_k);
 }
 
 void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
                              torch::stable::Tensor& hot_cache,
                              torch::stable::Tensor const& miss_global_indices,
                              torch::stable::Tensor const& miss_hot_indices,
-                             torch::stable::Tensor const& miss_counts) {
+                             torch::stable::Tensor const& miss_counts,
+                             int64_t row_value_bytes) {
   STD_TORCH_CHECK(
       host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
       "host_cache must be pinned CPU memory");
@@ -1429,10 +1488,10 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
   STD_TORCH_CHECK(hot_cache.dim() == 3,
                   "hot_cache must be [num_blocks, block_size, row_width]");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
-  STD_TORCH_CHECK(row_bytes % 16 == 0, "KV rows must be 16-byte aligned");
   STD_TORCH_CHECK(hot_cache.stride(1) * hot_cache.element_size() == row_bytes,
                   "hot-cache rows must be contiguous");
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
+  check_row_split(row_bytes, row_value_bytes, host_rows, hot_cache.size(1));
   const auto num_rows = static_cast<int32_t>(miss_global_indices.size(0));
   const auto top_k = static_cast<int32_t>(miss_global_indices.size(1));
   if (num_rows == 0 || top_k == 0) {
@@ -1457,5 +1516,5 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
       miss_global_indices.const_data_ptr<int32_t>(),
       miss_hot_indices.const_data_ptr<int32_t>(),
       miss_counts.const_data_ptr<int32_t>(), host_rows, hot_rows, row_bytes,
-      hot_block_stride, hot_block_size, top_k, num_rows);
+      row_value_bytes, hot_block_stride, hot_block_size, top_k, num_rows);
 }

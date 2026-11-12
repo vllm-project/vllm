@@ -101,6 +101,29 @@ def _flatten_row_mirrors(
     )
 
 
+def _token_mirrors_to_rows(
+    mirrors: tuple[SparseKVRowMirror, ...], tokens_per_row: int
+) -> tuple[SparseKVRowMirror, ...]:
+    """Mirror the cache rows written by each token span."""
+    if tokens_per_row == 1:
+        return mirrors
+    row_mirrors = []
+    for mirror in mirrors:
+        start = mirror.destination_start // tokens_per_row
+        end = (mirror.destination_start + mirror.num_rows) // tokens_per_row
+        if end > start:
+            row_mirrors.append(
+                SparseKVRowMirror(
+                    source_starts=tuple(
+                        source // tokens_per_row for source in mirror.source_starts
+                    ),
+                    destination_start=start,
+                    num_rows=end - start,
+                )
+            )
+    return tuple(row_mirrors)
+
+
 def _select_written_row_mirrors(
     candidates: tuple[SparseKVRowMirror, ...],
     source_slots: np.ndarray,
@@ -264,6 +287,18 @@ class HiSparseConnectorWorker:
         resident = cache_handles[0].view
         assert resident is not None
         self.kernel_block_size = resident.block_size
+        (self.tokens_per_row,) = {
+            cache.runtime.tokens_per_row for cache in cache_handles
+        }
+        (self.row_value_bytes,) = {
+            cache.runtime.row_value_bytes for cache in cache_handles
+        }
+        self._row_slot_mappings = tuple(
+            {
+                id(cache.row_slot_mappings): cache.row_slot_mappings
+                for cache in cache_handles
+            }.values()
+        )
         self._block_row_offsets = torch.arange(
             self.kernel_block_size, dtype=torch.int32, device=device
         )
@@ -402,6 +437,8 @@ class HiSparseConnectorWorker:
         request_ids: list[str] | None = None,
         num_tokens: int = 0,
     ) -> None:
+        for row_slot_mappings in self._row_slot_mappings:
+            row_slot_mappings.update()
         self._stage_row_mirror_mapping(num_tokens)
         self._finish_previous_step()
         previous_host_write_event = self.host_write_event
@@ -414,7 +451,10 @@ class HiSparseConnectorWorker:
             get_tp_group().barrier()
         self._release_completed_dma_descriptors()
         self._dma_submitted = False
-        mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
+        mirrors = _token_mirrors_to_rows(
+            _flatten_row_mirrors(metadata.row_mirrors, request_ids),
+            self.tokens_per_row,
+        )
         if self._slot_mapping_staging is not None:
             self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
@@ -645,12 +685,21 @@ class HiSparseConnectorWorker:
         ):
             return
         mirrors = self._row_mirrors
+        block_size = self.kernel_block_size
+        row_value_bytes = self.row_value_bytes
+        num_planes = 2 if row_value_bytes else 1
         num_layers = len(layer_indices)
-        descriptor_count = len(mirrors) * num_layers
+        descriptor_stride = num_layers * num_planes
+        descriptor_count = len(mirrors) * descriptor_stride
         descriptors = self._acquire_dma_descriptors(descriptor_count)
         destination_starts = self._row_mirror_destination_starts
+        destination_pages, destination_offsets = np.divmod(
+            destination_starts, block_size
+        )
         row_counts = self._row_mirror_counts
-        for descriptor_offset, layer_index in enumerate(layer_indices):
+        if row_value_bytes and np.any(destination_offsets + row_counts > block_size):
+            raise RuntimeError("HiSparse split-row DMA must stay within a page.")
+        for layer_offset, layer_index in enumerate(layer_indices):
             cache = self.cache_handles[layer_index]
             source_index = cache.runtime.resident_source_index
             if source_index >= self._row_mirror_source_starts.shape[1]:
@@ -659,13 +708,11 @@ class HiSparseConnectorWorker:
             source = self.resident_caches[layer_index]
             destination = self.host_caches[layer_index]
             row_bytes = source.shape[-1] * source.element_size()
-            source_blocks, source_row_offsets = np.divmod(
-                source_rows, self.kernel_block_size
-            )
+            source_blocks, source_row_offsets = np.divmod(source_rows, block_size)
             source_out_of_range = (
                 np.any(source_blocks < 0)
                 or np.any(source_blocks >= source.shape[0])
-                or np.any(source_row_offsets + row_counts > self.kernel_block_size)
+                or np.any(source_row_offsets + row_counts > block_size)
             )
             if source_out_of_range:
                 raise RuntimeError("HiSparse row DMA source is out of range.")
@@ -673,16 +720,33 @@ class HiSparseConnectorWorker:
                 destination_starts + row_counts > destination.shape[0]
             ):
                 raise RuntimeError("HiSparse row DMA index is out of range.")
-            descriptor_slice = slice(descriptor_offset, descriptor_count, num_layers)
-            descriptors.src_np[descriptor_slice] = (
-                source.data_ptr()
-                + source_blocks * source.stride(0) * source.element_size()
-                + source_row_offsets * row_bytes
+            planes = (
+                (
+                    (0, row_value_bytes),
+                    (block_size * row_value_bytes, row_bytes - row_value_bytes),
+                )
+                if row_value_bytes
+                else ((0, row_bytes),)
             )
-            descriptors.dst_np[descriptor_slice] = (
-                destination.data_ptr() + destination_starts * row_bytes
-            )
-            descriptors.sizes_np[descriptor_slice] = row_counts * row_bytes
+            for plane_index, (plane_offset, plane_bytes) in enumerate(planes):
+                descriptor_slice = slice(
+                    layer_offset * num_planes + plane_index,
+                    descriptor_count,
+                    descriptor_stride,
+                )
+                descriptors.src_np[descriptor_slice] = (
+                    source.data_ptr()
+                    + source_blocks * source.stride(0) * source.element_size()
+                    + plane_offset
+                    + source_row_offsets * plane_bytes
+                )
+                descriptors.dst_np[descriptor_slice] = (
+                    destination.data_ptr()
+                    + destination_pages * block_size * row_bytes
+                    + plane_offset
+                    + destination_offsets * plane_bytes
+                )
+                descriptors.sizes_np[descriptor_slice] = row_counts * plane_bytes
 
         self._submit_dma_descriptors(
             descriptors, descriptor_count, ready_event=ready_event

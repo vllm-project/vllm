@@ -14,10 +14,12 @@ from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
     get_hisparse_kv_cache_groups,
+    is_hisparse_spec,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseHostPool,
+    HiSparseRowSlotMappings,
     drop_hisparse_host_pool,
     get_hisparse_host_pool,
     initialize_hisparse_runtime_buffers,
@@ -30,7 +32,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
-    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -49,9 +50,7 @@ def resolve_hisparse_specs(
     """Resolve a common kernel block size for HiSparse MLA specs, and add the
     resident/hot specs HiSparse derives from them."""
     mla_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if isinstance(spec, MLAAttentionSpec)
+        name: spec for name, spec in kv_cache_spec.items() if is_hisparse_spec(spec)
     }
     if not mla_specs:
         return kv_cache_spec
@@ -67,18 +66,22 @@ def resolve_hisparse_specs(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec = kv_cache_spec | {
+    mla_specs = {
         name: spec.copy_with_new_block_size(block_size)
         for name, spec in mla_specs.items()
     }
-    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    groups = get_hisparse_kv_cache_groups(vllm_config, mla_specs)
     assert groups is not None
-    return kv_cache_spec | {
-        layer_name: group.kv_cache_spec
-        for group in groups
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
-        for layer_name in group.layer_names
-    }
+    return (
+        kv_cache_spec
+        | mla_specs
+        | {
+            layer_name: group.kv_cache_spec
+            for group in groups
+            if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+            for layer_name in group.layer_names
+        }
+    )
 
 
 def allocate_hisparse_kv_caches(
@@ -196,6 +199,15 @@ def _tensor_placements(
     }
 
 
+def _source_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+    (source_group_id,) = kv_cache_config.host_group_ids
+    source_group = kv_cache_config.kv_cache_groups[source_group_id]
+    spec = source_group.kv_cache_spec
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return dict(spec.kv_cache_specs)
+    return dict.fromkeys(source_group.layer_names, spec)
+
+
 def bind_hisparse_kv_caches(
     *,
     forward_context: dict[str, Any],
@@ -207,6 +219,8 @@ def bind_hisparse_kv_caches(
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
     tensor_configs = _tensor_placements(kv_cache_config)
+    source_specs = _source_specs(kv_cache_config)
+    row_slot_mappings = HiSparseRowSlotMappings()
     resident_groups = [
         (group_id, group)
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -233,12 +247,15 @@ def bind_hisparse_kv_caches(
             tensor_config, byte_offset = tensor_configs[cache_name]
             assert not tensor_config.host_resident
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
+            source_spec = source_specs[layer_name]
+            cache_handle.runtime.tokens_per_row = int(source_spec.tokens_per_state)
+            cache_handle.row_slot_mappings = row_slot_mappings
             cache_handle.bind_cache(
                 kv_caches[cache_name],
                 byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
-                block_size=group.kv_cache_spec.block_size,
+                block_size=source_spec.num_states,
                 block_table=residency[resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
@@ -270,7 +287,7 @@ def bind_hisparse_kv_caches(
                 byte_offset=byte_offset,
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
-                block_size=group.kv_cache_spec.block_size,
+                block_size=source_specs[layer_name].num_states,
                 block_table=block_tables.input_block_tables[group_id],
             )
             resident = cache_handle.view
@@ -305,7 +322,9 @@ def bind_hisparse_kv_caches(
         cache_handle.source_block_table = block_tables.input_block_tables[
             source_group_id
         ]
-        cache_handle.mirror_slot_mapping = block_tables.slot_mappings[source_group_id]
+        cache_handle.bind_mirror_slot_mapping(
+            block_tables.slot_mappings[source_group_id]
+        )
     return cache_handles
 
 
@@ -322,6 +341,7 @@ def rebind_hisparse_device_caches(
     views and hot entries are dropped.
     """
     tensor_configs = _tensor_placements(kv_cache_config)
+    source_specs = _source_specs(kv_cache_config)
     for group in kv_cache_config.kv_cache_groups:
         spec = group.kv_cache_spec
         for cache_name in group.layer_names:
@@ -336,9 +356,9 @@ def rebind_hisparse_device_caches(
                     byte_offset=byte_offset,
                     block_stride=tensor_config.block_stride,
                     num_blocks=kv_cache_config.num_blocks,
-                    block_size=spec.block_size,
+                    block_size=source_specs[layer_name].num_states,
                     block_table=cache_handle.block_table,
-                    slot_mapping=cache_handle.slot_mapping,
+                    slot_mapping=cache_handle.token_slot_mapping,
                 )
                 assert cache_handle.view is not None
                 kv_caches[cache_name] = cache_handle.view.cache
@@ -351,6 +371,6 @@ def rebind_hisparse_device_caches(
                     byte_offset=byte_offset,
                     block_stride=tensor_config.block_stride,
                     num_blocks=kv_cache_config.num_blocks,
-                    block_size=spec.block_size,
+                    block_size=source_specs[layer_name].num_states,
                     block_table=runtime.hot_block_table,
                 )
