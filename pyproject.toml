@@ -114,7 +114,7 @@ follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = "tests.*"
-disable_error_code = ["arg-type", "assignment"]
+disable_error_code = ["arg-type", "assignment", "union-attr"]
 
 [tool.pytest.ini_options]
 markers = [
@@ -183,12 +183,14 @@ unresolved-import = "ignore"
 unresolved-attribute = "ignore"
 
 [[tool.ty.overrides]]
-# Tests deliberately pass mocks and stand-ins where real types are expected
+# Tests deliberately pass mocks and stand-ins where real types are expected,
+# and a None where an attribute is expected fails the test anyway
 include = ["tests/**"]
 
 [tool.ty.overrides.rules]
 invalid-argument-type = "ignore"
 invalid-assignment = "ignore"
+missing-union-attribute = "ignore"
 
 [tool.typos.files]
 # these files may be written in non english words
