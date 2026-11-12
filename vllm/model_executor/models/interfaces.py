@@ -2030,8 +2030,7 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
-        /,
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.

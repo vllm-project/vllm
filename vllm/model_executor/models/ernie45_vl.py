@@ -1150,17 +1150,19 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
-        if "images" not in hf_data and "videos" not in hf_data:
+        if "images" not in mm_data and "videos" not in mm_data:
             return processed_data
 
         # Divide the processor_output into two modalities: image and video.
         pixel_values = processed_data["images"]
         if pixel_values is not None:
-            processed_data["images"] = self._pixel_values_norm(pixel_values, hf_kwargs)
+            processed_data["images"] = self._pixel_values_norm(
+                pixel_values, hf_processor_mm_kwargs
+            )
         for key in list(processed_data.keys()):
             if processed_data[key] is None:
                 del processed_data[key]

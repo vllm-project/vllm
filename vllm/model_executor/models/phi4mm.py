@@ -885,14 +885,14 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
-        if not hf_data:
+        if not mm_data:
             return processed_data
 
-        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         num_img_tokens = [
             self.info.get_num_image_tokens(
                 image_width=img_size[0],
@@ -903,13 +903,13 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         ]
         processed_data["num_img_tokens"] = num_img_tokens
 
-        audios = hf_data.get("audios", [])
+        audios = mm_data.get("audios", [])
         assert isinstance(audios, list)
         audio_features = processed_data.get("input_audio_embeds")
         if audio_features is None:
             return processed_data
 
-        sr = self.info.get_feature_extractor(**hf_kwargs).sampling_rate
+        sr = self.info.get_feature_extractor(**hf_processor_mm_kwargs).sampling_rate
         feature_sizes = [
             self.info.get_audio_num_frames(len(audio), sr) for audio, _ in audios
         ]
