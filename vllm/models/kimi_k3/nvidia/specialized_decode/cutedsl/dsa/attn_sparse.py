@@ -109,8 +109,10 @@ SPARSE_DCP = "1-8:sparse"
 # microbenchmark of the decode alone (DCP16: 96 gathered heads, ~130 keys per row
 # and rank, L2 flushed): two tiles + the bulk exchange ahead at 7-8 rows; at 4
 # rows (one wave already) one tile stays ahead.
-SPARSE_TILES = {16: "7-8:2"}
-SPARSE_BULK = {16: "7-8:1"}
+# DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
+# decode-step A/B there.
+SPARSE_TILES = {16: "7-8:2", 8: "5-15:2"}
+SPARSE_BULK = {16: "7-8:1", 8: "5-15:1"}
 # P-exchange form of the pushing decode, batch tables per DCP size (1: on): the
 # cluster CTAs of a row exchange their split's E4M3 P and row statistics instead of
 # the FP32 partials, and each CTA runs the PV of every split over its own merged
