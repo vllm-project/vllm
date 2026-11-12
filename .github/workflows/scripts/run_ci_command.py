@@ -526,7 +526,10 @@ def parse_command(body: str) -> str | None:
 
 
 def parse_include_step_keys(body: str) -> list[str]:
-    body = body.strip().removesuffix(ALLOW_STALE_SUFFIX)
+    body = body.strip()
+    if len(body.splitlines()) != 1:
+        return []
+    body = body.removesuffix(ALLOW_STALE_SUFFIX)
     prefix = f"{COMMAND_RUN_CI} --include "
     if not body.startswith(prefix):
         return []
