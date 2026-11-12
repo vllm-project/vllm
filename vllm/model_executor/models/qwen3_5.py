@@ -36,6 +36,7 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -179,6 +180,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                # Whole MLP on every rank: its output is complete, no all-reduce.
+                disable_tp=envs.VLLM_QWEN3_5_REPLICATE_FFN,
             )
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")
@@ -206,6 +209,31 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     config.hidden_size,
                 ),
             )
+
+
+def _setup_replicated_ffn(config, parallel_config) -> None:
+    """Checks and cross-rank determinism for VLLM_QWEN3_5_REPLICATE_FFN."""
+    if config.model_type != "qwen3_5_text":
+        raise NotImplementedError(
+            "VLLM_QWEN3_5_REPLICATE_FFN applies to dense Qwen3.5 models only."
+        )
+    if (
+        parallel_config.decode_context_parallel_size > 1
+        or parallel_config.prefill_context_parallel_size > 1
+    ):
+        # Context parallelism turns the TP-synced autotune off.
+        raise NotImplementedError(
+            "VLLM_QWEN3_5_REPLICATE_FFN is not supported with context parallelism."
+        )
+    # Nothing re-syncs ranks after a replicated MLP: autotune must agree.
+    from vllm.triton_utils.tp_synced_autotune import install
+
+    install()
+    # Same for kernels torch.compile generates: Inductor benchmarks configs that
+    # change numerics per process unless told not to.
+    import torch._inductor.config as inductor_config
+
+    inductor_config.deterministic = True
 
 
 @support_torch_compile(
@@ -237,6 +265,8 @@ class Qwen3_5Model(Qwen3NextModel):
             vllm_config.model_config.hf_text_config
         )
         parallel_config = vllm_config.parallel_config
+        if envs.VLLM_QWEN3_5_REPLICATE_FFN:
+            _setup_replicated_ffn(config, parallel_config)
 
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
