@@ -39,6 +39,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.model_executor.layers.attention.mla_attention import SparseMLAPrefillRoute
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
 )
@@ -448,7 +449,6 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ]
-        self._attention_layer = attention_layer
         impl = attention_layer.impl
         if not isinstance(impl, FlashInferMLASparseSM90Impl):
             raise TypeError(
@@ -542,9 +542,10 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         # refreshed buffers.
         num_rows, kv_lens, exact = self._kv_lens_host(common_attn_metadata)
         # MHA prefills are removed from q before forward_mqa. Plan only the
-        # decode prefix in that case, using the same routing decision as MLA.
-        if metadata.num_prefills > 0 and self._attention_layer._use_sparse_mha(
-            metadata
+        # decode prefix in that case.
+        if (
+            metadata.prefill is not None
+            and metadata.prefill.route is not SparseMLAPrefillRoute.SPARSE_MQA
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]

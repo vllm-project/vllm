@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import inspect
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,10 @@ import torch
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 import vllm.models.deepseek_v32.attention as deepseek_attention
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
+    SparseMLAPrefillRoute,
+)
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.v1.attention.backends.mla.indexer import (
@@ -108,10 +113,14 @@ def make_indexer_metadata(
     )
 
 
-def make_mla_metadata(*, use_dense_mha: bool = True, num_decode_tokens: int = 0):
+def make_mla_metadata(
+    *,
+    route: SparseMLAPrefillRoute = SparseMLAPrefillRoute.DENSE_MHA,
+    num_decode_tokens: int = 0,
+):
     return SimpleNamespace(
         num_decode_tokens=num_decode_tokens,
-        prefill=SimpleNamespace(use_dense_mha=use_dense_mha),
+        prefill=SimpleNamespace(route=route),
     )
 
 
@@ -155,7 +164,11 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     if indexer_metadata.num_decodes:
         indexer_metadata.decode = object()
     mla_metadata = make_mla_metadata(
-        use_dense_mha=batch_kind != "force_mqa",
+        route=(
+            SparseMLAPrefillRoute.SPARSE_MQA
+            if batch_kind == "force_mqa"
+            else SparseMLAPrefillRoute.DENSE_MHA
+        ),
         num_decode_tokens=mla_num_decode_tokens,
     )
 
@@ -268,7 +281,10 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
     num_tokens, num_heads, nope_dim, rope_dim = 3, 2, 4, 2
     should_skip = batch_kind == "short"
     mla_metadata = make_mla_metadata(
-        use_dense_mha=batch_kind != "masked_mha",
+        route={
+            "masked_mha": SparseMLAPrefillRoute.MASKED_MHA,
+            "force_mqa": SparseMLAPrefillRoute.SPARSE_MQA,
+        }.get(batch_kind, SparseMLAPrefillRoute.DENSE_MHA),
         num_decode_tokens=int(batch_kind == "mixed"),
     )
     mla_metadata.num_actual_tokens = num_tokens
@@ -337,7 +353,7 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
         skip_topk=False,
         use_pcp=False,
         _dense_mha_metadata_layer_name="" if batch_kind == "disabled" else MLA_LAYER,
-        _use_sparse_mha=lambda _: batch_kind != "force_mqa",
+        _use_sparse_mha=partial(MLAAttention._use_sparse_mha, None),
         indexer_rope_emb=SimpleNamespace(cos_sin_cache=None),
         rotary_emb=SimpleNamespace(cos_sin_cache=None),
         q_a_layernorm=SimpleNamespace(weight=None, variance_epsilon=1e-6),
