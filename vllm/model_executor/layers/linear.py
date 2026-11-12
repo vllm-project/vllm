@@ -1707,7 +1707,7 @@ def fp16_partial_sum_unscale() -> float:
 
 
 def unscale_fp16_partial_sums(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    """All-reduced FP16 partial sums times 2^k, rounded once to ``dtype``."""
+    """All-reduced FP16 partial sums times 2^k, rounded once to `dtype`."""
     # Exact: BF16 has FP32's exponent range, so rounding commutes with 2^k.
     return x.to(dtype).mul_(fp16_partial_sum_unscale())
 
@@ -1717,9 +1717,9 @@ _deferred_fp16_partial_sums = ContextVar("deferred_fp16_partial_sums", default=F
 
 @contextmanager
 def deferred_fp16_partial_sums(enable: bool = True) -> Iterator[None]:
-    """Row-parallel layers built here with ``reduce_results=False`` write FP16
+    """Row-parallel layers built here with `reduce_results=False` write FP16
     partial sums when their kernel can. Their callers all-reduce them and must
-    unscale them: see ``is_fp16_partial_sum`` and ``unscale_fp16_partial_sums``.
+    unscale them: see `is_fp16_partial_sum` and `unscale_fp16_partial_sums`.
     """
     token = _deferred_fp16_partial_sums.set(enable)
     try:
@@ -1729,7 +1729,7 @@ def deferred_fp16_partial_sums(enable: bool = True) -> Iterator[None]:
 
 
 def is_fp16_partial_sum(x: torch.Tensor, residual: torch.Tensor | None) -> bool:
-    """Whether ``x``, a deferred row-parallel output, holds FP16 partial sums
+    """Whether `x`, a deferred row-parallel output, holds FP16 partial sums
     (its dtype differs from the residual's)."""
     if residual is None or x.dtype == residual.dtype:
         return False

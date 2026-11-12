@@ -71,7 +71,7 @@ def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | 
 
 def has_fused_allreduce_norm_budget(tp_size: int) -> bool:
     """Whether FlashInfer fused all-reduce + RMSNorm has a workspace budget
-    for ``tp_size`` on this GPU (it may still fall back at runtime)."""
+    for `tp_size` on this GPU (it may still fall back at runtime)."""
     from vllm.config.compilation import PassConfig
 
     return bool(PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size))
