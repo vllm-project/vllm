@@ -644,6 +644,7 @@ class KVCacheManager:
             request.num_tokens,
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        self.coordinator.update_idle_tokens(request, num_tokens_need_slot)
 
         return self.create_kv_cache_blocks(new_blocks)
 

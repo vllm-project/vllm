@@ -6843,3 +6843,85 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+def test_swa_frees_each_block_on_the_step_it_leaves_the_window():
+    """Decode steps that allocate nothing must still free out-of-window blocks."""
+    block_size, window = 4, 8
+    manager = make_kv_cache_manager(
+        KVCacheConfig(
+            num_blocks=64,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["swa"],
+                    SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                        sliding_window=window,
+                    ),
+                )
+            ],
+        ),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    request = make_request("swa", [1, 2, 3], block_size, sha256)
+    swa = manager.coordinator.single_type_managers[0]
+    assert manager.allocate_slots(request, request.num_tokens) is not None
+    request.num_computed_tokens = request.num_tokens
+    for token_id in range(40):
+        request.append_output_token_ids(token_id)
+        assert manager.allocate_slots(request, 1) is not None
+        blocks = swa.req_to_blocks[request.request_id]
+        num_freed = next(i for i, block in enumerate(blocks) if not block.is_null)
+        expected = (request.num_computed_tokens - window + 1) // block_size
+        assert num_freed == max(0, expected)
+        request.num_computed_tokens += 1
+
+
+def test_partial_prompt_tail_is_cached_by_a_chunk_within_one_block():
+    """A chunk that reaches the prompt tail without allocating a block must
+    still register the tail for fine-grained prefix hits."""
+    block_size, hash_block_size = 64, 16
+    manager = make_kv_cache_manager(
+        KVCacheConfig(
+            num_blocks=32,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["full"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=block_size,
+                        shapes=((1,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                ),
+            ],
+        ),
+        max_model_len=256,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+    request = make_request("first", list(range(100)), hash_block_size, sha256)
+    assert manager.allocate_slots(request, 70) is not None
+    request.num_computed_tokens = 70
+    assert manager.allocate_slots(request, 30) is not None
+
+    full_attention = manager.coordinator.single_type_managers[0]
+    tail_block = full_attention.req_to_blocks[request.request_id][1]
+    assert tail_block.block_hash_num_tokens == 96
