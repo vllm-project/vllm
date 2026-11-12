@@ -105,26 +105,30 @@ vllm serve google/gemma-4-31B-it \
     --attention-backend TRITON_FLASHINFER
 ```
 
-### FlashAttention-2 Prefill in `TRITON_ATTN` (SM 8.x)
+### FlashAttention Prefill in `TRITON_ATTN` (SM 8.x and 9.x)
 
 This applies only when `TRITON_ATTN` is the selected backend, for example with
-`--attention-backend TRITON_ATTN`. Automatic selection does not pick it for
-multimodal-prefix models on SM 8.x, where `FLASHINFER` comes first.
+`--attention-backend TRITON_ATTN`. Automatic selection prefers other backends
+for multimodal-prefix models on these GPUs (`FLASHINFER` on SM 8.x, the
+Triton/FlashAttention composite on SM 9.x).
 
-With `TRITON_ATTN` on compute capability 8.x, a batch in which every scheduled
-query token lies in a bidirectional range is computed with FlashAttention-2
-instead of the Triton kernel. A query in range `[start, end]` attends to keys
-`0..end`, so each (request, range) piece is one non-causal FA2 sequence over
-the paged KV cache. The path also requires:
+With `TRITON_ATTN`, a batch in which every scheduled query token lies in a
+bidirectional range is computed with FlashAttention instead of the Triton
+kernel: FlashAttention-2 on compute capability 8.x, FlashAttention-3 on 9.x.
+A query in range `[start, end]` attends to keys `0..end`, so each
+(request, range) piece is one non-causal sequence over the paged KV cache. The
+path also requires:
 
-- the FA2 build to be available;
+- the FA2 or FA3 build to be available;
 - a decoder layer with head size 256 or less and no sliding window, ALiBi,
   logits soft cap or sinks;
 - an unquantized KV cache and an FP16 or BF16 query.
 
 Any other batch, including one with decodes or causal text tokens, runs the
-Triton kernel. Images inside a text prompt therefore stay on Triton. The path
-has been measured on A100 (SM 8.0) only.
+Triton kernel. Images inside a text prompt therefore stay on Triton. Other GPUs
+keep the Triton kernel; there, FlashAttention-4 and FlashInfer apply the ranges
+natively in their own backends. The path has been measured on A100 (SM 8.0) and
+H100 (SM 9.0).
 
 ### Manual Selection
 
