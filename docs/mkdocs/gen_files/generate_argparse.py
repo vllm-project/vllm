@@ -367,6 +367,23 @@ pages = {
     ),
 }
 
+serve_parser, _ = pages["cli/serve.md"]
+fill_markers(
+    "zh/configuration.md",
+    {
+        "engine-args": (
+            f"{JSON_TIP}## `EngineArgs`\n\n"
+            f"{linkify_docs_urls(format_help(engine_args))}"
+            f"## `AsyncEngineArgs`\n\n"
+            f"{linkify_docs_urls(format_help(async_engine_args))}"
+        ),
+        "serve-args": (
+            f"{JSON_TIP}"
+            f"{linkify_docs_urls(format_help(serve_parser))}"
+        )
+    },
+)
+
 # Command name for pages whose file stem differs (URL kept for back-compat).
 COMMAND_NAMES = {"cli/bench/mm_processor.md": "mm-processor"}
 

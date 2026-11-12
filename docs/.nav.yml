@@ -32,6 +32,15 @@ nav:
         - models/hardware_supported_models/*
         - TPU: https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/
     - Features: features
+  - Project Guide (简体中文):
+    - zh/README.md
+    - zh/architecture.md
+    - zh/concepts.md
+    - zh/features.md
+    - zh/interfaces.md
+    - zh/configuration.md
+    - zh/source_map.md
+    - zh/development.md
   - Developer Guide:
     - contributing/README.md
     - General:
