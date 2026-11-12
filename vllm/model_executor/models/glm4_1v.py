@@ -112,7 +112,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ..layers.activation import SiluAndMul
-from .encoder_cudagraph_utils import GridThwEncoderCudaGraphMixin
+from .encoder_cudagraph_utils import Qwen2VLEncoderCudaGraphMixin
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -1979,7 +1979,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 class Glm4vForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
-    GridThwEncoderCudaGraphMixin,
+    Qwen2VLEncoderCudaGraphMixin,
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,

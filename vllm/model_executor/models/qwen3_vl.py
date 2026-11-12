@@ -123,7 +123,7 @@ from vllm.utils.torch_utils import PIN_MEMORY
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed
 from ...utils.torch_utils import async_tensor_h2d
-from .encoder_cudagraph_utils import GridThwEncoderCudaGraphMixin
+from .encoder_cudagraph_utils import Qwen2VLEncoderCudaGraphMixin
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
@@ -1941,7 +1941,7 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
 class Qwen3VLForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
-    GridThwEncoderCudaGraphMixin,
+    Qwen2VLEncoderCudaGraphMixin,
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,

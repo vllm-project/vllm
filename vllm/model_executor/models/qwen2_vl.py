@@ -94,7 +94,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .encoder_cudagraph_utils import GridThwEncoderCudaGraphMixin
+from .encoder_cudagraph_utils import Qwen2VLEncoderCudaGraphMixin
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -1342,7 +1342,7 @@ class Qwen2VLForConditionalGeneration(
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
-    GridThwEncoderCudaGraphMixin,
+    Qwen2VLEncoderCudaGraphMixin,
 ):
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(

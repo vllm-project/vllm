@@ -9,7 +9,7 @@ Test organization:
     - TestGetInputModality     — modality routing from mm_kwargs keys
     - TestSupportsBatch        — precomputed embeddings skip the graph
     - TestDefaultBudgetTable   — subdivided default budgets, user overrides
-    - TestGridThwEncoderCudaGraphMixin — shared grid_thw select/capture logic
+    - TestQwen2VLEncoderCudaGraphMixin — shared Qwen2-VL-style select/capture logic
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
@@ -26,7 +26,7 @@ import pytest
 import torch
 
 from vllm.model_executor.models.encoder_cudagraph_utils import (
-    GridThwEncoderCudaGraphMixin,
+    Qwen2VLEncoderCudaGraphMixin,
 )
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.platforms import current_platform
@@ -1178,11 +1178,11 @@ class TestSupportsBatch:
 
 
 # ---------------------------------------------------------------------------
-# No-GPU tests — GridThwEncoderCudaGraphMixin
+# No-GPU tests — Qwen2VLEncoderCudaGraphMixin
 # ---------------------------------------------------------------------------
 
 
-class _StubGridThwVisual:
+class _StubQwen2VLVisual:
     spatial_merge_size = 2
     patch_embed = SimpleNamespace(
         proj=SimpleNamespace(in_channels=3), patch_size=2, temporal_patch_size=1
@@ -1197,9 +1197,9 @@ class _StubGridThwVisual:
         return {"cu_seqlens": torch.zeros(len(grid_thw) + 1, dtype=torch.int32)}
 
 
-class _GridThwHost(GridThwEncoderCudaGraphMixin):
+class _Qwen2VLHost(Qwen2VLEncoderCudaGraphMixin):
     def __init__(self):
-        self.visual = _StubGridThwVisual()
+        self.visual = _StubQwen2VLVisual()
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         return EncoderCudaGraphConfig(
@@ -1229,11 +1229,11 @@ def test_default_budget_range(max_num_batched_tokens, max_model_len):
     assert budget_range == (64, min(max_num_batched_tokens, max_model_len))
 
 
-class TestGridThwEncoderCudaGraphMixin:
-    """Shared grid_thw logic used by Qwen-VL-style models."""
+class TestQwen2VLEncoderCudaGraphMixin:
+    """Shared logic used by models with a Qwen2-VL-style vision tower."""
 
     def test_select_slices_items_by_patch_count(self):
-        host = _GridThwHost()
+        host = _Qwen2VLHost()
         grid = [[2, 2, 4], [1, 2, 2], [1, 4, 2]]
         pixel_values = torch.arange(28).unsqueeze(1)
         mm_kwargs = {"pixel_values_videos": pixel_values, "video_grid_thw": grid}
@@ -1262,7 +1262,7 @@ class TestGridThwEncoderCudaGraphMixin:
     def test_capture_buffers_cover_budget(
         self, token_budget, max_batch_size, max_frames_per_batch, grid_row
     ):
-        host = _GridThwHost()
+        host = _Qwen2VLHost()
         values = host.prepare_encoder_cudagraph_capture_inputs(
             token_budget=token_budget,
             max_batch_size=max_batch_size,
