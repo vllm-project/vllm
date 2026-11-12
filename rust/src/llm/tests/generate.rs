@@ -33,7 +33,7 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
     EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
-    GenerateRequest, WeightVersionSpan,
+    GenerateRequest, WeightVersionSpan, WeightVersions,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -433,15 +433,31 @@ async fn generate_merges_outputs_by_stream_interval() {
         start,
         end,
     };
+    // Each output carries the labels of its own tokens, merged like the tokens.
+    let labels = |runs: &[(&str, usize)]| {
+        let mut labels = WeightVersions::default();
+        for &(version, num_tokens) in runs {
+            labels.append(WeightVersions::new(Some(version.into()), num_tokens));
+        }
+        labels
+    };
     let weight_versions: Vec<_> =
         outputs.iter().map(|output| output.weight_versions.clone()).collect();
     assert_eq!(
         weight_versions,
         [
-            Some(vec![span("v7", 0, 1)]),
-            Some(vec![span("v7", 0, 2), span("v8", 2, 5)]),
-            Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
+            labels(&[("v7", 1)]),
+            labels(&[("v7", 1), ("v8", 3)]),
+            labels(&[("v7", 2)]),
         ]
+    );
+    let mut all = WeightVersions::default();
+    for labels in weight_versions {
+        all.append(labels);
+    }
+    assert_eq!(
+        all.spans(),
+        Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
     );
     // Each output carries the rows of its own tokens, merged like the tokens.
     let routed_rows = |token_ids: &[u32]| {
@@ -589,7 +605,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
             rows: vec![vec![1, 33, 99]],
         }),
         spec_decode_metrics: None,
-        weight_versions: None,
+        weight_versions: WeightVersions::new(None, 2),
         routed_experts: Default::default(),
         timestamps: Default::default(),
     };
@@ -923,7 +939,12 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
     let internal_id = stream.request_id().to_string();
     assert_ne!(internal_id, "req-abort");
 
-    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![7]);
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.token_ids, vec![7]);
+    assert_eq!(
+        first.weight_versions,
+        WeightVersions::new(Some("v7".into()), 1)
+    );
 
     // Abort by the external id; engine-core only knows the internal id.
     llm.abort(&["req-abort".to_string()]).await.unwrap();
@@ -934,15 +955,8 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
     let terminal = stream.next().await.unwrap().unwrap();
     assert_eq!(terminal.finish_reason, Some(FinishReason::Abort));
     assert!(terminal.token_ids.is_empty());
-    // The synthesized abort output reports the spans received so far.
-    assert_eq!(
-        terminal.weight_versions,
-        Some(vec![WeightVersionSpan {
-            version: "v7".into(),
-            start: 0,
-            end: 1
-        }])
-    );
+    // The synthesized abort output carries no tokens, so no labels either.
+    assert_eq!(terminal.weight_versions, WeightVersions::default());
     assert!(stream.next().await.is_none());
 
     let _ = shutdown_tx.send(());

@@ -581,27 +581,107 @@ def test_num_lookahead_tokens_without_speculation():
     assert config.num_lookahead_tokens == 0
 
 
+@pytest.mark.parametrize("max_num_reqs", [4, 2, 1])
 @pytest.mark.parametrize("max_logprobs", [0, 5, -1])
-def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
+def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(
+    max_logprobs, max_num_reqs
+):
     """Prompt logprobs materialize full-vocab logits a chunk at a time, which
     no other step reaches. The sizing step requests them on its real prefill,
-    so the runtime path computes them from the model's own hidden states."""
+    so the runtime path computes them from the model's own hidden states.
+
+    They are computed for every token of a step that requests them, so with a
+    budget beyond max_model_len they are measured on a single-prompt step and
+    the full-budget step runs without them. A runner without room for a second
+    prefill request runs one step."""
     runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
     runner.model_config = SimpleNamespace(
         get_vocab_size=lambda: 64, max_logprobs=max_logprobs, use_mla=False
     )
+    runner.max_num_reqs = max_num_reqs
     recorder = _StepRecorder()
-    requested: dict[str, int | None] = {}
+    # (scheduled tokens, prompt_logprobs of each prefill request) per step
+    steps: list[tuple[int, list[int | None]]] = []
 
     def execute_model(scheduler_output) -> None:
-        for new_req in scheduler_output.scheduled_new_reqs:
-            requested[new_req.req_id] = new_req.sampling_params.prompt_logprobs
+        prefill = [
+            r.sampling_params.prompt_logprobs
+            for r in scheduler_output.scheduled_new_reqs
+            if "_prefill_" in r.req_id
+        ]
+        if prefill:
+            steps.append((scheduler_output.total_num_scheduled_tokens, prefill))
         recorder.execute_model(scheduler_output)
 
     warmup.run_kv_cache_sizing_warmup(runner, execute_model, recorder.sample_tokens)
 
     expected = None if max_logprobs == 0 else max_logprobs
-    assert {
-        "prefill" if "_prefill_" in req_id else "decode": value
-        for req_id, value in requested.items()
-    } == {"prefill": expected, "decode": None}
+    if max_num_reqs == 1:
+        assert steps == [(MAX_MODEL_LEN - 1, [expected])]
+        return
+    logprob_steps = [step for step in steps if step[1] != [None] * len(step[1])]
+    if expected is None:
+        assert logprob_steps == []
+    else:
+        assert logprob_steps == [(MAX_MODEL_LEN, [expected])]
+    budget = runner.scheduler_config.max_num_batched_tokens
+    assert max(n for n, _ in steps) == min(budget, max_num_reqs * (MAX_MODEL_LEN - 1))
+
+
+def test_sizing_warmup_waits_for_each_step(monkeypatch):
+    """UvaBufferPool reuses a staging slot two writes later. Warmup discards
+    step outputs, so it must wait for each step before running the next."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
+    )
+    events: list[str] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: events.append("sync"))
+
+    warmup.run_kv_cache_sizing_warmup(
+        runner, lambda output: events.append("step"), lambda grammar_output: None
+    )
+
+    assert events
+    assert events == ["step", "sync"] * (len(events) // 2)
+
+
+@pytest.mark.parametrize(
+    "max_num_reqs, committable_blocks, expected_prefill_lens",
+    [
+        # Two full-length prompts plus the remainder fill the 2048-token budget.
+        (4, None, [MAX_MODEL_LEN - 1, MAX_MODEL_LEN - 1, 1]),
+        # Two request slots go to prefills rather than to a decode request.
+        (2, None, [MAX_MODEL_LEN - 1, MAX_MODEL_LEN - 1]),
+        # 1 decode + 64 prefill blocks fit; a second 64-block prompt does not.
+        (4, 100, [MAX_MODEL_LEN - 1]),
+        # A single-request runner measures the prefill alone.
+        (1, None, [MAX_MODEL_LEN - 1]),
+    ],
+)
+def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
+    max_num_reqs, committable_blocks, expected_prefill_lens
+):
+    """max_num_batched_tokens can exceed max_model_len, so the scheduler can
+    pack several prompts into one step. The sizing step must reach that
+    budget, splitting it across requests the runner and KV cache can hold."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
+    )
+    runner.max_num_reqs = max_num_reqs
+    if committable_blocks is not None:
+        runner.extensible_kv_cache = _StubExtensibleCache(committable_blocks)
+    outputs: list[SchedulerOutput] = []
+
+    warmup.run_kv_cache_sizing_warmup(
+        runner, outputs.append, lambda grammar_output: None
+    )
+
+    step = max(outputs, key=lambda o: o.total_num_scheduled_tokens)
+    prefill_lens = [len(r.prompt_token_ids) for r in step.scheduled_new_reqs]
+    assert prefill_lens == expected_prefill_lens
+    num_decode_reqs = len(step.scheduled_cached_reqs.req_ids)
+    assert num_decode_reqs == (1 if max_num_reqs > 2 else 0)
+    assert step.total_num_scheduled_tokens == num_decode_reqs + sum(prefill_lens)
+    assert step.total_num_scheduled_tokens == sum(step.num_scheduled_tokens.values())
