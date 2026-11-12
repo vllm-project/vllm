@@ -39,7 +39,7 @@ vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_tensor
 vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_block
 vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
 vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4
-vllm serve Qwen/Qwen3-0.6B --quantization nf12 --dtype bfloat16
+vllm serve Qwen/Qwen3-0.6B --quantization nf12
 
 vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
     --quantization-config '{"linear":{"activation":null,"weight":null}}'
@@ -66,6 +66,9 @@ Install NF12 support for NVIDIA CUDA:
 ```bash
 uv pip install "vllm[nf12]"
 ```
+
+NF12 requires BF16 weights and activations. For BF16 checkpoints such as
+Qwen3, the default `--dtype auto` already selects BF16.
 
 ## Advanced Configuration
 
