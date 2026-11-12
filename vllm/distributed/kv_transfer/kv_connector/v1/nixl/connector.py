@@ -436,6 +436,20 @@ class NixlPushConnector(NixlBaseConnector):
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        """Settle chunk WRITEs of preempted and aborted requests before their
+        blocks are reused."""
+        assert self.connector_worker is not None
+        assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.handle_preemptions(kv_connector_metadata)
+
+    def wait_for_save(self) -> None:
+        """Publish chunk jobs after this step's model execution is enqueued."""
+        super().wait_for_save()
+        assert self.connector_worker is not None
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.finish_chunk_step(self._connector_metadata)
+
 
 # Backward compatibility: NixlConnector is the pull-based connector.
 NixlConnector = NixlPullConnector

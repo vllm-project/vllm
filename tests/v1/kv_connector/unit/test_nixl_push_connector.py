@@ -43,9 +43,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
+    NixlPushChunkJob,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
+    NixlPushConnectorScheduler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
+    _ChunkRetirement,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
@@ -57,12 +62,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
+from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import (
     create_request,
+    create_vllm_config,
     expand_strided_descs,
+    make_kv_cache_config,
     make_nixl_push_scheduler,
     region_pairs_by_index,
 )
@@ -326,6 +334,65 @@ class TestPushScheduler:
         assert d_req.request_id not in meta.push_registrations
 
 
+class TestChunkedPushScheduler:
+    @staticmethod
+    def _scheduler_with_request():
+        """A chunked-push scheduler and a 40-token request on blocks 1-3 of 16
+        tokens, with the scheduler output that resolves the request's blocks."""
+        vllm_config = create_vllm_config(
+            kv_connector="NixlPushConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={"enable_chunked_push": True},
+        )
+        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=8)
+        sched = NixlPushConnectorScheduler(
+            vllm_config, "test-prefill-engine", kv_cache_config
+        )
+        request = create_request(num_tokens=40, block_size=16, do_remote_decode=True)
+        sched.update_state_after_alloc(request, _BlocksMock(([1, 2, 3],)), 0)
+
+        output = SchedulerOutput.make_empty()
+        output.preempted_req_ids = set()
+        output.kv_connector_block_state = KVConnectorBlockState(
+            req_ids={request.request_id},
+            resolve_block_ids=lambda _: ([1, 2, 3],),
+            boundary_state_offloads={},
+        )
+        return sched, request, output
+
+    def test_chunk_jobs_cover_newly_computed_blocks(self):
+        sched, request, output = self._scheduler_with_request()
+
+        output.num_scheduled_tokens = {request.request_id: 32}
+        (first,) = sched.build_connector_meta(output).push_chunk_jobs
+        assert (first.start_block, first.end_block, first.block_ids) == (0, 2, [1, 2])
+
+        request.num_computed_tokens = 32
+        output.num_scheduled_tokens = {request.request_id: 8}
+        (last,) = sched.build_connector_meta(output).push_chunk_jobs
+        # The partial last block goes out once the prompt is complete.
+        assert (last.start_block, last.end_block, last.block_ids) == (2, 3, [3])
+        assert last.total_blocks == 3
+
+    def test_preempted_request_pushes_again_from_first_block(self):
+        sched, request, output = self._scheduler_with_request()
+        output.num_scheduled_tokens = {request.request_id: 32}
+        sched.build_connector_meta(output)
+
+        output.preempted_req_ids = {request.request_id}
+        output.num_scheduled_tokens = {}
+        meta = sched.build_connector_meta(output)
+        assert meta.push_chunk_preemptions == {request.request_id}
+        assert meta.push_chunk_jobs == []
+
+        # Scheduled again once recomputed.
+        sched.update_state_after_alloc(request, _BlocksMock(([1, 2, 3],)), 0)
+        output.preempted_req_ids = set()
+        output.num_scheduled_tokens = {request.request_id: 32}
+        (job,) = sched.build_connector_meta(output).push_chunk_jobs
+        assert (job.start_block, job.end_block) == (0, 2)
+
+
 # ----------------------------------------------------------------- #
 #  Worker-side tests                                                 #
 # ----------------------------------------------------------------- #
@@ -358,6 +425,14 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._push_writer_wake = threading.Event()
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
+        w._chunked_push = False
+        w._chunk_job_inbox = queue.Queue()
+        w._chunk_deferred = []
+        w._chunk_states = {}
+        w._chunk_transfers = {}
+        w._chunk_transfer_tasks = {}
+        w._next_chunk_transfer_id = 0
+        w._chunk_retirements = []
 
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
@@ -439,6 +514,237 @@ def _registration_data(
         "remote_port": remote_port,
         "remote_tp_size": remote_tp_size,
     }
+
+
+def _chunk_job(start_block: int, end_block: int) -> NixlPushChunkJob:
+    return NixlPushChunkJob(
+        request_id="req-p",
+        block_ids=[1, 2][start_block:end_block],
+        start_block=start_block,
+        end_block=end_block,
+        total_blocks=2,
+    )
+
+
+def _chunk_worker() -> _StubWriterWorker:
+    """A chunked-push worker for request "req-p", whose D side "req-d" has
+    registered blocks 100 and 101 and is handshaked. WRITEs are recorded as
+    (local blocks, remote blocks, notif_msg)."""
+    w = _StubWriterWorker.fresh()
+    w._chunked_push = True
+    w._pending_d_registrations["req-p"] = _registration_data(
+        "req-d", local_block_ids=((100, 101),)
+    )
+    w._ensure_handshake = lambda *a, **k: None
+    w._chunk_path_supported = lambda job, reg_data: True
+    w._logical_to_kernel_block_ids = lambda blocks, ratio: blocks
+    w.nixl_wrapper = MagicMock()
+    w.xfer_stats = MagicMock()
+    w._lease_extension = 20
+    w.writes = []
+
+    def xfer(req_id, meta, *, notif_msg=None, track_request=True):
+        w.writes.append((meta.local_block_ids, meta.remote.block_ids, notif_msg))
+        return [len(w.writes)]
+
+    w._xfer_blocks_for_req = xfer
+    return w
+
+
+def _publish(w: _StubWriterWorker, *jobs: NixlPushChunkJob, ready: bool = True):
+    """Publish jobs as `wait_for_save` does; their CUDA event reports
+    `ready`."""
+    meta = NixlConnectorMetadata()
+    meta.push_chunk_jobs = list(jobs)
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker.torch.cuda.Event"
+    ) as event:
+        event.return_value.query.return_value = ready
+        w.finish_chunk_step(meta)
+
+
+def _run_writer_until_idle(w: _StubWriterWorker) -> None:
+    """Run the writer thread until it has no queued or deferred chunk jobs."""
+    t = threading.Thread(target=w._push_writer_loop, daemon=True)
+    t.start()
+    try:
+        deadline = time.perf_counter() + 2.0
+        while (
+            w._chunk_deferred or not w._chunk_job_inbox.empty()
+        ) and time.perf_counter() < deadline:
+            time.sleep(0.01)
+    finally:
+        w._push_writer_stop.set()
+        w._push_writer_wake.set()
+        t.join(timeout=2)
+
+
+def test_last_chunk_waits_for_earlier_writes_and_carries_notification():
+    w = _chunk_worker()
+    w.nixl_wrapper.check_xfer_state.return_value = "PROC"
+    _publish(w, _chunk_job(0, 1), _chunk_job(1, 2))
+    w._process_chunk_jobs()
+    assert w.writes == [(([1],), ([100],), b"")]
+    assert "decode-engine" in w._engine_last_active
+
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    w._poll_chunk_transfers()
+    w._process_chunk_jobs()
+    assert w.writes[1:] == [(([2],), ([101],), None)]
+
+
+def test_handed_off_request_is_reported_once_it_finishes():
+    w = _chunk_worker()
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    _publish(w, _chunk_job(0, 2))
+    w._process_chunk_jobs()
+    w._poll_chunk_transfers()
+    assert "req-p" not in w._sending_transfers
+
+    # Reported with no further WRITE, as a whole-request push whose WRITEs
+    # completed.
+    w._set_chunk_finished("req-p", ([1, 2],))
+    w._process_chunk_handoffs()
+    assert w._sending_transfers["req-p"] == []
+    assert len(w.writes) == 1
+
+
+def _fail_writes(w: _StubWriterWorker) -> None:
+    """Make in-flight WRITEs report failure when polled."""
+    w._log_failure = MagicMock()
+    w._handle_failed_transfer = lambda req_id, handle, failed: (
+        failed.add(req_id) or True
+    )
+    w.nixl_wrapper.check_xfer_state.return_value = "ERR"
+
+
+@pytest.mark.parametrize(
+    "cause", ["failed_write", "incompatible_peer", "failed_handshake"]
+)
+def test_request_with_an_unwritten_chunk_is_pushed_whole(cause):
+    w = _chunk_worker()
+    if cause == "failed_write":
+        _fail_writes(w)
+    elif cause == "incompatible_peer":  # e.g. a decode peer with a different TP
+        w._chunk_path_supported = lambda job, reg_data: False
+    else:
+        handshake: Future = Future()
+        w._ensure_handshake = MagicMock(return_value=handshake)
+    _publish(w, _chunk_job(0, 1), _chunk_job(1, 2))
+    w._process_chunk_jobs()
+    if cause == "failed_handshake":
+        handshake.set_exception(RuntimeError("decode is unreachable"))
+    w._poll_chunk_transfers()
+    w._process_chunk_jobs()
+    if cause == "failed_handshake":
+        # Each job tries the handshake once, as a whole-request push does.
+        assert w._ensure_handshake.call_count == 2
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    w._poll_chunk_transfers()
+    assert all(notif_msg == b"" for _, _, notif_msg in w.writes)
+
+    w._set_chunk_finished("req-p", ([1, 2],))
+    w._process_chunk_handoffs()
+    assert w.start_push_calls == [
+        ("req-p", ([1, 2],), _registration_data("req-d", local_block_ids=((100, 101),)))
+    ]
+
+
+def test_finished_request_without_registration_waits_as_whole_push():
+    w = _chunk_worker()
+    w._pending_d_registrations.clear()
+    _publish(w, _chunk_job(0, 2))
+    w._process_chunk_jobs()
+    w._set_chunk_finished("req-p", ([1, 2],))
+    w._process_chunk_handoffs()
+    assert w._push_finished_blocks == {"req-p": ([1, 2],)}
+
+    w._process_chunk_jobs()
+    assert w._chunk_deferred == []
+    assert w.writes == []
+
+
+def _retire(w: _StubWriterWorker, preempted: bool) -> threading.Event:
+    """Hand the writer what handle_preemptions sends for "req-p" when it is
+    preempted or aborted; the event is set once its WRITEs have settled."""
+    retirement = _ChunkRetirement(
+        preempted={"req-p"} if preempted else set(),
+        aborted=set() if preempted else {"req-p"},
+    )
+    w._chunk_job_inbox.put(retirement)
+    w._process_chunk_jobs()
+    w._poll_chunk_transfers()
+    return retirement.done
+
+
+@pytest.mark.parametrize("preempted", [True, False])
+def test_retired_request_settles_its_writes_and_drops_its_jobs(preempted):
+    w = _chunk_worker()
+    w.nixl_wrapper.check_xfer_state.return_value = "PROC"
+    _publish(w, _chunk_job(0, 1))
+    w._process_chunk_jobs()
+    _publish(w, _chunk_job(1, 2), ready=False)
+
+    # The job still waiting for its CUDA event is dropped, and the wait lasts
+    # until the WRITE no longer reads the blocks.
+    settled = _retire(w, preempted)
+    assert w._chunk_deferred == []
+    assert not settled.is_set()
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    w._poll_chunk_transfers()
+    assert settled.is_set()
+    assert len(w.writes) == 1
+
+    if preempted:
+        # The recomputed prompt is pushed again from the first block.
+        _publish(w, _chunk_job(0, 2))
+        w._process_chunk_jobs()
+        assert w.writes[1:] == [(([1, 2],), ([100, 101],), None)]
+
+
+@pytest.mark.parametrize("handed_off", [True, False])
+def test_request_preempted_during_its_handoff(handed_off):
+    w = _chunk_worker()
+    _fail_writes(w)
+    w.nixl_wrapper.check_xfer_state.return_value = "PROC"
+    _publish(w, _chunk_job(0, 2))
+    w._process_chunk_jobs()
+    settled = _retire(w, preempted=True)
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE" if handed_off else "ERR"
+    w._poll_chunk_transfers()
+    assert settled.is_set()
+
+    # Once handed off, the recomputed prompt is not pushed again.
+    _publish(w, _chunk_job(0, 2))
+    w._process_chunk_jobs()
+    assert len(w.writes) == (1 if handed_off else 2)
+
+
+def test_preemption_stops_waiting_for_a_write_that_never_completes():
+    w = _chunk_worker()
+    w._lease_extension = 0
+    meta = NixlConnectorMetadata()
+    meta.push_chunk_preemptions = {"req-p"}
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker.logger"
+    ) as mock_logger:
+        w.handle_preemptions(meta)
+    mock_logger.error.assert_called_once()
+
+
+def test_evicted_request_drops_its_chunk_jobs():
+    # Its lease expired, e.g. because the handshake to D never completed.
+    w = _chunk_worker()
+    w._ensure_handshake = MagicMock(return_value=Future())
+    w.nixl_wrapper.get_new_notifs.return_value = {}
+    _publish(w, _chunk_job(0, 2))
+    w._process_chunk_jobs()
+    w._evict_finished_inbox.put("req-p")
+
+    _run_writer_until_idle(w)
+    assert w._chunk_deferred == []
+    assert "req-p" not in w._chunk_states
+    assert w.writes == []
 
 
 class TestPushWriterRegSend:
