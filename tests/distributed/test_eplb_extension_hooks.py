@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+
 import pytest
 import torch
 from transformers import LlamaConfig
@@ -247,26 +249,31 @@ def model_state(cpu_group):
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-def test_planning_hook_preserves_existing_policy_result(model_state, use_async):
+def test_policy_receives_extended_stats_without_losing_inputs(model_state, use_async):
+    @dataclass
+    class Stats(EplbStats):
+        metadata: tuple[int, ...] = ()
+
+    class Policy(DefaultEplbPolicy):
+        def rebalance_experts(self, stats, old_global_expert_indices=None):
+            assert isinstance(stats, Stats)
+            assert stats.metadata == (3, 7)
+            assert stats.global_expert_load_window.device.type == "cpu"
+            return super().rebalance_experts(stats, old_global_expert_indices)
+
     loads = torch.tensor([[13, 3, 4, 3]])
     current = torch.tensor([[0, 1, 2, 3, 0, 1]])
-    observed = []
-
-    class State(_State):
-        def rebalance_experts(self, model, weight, *args):
-            observed.append(model)
-            assert weight.ndim == 2
-            return super().rebalance_experts(model, weight, *args)
-
-    state = State()
+    stats = Stats(loads, 6, 1, 1, 2, metadata=(3, 7))
+    state = _State(Policy())
     if use_async:
-        model_state.eplb_stats = EplbStats(loads, 6, 1, 1, 2)
+        model_state.eplb_stats = stats
         result = run_rebalance_experts(model_state, state, current, None)
     else:
-        result = state.rebalance_experts(model_state, loads, 6, 1, 1, 2, current)
-    expected = DefaultEplbPolicy.rebalance_experts(loads, 6, 1, 1, 2, current)
+        result = state.policy.rebalance_experts(stats, current)
+    default_state = EplbState(ParallelConfig(), torch.device("cpu"))
+    assert isinstance(default_state.policy, DefaultEplbPolicy)
+    expected = default_state.policy.rebalance_experts(stats, current)
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
-    assert len(observed) == 1 and observed[0] is model_state
 
 
 @pytest.mark.parametrize("fail_commit", [False, True])
