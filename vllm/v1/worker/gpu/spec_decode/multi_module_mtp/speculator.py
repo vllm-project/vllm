@@ -75,7 +75,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
     def add_request(self, req_index: int) -> None:
-        self.num_cached_tokens[req_index] = 0
+        self.num_cached_tokens[req_index : req_index + 1].zero_()
 
     def load_draft_model(
         self,
