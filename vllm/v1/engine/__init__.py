@@ -261,6 +261,19 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
+class PrefillProgress(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    """Per-request prefill progress, so a router can price a request exactly."""
+
+    request_id: str
+    # Tokens still to compute for this request's prefill.
+    remaining_prefill_tokens: int
+
+
 class EngineCoreOutput(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -315,6 +328,8 @@ class EngineCoreOutput(
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
+    # Remaining prefill work for this request, while it is prefilling.
+    prefill_progress: PrefillProgress | None = None
 
 
 class UtilityOutput(
@@ -327,19 +342,6 @@ class UtilityOutput(
     # Non-None implies the call failed, result should be None.
     failure_message: str | None = None
     result: UtilityResult | None = None
-
-
-class PrefillProgress(
-    msgspec.Struct,
-    array_like=True,  # type: ignore[call-arg]
-    omit_defaults=True,  # type: ignore[call-arg]
-    gc=False,
-):  # type: ignore[call-arg]
-    """Per-request prefill progress, so a router can price a request exactly."""
-
-    request_id: str
-    # Tokens still to compute for this request's prefill.
-    remaining_prefill_tokens: int
 
 
 class EngineCoreOutputs(
