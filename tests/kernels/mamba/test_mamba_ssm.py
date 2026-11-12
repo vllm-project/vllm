@@ -563,9 +563,9 @@ def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
 @pytest.mark.parametrize("is_variable_B", [True])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [False, True])
-# tests the launch config chosen from the longest sequence and from an
-# underestimate of it, which must split sequences into more chunks
-@pytest.mark.parametrize("max_seqlen_mode", ["exact", "under"])
+# tests the default fallback to the total length and an underestimate of the
+# longest sequence, which splits longer sequences into more chunks
+@pytest.mark.parametrize("max_seqlen_mode", ["unset", "under"])
 @skip_unless_cuda_alike
 def test_selective_scan_varlen(
     max_seqlen_mode,
@@ -673,7 +673,7 @@ def test_selective_scan_varlen(
         0, 2, (cumsum.shape[0] - 1,), dtype=torch.bool, device=u.device
     )
     max_seqlen = {
-        "exact": max(seqlens[0]),
+        "unset": 0,
         "under": max(1, max(seqlens[0]) // 3),
     }[max_seqlen_mode]
     out = selective_scan_fn(
