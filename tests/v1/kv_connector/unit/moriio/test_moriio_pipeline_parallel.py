@@ -198,7 +198,9 @@ def test_decode_addresses_only_the_first_stage(shape, pp_size, tp_size):
     scheduler = _decode_scheduler()
 
     scheduler.update_state_after_alloc(
-        SimpleNamespace(request_id="req", kv_transfer_params=params, num_prompt_tokens=40),
+        SimpleNamespace(
+            request_id="req", kv_transfer_params=params, num_prompt_tokens=40
+        ),
         SimpleNamespace(
             get_block_ids=lambda: ([5, 6, 7],),
             get_unhashed_block_ids_all_groups=lambda: [[5, 6, 7]],
@@ -258,7 +260,9 @@ def test_every_stage_gets_the_allocation_and_release(shape, monkeypatch):
     scheduler = _decode_scheduler(send=True)
 
     scheduler.update_state_after_alloc(
-        SimpleNamespace(request_id="req", kv_transfer_params=params, num_prompt_tokens=40),
+        SimpleNamespace(
+            request_id="req", kv_transfer_params=params, num_prompt_tokens=40
+        ),
         SimpleNamespace(
             get_block_ids=lambda: ([5, 6, 7],),
             get_unhashed_block_ids_all_groups=lambda: [[5, 6, 7]],
