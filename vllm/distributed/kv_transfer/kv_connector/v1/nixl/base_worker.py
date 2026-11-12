@@ -128,10 +128,10 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     return len(block_strides) == len(storage_ptrs) == 1
 
 
-# Slack (seconds) between a modelled remote lease deadline and the moment this
-# worker acts on it (sends a heartbeat that must still find the lease alive, or
-# posts a read). It absorbs the error of the handshake clock-offset estimate
-# and the propagation delay of a notification to the remote.
+# Upper bound (seconds) of the slack between a modelled remote lease deadline
+# and the moment this worker acts on it (sends a heartbeat that must still find
+# the lease alive, or posts a read). It absorbs the error of the handshake
+# clock-offset estimate and the propagation delay of a notification.
 _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
@@ -712,6 +712,11 @@ class NixlBaseConnectorWorker:
         )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_extension(kv_lease_duration)
+        # At most the heartbeat interval so heartbeats can keep a short lease
+        # alive (assumes both sides share kv_lease_duration, like the interval).
+        self._lease_safety_margin = min(
+            _KV_BLOCKS_EXPIRY_SAFETY_MARGIN, kv_lease_duration / 6
+        )
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -3664,7 +3669,7 @@ class NixlBaseConnectorWorker:
             model = self._remote_leases[key] = RemoteLeaseModel(deadline)
         if not model.alive:
             return
-        if now + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN <= model.deadline:
+        if now + self._lease_safety_margin <= model.deadline:
             model.deadline = max(model.deadline, now + extension)
         else:
             # The lease ran out before this heartbeat could reach the remote;

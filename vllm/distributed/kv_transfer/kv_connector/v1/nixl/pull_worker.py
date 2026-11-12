@@ -9,7 +9,6 @@ import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-    _KV_BLOCKS_EXPIRY_SAFETY_MARGIN,
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -164,7 +163,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         deadline = self._remote_lease_deadline(meta)
         if deadline is None:
             return False
-        return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
+        return time.perf_counter() + self._lease_safety_margin >= deadline
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None

@@ -54,11 +54,14 @@ _FAKE_WRAPPER = patch(
 )
 
 
-def _make_connector():
+def _make_connector(kv_lease_duration: int = _LEASE):
     """Worker-side NixlConnector (pull mode, no bidirectional transfer) with a
     handshaken fake remote and a zero clock offset."""
     block_size = maybe_update_block_size(32)
-    vllm_config = create_vllm_config(block_size=block_size)
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        kv_connector_extra_config={"kv_lease_duration": kv_lease_duration},
+    )
     kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=2)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
     connector.connector_worker = FakeNixlConnectorWorker(
@@ -267,6 +270,26 @@ def test_heartbeat_chain_end_to_end(
     now["t"] = read_time
     result = _load(connector, meta)
     _assert_declined(worker, result, expect_declined)
+
+
+@_FAKE_WRAPPER
+@pytest.mark.parametrize("heartbeats", [True, False])
+def test_short_lease_keeps_reads_alive(dist_init, monkeypatch, heartbeats):
+    """With a lease shorter than the default margin allows (6s: 4s renewals,
+    1s heartbeat interval), the margin shrinks to the heartbeat interval, so
+    both the initial lease and heartbeat renewals still allow the read."""
+    lease = 6
+    connector, worker = _make_connector(kv_lease_duration=lease)
+    now = {"t": 0.0}
+    monkeypatch.setattr(time, "perf_counter", lambda: now["t"])
+    meta = _recv_meta(lease)
+    leases = {_REMOTE_REQ: (float(lease), kv_lease_extension(lease))}
+    for t in range(20) if heartbeats else ():
+        now["t"] = float(t)
+        worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
+    now["t"] = 20.0 if heartbeats else 4.0
+    result = _load(connector, meta)
+    _assert_declined(worker, result, False)
 
 
 @_FAKE_WRAPPER

@@ -56,7 +56,9 @@ To close this gap, P exports the lease deadline in `kv_transfer_params`
 `remote_lease_extension`, the number of seconds each heartbeat renews the lease
 by. Before issuing a read, D's worker rebases the deadline with the clock offset
 measured at handshake and declines the read if the deadline is within
-`_KV_BLOCKS_EXPIRY_SAFETY_MARGIN` (5s) of now.
+the safety margin of now: 5s, or the heartbeat interval
+(`kv_lease_duration / 6`) for leases shorter than 30s, so that heartbeats can
+keep a short lease alive.
 
 The heartbeats D itself sent for the request are taken into account with an
 exact model of P's renewal rule: D's scheduler ships the exported deadline and
@@ -91,7 +93,7 @@ What this does not cover:
 - A single heartbeat stall longer than `extension - margin` (15s with the
   defaults) marks the modelled lease as lapsed for good, even though P may have
   renewed it if the late heartbeat still arrived in time; the request is then
-  declined however long it is heartbeated afterwards. The shared 5s margin
+  declined however long it is heartbeated afterwards. The shared margin
   trades this (rare, conservative) case for simplicity.
 - A heartbeat notification that takes longer than the safety margin to reach P.
   The model credits the renewal at send time; if P only processes the heartbeat
@@ -106,7 +108,7 @@ What this does not cover:
   initial lease is over.
 - The clock offset is estimated once per handshake (and again whenever the
   remote re-registers). Both hosts' monotonic clocks are assumed to be
-  rate-disciplined (NTP/chrony); an undisciplined drift that exceeds the 5s
+  rate-disciplined (NTP/chrony); an undisciplined drift that exceeds the
   margin over the lifetime of the pairing would defeat the check.
 - The check happens right before the read is posted. A lease that runs out
   while the transfer is in flight is the existing race that
