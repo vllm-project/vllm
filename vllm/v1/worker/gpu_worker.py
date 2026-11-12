@@ -180,6 +180,7 @@ if TYPE_CHECKING:
     from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.pp_utils import PPActivationTransport
 
 
 class AsyncIntermediateTensors(IntermediateTensors):
@@ -271,6 +272,16 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
 
+        if envs.VLLM_ROCM_USE_STREAMED_PP_TRANSPORT:
+            if not current_platform.is_rocm():
+                raise ValueError("Streamed PP transport is only supported on ROCm")
+            if self.parallel_config.pipeline_parallel_size <= 1:
+                raise ValueError("Streamed PP transport requires PP > 1")
+            if self.parallel_config.tensor_parallel_size != 1:
+                raise ValueError("Streamed PP transport currently requires TP=1")
+            if self.model_config.dtype != torch.bfloat16:
+                raise ValueError("Streamed PP transport requires BF16 activations")
+
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
         # Chosen by VLLM_PP_TRANSPORT in load_model; None sends over NCCL.
@@ -327,6 +338,7 @@ class Worker(WorkerBase):
         return set(storage.values()) - preserved
 
     def sleep(self, level: int = 1) -> None:
+        self._drain_pp_activation_transport()
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
         # Level 2 keeps everything the weight update doesn't rewrite.
@@ -620,7 +632,11 @@ class Worker(WorkerBase):
                 format_gib(self.requested_memory),
             )
 
-        if envs.VLLM_PP_TRANSPORT != "nccl" and self._pp_transport is None:
+        if (
+            envs.VLLM_PP_TRANSPORT != "nccl"
+            and self._pp_transport is None
+            and self._get_pp_activation_transport() is None
+        ):
             # After init_device, so memory profiling counts its buffers.
             from vllm.distributed.pp_transport import create_pp_transport
 
@@ -639,10 +655,16 @@ class Worker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
-        # Preserve parallel weight loading, then use serving's thread count
-        # for profiling and compilation so Dynamo's global-state guards remain
-        # valid when requests arrive.
         set_torch_threads_for_runtime()
+
+    def _get_pp_activation_transport(self) -> "PPActivationTransport | None":
+        pp_handler = getattr(self.model_runner, "pp_handler", None)
+        return None if pp_handler is None else pp_handler.activation_transport
+
+    def _drain_pp_activation_transport(self) -> None:
+        pp_handler = getattr(self.model_runner, "pp_handler", None)
+        if pp_handler is not None:
+            pp_handler.drain_activation_transport()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the
@@ -1487,14 +1509,34 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        activation_transport = self._get_pp_activation_transport()
+        all_gather_tensors: dict[str, bool] = {}
+        use_fixed_pp_transport = (
+            forward_pass
+            and activation_transport is not None
+            and activation_transport.can_transfer(
+                num_scheduled_tokens,
+                all_gather_tensors,
+            )
+        )
+
         if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
             intermediate_tensors = self._pp_transport.recv(get_pp_group())
         elif forward_pass and not get_pp_group().is_first_rank:
-            tensor_dict, comm_handles, comm_postprocess = (
-                get_pp_group().irecv_tensor_dict(
-                    all_gather_group=get_tp_group(),
+            tensor_dict: dict[str, Any] | None
+            comm_postprocess: list[Callable[[], None]]
+            if use_fixed_pp_transport:
+                assert activation_transport is not None
+                tensor_dict, comm_handles = activation_transport.receive()
+                comm_postprocess = []
+            else:
+                tensor_dict, comm_handles, comm_postprocess = (
+                    get_pp_group().irecv_tensor_dict(
+                        all_gather_group=get_tp_group(),
+                        all_gather_tensors=all_gather_tensors,
+                    )
                 )
-            )
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -1520,7 +1562,16 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        if self._pp_transport is not None:
+        if use_fixed_pp_transport:
+            assert activation_transport is not None
+            activation_transport.send(output.tensors)
+        elif activation_transport is not None:
+            activation_transport.send_generic(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+                all_gather_tensors=all_gather_tensors,
+            )
+        elif self._pp_transport is not None:
             self._pp_transport.send(output.tensors, get_pp_group())
         else:
             # Non-blocking send of the intermediate tensors. The metadata handle
@@ -1529,6 +1580,7 @@ class Worker(WorkerBase):
             handles = get_pp_group().isend_tensor_dict(
                 output.tensors,
                 all_gather_group=get_tp_group(),
+                all_gather_tensors=all_gather_tensors,
             )
             self._pp_send_work = handles[1:]
 
@@ -1836,6 +1888,8 @@ class Worker(WorkerBase):
 
     def shutdown(self) -> None:
         gc.unfreeze()
+
+        self._drain_pp_activation_transport()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
