@@ -136,23 +136,6 @@ _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 
 
 @dataclass
-class RemoteLeaseModel:
-    """The remote's lease on one request's KV blocks, as renewed by the
-    heartbeats this worker sent (deadline in our perf_counter domain).
-
-    Mirrors ``_handle_heartbeat`` on the remote: a heartbeat that arrives while
-    the lease is alive renews it to ``now + extension``; one that arrives after
-    it ran out renews nothing, and nothing after it does either. Our send time
-    plus the safety margin stands in for the arrival time, so the model can
-    only lag the real lease, never run ahead of it (as long as a notification
-    propagates within the margin); see ``_record_heartbeat_sent``.
-    """
-
-    deadline: float
-    alive: bool = True
-
-
-@dataclass
 class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
 
@@ -873,7 +856,7 @@ class NixlBaseConnectorWorker:
         # Remote leases as renewed by the heartbeats this worker sent, so the
         # pull path knows how long the producer keeps the blocks before it
         # reads them. Keyed by (remote engine id, remote request id).
-        self._remote_leases: dict[tuple[EngineId, str], RemoteLeaseModel] = {}
+        self._remote_leases: dict[tuple[EngineId, str], float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -3322,12 +3305,6 @@ class NixlBaseConnectorWorker:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
-            if meta.remote is not None:
-                # Heartbeats may have gone out between the read and its
-                # completion; the scheduler stops them once it learns of it.
-                self._remote_leases.pop(
-                    (meta.remote.engine_id, meta.remote.request_id), None
-                )
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
@@ -3636,11 +3613,10 @@ class NixlBaseConnectorWorker:
                         exc_info=True,
                     )
             clock_offset = self._engine_clock_offset.get(engine_id)
-            if all_sent and clock_offset is not None and self._TRANSFER_MODE == "pull":
+            if all_sent and clock_offset is not None:
                 # A round that missed a rank is not counted. This avoids relying
                 # on the scheduler-side aggregation that keeps the blocks
-                # allocated until every rank's lease has ended. Only the pull
-                # worker reads remote blocks, so only it keeps the models.
+                # allocated until every rank's lease has ended.
                 for remote_req_id, (expiry, extension) in hb_info.leases.items():
                     if "," in remote_req_id:
                         # The payload is comma-separated, so the remote cannot
@@ -3653,29 +3629,26 @@ class NixlBaseConnectorWorker:
                         extension,
                     )
         if metadata.heartbeat_by_engine:
-            # A model past its deadline no longer matters (the read is declined
+            # A lease past its deadline no longer matters (the read is declined
             # either way), and one for a request still heartbeated is renewed.
             self._remote_leases = {
-                k: m for k, m in self._remote_leases.items() if m.deadline > now
+                k: d for k, d in self._remote_leases.items() if d > now
             }
 
     def _record_heartbeat_sent(
         self, key: tuple[EngineId, str], now: float, deadline: float, extension: int
     ) -> None:
-        """Apply one heartbeat sent at ``now`` to the model of the remote lease
-        whose initial deadline (our clock) is ``deadline``."""
-        model = self._remote_leases.get(key)
-        if model is None:
-            model = self._remote_leases[key] = RemoteLeaseModel(deadline)
-        if not model.alive:
-            return
-        if now + self._lease_safety_margin <= model.deadline:
-            model.deadline = max(model.deadline, now + extension)
-        else:
-            # The lease ran out before this heartbeat could reach the remote;
-            # the blocks are released at the deadline and later heartbeats
-            # renew nothing.
-            model.alive = False
+        """Apply one heartbeat sent at ``now`` to our model of the remote's lease
+        (initial deadline ``deadline``, our clock), mirroring its
+        ``_handle_heartbeat``: a heartbeat that reaches a live lease renews it
+        to ``now + extension``. Our send time plus the safety margin stands in
+        for the arrival time, so the model lags the real lease (as long as a
+        notification propagates within the margin). Once a heartbeat finds the
+        lease gone, no later one renews it: the deadline no longer moves while
+        ``now`` grows."""
+        lease = self._remote_leases.setdefault(key, deadline)
+        if now + self._lease_safety_margin <= lease:
+            self._remote_leases[key] = max(lease, now + extension)
 
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int

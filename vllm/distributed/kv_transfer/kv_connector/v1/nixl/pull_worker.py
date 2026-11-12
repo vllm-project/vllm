@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
+import math
 import time
 from typing import TYPE_CHECKING
 
@@ -123,46 +124,31 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
                 self._reqs_to_send[req_id] = expiration_time
 
-    def _remote_lease_deadline(self, meta: ReqMeta) -> float | None:
-        """Instant (our perf_counter) until which the remote keeps this request's
-        blocks, or None when it cannot be told.
-
-        Starts from the deadline the remote exported in ``kv_transfer_params``,
-        rebased with the handshake clock offset. Heartbeats we sent for the
-        request renew the lease on the remote, and ``_record_heartbeat_sent``
-        keeps an exact model of those renewals (a lease that lapsed between two
-        heartbeats keeps the deadline it ran out at). Without a model (no
-        heartbeat went out, or the remote exported no renewal amount) the
-        initial deadline stands: never guess.
-        """
-        assert meta.remote is not None
-        expiry = meta.remote.blocks_expiry_time
-        if expiry is None:
-            return None
-        clock_offset = self._engine_clock_offset.get(meta.remote.engine_id)
-        if clock_offset is None:
-            return None
-        deadline = expiry - clock_offset
-        model = self._remote_leases.get((meta.remote.engine_id, meta.remote.request_id))
-        if model is None:
-            return deadline
-        return max(deadline, model.deadline)
-
     def _is_remote_read_expired(self, meta: ReqMeta) -> bool:
         """Whether the remote's lease on this request's blocks has (nearly) run out.
 
         P exports the deadline of the lease it grants when a prefill finishes (D
         exports its turn-2 TTL). Past it the remote has released the blocks and
         reused them, so the read would load other requests' KV and SSM state
-        without any transport error.
+        without any transport error. The deadline is rebased with the handshake
+        clock offset and extended by the renewals our heartbeats caused
+        (``_record_heartbeat_sent``).
         """
+        remote = meta.remote
+        assert remote is not None
+        clock_offset = self._engine_clock_offset.get(remote.engine_id)
         # A full local prefix hit issues no read at all. The deadline may be
         # absent (older peer, or a router that drops it): read as before.
-        if not meta.local_physical_block_ids:
+        if (
+            not meta.local_physical_block_ids
+            or remote.blocks_expiry_time is None
+            or clock_offset is None
+        ):
             return False
-        deadline = self._remote_lease_deadline(meta)
-        if deadline is None:
-            return False
+        deadline = max(
+            remote.blocks_expiry_time - clock_offset,
+            self._remote_leases.get((remote.engine_id, remote.request_id), -math.inf),
+        )
         return time.perf_counter() + self._lease_safety_margin >= deadline
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
@@ -183,9 +169,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)
             return
-        lease_key = (engine_id, meta.remote.request_id)
         if self._is_remote_read_expired(meta):
-            self._remote_leases.pop(lease_key, None)
             # One warning per remote engine explains the condition; every
             # occurrence is counted (Num declined expired reads) and logged at
             # debug level, as a stalled router can produce these continuously.
@@ -209,9 +193,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
-        # The read goes ahead; the scheduler stops heartbeating this request
-        # once it completes.
-        self._remote_leases.pop(lease_key, None)
 
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.

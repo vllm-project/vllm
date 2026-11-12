@@ -63,7 +63,7 @@ keep a short lease alive.
 The heartbeats D itself sent for the request are taken into account with an
 exact model of P's renewal rule: D's scheduler ships the exported deadline and
 renewal amount along with each heartbeat batch (`HeartbeatInfo.leases`), and
-the worker applies every heartbeat it sends to a per-request `RemoteLeaseModel`
+the worker applies every heartbeat it sends to a per-request lease deadline
 the way P's `_handle_heartbeat` would. A heartbeat that goes out while the
 modelled lease is still alive renews it to `send time + extension`; one that
 goes out after the lease ran out renews nothing, and neither does anything after

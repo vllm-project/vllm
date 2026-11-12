@@ -22,7 +22,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     _KV_BLOCKS_EXPIRY_SAFETY_MARGIN,
-    RemoteLeaseModel,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import HeartbeatInfo
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
@@ -212,21 +211,15 @@ def test_lease_model_decides_the_read(
     dist_init, expiry_delta, model_deadline_delta, expect_declined
 ):
     connector, worker = _make_connector()
-    worker._remote_leases[_KEY] = RemoteLeaseModel(
-        deadline=time.perf_counter() + model_deadline_delta
-    )
+    worker._remote_leases[_KEY] = time.perf_counter() + model_deadline_delta
     result = _load(connector, _recv_meta(expiry_delta))
     _assert_declined(worker, result, expect_declined)
-    # Bookkeeping is dropped once the read is decided either way.
-    assert _KEY not in worker._remote_leases
 
 
 @_FAKE_WRAPPER
 def test_model_for_another_engine_does_not_count(dist_init):
     connector, worker = _make_connector()
-    worker._remote_leases[("other-engine", _REMOTE_REQ)] = RemoteLeaseModel(
-        deadline=time.perf_counter() + 100.0
-    )
+    worker._remote_leases[("other-engine", _REMOTE_REQ)] = time.perf_counter() + 100
     result = _load(connector, _recv_meta(-10.0))
     _assert_declined(worker, result, True)
 
@@ -304,15 +297,17 @@ def test_lease_model_mirrors_the_remote_renewal(dist_init, monkeypatch):
     for t, deadline in expected:
         now["t"] = t
         worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
-        model = worker._remote_leases[_KEY]
-        assert (model.deadline, model.alive) == (deadline, True)
-    # 54 + margin > 58: this heartbeat finds the lease gone; it and all later
-    # ones renew nothing, and the deadline stays where the lease ran out.
-    for t in (54.0, 59.0):
+        assert worker._remote_leases[_KEY] == deadline
+    # 54 + margin > 58: this heartbeat finds the lease gone and renews nothing.
+    now["t"] = 54.0
+    worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
+    assert worker._remote_leases[_KEY] == 58.0
+    # Past 58 the lease is pruned; later heartbeats start again from the
+    # initial deadline (30), which is long gone, so they renew nothing either.
+    for t in (59.0, 64.0):
         now["t"] = t
         worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
-    model = worker._remote_leases[_KEY]
-    assert (model.deadline, model.alive) == (58.0, False)
+        assert _KEY not in worker._remote_leases
 
 
 @_FAKE_WRAPPER
@@ -358,7 +353,7 @@ def test_send_heartbeats_prunes_expired_models(dist_init, monkeypatch):
     # "b" is no longer heartbeated; a round carrying only "a" keeps both.
     now["t"] = 125.0
     worker._send_heartbeats(_hb_meta("a", leases={"a": leases["a"]}))
-    assert worker._remote_leases[(_REMOTE, "a")].deadline == 145.0
+    assert worker._remote_leases[(_REMOTE, "a")] == 145.0
     assert set(worker._remote_leases) == {(_REMOTE, "a"), (_REMOTE, "b")}
     # Past b's deadline the next round drops it; an empty (throttled) round
     # prunes nothing.
@@ -417,7 +412,7 @@ def test_replicated_pcp_rank_keeps_a_lease_model(dist_init, monkeypatch):
         connector.bind_connector_metadata(_hb_meta(_REMOTE_REQ, leases=leases))
         connector.start_load_kv(ctx)
         connector.clear_connector_metadata()
-    assert worker._remote_leases[_KEY].deadline == 70.0
+    assert worker._remote_leases[_KEY] == 70.0
 
 
 @_FAKE_WRAPPER
@@ -437,23 +432,6 @@ def test_heartbeat_round_in_the_read_step_is_credited_first(dist_init, monkeypat
     meta.heartbeat_by_engine = _hb_meta(_REMOTE_REQ, leases=leases).heartbeat_by_engine
     result = _load(connector, meta)
     _assert_declined(worker, result, False)
-
-
-@_FAKE_WRAPPER
-def test_model_is_dropped_when_the_transfer_completes(dist_init):
-    """Heartbeats may still go out between the read and its completion; the
-    model they recreate must not outlive the transfer."""
-    connector, worker = _make_connector()
-    leases = {_REMOTE_REQ: (time.perf_counter() + 30.0, 20)}
-    connector.bind_connector_metadata(_recv_meta(20.0))
-    ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
-    connector.start_load_kv(ctx)
-    assert _KEY not in worker._remote_leases  # popped when the read was decided
-    worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
-    assert _KEY in worker._remote_leases
-    result = worker.get_transfer_results()
-    assert "req" in result.finished_recving
-    assert _KEY not in worker._remote_leases
 
 
 # ---------------------------------------------------------------------------
