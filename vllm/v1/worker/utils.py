@@ -18,6 +18,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -449,6 +450,12 @@ class AttentionGroup:
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
+        # A padded page spreads its kernel blocks evenly.
+        page_stride = (
+            spec.page_size_bytes
+            // kv_cache.element_size()
+            // (kv_cache.shape[-2] // kernel_rows)
+        )
         # Token caches are written through manager-block slot mappings, so only
         # caches written from their block table (compressed ones, or as their
         # backend declares) or whose slot mappings are mapped too
@@ -460,7 +467,7 @@ class AttentionGroup:
                 and not self.maps_slot_mapping
             )
             or kv_cache.shape[1] != 1
-            or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))
+            or kv_cache.stride(0) % page_stride
         ):
             raise ValueError(
                 f"{self.backend.get_name()} needs {self.kernel_block_size}-token "
@@ -472,7 +479,6 @@ class AttentionGroup:
         # Kernel block j of block b is b * kernel_block_stride + j. The view
         # spans the other layers' pages between blocks (never addressing them),
         # which ``view`` cannot express.
-        page_stride = kernel_rows * kv_cache.stride(-2)
         self.kernel_block_stride = kv_cache.stride(0) // page_stride
         num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
             kv_cache.shape[-2] // kernel_rows
@@ -488,7 +494,8 @@ class AttentionGroup:
         """Views a packed cache in kernel blocks as manager blocks."""
         assert self.kernel_block_stride
         spec = self.kv_cache_spec
-        rows = spec.get_num_kernel_states(spec.block_size)
+        row_bytes = kv_cache.stride(-2) * kv_cache.element_size()
+        rows = cdiv(spec.page_size_bytes, row_bytes)
         return kv_cache.as_strided(
             (num_blocks, *kv_cache.shape[1:-2], rows, kv_cache.shape[-1]),
             (kv_cache.stride(0) * self.kernel_block_stride, *kv_cache.stride()[1:]),

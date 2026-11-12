@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 from vllm.config import VllmConfig
@@ -34,6 +34,8 @@ logger = init_logger(__name__)
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
+# DeepGEMM reads indexer pages through TMA.
+_INDEXER_PAGE_ALIGNMENT = 16
 
 
 @dataclass(frozen=True)
@@ -84,10 +86,11 @@ def _lay_out_hisparse_groups(
     mla_specs: dict[str, KVCacheSpec],
     regular_groups: list[KVCacheGroupSpec],
 ) -> list[KVCacheGroupSpec]:
-    """Lay out the groups to fill the largest regular page, or the pool block
-    when a block-outer layout rounds it up to every group's block stride
-    alignment. Before the layout is resolved, only the per-layer specs are
-    used."""
+    """Lay out the groups to fill the largest regular page. When a block-outer
+    layout's pool block is not whole indexer pages, either the block grows to
+    whole pages or the pages spread out to divide the block, whichever takes
+    less memory per request. Before the layout is resolved, only the per-layer
+    specs are used."""
     from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block
 
     block_bytes = max(map(_group_page_bytes, regular_groups), default=0)
@@ -97,8 +100,30 @@ def _lay_out_hisparse_groups(
     pool_block_bytes = _pool_bytes_per_block(vllm_config, groups)
     if pool_block_bytes == block_bytes:
         return groups
-    return _fill_hisparse_groups(
-        vllm_config, mla_specs, regular_groups, pool_block_bytes
+    other_groups = [
+        group for group in groups if group.role is not KVCacheGroupRole.HISPARSE_INDEXER
+    ]
+    candidates = [
+        _fill_hisparse_groups(vllm_config, mla_specs, regular_groups, pool_block_bytes),
+        _fill_hisparse_groups(
+            vllm_config,
+            mla_specs,
+            regular_groups,
+            _pool_bytes_per_block(vllm_config, other_groups),
+            spread_indexer_pages=True,
+        ),
+    ]
+    return min(
+        candidates,
+        key=lambda groups: (
+            _pool_bytes_per_block(vllm_config, groups)
+            * sum(
+                group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+                / group.kv_cache_spec.page_size_bytes
+                for group in groups
+                if not group.host_resident
+            )
+        ),
     )
 
 
@@ -142,6 +167,7 @@ def _fill_hisparse_groups(
     mla_specs: dict[str, KVCacheSpec],
     regular_groups: list[KVCacheGroupSpec],
     block_bytes: int,
+    spread_indexer_pages: bool = False,
 ) -> list[KVCacheGroupSpec]:
     source_specs, indexer_specs = _partition_hisparse_specs(mla_specs)
     block_sizes = {spec.block_size for spec in source_specs.values()}
@@ -163,10 +189,23 @@ def _fill_hisparse_groups(
     )
     assert config is not None
     indexer_page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values())
+    page_stride = None
+    if spread_indexer_pages:
+        page_bytes = indexer_page_bytes // len(indexer_specs)
+        page_stride = block_bytes // next(
+            pages
+            for pages in range(block_bytes // page_bytes, 0, -1)
+            if block_bytes % (pages * _INDEXER_PAGE_ALIGNMENT) == 0
+        )
+        indexer_page_bytes = page_stride * len(indexer_specs)
     pages_per_block = max(block_bytes // indexer_page_bytes, 1)
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
         {
-            name: spec.copy_with_new_block_size(spec.block_size * pages_per_block)
+            name: replace(
+                spec.copy_with_new_block_size(spec.block_size * pages_per_block),
+                page_size_padded=page_stride and page_stride * pages_per_block,
+                block_stride_alignment=page_stride or spec.block_stride_alignment,
+            )
             for name, spec in indexer_specs.items()
         }
     )

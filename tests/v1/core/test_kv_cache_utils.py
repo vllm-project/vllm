@@ -273,11 +273,11 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page(
 
 
 @pytest.mark.parametrize(
-    ("kv_cache_layout", "indexer_block_size"), [(None, 4096), ("BLHNC", 4608)]
+    ("kv_cache_layout", "indexer_block_size"), [(None, 4096), ("BLHNC", 2304)]
 )
-def test_hisparse_indexer_fills_rounded_pool_block(kv_cache_layout, indexer_block_size):
-    """A block-outer pool block rounds up past the largest page to the lcm of
-    hot rows and indexer kernel pages; indexer blocks fill the padding."""
+def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block_size):
+    """A block-outer pool block is whole hot rows, and indexer kernel pages
+    spread out to divide it when growing it to whole pages costs more."""
     mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
     specs: dict[str, KVCacheSpec] = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -305,7 +305,7 @@ def test_hisparse_indexer_fills_rounded_pool_block(kv_cache_layout, indexer_bloc
     )
     assert indexer_group.kv_cache_spec.block_size == indexer_block_size
     if kv_cache_layout is not None:
-        assert _pool_bytes_per_block(config, groups) == 1_179_648
+        assert _pool_bytes_per_block(config, groups) == 1_049_472
 
 
 def test_hisparse_rejects_deepseek_v4():
