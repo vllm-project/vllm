@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
@@ -25,6 +26,10 @@ from vllm.platforms import current_platform
 from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import device_memory_info, format_gib
+from vllm.utils.vmm_driver import (
+    MEM_HANDLE_TYPE_FABRIC,
+    MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+)
 from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -85,6 +90,7 @@ class ExtensibleKVCache:
         kv_cache_config: KVCacheConfig,
         device: torch.device,
         layout: KVCacheLayout,
+        export_handle_types: int = 0,
     ):
         tensors = [
             tensor
@@ -118,6 +124,7 @@ class ExtensibleKVCache:
                 end - start
                 for start, end in pairwise([*self.segment_offsets, self.size])
             ],
+            export_handle_types=export_handle_types,
         )
 
     def _segments(
@@ -377,6 +384,21 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
         kv_transfer_config is not None
         and kv_transfer_config.registers_kv_cache_memory()
     )
+
+
+def kv_cache_export_handle_types(vllm_config: "VllmConfig") -> int:
+    """Handle types other processes import the KV cache through, for
+    `VmmDriver.create`."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return 0
+    access = kv_transfer_config.kv_cache_access()
+    handle_types = 0
+    if KVCacheAccess.EXPORTS_FD in access:
+        handle_types |= MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+    if KVCacheAccess.EXPORTS_FABRIC in access:
+        handle_types |= MEM_HANDLE_TYPE_FABRIC
+    return handle_types
 
 
 def pad_kv_cache_segments(
