@@ -22,7 +22,7 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
-from vllm.config.vllm import set_current_vllm_config
+from vllm.config.vllm import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
@@ -57,8 +57,8 @@ from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.CUTLASS_MLA,
@@ -70,7 +70,10 @@ BACKENDS_TO_TEST = [
 ]
 
 if current_platform.is_rocm():
-    BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
+    BACKENDS_TO_TEST += [
+        AttentionBackendEnum.ROCM_AITER_MLA,
+        AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+    ]
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -353,6 +356,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
+    layer.dcp_manager = None
     layer.quant_config = None
     layer.layer_name = "test"
     layer.act_dtype = torch.float32
@@ -378,6 +382,69 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
     torch.testing.assert_close(layer.W_UV, old_w_uv + 100)
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.parametrize("num_tokens", [1, 64, 300])
+@pytest.mark.parametrize("q_scale", [1.0, 0.37])
+def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
+    """The fused AITER decode query (Kimi-K2 at TP8: 8 heads, L=512, P=128) is
+    the padded fp8 query MLAAttention builds otherwise: torch.bmm into a
+    token-major buffer, _DecodeConcatQuantFP8, then get_mla_padded_q."""
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    num_heads, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim = 8, 512, 128, 64
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available on this platform")
+    if not rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+        num_heads, kv_lora_rank, qk_nope_head_dim
+    ):
+        pytest.skip("installed AITER has no tuned fused MLA decode query kernel")
+
+    set_random_seed(0)
+    q = torch.randn(
+        num_tokens,
+        num_heads,
+        qk_nope_head_dim + qk_rope_head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    q_nope, q_pe = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+    q_nope = q_nope.transpose(0, 1)
+    # W_UK^T as split_kv_b_proj + process_weights_after_loading lay it out.
+    kv_b_weight = 0.05 * torch.randn(
+        num_heads * 2 * qk_nope_head_dim,
+        kv_lora_rank,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    w_uk, _ = kv_b_weight.T.view(kv_lora_rank, num_heads, -1).split(
+        [qk_nope_head_dim, qk_nope_head_dim], dim=-1
+    )
+    w_uk_t = w_uk.permute(1, 2, 0)
+    scale = torch.tensor(q_scale, dtype=torch.float32, device="cuda")
+    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+
+    ql_nope = q_nope.new_empty(num_tokens, num_heads, kv_lora_rank)
+    torch.bmm(q_nope, w_uk_t, out=ql_nope.transpose(0, 1))
+    with set_current_vllm_config(VllmConfig()):
+        concat_quant = _DecodeConcatQuantFP8(
+            static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
+        )
+    ref = AiterMLAHelper.get_mla_padded_q(
+        num_heads, concat_quant.forward_native(ql_nope, q_pe, scale)
+    )
+    out = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
+        q_nope, w_uk_t, q_pe, scale, padded_heads
+    )
+
+    assert out.shape == ref.shape and out.dtype == ref.dtype
+    # A different accumulation order can flip a bf16 rounding of the BMM
+    # result, which moves the fp8 value by at most one step.
+    torch.testing.assert_close(out.float(), ref.float(), atol=2**-9, rtol=2**-3)
+    mismatch = (out.view(torch.uint8) != ref.view(torch.uint8)).float().mean()
+    assert mismatch.item() < 0.01
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.
@@ -1859,7 +1926,7 @@ def _run_backend_correctness(
 
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
-    for i, backend in enumerate(backends_to_test):
+    for _ in backends_to_test:
         all_sdpa_outputs.append([])
 
     for i in range(batch_size):
@@ -1906,7 +1973,7 @@ def _run_backend_correctness(
         # pipeline (MHA-style). This ensures the reference implementation
         # matches each backend's actual decode/prefill pipeline path.
         is_decode = []
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend in backends_to_test:
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
                 query_len_support = getattr(
@@ -2011,7 +2078,7 @@ def _run_backend_correctness(
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
 
-        for backend_idx, backend in enumerate(backends_to_test):
+        for backend_idx in range(len(backends_to_test)):
             if is_decode[backend_idx]:
                 all_sdpa_outputs[backend_idx].append(sdpa_out_i_decode)
             else:
@@ -2116,7 +2183,7 @@ def _run_backend_correctness(
         # tokens is off by up to ~2**-4 of max|V| (~4 here).
         rtol, atol = 2**-4, 3e-1
     failures = []
-    for backend_idx, backend_name in enumerate(backends_to_test):
+    for backend_name in backends_to_test:
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in SPEC_DECODE_BACKENDS:
             continue

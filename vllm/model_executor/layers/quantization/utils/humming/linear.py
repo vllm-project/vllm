@@ -37,9 +37,9 @@ def _nbytes(t: torch.Tensor) -> int:
 def replace_layer_parameters(
     layer: torch.nn.Module, tensors: dict[str, torch.Tensor], names: list[str]
 ) -> None:
-    """Write ``tensors`` into ``layer``, keeping existing parameter objects.
+    """Write `tensors` into `layer`, keeping existing parameter objects.
 
-    A param in ``names`` that gets no new tensor stays registered: an alias of a
+    A param in `names` that gets no new tensor stays registered: an alias of a
     replaced param follows it; one whose storage a new tensor is in, or a large
     one, is also registered under a new name (see `move_parameter`); any other
     keeps its data, retired."""
@@ -91,8 +91,8 @@ def convert_linear_layer_to_humming_standard(
     layer: LinearBase, name_map: dict[str, str]
 ):
     """Rename/reshape a linear layer's quantized params (the canonical MPLinear
-    layout: ``weight_packed`` int32 + ``weight_scale``) into the parameter names
-    and layout humming's weight schema expects (``weight`` / ``weight_scale``)."""
+    layout: `weight_packed` int32 + `weight_scale`) into the parameter names
+    and layout humming's weight schema expects (`weight` / `weight_scale`)."""
     for name, checkpoint_name in name_map.items():
         param = getattr(layer, checkpoint_name)
         tensor = param.data

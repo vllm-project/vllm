@@ -147,6 +147,42 @@ def test_update_offload_keys_without_scanning_hash_prefix():
                 assert context.get_offload_key_position(key) == chunk_idx * stride * 16
 
 
+def test_streaming_resume_refreshes_recomputed_offload_keys():
+    scheduler = _make_partial_tail_scheduler()
+    scheduler.use_lookahead_block_hashes = True
+    request = _make_partial_tail_request(scheduler, num_tokens=160)
+    request.resumable = True
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    old_keys = [list(group.offload_keys) for group in state.group_states]
+
+    # Core recomputes the hashes after the request loses its resident KV.
+    request.block_hashes[16:] = [
+        BlockHash(f"new{i}".encode()) for i in range(len(request.block_hashes) - 16)
+    ]
+    scheduler._lookup = MagicMock(return_value=0)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+    for config, group, old in zip(
+        scheduler.config.kv_group_configs, state.group_states, old_keys
+    ):
+        expected = [
+            make_offload_key(block_hash, config.group_idx)
+            for block_hash in request.block_hashes[
+                config.hashes_per_chunk - 1 :: config.hashes_per_chunk
+            ]
+        ]
+        unchanged_chunks = 16 // config.hashes_per_chunk
+        assert 0 < unchanged_chunks < len(old)
+        assert group.offload_keys[:unchanged_chunks] == old[:unchanged_chunks]
+        assert group.offload_keys[unchanged_chunks:] != old[unchanged_chunks:]
+        assert group.offload_keys == expected
+        for chunk_idx, key in enumerate(expected, 1):
+            assert state.req_context.get_offload_key_position(key) == (
+                chunk_idx * config.tokens_per_chunk
+            )
+
+
 @pytest.mark.parametrize(
     "window,extra_retained", [(128, 0), (128, 3), (256, 1), (256, 3)]
 )
@@ -700,7 +736,7 @@ def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
 
 def _hybrid_lookup(stored: set[OffloadKey]):
     """Full attention (group 0) holds every chunk; Mamba (group 1) only
-    the boundary states in ``stored``."""
+    the boundary states in `stored`."""
 
     def lookup(key: OffloadKey, req_context: ReqContext) -> LookupResult:
         if get_offload_group_idx(key) == 0:
@@ -758,6 +794,78 @@ def test_shared_prefix_junction_is_not_lowered():
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
     assert request.shared_prefix_boundary == 24
+
+
+def test_pending_attention_outside_hit_keeps_shared_prefix_junction():
+    """A pending chunk outside the converged hit must not hide the junction."""
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 24},
+    )
+    config.cache_config.prefix_cache_retention_interval = 0
+    attention = dict(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    kv_config = KVCacheConfig(
+        num_blocks=20,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], FullAttentionSpec(**attention)),
+            KVCacheGroupSpec(
+                ["window_a"], SlidingWindowSpec(**attention, sliding_window=16)
+            ),
+            KVCacheGroupSpec(
+                ["window_b"], SlidingWindowSpec(**attention, sliding_window=16)
+            ),
+        ],
+    )
+    spec = CPUOffloadingSpec(build_offloading_config(config, kv_config))
+    scheduler = OffloadingConnectorScheduler(spec, config, kv_config)
+    request = create_request(num_tokens=49, block_size=16)
+    scheduler.on_new_request(request)
+    keys = [
+        [make_offload_key(block_hash, group) for block_hash in request.block_hashes]
+        for group in range(3)
+    ]
+    ready = [keys[0][0], keys[0][1], keys[1][0], keys[1][2], keys[2][0], keys[2][1]]
+    pending = [keys[0][2]]
+    manager = spec.get_manager()
+    producer = ReqContext("producer")
+    assert manager.prepare_store(ready, producer) is not None
+    manager.complete_store(ready, producer)
+    assert manager.prepare_store(pending, producer) is not None
+    assert manager.lookup(pending[0], producer) is LookupResult.HIT_PENDING
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
+    assert request.shared_prefix_boundary == 32
+    assert manager.lookup(pending[0], producer) is LookupResult.HIT_PENDING
+
+
+def test_unconfirmed_attention_does_not_register_junction():
+    """Another attention group cannot confirm a pending prefix on its behalf."""
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1 << 24},
+    )
+    config.cache_config.prefix_cache_retention_interval = 0
+    kv_config = _make_mamba_hybrid_kv_cache_config()
+    full = kv_config.kv_cache_groups[0].kv_cache_spec
+    kv_config.kv_cache_groups.insert(1, KVCacheGroupSpec(["other_full"], full))
+    spec = CPUOffloadingSpec(build_offloading_config(config, kv_config))
+    scheduler = OffloadingConnectorScheduler(spec, config, kv_config)
+    request = create_request(num_tokens=49, block_size=16)
+    scheduler.on_new_request(request)
+    first_hash = request.block_hashes[0]
+    pending = [make_offload_key(first_hash, 0)]
+    ready = [make_offload_key(first_hash, 1)]
+    manager = spec.get_manager()
+    producer = ReqContext("producer")
+    assert manager.prepare_store(pending, producer) is not None
+    assert manager.prepare_store(ready, producer) is not None
+    manager.complete_store(ready, producer)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert request.shared_prefix_boundary == 0
 
 
 def test_no_shared_prefix_junction_when_sparse_group_hits():
@@ -1039,7 +1147,7 @@ def test_external_cache_hit_sources_range_boundaries(ranges, expected):
     request = _make_partial_tail_request(scheduler)
     state = scheduler._req_status[request.request_id]
     state.num_locally_computed_tokens = 4
-    for idx, (lo, hi, source) in enumerate(ranges):
+    for idx, (lo, hi, _) in enumerate(ranges):
         key = make_offload_key(str(idx).encode(), 0)
         state.load_key_ranges.append((lo, hi, key))
     _as_mock(scheduler.manager.get_load_source).side_effect = lambda key, ctx: ranges[
@@ -1687,7 +1795,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
     """Store, finish and resend a 30-token prompt with an EAGLE group.
 
     The resend hits the Mamba checkpoint at 24 only through the EAGLE
-    group's proof key at 28. With ``cow_on_proof_step``, the steps follow core:
+    group's proof key at 28. With `cow_on_proof_step`, the steps follow core:
     the prefill stops at 24, and the CoW hand-off arrives on the step that
     computes tokens 24-30. The producer models a turn that loaded its prefix
     from the offload tier, so that its tail is stored.
@@ -6056,6 +6164,7 @@ class TestEagle:
                 block_ids=(full_block_ids, swa_block_ids),
                 num_computed_tokens=0,
                 lora_request=None,
+                prefill_token_ids=[],
             )
         ]
         first_output.num_scheduled_tokens = {"req": 1000}
@@ -6946,8 +7055,8 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
         block_hasher=get_request_block_hasher(4, sha256, lookahead),
     )
     engine.add_request(request)
-    scheduler.manager.prepare_store.side_effect = (
-        lambda keys, ctx: generate_store_output(keys)
+    scheduler.manager.prepare_store.side_effect = lambda keys, ctx: (
+        generate_store_output(keys)
     )
     offered = set()
     for _ in range(5):
@@ -6961,7 +7070,6 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
             step,
             ModelRunnerOutput(
                 req_ids=[request.request_id],
-                req_id_to_index={request.request_id: 0},
                 sampled_token_ids=[[99] if final else []],
             ),
         )
