@@ -154,7 +154,7 @@ class MambaHybridModelState(DefaultModelState):
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
     ) -> None:
-        if self.cache_config.use_replayssm:
+        if self.cache_config.use_mamba_window_rings:
             initialize_replayssm_ring_trackers(
                 kv_cache_config,
                 self.vllm_config.compilation_config.static_forward_context,
@@ -359,6 +359,7 @@ class MambaHybridModelState(DefaultModelState):
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            req_idx=input_batch.idx_mapping_np,
         )
         if self._use_flashinfer_replayssm:
             self._replayssm_query_start_loc = None

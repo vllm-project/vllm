@@ -18,6 +18,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm.config.cache import CacheConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
 from vllm.platforms import current_platform
@@ -54,6 +55,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
     state.model_config = SimpleNamespace(max_model_len=8192)
+    state.cache_config = CacheConfig()
     state._align_mode = False
     state._use_flashinfer_replayssm = False
     state.recoverssm = None
@@ -72,6 +74,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         seq_lens=torch.tensor([1537], dtype=torch.int32),
         is_prefilling_np=torch.tensor([False]).numpy(),
         prefill_runs_as_decode_np=None,
+        idx_mapping_np=torch.tensor([0]).numpy(),
         dcp_local_seq_lens=None,
         positions=positions,
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
@@ -122,6 +125,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
     state.model_config = SimpleNamespace(max_model_len=8192)
+    state.cache_config = CacheConfig()
     state._align_mode = False
     state._use_flashinfer_replayssm = False
     state.recoverssm = None
@@ -139,6 +143,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         num_reqs_after_padding=3,
         num_tokens_after_padding=12,
         idx_mapping=torch.arange(3),
+        idx_mapping_np=np.arange(3),
         query_start_loc_np=query_start_loc,
         query_start_loc=torch.from_numpy(query_start_loc),
         num_scheduled_tokens=np.array(query_lens, dtype=np.int32),
@@ -187,6 +192,7 @@ def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state = object.__new__(MambaHybridModelState)
     state.vllm_config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     state.model_config = SimpleNamespace(max_model_len=8192)
+    state.cache_config = CacheConfig()
     state._align_mode = False
     state._use_flashinfer_replayssm = False
     state.recoverssm = None
@@ -224,6 +230,7 @@ def _input_batch(
         if num_draft_tokens_per_req is None
         else np.array(num_draft_tokens_per_req, dtype=np.int32),
         idx_mapping=torch.arange(num_reqs),
+        idx_mapping_np=np.arange(num_reqs),
         query_start_loc=torch.from_numpy(query_start_loc),
         seq_lens=seq_lens,
         dcp_local_seq_lens=None,
@@ -480,6 +487,52 @@ def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
     metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
 
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [-1, -1]
+
+
+def test_prepare_attn_forwards_sketchssm_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SketchSSM rows get their persistent request index."""
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    state.model_config = SimpleNamespace(max_model_len=8192)
+    state.cache_config = CacheConfig(sketchssm="unused.pt")
+    state._align_mode = False
+    state._use_flashinfer_replayssm = False
+    state.recoverssm = None
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=2,
+        num_reqs_after_padding=4,
+        num_tokens_after_padding=4,
+        query_start_loc_np=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32).numpy(),
+        query_start_loc=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
+        num_scheduled_tokens=torch.tensor([1, 1], dtype=torch.int32),
+        max_query_len=None,
+        seq_lens_cpu_upper_bound=torch.tensor([40, 77, 0, 0], dtype=torch.int32),
+        seq_lens=torch.tensor([40, 77, 0, 0], dtype=torch.int32),
+        is_prefilling_np=torch.tensor([False, False]).numpy(),
+        prefill_len_np=torch.tensor([30, 70], dtype=torch.int32).numpy(),
+        prefill_runs_as_decode_np=None,
+        idx_mapping_np=torch.tensor([5, 2]).numpy(),
+        dcp_local_seq_lens=None,
+        positions=torch.tensor([39, 76, 0, 0], dtype=torch.int64),
+        prompt_lens=torch.tensor([30, 70], dtype=torch.int32),
+    )
+    build_attn_metadata = Mock(return_value={})
+    monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", build_attn_metadata)
+
+    state.prepare_attn(
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=Mock(),
+    )
+
+    kwargs = build_attn_metadata.call_args.kwargs
+    assert kwargs["req_idx"].tolist() == [5, 2]
 
 
 @pytest.mark.skipif(not HAS_GPU, reason="Requires CUDA or XPU")

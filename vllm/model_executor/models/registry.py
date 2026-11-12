@@ -57,6 +57,7 @@ from .interfaces import (
     supports_multimodal_raw_input_only,
     supports_pp,
     supports_replayssm,
+    supports_sketchssm,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -963,6 +964,7 @@ class _ModelInfo:
     is_hybrid: bool
     has_noops: bool
     supports_replayssm: bool
+    supports_sketchssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
     supports_kv_cache_grouping: bool
@@ -998,6 +1000,7 @@ class _ModelInfo:
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_replayssm=supports_replayssm(model),
+            supports_sketchssm=supports_sketchssm(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only

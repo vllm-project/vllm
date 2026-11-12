@@ -81,6 +81,13 @@ class BaseMambaAttentionMetadata:
     replayssm_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     # Contiguous cache-slot indices shared by all FlashInfer ReplaySSM layers.
     replayssm_state_indices_d: torch.Tensor | None = None
+    # SketchSSM: the sketch (persistent request index) of each prefill and
+    # decode row, the decode rows that have no sketch yet, and the step's
+    # flush rows, -1 padded. The planning layer fills the last on the GPU.
+    sketch_indices_p: torch.Tensor | None = None
+    sketch_indices_d: torch.Tensor | None = None
+    sketch_missing_d: torch.Tensor | None = None
+    sketch_flush_rows_d: torch.Tensor | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
@@ -108,6 +115,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
         self.use_replayssm = vllm_config.cache_config.use_replayssm
+        self.use_sketchssm = vllm_config.cache_config.sketchssm is not None
+        self.use_window_rings = vllm_config.cache_config.use_mamba_window_rings
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
         self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
 
@@ -139,7 +148,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         ) = None
         self.decode_replayssm_state_indices_d: torch.Tensor | None = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
-        if self.use_replayssm and not self.use_flashinfer_replayssm:
+        if self.use_window_rings and not self.use_flashinfer_replayssm:
             # Filled on the GPU each step by plan_replayssm_decode; persistent
             # so full CUDA graphs keep reading the same addresses.
             bc_scratch_bs = max(
@@ -151,6 +160,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.decode_is_flush_d: torch.Tensor = torch.zeros(
                 (bc_scratch_bs,), dtype=torch.int8, device=device
             )
+            if self.use_sketchssm:
+                self.decode_sketch_indices_d: torch.Tensor = torch.zeros(
+                    (bc_scratch_bs,), dtype=torch.int32, device=device
+                )
+                self.decode_sketch_missing_d: torch.Tensor = torch.zeros(
+                    (bc_scratch_bs,), dtype=torch.int8, device=device
+                )
+                self.decode_sketch_flush_rows_d: torch.Tensor = torch.full(
+                    (bc_scratch_bs,), -1, dtype=torch.int32, device=device
+                )
             # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
             # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
             bc_ngroups = kv_cache_spec.shapes[4][0]
@@ -462,6 +481,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         write_pos_d = None
         is_flush_d = None
+        sketch_indices_p = sketch_indices_d = None
+        sketch_missing_d = sketch_flush_rows_d = None
         replayssm_scratch = None
 
         state_indices_tensor = mamba_get_block_table_tensor(
@@ -518,13 +539,37 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         replayssm_seq_lens_d = None
         replayssm_align_block_size = 0
-        if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
+        if (
+            self.use_window_rings
+            and not self.use_flashinfer_replayssm
+            and num_decodes > 0
+        ):
             write_pos_d = self.decode_write_pos_d[:num_decodes]
             is_flush_d = self.decode_is_flush_d[:num_decodes]
             if self.vllm_config.cache_config.mamba_cache_mode == "align":
                 # All rows, so a padded full-CUDA-graph batch can reuse it.
                 replayssm_seq_lens_d = common_attn_metadata.seq_lens[:num_reqs]
                 replayssm_align_block_size = self.kv_cache_spec.block_size
+
+        if self.use_sketchssm:
+            req_idx = common_attn_metadata.req_idx
+            assert req_idx is not None, "SketchSSM requires persistent request indices"
+            device = common_attn_metadata.query_start_loc.device
+            if num_prefills > 0:
+                sketch_indices_p = async_tensor_h2d(
+                    req_idx[num_decodes:num_reqs], dtype=torch.int32, device=device
+                )
+            if num_decodes > 0:
+                # Rows padding the batch past the requests read sketch 0.
+                rows = torch.zeros(num_decodes, dtype=torch.int32)
+                rows[: len(req_idx)] = torch.from_numpy(req_idx[:num_decodes])
+                sketch_indices_d = async_tensor_h2d(rows, device=device)
+                # A prompt's one-token tail can reach decode before any prefill
+                # of its request built the sketch (a prefix-cache hit).
+                sketch_missing_d = async_tensor_h2d(
+                    prefill_to_decode[:num_decodes], dtype=torch.int8, device=device
+                )
+                sketch_flush_rows_d = self.decode_sketch_flush_rows_d[:num_decodes]
 
         if self.use_flashinfer_replayssm and num_decodes > 0:
             assert self.decode_replayssm_scratch is not None
@@ -537,7 +582,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         bc_pre_scratch = None
         if (
-            self.use_replayssm
+            self.use_window_rings
             and self.decode_bc_pre_scratch is not None
             and num_decodes > 0
         ):
@@ -558,6 +603,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             replayssm_seq_lens_d=replayssm_seq_lens_d,
             replayssm_align_block_size=replayssm_align_block_size,
             replayssm_scratch=replayssm_scratch,
+            sketch_indices_p=sketch_indices_p,
+            sketch_indices_d=sketch_indices_d,
+            sketch_missing_d=sketch_missing_d,
+            sketch_flush_rows_d=sketch_flush_rows_d,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             num_reqs=num_reqs,
@@ -581,6 +630,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens = metadata.num_accepted_tokens
         write_pos_d = metadata.write_pos_d
         is_flush_d = metadata.is_flush_d
+        sketch_indices_d = metadata.sketch_indices_d
+        sketch_missing_d = metadata.sketch_missing_d
+        sketch_flush_rows_d = metadata.sketch_flush_rows_d
         bc_pre_scratch = metadata.bc_pre_scratch
         replayssm_scratch = metadata.replayssm_scratch
         replayssm_state_indices_d = None
@@ -607,11 +659,26 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     1  # pad with 1st slot index
                 )
 
-            if self.use_replayssm and not self.use_flashinfer_replayssm:
+            if self.use_window_rings and not self.use_flashinfer_replayssm:
                 # Planned on the GPU inside the graph; padded rows have
                 # NULL_BLOCK_ID slots and are planned as no-ops.
                 write_pos_d = self.decode_write_pos_d[:padded_bs]
                 is_flush_d = self.decode_is_flush_d[:padded_bs]
+
+                if self.use_sketchssm:
+                    assert sketch_indices_d is not None
+                    assert sketch_missing_d is not None
+                    self.decode_sketch_indices_d[: metadata.num_decodes].copy_(
+                        sketch_indices_d[: metadata.num_decodes], non_blocking=True
+                    )
+                    self.decode_sketch_missing_d[: metadata.num_decodes].copy_(
+                        sketch_missing_d[: metadata.num_decodes], non_blocking=True
+                    )
+                    sketch_indices_d = self.decode_sketch_indices_d[:padded_bs]
+                    sketch_missing_d = self.decode_sketch_missing_d[:padded_bs]
+                    sketch_indices_d[metadata.num_decodes :] = 0
+                    sketch_missing_d[metadata.num_decodes :] = 0
+                    sketch_flush_rows_d = self.decode_sketch_flush_rows_d[:padded_bs]
 
                 if self.decode_bc_pre_scratch is not None:
                     bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
@@ -648,6 +715,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             bc_pre_scratch=bc_pre_scratch,
             replayssm_scratch=replayssm_scratch,
             replayssm_state_indices_d=replayssm_state_indices_d,
+            sketch_indices_d=sketch_indices_d,
+            sketch_missing_d=sketch_missing_d,
+            sketch_flush_rows_d=sketch_flush_rows_d,
         )
 
     def update_block_table(
