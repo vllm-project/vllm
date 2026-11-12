@@ -428,9 +428,11 @@ class AiterMoe:
     ):
         """`fused_moe_2stages` on a ready sort with row `md` (the routed
         output, [M, model_dim] bf16; `a1` / `a1_scale`: prequantized rows and
-        their sorted scales). `shared`: (gate_up, down, scratch) of a dense bf16
-        shared expert the a16w4 kernels add in (gate_up [2 I, H] / down [H, I]
-        preshuffled, scratch [M, I] bf16); the output is then routed + shared.
+        their sorted scales). `shared`: (stage-1 weights, stage-2 weights,
+        scratch) of a dense shared expert the a16w4 kernels add in: the weight
+        arguments of AITER's stage wrappers (`SharedWeights.fused1` / `fused2`:
+        gate_up [2 I, H] / down [H, I] preshuffled, MXFP8 with scales or bf16)
+        and the [M, I] bf16 scratch; the output is then routed + shared.
         `scatter`: a dict, only for rows where `scatter_deferrable`: stage 2
         skips the top-k combine and fills it with the intermediate (AITER's
         `scatter_intermediate`); the returned output is then NOT written."""
@@ -439,9 +441,9 @@ class AiterMoe:
         sids, sw, seids, nv, buf, m_idx, rev = sorted7
         extra1 = extra2 = None
         if shared is not None:
-            gu, dn, scratch = shared
-            extra1 = {"shared_w1_bf16": gu, "shared_inter_bf16": scratch}
-            extra2 = {"shared_w2_bf16": dn, "shared_inter_bf16": scratch}
+            sh1, sh2, scratch = shared
+            extra1 = {**sh1, "shared_inter_bf16": scratch}
+            extra2 = {**sh2, "shared_inter_bf16": scratch}
         if scatter is not None:
             extra2 = {**(extra2 or {}), "scatter_intermediate": scatter}
         return fused_moe_2stages(

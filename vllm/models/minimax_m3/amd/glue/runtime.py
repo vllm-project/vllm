@@ -119,7 +119,7 @@ class M3Glue:
         self.widths = WIDTHS
         self.decode: Any = None  # DecodeGlue, once set up
         self.shared: dict[int, object] = {}  # layer id -> SharedWeights
-        self.shared_fused = False
+        self.shared_fused: str | None = None  # "mxfp8" / "bf16": inside the MoE
         self._tls = threading.local()
         self._moe: dict[int, object] = {}  # layer id -> AiterMoe (lazy, host only)
         # width -> (tuned row, activation dtype), or None when refused
@@ -186,13 +186,14 @@ class M3Glue:
                 "MiniMax-M3 decode glue off: %s", err or "refused on another rank"
             )
             return
-        # the shared expert inside the a16w4 MoE launches (bf16 weights) when the
-        # installed AITER takes it and the model's SwiGLU is the kernels'; else
-        # separate MXFP8 GEMMs
-        self.shared_fused = all(
+        # the shared expert inside the a16w4 MoE launches when the installed AITER
+        # takes it and the model's SwiGLU is the kernels' (MXFP8 weights when that
+        # AITER reads them, else their bf16 upcast); else separate MXFP8 GEMMs
+        fmts = {
             fused_shared_supported(layer.block_sparse_moe.shared_experts)
             for layer in self.layers
-        )
+        }
+        self.shared_fused = fmts.pop() if len(fmts) == 1 else None
         for layer in self.layers:
             self.shared[layer.layer_id] = build_shared_weights(
                 layer.block_sparse_moe.shared_experts,
@@ -236,7 +237,7 @@ class M3Glue:
             "AITER fused op" if glue.fused is not None else "FlyDSL kernel",
             min(glue.widths),
             max(glue.widths),
-            "fused into the a16w4 MoE launches (bf16)"
+            f"fused into the a16w4 MoE launches ({self.shared_fused})"
             if self.shared_fused
             else "separate (MXFP8 GEMMs)",
         )

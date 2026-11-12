@@ -10,9 +10,13 @@ per-row [N, K / 32] E8M0 scales, as the Quark OCP-MX loader stores them):
 * SP prefill: the full, replicated expert, all-gathered from the TP shards
   (gate_up = [all ranks' gate rows | all ranks' up rows], down = all ranks'
   columns), preshuffled; the output of a rank's own rows is complete.
-* decode, fused (`fused=True`): the TP shard as exact bf16 (e4m3 x 2^k fits
-  bf16), (16, 16)-preshuffled, for AITER's a16w4 MoE kernels' dense shared-expert
-  prologue (routed + shared in the two MoE launches; no separate shared GEMMs)."""
+* decode, fused (`fused`): the TP shard for AITER's a16w4 MoE kernels' dense
+  shared-expert prologue (routed + shared in the two MoE launches; no separate
+  shared GEMMs). "mxfp8": the checkpoint's FP8 codes, (16, 16)-preshuffled, and
+  their E8M0 scales in AITER's `shuffle_scale` layout; the kernels scale the codes
+  to bf16 in registers. "bf16" (an AITER that takes only bf16 there): the exact
+  bf16 upcast (e4m3 x 2^k fits bf16), (16, 16)-preshuffled, twice the bytes. Both
+  give the same bits."""
 
 from __future__ import annotations
 
@@ -40,8 +44,9 @@ class SharedWeights:
     gu_full_s: torch.Tensor | None = None
     dn_full: torch.Tensor | None = None
     dn_full_s: torch.Tensor | None = None
-    gu_bf16: torch.Tensor | None = None  # TP gate_up, exact bf16, preshuffled (fused)
-    dn_bf16: torch.Tensor | None = None  # TP down, exact bf16, preshuffled (fused)
+    # decode, fused: AITER's stage-1 / stage-2 shared-weight arguments (no scratch)
+    fused1: dict[str, torch.Tensor] | None = None
+    fused2: dict[str, torch.Tensor] | None = None
 
 
 def fp8_rows(linear) -> tuple[torch.Tensor, torch.Tensor]:
@@ -71,31 +76,37 @@ def dequant_bf16(w: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
 FUSED_SWIGLU = (1.702, 1.0)
 
 
-def fused_shared_supported(mlp) -> bool:
-    """Whether the a16w4 kernels' SwiGLU is `mlp`'s and the installed AITER
-    takes a dense bf16 shared expert in those kernels."""
+def fused_shared_supported(mlp) -> str | None:
+    """The shared-weight format ("mxfp8" or "bf16") in which `mlp` runs inside
+    the a16w4 MoE kernels: their SwiGLU is `mlp`'s and the installed AITER takes
+    a dense shared expert there; else None."""
     alpha, beta, limit = swiglu_params(mlp)
-    return (
-        (alpha, beta) == FUSED_SWIGLU
-        and limit is not None
-        and aiter_fused_shared_available()
-    )
+    if (alpha, beta) != FUSED_SWIGLU or limit is None:
+        return None
+    return aiter_fused_shared_format()
 
 
 @functools.cache
-def aiter_fused_shared_available() -> bool:
-    """Whether AITER's A16W4 MoE stages take the dense bf16 shared expert
-    (`shared_w1_bf16` / `shared_w2_bf16`, ROCm/aiter#7773)."""
+def aiter_fused_shared_format() -> str | None:
+    """The dense shared expert AITER's A16W4 MoE stages take: "mxfp8" (FP8 codes
+    + E8M0 scales: `shared_w1` / `shared_w1_scale`, `shared_w2` / `shared_w2_scale`),
+    "bf16" (`shared_w1_bf16` / `shared_w2_bf16`, ROCm/aiter#7773 as first
+    posted), or None."""
     try:
         from aiter import fused_moe as fm
 
-        return (
-            "shared_w1_bf16" in inspect.signature(fm._flydsl_stage1_wrapper).parameters
-            and "shared_w2_bf16"
-            in inspect.signature(fm._flydsl_stage2_wrapper).parameters
-        )
+        p1 = inspect.signature(fm._flydsl_stage1_wrapper).parameters
+        p2 = inspect.signature(fm._flydsl_stage2_wrapper).parameters
     except (ImportError, AttributeError, TypeError, ValueError):
-        return False
+        return None
+    if {"shared_w1", "shared_w1_scale"} <= p1.keys() and {
+        "shared_w2",
+        "shared_w2_scale",
+    } <= p2.keys():
+        return "mxfp8"
+    if "shared_w1_bf16" in p1 and "shared_w2_bf16" in p2:
+        return "bf16"
+    return None
 
 
 def _gather(t: torch.Tensor, dim: int, group) -> torch.Tensor:
@@ -105,18 +116,35 @@ def _gather(t: torch.Tensor, dim: int, group) -> torch.Tensor:
 
 
 def build_shared_weights(
-    mlp, decode: bool, sp: bool, group, fused: bool = False
+    mlp, decode: bool, sp: bool, group, fused: str | None = None
 ) -> SharedWeights:
-    """Collective when `sp` (every TP rank, same layer order). `fused`: decode
-    uses the bf16 copies (and not the FP8 ones)."""
+    """Collective when `sp` (every TP rank, same layer order). `fused` ("mxfp8" or
+    "bf16", from `fused_shared_supported`): decode runs the shared expert inside
+    the MoE kernels, on weights in that format (and not the separate GEMMs')."""
     from aiter.ops.shuffle import shuffle_weight
 
     gu, gu_s = fp8_rows(mlp.gate_up_proj)
     dn, dn_s = fp8_rows(mlp.down_proj)
     out = SharedWeights()
-    if decode and fused:
-        out.gu_bf16 = shuffle_weight(dequant_bf16(gu, gu_s), layout=(16, 16))
-        out.dn_bf16 = shuffle_weight(dequant_bf16(dn, dn_s), layout=(16, 16))
+    if decode and fused == "mxfp8":
+        from aiter.ops.shuffle import shuffle_scale
+
+        e4m3 = torch.float8_e4m3fn  # OCP MXFP8 codes (the checkpoint's F8_E4M3)
+        out.fused1 = {
+            "shared_w1": shuffle_weight(gu.view(e4m3), layout=(16, 16)),
+            "shared_w1_scale": shuffle_scale(gu_s),
+        }
+        out.fused2 = {
+            "shared_w2": shuffle_weight(dn.view(e4m3), layout=(16, 16)),
+            "shared_w2_scale": shuffle_scale(dn_s),
+        }
+    elif decode and fused == "bf16":
+        out.fused1 = {
+            "shared_w1_bf16": shuffle_weight(dequant_bf16(gu, gu_s), layout=(16, 16))
+        }
+        out.fused2 = {
+            "shared_w2_bf16": shuffle_weight(dequant_bf16(dn, dn_s), layout=(16, 16))
+        }
     elif decode:
         out.gu, out.gu_s = shuffle_weight(gu, layout=(16, 16)), gu_s
         out.dn, out.dn_s = shuffle_weight(dn, layout=(16, 16)), dn_s

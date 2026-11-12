@@ -414,7 +414,7 @@ class DecodeGlue:
         from vllm.utils.torch_utils import current_stream
 
         b = self.launch(layer, part, residual)
-        if sw.gu_bf16 is not None:
+        if sw.fused1 is not None:
             # the shared expert runs inside the routed MoE launches (its tiles first):
             # moe_buf = routed (x2.0 in the top-k weights) + shared
             out = aiter_moe.run_sorted(
@@ -424,7 +424,7 @@ class DecodeGlue:
                 (b.sids, b.sw, b.seids, b.nv, b.moe_buf, None, None),
                 b.ids,
                 b.w,
-                shared=(sw.gu_bf16, sw.dn_bf16, b.sh_inter),
+                shared=(sw.fused1, sw.fused2, b.sh_inter),
             )
             return self._post_moe(out, b, nxt_norm)
         mlp = layer.block_sparse_moe.shared_experts
