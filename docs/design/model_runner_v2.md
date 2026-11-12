@@ -199,6 +199,53 @@ Some attention backends also materialize derived state, such as scheduler metada
 
 For draft models that advance positions, the fused path is enabled only when every draft attention group declares `supports_draft_decode_metadata_update`. Otherwise, MRV2 falls back to rebuilding attention metadata between draft steps. Draft models that keep positions fixed do not require this update. Before enabling a backend, developers must audit all derived metadata, including state inherited from parent builders or owned by auxiliary attention backends.
 
+## Per-field Pipeline Tensor Layouts
+
+Models can declare hidden-state and residual layouts through
+`vllm.distributed.pp_transport.schema`. This schema uses the existing tensor-dict
+channel and is separate from the `PPTransport` communication-backend interface.
+
+```python
+from vllm.distributed import get_tp_group
+from vllm.distributed.pp_transport.schema import (
+    PPTransportDataType,
+    PPTransportSchema,
+    PPTransportTensor,
+)
+
+self.pp_transport_schema = PPTransportSchema(
+    {
+        PPTransportDataType.HIDDEN_STATES: PPTransportTensor(
+            (hidden_size,), sequence_parallel=True
+        ),
+        PPTransportDataType.RESIDUAL: PPTransportTensor((hidden_size,)),
+    },
+    tp_size=get_tp_group().world_size,
+)
+self.make_empty_intermediate_tensors = (
+    self.pp_transport_schema.make_empty_intermediate_tensors
+)
+```
+
+Expose `pp_transport_schema` on the top-level model. Non-last stages return
+`self.pp_transport_schema.make_intermediate_tensors(
+num_global_tokens, hidden_states=hidden_states, residual=residual)`.
+The token count includes the runner's padding. Shapes exclude the token
+dimension; an explicit `dtype` overrides the runner's requested dtype.
+
+Full tensors retain TP slice-send/all-gather. A field marked
+`sequence_parallel=True` has `ceil(num_global_tokens / tp_size)` local rows and
+travels directly to the matching TP lane. Adjacent stages must use the same
+per-field layouts, TP ordering and padded token count. The schema does not
+perform a model's SP collectives or enable SP+PP for an unsupported model.
+
+MRV2 shares per-field views across profiling, capture and execution. CUDA graph
+replay preserves each output field's captured shape and persistent addresses.
+SP-sharded bindings use NCCL when `VLLM_PP_TRANSPORT=auto`; forcing
+`copy_engine` is unsupported. SP bindings with ubatching/DBO are also unsupported.
+Models without a schema retain full-tensor behavior, including arbitrary legacy
+intermediate keys and dtype-converting receive copies.
+
 ## Development Philosophy
 
 MRV2 changes should meet a higher code quality bar. As feature gaps with V1 are filled, features should be reconsidered from first principles in the MRV2 design context instead of quickly porting V1 behavior.
