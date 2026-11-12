@@ -207,7 +207,7 @@ guide: |
 
   - **Vision encoder overhead:** Prefer `--mm-encoder-tp-mode data` over TP for the encoder.
   - **Long-context memory:** At 128K context, tune `--max-num-batched-tokens` and
-    `--gpu-memory-utilization` to prevent OOM.
+    `--max-num-seqs` to prevent OOM.
 
   ## References
 
