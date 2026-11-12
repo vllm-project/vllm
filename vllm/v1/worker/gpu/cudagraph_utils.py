@@ -256,6 +256,11 @@ class CudaGraphManager:
         self._decode_descs: dict[
             tuple[int, int, int], list[BatchExecutionDescriptor]
         ] = {}
+        # Uniform decode descriptor -> its copies bounded on the context length,
+        # tightest bound first (see `_add_seq_len_bounded_graphs`).
+        self._bounded_descs: dict[
+            BatchExecutionDescriptor, list[BatchExecutionDescriptor]
+        ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
@@ -464,7 +469,9 @@ class CudaGraphManager:
         """Add a copy of each FULL decode graph per context-length bound.
 
         Mixed graphs replay prefills and DBO graphs split the batch, so neither
-        gets copies. Returns the bounds that have graphs.
+        gets copies. A token-keyed graph's copies go first in its `_candidates`
+        lists; a uniform decode graph's are found through `_bounded_descs`.
+        Returns the bounds that have graphs.
         """
         bounds = tuple(sorted(bounds))
         bounded = {
@@ -481,6 +488,7 @@ class CudaGraphManager:
         )
         # dispatch() takes the first compatible candidate: the tightest bound
         # first, the default graph last.
+        self._bounded_descs = bounded
         for candidates in self._candidates.values():
             candidates[:0] = [b for d in candidates if d in bounded for b in bounded[d]]
         logger.info_once(
@@ -636,7 +644,8 @@ class CudaGraphManager:
         length that covers `num_tokens`, which may be padded (e.g. to the DP
         maximum), if that graph holds its requests. Other batches, and decode
         batches no decode graph takes, take the smallest compatible token-keyed
-        graph.
+        graph. A graph bounded on the context length goes before the one it
+        copies.
 
         `max_seq_len` is an upper bound on every request's context length;
         None keeps the batch out of graphs bounded on it.
@@ -650,7 +659,12 @@ class CudaGraphManager:
                 )
                 n = cdiv(num_tokens, uniform_token_count)
                 if n < len(decode_descs):
-                    candidates = [decode_descs[n], *candidates]
+                    decode_desc = decode_descs[n]
+                    candidates = [
+                        *self._bounded_descs.get(decode_desc, ()),
+                        decode_desc,
+                        *candidates,
+                    ]
             for desc in candidates:
                 if _is_compatible(
                     desc,
