@@ -94,6 +94,20 @@ def test_quantize_block_scales_follow_rows() -> None:
     assert torch.all(error < 0.1), error
 
 
+def test_quantize_scale_refinement_never_hurts() -> None:
+    torch.manual_seed(0)
+    weight = torch.distributions.StudentT(3.0).sample((64, 256))
+
+    def tile_errors(**kwargs) -> torch.Tensor:
+        reconstructed = _dequantize(quantize_lut_b(weight, **kwargs), torch.float32)
+        error = (reconstructed - weight).square()
+        return error.view(8, 8, 4, 64).sum((1, 3))
+
+    refined, unrefined = tile_errors(), tile_errors(num_scale_rounds=0)
+    assert torch.all(refined <= unrefined * (1 + 1e-6))
+    assert refined.sum() < 0.97 * unrefined.sum()
+
+
 def test_quantize_preserves_zeros() -> None:
     weight = torch.linspace(-1, 1, 512).reshape(8, 64)
     weight[:, -1] = 0
