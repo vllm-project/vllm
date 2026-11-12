@@ -93,6 +93,19 @@ ISO639_1_SUPPORTED_LANGS = {
     "es": "Spanish",
 }
 
+_MAX_AUDIO_TOKENS = 8190
+
+
+def get_encoder_batch_size(config: PreTrainedConfig, num_features: int) -> int:
+    tokens_per_window = config.window_size // config.downsample_rate
+    max_features = _MAX_AUDIO_TOKENS // tokens_per_window * config.window_size
+    context_size = config.encoder_config.context_size
+    return max(
+        1,
+        math.ceil(max_features / context_size)
+        // math.ceil(num_features / context_size),
+    )
+
 
 ### Audio Input
 class GraniteSpeechAudioInputs(TensorSchema):
@@ -132,10 +145,14 @@ class GraniteSpeechProcessingInfo(BaseProcessingInfo):
     # than we would expect to encounter. The sequence of length
     # get_max_audio_len() produces get_max_audio_tokens().
     def get_max_audio_tokens(self):
-        return 5001
+        return _MAX_AUDIO_TOKENS
 
     def get_max_audio_len(self):
-        return 8000000
+        audio_processor = self.get_hf_processor().audio_processor
+        window_size = audio_processor.projector_window_size
+        tokens_per_window = window_size // audio_processor.projector_downsample_rate
+        encoder_length = _MAX_AUDIO_TOKENS // tokens_per_window * window_size
+        return (2 * encoder_length - 1) * audio_processor.melspec_kwargs["hop_length"]
 
 
 ### Input Processing  & Multimodal utils
@@ -788,9 +805,15 @@ class GraniteSpeechForConditionalGeneration(
 
         """
         # TODO (Alex) - support embedding inputs
-        encoder_embeds = self.encoder(audio_input["input_features"])
+        input_features = audio_input["input_features"]
+        batch_size = get_encoder_batch_size(self.config, input_features.shape[1])
         # [bsz, <max feature size>, 4096]
-        projected_embeds = self.projector(encoder_embeds)
+        projected_embeds = torch.cat(
+            [
+                self.projector(self.encoder(features))
+                for features in input_features.split(batch_size)
+            ]
+        )
         # Apply mask on variable length audio features.
         with gpu_sync_allowed():
             masked_embeds = projected_embeds[audio_input["input_features_mask"]]
