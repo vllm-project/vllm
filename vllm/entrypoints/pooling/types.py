@@ -200,6 +200,33 @@ class OfflineInputsContext:
             extras["cache_salt"] = self.cache_salt
         return extras or None
 
+    def to_encode_context(
+        self,
+        *,
+        inputs_seq: list[PoolingInput],
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None,
+    ) -> "OfflineEncodeInputsContext":
+        """Derive an `OfflineEncodeInputsContext` from this context."""
+        # `late_chunking` is intentionally dropped: inputs are re-composed,
+        #  so per-document source ranges no longer line up with the new inputs.
+        return OfflineEncodeInputsContext(
+            pooling_task=self.pooling_task,
+            tokenization_kwargs=self.tokenization_kwargs,
+            lora_request=self.lora_request,
+            priorities=self.priorities,
+            add_generation_prompt=self.add_generation_prompt,
+            continue_final_message=self.continue_final_message,
+            add_special_tokens=self.add_special_tokens,
+            chat_template=self.chat_template,
+            chat_template_kwargs=self.chat_template_kwargs,
+            chat_template_content_format=self.chat_template_content_format,
+            media_io_kwargs=self.media_io_kwargs,
+            mm_processor_kwargs=self.mm_processor_kwargs,
+            cache_salt=self.cache_salt,
+            inputs_seq=inputs_seq,
+            pooling_params=pooling_params,
+        )
+
 
 @dataclass
 class OfflineEncodeInputsContext(OfflineInputsContext):
@@ -211,6 +238,21 @@ class OfflineEncodeInputsContext(OfflineInputsContext):
 class OfflineScoringInputsContext(OfflineInputsContext):
     scoring_data: ScoringData
     pooling_params: PoolingParams
+
+    def to_encode_context(
+        self,
+        *,
+        inputs_seq: list[PoolingInput],
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+    ) -> "OfflineEncodeInputsContext":
+        # Default to the scoring ctx's own `pooling_params` so callers do not
+        # have to pass it explicitly.
+        return super().to_encode_context(
+            inputs_seq=inputs_seq,
+            pooling_params=(
+                self.pooling_params if pooling_params is None else pooling_params
+            ),
+        )
 
 
 @dataclass
@@ -259,6 +301,7 @@ class ScoringRenderParams(RenderParams):
     data_1: ScoreData
     data_2: ScoreData
     chat_template: str | None
+    chat_template_kwargs: NotRequired[dict[str, Any] | None]
     max_tokens_per_query: int
     max_tokens_per_doc: int
 

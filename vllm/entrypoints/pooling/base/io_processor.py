@@ -14,9 +14,7 @@ from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.renderers.chat_utils import (
-    ChatTemplateConfig,
-)
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -233,9 +231,6 @@ class PoolingIOProcessor:
             trust_request_chat_template=self.trust_request_chat_template,
         )
 
-        # Pack the renderer-side `prompt_extras` once and share it across both
-        # the chat and completion branches. `mm_processor_kwargs` / `cache_salt`
-        # are forwarded here (see `OfflineInputsContext.build_prompt_extras`).
         prompt_extras = ctx.build_prompt_extras()
 
         def request_factory() -> RequestGenerator:

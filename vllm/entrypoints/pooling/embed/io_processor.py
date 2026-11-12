@@ -44,6 +44,7 @@ from ..types import (
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingEngineInput,
+    PoolingInput,
     PoolingServeContext,
     RequestFactory,
     RequestGenerator,
@@ -791,15 +792,24 @@ class JinaRankingTokenEmbedIOProcessor(
         self, ctx: AnyOfflineInputsContext
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineEncodeInputsContext)
-        if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
+        if not isinstance(ctx.inputs_seq, Sequence) or len(ctx.inputs_seq) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
 
-        text_prompts = self.ensure_str(ctx.prompts)
+        text_prompts = self.ensure_str(ctx.inputs_seq)
 
         # The JinaForRanking model concatenates docs first, then query.
         # Let's stay consistent with this novel design.
-        ctx.prompts = self.format_docs_prompts_func(
-            query=text_prompts[-1], docs=text_prompts[:-1]
-        )
+        # `format_docs_prompts_func` returns a single composed prompt, so wrap
+        # it in a one-element list to match `inputs_seq: list[PoolingInput]`.
+        new_inputs_seq: list[PoolingInput] = [
+            self.format_docs_prompts_func(
+                query=text_prompts[-1], docs=text_prompts[:-1]
+            )
+        ]
 
-        return super().get_request_factory_offline(ctx)
+        return super().get_request_factory_offline(
+            ctx.to_encode_context(
+                inputs_seq=new_inputs_seq,
+                pooling_params=ctx.pooling_params,
+            )
+        )

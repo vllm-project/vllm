@@ -31,7 +31,6 @@ from ..types import (
     AnyRenderParam,
     EncodeChatRenderParams,
     EncodeCMPLRenderParams,
-    OfflineEncodeInputsContext,
     OfflineOutputsContext,
     OfflineScoringInputsContext,
     PoolingEngineInput,
@@ -307,14 +306,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         prompts = data_1 + data_2
 
         return super().get_request_factory_offline(
-            OfflineEncodeInputsContext(
-                pooling_task=self.pooling_task,
-                prompts=prompts,
-                tokenization_kwargs=ctx.tokenization_kwargs,
-                pooling_params=ctx.pooling_params,
-                lora_request=ctx.lora_request,
-                priorities=ctx.priorities,
-            )
+            ctx.to_encode_context(inputs_seq=prompts)
         )
 
     def post_process_offline(
@@ -551,11 +543,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
+        chat_template_kwargs = (
+            ctx.prompt_extras.get("chat_template_kwargs") if ctx.prompt_extras else None
+        )
+
         requests = [
             ScoringRenderParams(
                 data_1=data_1[i],
                 data_2=data_2[i],
                 chat_template=self.chat_template,
+                chat_template_kwargs=chat_template_kwargs,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
                 tok_params=tok_params,
@@ -588,24 +585,33 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
-        prompt_extras = ctx.pooling_params.extra_kwargs
+
+        # `add_special_tokens` is an explicit offline API knob. User-provided
+        # `tokenization_kwargs` still wins if it sets the same key.
+        tok_kwargs: dict[str, Any] = {
+            "add_special_tokens": ctx.add_special_tokens,
+        }
+        tok_kwargs.update(ctx.tokenization_kwargs or {})
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
+
+        # Pack `mm_processor_kwargs` / `cache_salt` into the renderer-side
+        # `prompt_extras`, mirroring the encode path.
+        prompt_extras = ctx.build_prompt_extras()
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+
+        chat_template = (
+            self.chat_template if ctx.chat_template is None else ctx.chat_template
+        )
 
         def request_factory() -> RequestGenerator:
             for i in range(num_requests):
                 yield ScoringRenderParams(
                     data_1=data_1[i],
                     data_2=data_2[i],
-                    chat_template=(
-                        self.chat_template
-                        if ctx.chat_template is None
-                        else ctx.chat_template
-                    ),
+                    chat_template=chat_template,
+                    chat_template_kwargs=ctx.chat_template_kwargs,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
@@ -659,9 +665,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             chat_template=render_params["chat_template"],
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
-            chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
-            if prompt_extras
-            else None,
+            chat_template_kwargs=render_params.get("chat_template_kwargs"),
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
@@ -986,13 +990,10 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
             scoring_data = self._truncate_scoring_data(
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
-        prompt_extras = ctx.pooling_params.extra_kwargs
 
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
-        chat_template_kwargs = (
-            prompt_extras.get("chat_template_kwargs") if prompt_extras else None
-        )
+        chat_template_kwargs = ctx.chat_template_kwargs
         instruction = (
             chat_template_kwargs.get("instruction") if chat_template_kwargs else None
         )
@@ -1013,14 +1014,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
 
         return PoolingIOProcessor.get_request_factory_offline(
             self,
-            OfflineEncodeInputsContext(
-                pooling_task=self.pooling_task,
-                prompts=prompts,
-                tokenization_kwargs=ctx.tokenization_kwargs,
-                pooling_params=ctx.pooling_params,
-                lora_request=ctx.lora_request,
-                priorities=ctx.priorities,
-            ),
+            ctx.to_encode_context(inputs_seq=prompts),
         )
 
     def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
