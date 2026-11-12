@@ -29,7 +29,7 @@ class DSparkCorrectnessConfig:
     use_chat_completions: bool = False
     chat_template_kwargs: dict[str, object] | None = None
     attention_backend: str | None = None
-    gpu_memory_utilization: float = 0.92
+    gpu_memory_utilization: float | None = None
     enforce_eager: bool = False
     disable_flashinfer_sampler: bool = False
     language_model_only: bool = False
@@ -57,7 +57,6 @@ GEMMA4_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
     max_num_seqs=32,
     num_questions=200,
     use_chat_completions=True,
-    gpu_memory_utilization=0.85,
     enforce_eager=True,
     disable_flashinfer_sampler=True,
     language_model_only=True,
@@ -75,7 +74,6 @@ QWEN3_6_DSPARK_SPECULATORS = DSparkCorrectnessConfig(
     num_questions=200,
     use_chat_completions=True,
     chat_template_kwargs={"enable_thinking": False},
-    gpu_memory_utilization=0.85,
     language_model_only=True,
 )
 
