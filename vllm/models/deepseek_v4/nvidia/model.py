@@ -125,6 +125,14 @@ def prepare_mega_gate_routing_metadata(
     )
 
 
+def _use_mega_gate(vllm_config: VllmConfig) -> bool:
+    """Whether MegaMoE layers route with `bf16_mega_gate`, which is SM100-only."""
+    return (
+        vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        and current_platform.is_device_capability_family(100)
+    )
+
+
 class DeepseekV4MLP(nn.Module):
     def __init__(
         self,
@@ -263,6 +271,7 @@ class DeepseekV4MoE(nn.Module):
         self.reduce_results = reduce_results
         moe_backend = vllm_config.kernel_config.moe_backend
         self.use_native_mega_moe = moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         if (
             self.use_native_mega_moe
             and not vllm_config.parallel_config.enable_expert_parallel
@@ -292,11 +301,7 @@ class DeepseekV4MoE(nn.Module):
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently supports sqrtsoftplus routing only."
             )
-        if (
-            self.use_native_mega_moe
-            and envs.VLLM_BATCH_INVARIANT
-            and envs.VLLM_BI_MEGA_GATE
-        ):
+        if self.use_mega_gate and envs.VLLM_BATCH_INVARIANT and envs.VLLM_BI_MEGA_GATE:
             # Mega Gate is row invariant only with DeepGEMM's deterministic
             # (fixed split) heuristics, a process-wide setting.
             from vllm.model_executor.kernels.linear.cute_dsl.batch_invariant import (
@@ -516,7 +521,10 @@ class DeepseekV4MoE(nn.Module):
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
         # Batch invariance needs one router path for every batch size.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        if envs.VLLM_BATCH_INVARIANT:
+        if not self.use_mega_gate:
+            # bf16_mega_gate is SM100-only.
+            use_gate_linear = True
+        elif envs.VLLM_BATCH_INVARIANT:
             use_gate_linear = not envs.VLLM_BI_MEGA_GATE
         else:
             use_gate_linear = hidden_states.shape[0] <= gate_threshold
@@ -902,6 +910,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if (
             self.use_native_mega_moe
@@ -1054,7 +1063,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             input_ids = sp_shard(input_ids)
 
         mega_gate_metadata = None
-        if self.use_native_mega_moe:
+        if self.use_mega_gate:
             mega_gate_metadata = prepare_mega_gate_routing_metadata(
                 input_ids,
                 has_hash_routing=self.has_local_hash_moe,

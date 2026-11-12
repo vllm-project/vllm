@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Union
 
 import torch
@@ -106,6 +106,26 @@ def _quant_flags_to_group_shape(
             w_shape = GroupShape.PER_TOKEN
 
     return a_shape, w_shape
+
+
+class RoutedScaleMode(Enum):
+    """Where routed_scaling_factor is applied in a MoE layer."""
+
+    # The scale is passed to the router and the experts kernel instead of the
+    # runner: grouped top-k folds it into the top-k weights, and some kernels
+    # (e.g. ROCm AITER) apply it themselves.
+    ROUTER = "router"
+    # The runner multiplies the routed expert output by the scale.
+    OUTPUT = "output"
+    # Like OUTPUT, except that in FP16 with shared experts the runner divides
+    # the shared expert output by the scale instead, to avoid overflow. The
+    # model's decoder layer must compensate with matching divisions (see
+    # DeepseekV2DecoderLayer).
+    OUTPUT_FP16_GUARD = "output_fp16_guard"
+
+    @property
+    def scales_output(self) -> bool:
+        return self is not RoutedScaleMode.ROUTER
 
 
 # The type of method in top-K routing
