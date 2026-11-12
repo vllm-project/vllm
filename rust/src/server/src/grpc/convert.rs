@@ -210,7 +210,14 @@ fn build_sampling_params(
             params.bad_words_token_ids =
                 Some(d.bad_words_token_ids.iter().map(|sequence| sequence.ids.clone()).collect());
         }
-        params.structured_outputs = structured_output_from_proto(d.structured_output.as_ref())?;
+        let legacy = d.legacy_structured_output.as_ref().map(legacy_structured_output);
+        if d.structured_output.is_some() && legacy.is_some() {
+            return Err(Status::invalid_argument(
+                "set decoding.structured_output or the legacy inline structured-output fields, not both",
+            ));
+        }
+        params.structured_outputs =
+            structured_output_from_proto(d.structured_output.as_ref().or(legacy.as_ref()))?;
     }
 
     // StoppingCriteria
@@ -302,6 +309,27 @@ pub(super) fn structured_output_from_proto(
         Kind::StructuralTag(tag) => StructuredOutputsParams::structural_tag(tag.clone()),
     };
     Ok(Some(params))
+}
+
+/// Lift the legacy inline `DecodingParameters` constraint into the shared
+/// `StructuredOutput` message.
+fn legacy_structured_output(
+    legacy: &pb::decoding_parameters::LegacyStructuredOutput,
+) -> pb::StructuredOutput {
+    use pb::decoding_parameters::LegacyStructuredOutput as Legacy;
+    use pb::structured_output::{Kind, StringChoices};
+
+    let kind = match legacy {
+        Legacy::Json(schema) => Kind::Json(schema.clone()),
+        Legacy::Regex(regex) => Kind::Regex(regex.clone()),
+        Legacy::Choice(choices) => Kind::Choice(StringChoices {
+            choices: choices.choices.clone(),
+        }),
+        Legacy::Grammar(grammar) => Kind::Grammar(grammar.clone()),
+        Legacy::JsonObject(json_object) => Kind::JsonObject(*json_object),
+        Legacy::StructuralTag(tag) => Kind::StructuralTag(tag.clone()),
+    };
+    pb::StructuredOutput { kind: Some(kind) }
 }
 
 /// The inverse of [`structured_output_from_proto`]. Constraint options are
@@ -650,6 +678,69 @@ mod tests {
             .generate_request;
             let params = engine.sampling_params;
             assert_eq!(params.bad_words_token_ids, Some(vec![vec![5], vec![7, 11]]));
+        }
+    }
+
+    /// Clients built before `decoding.structured_output` still set the legacy
+    /// inline fields, which must keep constraining generation; setting both is
+    /// ambiguous and rejected.
+    #[test]
+    fn grpc_legacy_structured_output_fields_still_constrain() {
+        use pb::decoding_parameters::{LegacyStructuredOutput as Legacy, StringChoices};
+        use pb::structured_output::Kind;
+
+        let schema = r#"{"type":"object"}"#;
+        let request = |decoding| pb::GenerateRequest {
+            decoding: Some(decoding),
+            ..base_request()
+        };
+        let constraint = |decoding| {
+            let encoded = request(decoding).encode_to_vec();
+            let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+            to_text_request(decoded, false, &served())
+                .map(|text| text.sampling_params.structured_outputs)
+        };
+        for (legacy, kind) in [
+            (
+                Legacy::Json(schema.to_string()),
+                Kind::Json(schema.to_string()),
+            ),
+            (
+                Legacy::Regex("a+".to_string()),
+                Kind::Regex("a+".to_string()),
+            ),
+            (
+                Legacy::Choice(StringChoices {
+                    choices: vec!["yes".to_string(), "no".to_string()],
+                }),
+                Kind::Choice(pb::structured_output::StringChoices {
+                    choices: vec!["yes".to_string(), "no".to_string()],
+                }),
+            ),
+            (Legacy::JsonObject(true), Kind::JsonObject(true)),
+        ] {
+            let from_legacy = constraint(pb::DecodingParameters {
+                legacy_structured_output: Some(legacy.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+            let from_current = constraint(pb::DecodingParameters {
+                structured_output: Some(pb::StructuredOutput {
+                    kind: Some(kind.clone()),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(from_legacy.is_some(), "{legacy:?}");
+            assert_eq!(from_legacy, from_current, "{legacy:?}");
+
+            let error = constraint(pb::DecodingParameters {
+                legacy_structured_output: Some(legacy),
+                structured_output: Some(pb::StructuredOutput { kind: Some(kind) }),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
         }
     }
 

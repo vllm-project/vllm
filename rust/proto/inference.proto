@@ -112,15 +112,26 @@ message DecodingParameters {
   map<uint32, float> logit_bias = 4;
   repeated uint32 allowed_token_ids = 5;
 
-  // Structured-output constraint. Omitted means unconstrained.
-  StructuredOutput structured_output = 13;
+  message StringChoices {
+    repeated string choices = 1;
+  }
+
+  // To be deprecated: the structured-output constraint as inline fields, kept
+  // for clients built before `structured_output`. Setting both is rejected.
+  oneof legacy_structured_output {
+    string json = 6;
+    string regex = 7;
+    StringChoices choice = 8;
+    string grammar = 9;
+    bool json_object = 10;
+    string structural_tag = 11;
+  }
 
   // Token sequences that must not be generated. Each sequence must be nonempty.
   repeated TokenIds bad_words_token_ids = 12;
 
-  // The former inline `structured_output` oneof.
-  reserved 6 to 11;
-  reserved "json", "regex", "choice", "grammar", "json_object", "structural_tag";
+  // Structured-output constraint. Omitted means unconstrained.
+  StructuredOutput structured_output = 13;
 }
 
 // One structured-output constraint.
