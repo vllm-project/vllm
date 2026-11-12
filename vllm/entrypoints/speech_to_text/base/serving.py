@@ -258,18 +258,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         chunks = self._chunk_speech(y, sr, duration, request)
         return chunks, duration
 
-    async def _decode_and_vad_chunk_speech_async(
-        self,
-        audio_data: bytes,
-        request: SpeechToTextRequest,
-    ) -> tuple[list[np.ndarray], float]:
-        """Decode on the preprocess pool, then run VAD on the VAD pool."""
-        # VAD chunks are copies, so the decoded waveform is freed on return.
-        async with self._vad_pipeline_semaphore:
-            y, sr, duration = await self._decode_audio_async(audio_data)
-            chunks = await self._chunk_speech_async(y, sr, duration, request)
-        return chunks, duration
-
     async def _detect_language(
         self,
         audio_chunk: np.ndarray,
@@ -341,9 +329,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         if self._vad_executor is not None and request.build_vad_config().enabled:
-            chunks, duration = await self._decode_and_vad_chunk_speech_async(
-                audio_data, request
-            )
+            async with self._vad_pipeline_semaphore:
+                y, sr, duration = await self._decode_audio_async(audio_data)
+                chunks = await self._chunk_speech_async(y, sr, duration, request)
+                # VAD chunks are copies; free the waveform before releasing
+                # the permit.
+                del y
         else:
             chunks, duration = await self._decode_and_chunk_speech_async(
                 audio_data, request

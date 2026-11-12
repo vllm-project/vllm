@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 
+import vllm.envs as envs
+from vllm.config.speech_to_text import SpeechToTextConfig, VADConfig
 from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionResponse
 
@@ -212,3 +216,67 @@ async def test_language_detection_cancel_aborts_engine_request():
     sampling_params = engine_client.generate.call_args.args[1]
     assert sampling_params.watermarking is False
     engine_client.abort.assert_awaited_once_with(request_id)
+
+
+@pytest.mark.asyncio
+async def test_vad_pool_bounds_decoded_audio_waiting_for_vad(monkeypatch):
+    """With a dedicated VAD pool, at most decode + VAD workers requests may
+    hold decoded audio while VAD is busy."""
+    decode_workers, vad_workers, num_requests = 2, 1, 8
+    bound = decode_workers + vad_workers
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_PREPROCESS_WORKERS", decode_workers)
+    monkeypatch.setattr(envs, "VLLM_MAX_VAD_WORKERS", vad_workers)
+    monkeypatch.setattr(
+        SpeechToTextBaseServing,
+        "model_cls",
+        SimpleNamespace(
+            get_speech_to_text_config=lambda *_: SpeechToTextConfig(),
+            get_streaming_post_processor_cls=lambda: None,
+            supports_segment_timestamp=False,
+            validate_language=lambda language: language,
+        ),
+    )
+
+    decoded = []
+    vad_released = threading.Event()
+
+    def fake_decode_audio(self, audio_data):
+        decoded.append(audio_data)
+        return np.zeros(16000, dtype=np.float32), 16000, 1.0
+
+    def fake_chunk_speech(self, y, sr, duration, request):
+        vad_released.wait()  # holds the only VAD worker until released
+        return []
+
+    monkeypatch.setattr(SpeechToTextBaseServing, "_decode_audio", fake_decode_audio)
+    monkeypatch.setattr(SpeechToTextBaseServing, "_chunk_speech", fake_chunk_speech)
+
+    engine_client = SimpleNamespace(
+        model_config=SimpleNamespace(get_diff_sampling_param=dict),
+        renderer=None,
+        input_processor=None,
+    )
+    server = SpeechToTextBaseServing(engine_client, models=None, request_logger=None)
+    request = SimpleNamespace(
+        language="en",
+        to_language=None,
+        build_vad_config=lambda: VADConfig(enabled=True),
+    )
+    tasks = [
+        asyncio.create_task(
+            server._preprocess_speech_to_text(request, b"audio", f"request-{i}")
+        )
+        for i in range(num_requests)
+    ]
+    try:
+        for _ in range(3000):  # up to 30 s on a slow machine
+            if len(decoded) >= bound:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)  # let any decodes beyond the bound happen
+        assert len(decoded) == bound
+    finally:
+        vad_released.set()
+        await asyncio.gather(*tasks)
+        server.shutdown()
+    assert len(decoded) == num_requests
