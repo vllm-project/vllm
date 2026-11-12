@@ -28,6 +28,7 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import is_modelscope_hub_enabled
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import (
     parse_safetensors_file_metadata,
@@ -45,7 +46,7 @@ from .repo_utils import (
     with_retry,
 )
 
-if envs.VLLM_USE_MODELSCOPE:
+if is_modelscope_hub_enabled():
     from modelscope import AutoConfig
 else:
     from transformers import AutoConfig
@@ -1293,7 +1294,7 @@ def get_hf_image_processor_config(
     **kwargs,
 ) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
-    if envs.VLLM_USE_MODELSCOPE:
+    if is_modelscope_hub_enabled():
         return dict()
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs

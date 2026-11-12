@@ -7,8 +7,8 @@ from transformers.dynamic_module_utils import (
     resolve_trust_remote_code,
 )
 
-import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import is_modelscope_hub_enabled
 
 logger = init_logger(__name__)
 
@@ -55,7 +55,7 @@ def try_get_class_from_dynamic_module(
             **kwargs,
         )
     except Exception:
-        location = "ModelScope" if envs.VLLM_USE_MODELSCOPE else "HF Hub"
+        location = "ModelScope" if is_modelscope_hub_enabled() else "HF Hub"
 
         if warn_on_fail:
             logger.warning(

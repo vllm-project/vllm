@@ -11,6 +11,7 @@ from typing import Any
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import is_modelscope_hub_enabled
 
 logger = init_logger(__name__)
 
@@ -115,9 +116,8 @@ def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
 
 
 def convert_model_repo_to_path(model_repo: str) -> str:
-    """When VLLM_USE_MODELSCOPE is True convert a model
-    repository string to a Path str."""
-    if not envs.VLLM_USE_MODELSCOPE or Path(model_repo).exists():
+    """Convert a repository ID to its cache path under global ModelScope routing."""
+    if not is_modelscope_hub_enabled() or Path(model_repo).exists():
         return model_repo
     from modelscope.utils.file_utils import get_model_cache_root
 

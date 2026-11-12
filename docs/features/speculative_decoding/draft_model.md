@@ -82,3 +82,22 @@ The code used to request completions as a client remains unchanged:
     through `--speculative-model` and adding related parameters such as
     `--num-speculative-tokens` separately has been deprecated. For supported
     keys and examples, see the [`--speculative-config` schema](README.md#--speculative-config-schema).
+
+## Selecting the draft model hub
+
+`VLLM_DRAFT_USE_MODELSCOPE` overrides the source of a separate draft checkpoint.
+Set these variables before importing vLLM or starting the server:
+
+| `VLLM_USE_MODELSCOPE` | `VLLM_DRAFT_USE_MODELSCOPE` | Target | Draft |
+| --- | --- | --- | --- |
+| `0` | unset | Hugging Face | Hugging Face |
+| `1` | unset | ModelScope | ModelScope |
+| `0` | `1` | Hugging Face | ModelScope |
+| `1` | `0` | ModelScope | Hugging Face |
+
+Install `modelscope>=1.18.1` when using ModelScope. Use ordinary repository IDs
+or local paths, without hub prefixes. Existing local paths are used directly.
+Hugging Face models retain their repository IDs and use the existing on-demand
+weight loader. ModelScope models are resolved to local snapshots when mixing
+hubs. The draft shares the target's tokenizer and its source. Speculative
+methods that reuse the target checkpoint do not fetch a separate draft.

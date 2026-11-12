@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
+    VLLM_DRAFT_USE_MODELSCOPE: bool | None = None
     VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
@@ -777,6 +778,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     "VLLM_USE_MODELSCOPE": lambda: (
         os.environ.get("VLLM_USE_MODELSCOPE", "False").strip().lower() in ("1", "true")
+    ),
+    # Override the hub for the draft model: true uses ModelScope, false uses
+    # Hugging Face. Unset inherits VLLM_USE_MODELSCOPE. Set before importing vLLM.
+    "VLLM_DRAFT_USE_MODELSCOPE": lambda: (
+        os.environ["VLLM_DRAFT_USE_MODELSCOPE"].strip().lower() in ("1", "true")
+        if "VLLM_DRAFT_USE_MODELSCOPE" in os.environ
+        else None
     ),
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
@@ -2492,6 +2500,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
+        "VLLM_DRAFT_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
