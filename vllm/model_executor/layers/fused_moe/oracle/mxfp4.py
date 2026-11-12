@@ -804,6 +804,21 @@ def select_deepseek_v4_mxfp4_moe_backend(
     else:
         priority_backends = _get_priority_backends()
 
+    if (
+        config.routing_method == RoutingMethodType.DeepseekV4
+        and not config.moe_parallel_config.use_all2all_kernels
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(120)
+    ):
+        # Humming runs DeepSeek-V4's experts faster than DeepGEMM on SM120 at
+        # every decode batch size, with TP or EP over TP ranks. EP with
+        # all-to-all (DP/PCP) and SM121 are not benchmarked.
+        priority_backends.remove(Mxfp4MoeBackend.HUMMING)
+        priority_backends.insert(
+            priority_backends.index(Mxfp4MoeBackend.DEEPGEMM_MXFP4),
+            Mxfp4MoeBackend.HUMMING,
+        )
+
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
     oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None)
     for backend in priority_backends:
