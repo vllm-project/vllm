@@ -2392,7 +2392,6 @@ class MooncakeStoreWorker:
             if not request.can_save:
                 continue
             request.current_event = current_event
-            assert self.kv_send_thread is not None
             self.kv_send_thread.add_request(request)
 
     def get_finished(
