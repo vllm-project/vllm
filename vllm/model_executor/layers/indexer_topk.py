@@ -6,8 +6,11 @@ import functools
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
+from vllm.logger import init_logger
+from vllm.model_executor.layers.canonical_topk import canonicalize_topk_
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -133,6 +136,14 @@ def deep_select_topk(
 # ---------------------------------------------------------------------------
 
 
+logger = init_logger(__name__)
+
+
+def deterministic_sparse_topk() -> bool:
+    """Whether the sparse indexer top-k must be canonical (see canonical_topk)."""
+    return envs.VLLM_DETERMINISTIC_SPARSE_TOPK or envs.VLLM_BATCH_INVARIANT
+
+
 @functools.cache
 def get_indexer_topk(backend: str) -> "SparseIndexerTopk":
     return SparseIndexerTopk(backend)
@@ -151,6 +162,15 @@ class SparseIndexerTopk(torch.nn.Module):
             backend = (
                 get_current_vllm_config().kernel_config.sparse_indexer_topk_backend
             )
+        self._deterministic = deterministic_sparse_topk()
+        if self._deterministic and backend == "deep_select":
+            # DeepSelect ranks BF16 approximations of the scores, so its set
+            # is not the exact top-k a canonical result is built from.
+            logger.warning_once(
+                "Deterministic sparse top-k: using the exact top-k kernels "
+                "instead of sparse_indexer_topk_backend='deep_select'."
+            )
+            backend = "auto"
         self._backend = backend
         self._is_cuda = current_platform.is_cuda()
         self._has_deep_select = self._is_cuda and (
@@ -345,6 +365,26 @@ class SparseIndexerTopk(torch.nn.Module):
         topk_indices (int32, -1 fill for rows shorter than topk_tokens).
         """
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
+        self._dispatch(
+            backend, logits, seq_lens, next_n, topk_indices, topk_tokens, max_seq_len
+        )
+        if self._deterministic:
+            canonicalize_topk_(
+                logits,
+                topk_indices[:, :topk_tokens],
+                self._row_ends(seq_lens, next_n, logits.shape[0]),
+            )
+
+    def _dispatch(
+        self,
+        backend: str,
+        logits: torch.Tensor,
+        seq_lens: torch.Tensor,
+        next_n: int,
+        topk_indices: torch.Tensor,
+        topk_tokens: int,
+        max_seq_len: int,
+    ) -> None:
         if backend == "deep_select":
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
             deep_select_topk(logits, topk_tokens, end=row_ends, output_idx=topk_indices)
