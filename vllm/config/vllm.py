@@ -45,7 +45,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig, hisparse_host_pool_gib
+from .kv_transfer import KVCacheAccess, KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
@@ -1500,7 +1500,6 @@ class VllmConfig:
             )
 
             self.model_config.verify_with_parallel_config(self.parallel_config)
-            self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
@@ -3205,6 +3204,11 @@ class VllmConfig:
             return
         cache_config._extensible_kv_cache_resolved = True
         requested = cache_config.enable_extensible_kv_cache
+        kv_cache_access = (
+            KVCacheAccess.IN_PROCESS
+            if self.kv_transfer_config is None
+            else self.kv_transfer_config.kv_cache_access()
+        )
         unsupported = None
         if not current_platform.is_cuda_alike():
             unsupported = "it is only supported on CUDA and ROCm"
@@ -3223,13 +3227,10 @@ class VllmConfig:
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
                 "cache size, so no measurement would size the cache"
             )
-        elif (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("LMCacheMPConnector")
-        ):
+        elif KVCacheAccess.LEGACY_IPC in kv_cache_access:
             unsupported = (
-                "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
-                "which cannot export driver-mapped memory"
+                "a KV connector (e.g. LMCacheMPConnector) shares the KV cache "
+                "through legacy CUDA IPC, which cannot export driver-mapped memory"
             )
         elif (
             self.kv_transfer_config is not None
@@ -3239,39 +3240,44 @@ class VllmConfig:
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
             )
-        elif (
-            self.kv_transfer_config is not None
-            and current_platform.is_rocm()
-            and self.kv_transfer_config.registers_kv_cache_memory()
-        ):
+        elif current_platform.is_rocm() and kv_cache_access.needs_single_chunk():
             # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
-                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
+                "which connectors that register the KV cache (e.g. NIXL, Mooncake, "
+                "MoRIIO, UMBP) require"
             )
-        # NIXL within a host reaches driver-mapped memory through a FABRIC handle.
-        nixl_would_use_tcp = (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.uses_nixl_on_device_memory()
+        exports_fd = KVCacheAccess.EXPORTS_FD in kv_cache_access
+        if exports_fd and (requested is False or unsupported is not None):
+            raise ValueError(
+                "enable_extensible_kv_cache: a KV connector (e.g. "
+                "LMCacheMPConnector with lmcache.mp.use_vmm_api) imports the KV "
+                "cache through POSIX file descriptors, which needs it, but "
+                f"{unsupported or 'it is disabled'}."
+            )
+        # FABRIC handles to driver-mapped memory need an IMEX channel.
+        fabric_unavailable = (
+            KVCacheAccess.EXPORTS_FABRIC in kv_cache_access
             and not imex_channel_available()
         )
         if requested is None:
-            cache_config.enable_extensible_kv_cache = (
-                unsupported is None and not nixl_would_use_tcp
-            )
-            if unsupported is None and nixl_would_use_tcp:
+            enabled = unsupported is None and (exports_fd or not fabric_unavailable)
+            cache_config.enable_extensible_kv_cache = enabled
+            if unsupported is None and not enabled:
                 logger.info(
-                    "Extensible KV cache off: without an IMEX channel, NIXL within "
-                    "a host would lose NVLink and fall back to RDMA or TCP. If "
-                    "transfers only cross hosts, pass --enable-extensible-kv-cache."
+                    "Extensible KV cache off: without an IMEX channel, KV transfers "
+                    "within a host (e.g. NIXL) would lose NVLink and fall back to "
+                    "RDMA or TCP. If transfers only cross hosts, pass "
+                    "--enable-extensible-kv-cache."
                 )
         elif requested and unsupported is not None:
             raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
-        elif requested and nixl_would_use_tcp:
+        if cache_config.enable_extensible_kv_cache and fabric_unavailable:
             logger.warning(
-                "No IMEX channel: with the extensible KV cache, NIXL within a host "
-                "falls back to TCP. Transfers across hosts use RDMA."
+                "No IMEX channel: with the extensible KV cache, KV transfers within "
+                "a host (e.g. NIXL) fall back to TCP. Transfers across hosts use "
+                "RDMA."
             )
 
     def _validate_adaptive_verification(self) -> None:
