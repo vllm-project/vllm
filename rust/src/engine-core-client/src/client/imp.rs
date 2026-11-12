@@ -203,8 +203,6 @@ impl ClientInner {
         outputs.into_iter().filter_map(|output| registry.send_output(output)).collect()
     }
 
-    /// Route one batch of replaceable prefill progress to the request streams.
-
     /// Remove a batch of requests that have finished or aborted, returning
     /// their stream senders.
     pub fn finish_requests<'a>(

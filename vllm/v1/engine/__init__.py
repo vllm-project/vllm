@@ -225,8 +225,6 @@ class EngineCoreRequest(
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
 
-    # Whether the requesting frontend streams per-request prefill progress.
-
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
