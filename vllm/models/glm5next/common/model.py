@@ -82,6 +82,7 @@ from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsEagle3,
     SupportsPP,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -1257,7 +1258,13 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
 
 
 class Glm5NextForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3
+    nn.Module,
+    HasInnerState,
+    SupportsPP,
+    MixtureOfExperts,
+    IsHybrid,
+    SupportsEagle3,
+    SupportsReplaySSM,
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1396,6 +1403,7 @@ class Glm5NextForConditionalGeneration(
     IsHybrid,
     MixtureOfExperts,
     SupportsEagle3,
+    SupportsReplaySSM,
 ):
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
