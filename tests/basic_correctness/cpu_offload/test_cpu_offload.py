@@ -8,12 +8,15 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.model_executor.model_loader.utils import device_loading_context
 from vllm.model_executor.offloader import (
     PrefetchOffloader,
     UVAOffloader,
     get_offloader,
     set_offloader,
 )
+from vllm.platforms import current_platform
+from vllm.utils.platform_utils import is_uva_available
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from ...utils import compare_two_settings
@@ -145,7 +148,19 @@ def test_tower_weight_offloading(vllm_runner, monkeypatch, disable_uva):
 
 
 @pytest.mark.parametrize(
-    "model", ["vllm-project/tiny-random-LlamaForCausalLM", "TitanML/tiny-mixtral"]
+    "model",
+    [
+        "vllm-project/tiny-random-LlamaForCausalLM",
+        pytest.param(
+            "TitanML/tiny-mixtral",
+            marks=pytest.mark.xfail(
+                current_platform.is_xpu(),
+                reason="XpuFusedMoe re-lays out the offloaded experts in device "
+                "memory on the first forward",
+                strict=True,
+            ),
+        ),
+    ],
 )
 def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model):
     """Transformers backend decoder layers (including MoE experts) are offloaded as
@@ -175,6 +190,8 @@ def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model)
 
     monkeypatch.setattr(UVAOffloader, "wrap_modules", wrap_modules)
     num_layers = 8
+    # 1 GiB on any device, too little to hold the decoder layers
+    gpu_memory_utilization = (1 << 30) / current_platform.get_device_total_memory()
 
     try:
         with vllm_runner(
@@ -188,7 +205,7 @@ def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model)
                 "intermediate_size": 4096,
             },
             enforce_eager=True,
-            gpu_memory_utilization=0.1,
+            gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=128,
             max_num_seqs=1,
             # More than the decoder layers, so every one of them is offloaded
@@ -198,6 +215,8 @@ def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model)
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
             layers = model_runner.get_model().model.get_decoder().layers
             assert all(_is_offloaded(p) for p in layers.parameters())
+            # Weight processing must not have moved them back to the device
+            assert model_runner.model_memory_usage < sum(layer_bytes)
     finally:
         set_offloader(original_offloader)
         envs.disable_envs_cache()
@@ -210,6 +229,25 @@ def test_transformers_backend_weight_offloading(vllm_runner, monkeypatch, model)
         peak_above_resident,
         layer_bytes,
     )
+
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available")
+def test_uva_weight_rebound_to_device_is_reoffloaded():
+    """Weight processing that rebinds a UVA-offloaded weight's `.data` to new
+    device memory (e.g. ROCm MoE padding) leaves it offloaded again."""
+    device = torch.accelerator.current_accelerator()
+    module = nn.Linear(1024, 1024, bias=False, device=device)
+    UVAOffloader(cpu_offload_max_bytes=1 << 30).wrap_modules(m for m in [module])
+    weight = module.weight
+    assert getattr(weight, "_vllm_is_uva_offloaded", False)
+    expected = weight.data.cpu() + 1
+    allocated_before = torch.accelerator.memory_allocated()
+
+    with device_loading_context(module, device):
+        weight.data = weight.data + 1
+
+    assert torch.accelerator.memory_allocated() == allocated_before
+    torch.testing.assert_close(weight.data.cpu(), expected)
 
 
 PREFETCH_ARGS = [
