@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Chunked-context MLA prefill with an nvfp4_ds_mla KV cache.
 
-``MLACommonBaseImpl._compute_prefill_context`` gathers each chunk's context KV
+`MLACommonBaseImpl._compute_prefill_context` gathers each chunk's context KV
 into a BF16 workspace. For nvfp4_ds_mla it must use the NVFP4 upconvert gather
 (the generic one rejects the dtype) and pass the chunk starts through, so a
 continuation chunk reads from its start rather than from the request's first
 token.
 
 The reference runs the same method on a BF16 cache that holds the dequantized
-values, through the generic gather, which applies ``seq_starts`` itself. Every
+values, through the generic gather, which applies `seq_starts` itself. Every
 chunk must then see bit-identical Q, K and V.
 """
 
@@ -68,7 +68,7 @@ class _RecordingPrefillBackend:
 
 
 class _KVBProj(torch.nn.Module):
-    """Stand-in for ``kv_b_proj`` with a BF16 weight (returns (out, bias))."""
+    """Stand-in for `kv_b_proj` with a BF16 weight (returns (out, bias))."""
 
     def __init__(self, device: torch.device) -> None:
         super().__init__()

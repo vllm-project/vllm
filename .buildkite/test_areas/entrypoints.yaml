@@ -113,6 +113,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API completion)"
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-completion
+  automatic_shard: true
   timeout_in_minutes: 68
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -135,6 +136,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 65
@@ -209,6 +211,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Responses API)"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 50
