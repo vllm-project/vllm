@@ -824,10 +824,12 @@ class DeepGemmMegaMoEExperts(nn.Module):
                     activation=self.activation.name,
                 )
             self._symm_buffers[key] = symm_buffer
-            # DeepGEMM measures the SM locality-domain map that MegaMoE reads through
-            # an MPS helper process, which stays alive until released. vLLM
+            # Only SM100 MegaMoE needs the locality map. Cache it before stopping
+            # the MPS helper; vLLM does not localize weights.
             # localizes no weights, so cache the map and stop the helper now.
-            if hasattr(deep_gemm, "destroy_localizer"):
+            if current_platform.is_device_capability_family(100) and hasattr(
+                deep_gemm, "destroy_localizer"
+            ):
                 deep_gemm.destroy_localizer()
         return symm_buffer
 
