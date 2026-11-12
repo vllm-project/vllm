@@ -1141,6 +1141,7 @@ def test_select_mxfp4_moe_backend_relu2_dispatches_to_aiter(
     dispatches through select_mxfp4_moe_backend() to AiterMxfp4Experts on
     ROCm.
     """
+    _fake_rocm_arch(monkeypatch, "gfx950")
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation

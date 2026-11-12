@@ -885,7 +885,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
 
         intermediate_alignment = (
             128
-            if is_situ_or_silu and (aiter_uses_128 or triton_uses_128 or aiter_w4a4)
+            if (aiter_w4a4 and activation != MoEActivation.RELU2_NO_MUL)
+            or (is_situ_or_silu and (aiter_uses_128 or triton_uses_128))
             else 256
         )
         # W4A4 stage 1 still requires a 256-aligned hidden dimension.
