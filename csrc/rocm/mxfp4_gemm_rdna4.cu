@@ -40,6 +40,8 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
+#include <cstdlib>
+
 #include "qdq_mxfp4_rdna4.cuh"
 
 #if defined(__gfx1200__) || defined(__gfx1201__)
@@ -154,18 +156,23 @@ __device__ __forceinline__ v8f32 wmma_fp8(v2i32 a, v2i32 b, v8f32 c) {
 // ---------------------------------------------------------------------------
 // Section 1: general (prefill) path. 16M x 16N tile, one wave, full K.
 // ---------------------------------------------------------------------------
-template <typename T>
-__global__ void gemm_mxfp4_wmma_fp8_16x16_1w(
-    const uint8_t* __restrict__ aq, const float* __restrict__ ascale,
-    const uint32_t* __restrict__ b_q, const uint8_t* __restrict__ b_scales,
-    T* __restrict__ c, int M, int N, int K) {
-  const int m_tile = blockIdx.y * 16;
-  const int n_tile = blockIdx.x * 16;
+// WM x WN waves per block, each wave owning one 16x16 WMMA tile, so the block
+// tile is (16*WM) x (16*WN). WM=WN=1 is the original single-wave kernel.
+template <typename T, int WM, int WN>
+__global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t* __restrict__ aq,
+                                          const float* __restrict__ ascale,
+                                          const uint32_t* __restrict__ b_q,
+                                          const uint8_t* __restrict__ b_scales,
+                                          T* __restrict__ c, int M, int N,
+                                          int K) {
+  const int wave = threadIdx.x >> 5;
+  const int m_tile = blockIdx.y * (16 * WM) + 16 * (wave / WN);
+  const int n_tile = blockIdx.x * (16 * WN) + 16 * (wave % WN);
   if (m_tile >= M || n_tile >= N) return;
 
-  const int lane = threadIdx.x;  // 0..31
-  const int lo = lane & 15;      // A: row | B: col | acc: N index
-  const int hi = lane >> 4;      // which half of the 16-wide K step
+  const int lane = threadIdx.x & 31;
+  const int lo = lane & 15;  // A: row | B: col | acc: N index
+  const int hi = lane >> 4;  // which half of the 16-wide K step
 
   const int n_col = n_tile + lo;
   const int a_row = m_tile + lo;
@@ -216,10 +223,10 @@ __global__ void gemm_mxfp4_wmma_fp8_16x16_1w(
 
 #else  // non-RDNA4 device pass: keep symbols so the TU links everywhere.
 
-template <typename T>
-__global__ void gemm_mxfp4_wmma_fp8_16x16_1w(const uint8_t*, const float*,
-                                             const uint32_t*, const uint8_t*,
-                                             T*, int, int, int) {}
+template <typename T, int WM, int WN>
+__global__ void gemm_mxfp4_wmma_fp8_tiled(const uint8_t*, const float*,
+                                          const uint32_t*, const uint8_t*, T*,
+                                          int, int, int) {}
 
 #endif  // __HIP__MXFP4_RDNA4__
 
@@ -274,6 +281,17 @@ __global__ void gemv_mxfp4_rdna4(const T* __restrict__ a,
   }
 }
 
+// Tile config override for tuning sweeps: VLLM_MXFP4_RDNA4_TILE =
+// 1 -> 16x16 (1 wave), 2 -> 32x32 (4 waves), 3 -> 64x32 (8 waves).
+// Unset / 0 picks by shape.
+inline int tile_cfg_override() {
+  static const int v = [] {
+    const char* e = std::getenv("VLLM_MXFP4_RDNA4_TILE");
+    return e ? atoi(e) : 0;
+  }();
+  return v;
+}
+
 }  // namespace mxfp4_rdna4
 }  // namespace vllm
 
@@ -300,25 +318,40 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a, torch::Tensor const& b_q,
   const auto* bq = reinterpret_cast<const uint32_t*>(b_q.data_ptr());
   const auto* bs = reinterpret_cast<const uint8_t*>(b_scales.data_ptr());
 
-#define DISPATCH(T, TT)                                               \
-  if (M <= kGemvMaxM) {                                               \
-    dim3 blk(32, 4);                                                  \
-    dim3 grd((N + 3) / 4);                                            \
-    gemv_mxfp4_rdna4<TT, kGemvMaxM><<<grd, blk, 0, stream>>>(         \
-        reinterpret_cast<const TT*>(a.data_ptr()), bq, bs,            \
-        reinterpret_cast<TT*>(c.data_ptr()), M, N, K);                \
-  } else {                                                            \
-    auto aq = torch::empty({M, K}, a.options().dtype(torch::kUInt8)); \
-    auto as = torch::empty({M}, a.options().dtype(torch::kFloat32));  \
-    quantize_a_e4m3<TT><<<M, 256, 0, stream>>>(                       \
-        reinterpret_cast<const TT*>(a.data_ptr()),                    \
-        reinterpret_cast<uint8_t*>(aq.data_ptr()),                    \
-        reinterpret_cast<float*>(as.data_ptr()), M, K);               \
-    dim3 grd((N + 15) / 16, (M + 15) / 16);                           \
-    gemm_mxfp4_wmma_fp8_16x16_1w<TT><<<grd, 32, 0, stream>>>(         \
-        reinterpret_cast<const uint8_t*>(aq.data_ptr()),              \
-        reinterpret_cast<const float*>(as.data_ptr()), bq, bs,        \
-        reinterpret_cast<TT*>(c.data_ptr()), M, N, K);                \
+#define LAUNCH_TILED(TT, WM, WN)                                               \
+  do {                                                                         \
+    dim3 grd((N + 16 * (WN) - 1) / (16 * (WN)),                                \
+             (M + 16 * (WM) - 1) / (16 * (WM)));                               \
+    gemm_mxfp4_wmma_fp8_tiled<TT, WM, WN>                                      \
+        <<<grd, 32 * (WM) * (WN), 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K); \
+  } while (0)
+
+#define DISPATCH(T, TT)                                                \
+  if (M <= kGemvMaxM) {                                                \
+    dim3 blk(32, 4);                                                   \
+    dim3 grd((N + 3) / 4);                                             \
+    gemv_mxfp4_rdna4<TT, kGemvMaxM><<<grd, blk, 0, stream>>>(          \
+        reinterpret_cast<const TT*>(a.data_ptr()), bq, bs,             \
+        reinterpret_cast<TT*>(c.data_ptr()), M, N, K);                 \
+  } else {                                                             \
+    auto aq = torch::empty({M, K}, a.options().dtype(torch::kUInt8));  \
+    auto as = torch::empty({M}, a.options().dtype(torch::kFloat32));   \
+    quantize_a_e4m3<TT><<<M, 256, 0, stream>>>(                        \
+        reinterpret_cast<const TT*>(a.data_ptr()),                     \
+        reinterpret_cast<uint8_t*>(aq.data_ptr()),                     \
+        reinterpret_cast<float*>(as.data_ptr()), M, K);                \
+    const auto* aqp = reinterpret_cast<const uint8_t*>(aq.data_ptr()); \
+    const auto* asp = reinterpret_cast<const float*>(as.data_ptr());   \
+    auto* cp = reinterpret_cast<TT*>(c.data_ptr());                    \
+    int cfg = tile_cfg_override();                                     \
+    if (cfg == 0) cfg = (M >= 256) ? 3 : ((M >= 32) ? 2 : 1);          \
+    if (cfg == 3) {                                                    \
+      LAUNCH_TILED(TT, 4, 2);                                          \
+    } else if (cfg == 2) {                                             \
+      LAUNCH_TILED(TT, 2, 2);                                          \
+    } else {                                                           \
+      LAUNCH_TILED(TT, 1, 1);                                          \
+    }                                                                  \
   }
 
   if (a.scalar_type() == at::kHalf) {
@@ -327,6 +360,7 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a, torch::Tensor const& b_q,
     DISPATCH(bf16_t, __hip_bfloat16)
   }
 #undef DISPATCH
+#undef LAUNCH_TILED
 
   return c;
 }
