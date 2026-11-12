@@ -10,6 +10,7 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import mmap
 import os
 import threading
 import time
@@ -2413,6 +2414,20 @@ class TestTieringOffloadingManagerWithFsTier:
     """Integration tests for TieringOffloadingManager backed by a real FS tier."""
 
     @staticmethod
+    def _aligned_mock_mmap_region(num_chunks: int):
+        """Mock region of page-aligned whole pages, so the fs tier's O_DIRECT
+        loads work on any filesystem (tmpfs, ext4, overlayfs)."""
+        page = mmap.PAGESIZE
+        tensor = torch.zeros(num_chunks * page + page, dtype=torch.uint8)
+        shift = page - (tensor.data_ptr() % page)
+        view = memoryview(
+            tensor[shift : shift + num_chunks * page].numpy().reshape(num_chunks, page)
+        )
+        mock = MagicMock()
+        mock.create_kv_memoryview.return_value = view
+        return mock
+
+    @staticmethod
     def _make_fs_tier(
         mmap_region, root_dir: str, lock: threading.Lock
     ) -> FileSystemTierManager:
@@ -2456,11 +2471,10 @@ class TestTieringOffloadingManagerWithFsTier:
     @pytest.fixture
     def fs_manager_setup(self, tmp_path, manager_lock):
         """Real FileSystemTierManager inside TieringOffloadingManager on a tmp disk."""
-        # Small block size so tests are fast and don't require O_DIRECT
-        # alignment; the FS tier gracefully falls back to buffered I/O when
-        # O_DIRECT is unavailable.
-        n_chunks, block_bytes = 8, 64
-        mmap = _mock_mmap_region(n_chunks, block_bytes)
+        # Whole-page blocks keep the tier's O_DIRECT path usable on any
+        # filesystem (tmpfs, ext4, overlayfs).
+        n_chunks = 8
+        mmap = self._aligned_mock_mmap_region(n_chunks)
         primary_tier = CPUPrimaryTierOffloadingManager(
             num_chunks=n_chunks, mmap_region=mmap
         )
@@ -2510,7 +2524,7 @@ class TestTieringOffloadingManagerWithFsTier:
             path = fs_tier.file_mapper.get_file_name(k)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as f:
-                f.write(bytes(64))
+                f.write(bytes(fs_tier.block_size_bytes))
 
     @staticmethod
     def _gate_fs_load_materialization(fs_tier, monkeypatch) -> threading.Event:
@@ -2566,7 +2580,7 @@ class TestTieringOffloadingManagerWithFsTier:
 
     def test_two_fs_tier_promotions_different_keys(self, tmp_path, manager_lock):
         """Two FS tiers each hold different keys; promotions go to correct tier."""
-        mmap = _mock_mmap_region(8, 64)
+        mmap = self._aligned_mock_mmap_region(8)
         primary_tier = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mmap)
         path0, path1 = tmp_path / "tier0", tmp_path / "tier1"
         path0.mkdir()
@@ -2714,7 +2728,7 @@ class TestTieringOffloadingManagerWithFsTier:
         FS pool join would otherwise wait forever on a worker looping in
         _materialize_under_lock().
         """
-        mmap = _mock_mmap_region(8, 64)
+        mmap = self._aligned_mock_mmap_region(8)
         primary_tier = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mmap)
         fs_tier = self._make_fs_tier(mmap, str(tmp_path), manager_lock)
         manager = TieringOffloadingManager(
