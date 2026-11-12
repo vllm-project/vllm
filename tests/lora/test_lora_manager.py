@@ -33,6 +33,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.utils import StageMissingLayer
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -444,6 +445,29 @@ def test_target_modules_fail_closed_on_unsupported_matched_modules(
             torch.device(DEVICES[0]),
             default_vllm_config,
         )
+
+
+def test_skip_modules_missing_on_this_pp_stage(
+    default_vllm_config, dist_init, dummy_model
+):
+    model = dummy_model
+    model.lm_head = StageMissingLayer("pp_stage", model.lm_head)
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+        default_vllm_config,
+    )
+
+    # Adapters with `lm_head` weights still load on stages without `lm_head`.
+    assert "lm_head" not in manager.unsupported_lora_modules
+    assert "lm_head" not in manager.modules
 
 
 def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():

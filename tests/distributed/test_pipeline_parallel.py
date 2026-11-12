@@ -504,6 +504,7 @@ def test_pp_granite4_vision_deepstack(num_gpus_available):
     ("model_id", "model_kwargs"),
     [
         pytest.param("tiiuae/Falcon-H1-Tiny-90M-Instruct", {}, id="falcon_h1"),
+        pytest.param("Qwen/Qwen3.5-0.8B", {}, id="qwen3_5"),
         # Startup check only: dummy weights give near-uniform logits.
         pytest.param(
             "baidu/ERNIE-4.5-21B-A3B-PT",

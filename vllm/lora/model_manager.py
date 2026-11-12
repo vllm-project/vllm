@@ -47,7 +47,7 @@ from vllm.model_executor.models import (
     supports_multimodal,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.model_executor.models.utils import PPMissingLayer, StageMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
@@ -493,7 +493,7 @@ class LoRAModelManager:
         named_modules.sort(key=lambda item: item[0].startswith(tuple(runners)))
 
         for module_name, module in named_modules:
-            if isinstance(module, PPMissingLayer):
+            if isinstance(module, (PPMissingLayer, StageMissingLayer)):
                 continue
 
             is_classifier_head = module_name in self.supported_modules_to_save
