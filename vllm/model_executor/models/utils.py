@@ -508,7 +508,7 @@ def get_fused_shared_expert_layers(
     an `nn.ModuleList`, and absolute for `nn.ModuleDict` MTP layers keyed by
     layer index. No loader needs to hard-code an offset.
 
-    Also rejects mixed fusion when EPLB is enabled or the `nixl_ep` all2all
+    Also rejects mixed fusion when EPLB is enabled or an elastic-buffer all2all
     backend is selected, and logs the resolved policy.
     """
     fused_layers: set[int] = set()
@@ -547,7 +547,7 @@ def get_fused_shared_expert_layers(
         all2all_backend = (
             parallel_config.all2all_backend if parallel_config is not None else None
         )
-        if all2all_backend == "nixl_ep":
+        if all2all_backend in ("nixl_ep", "mooncake_ep"):
             raise NotImplementedError(
                 "Mixed per-layer shared-expert fusion is not supported with "
                 f"all2all_backend={all2all_backend!r}"

@@ -53,6 +53,7 @@ All2AllBackend = Literal[
     "moonep",
     "mori",
     "nixl_ep",
+    "mooncake_ep",
     "allgather_reducescatter",
     "alltoall_batched",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -244,6 +245,7 @@ class ParallelConfig:
       EPv1 otherwise, picking the EPv1 inter-node kernel from the token budget
       (see `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`)
     - "nixl_ep": Use nixl-ep kernels
+    - "mooncake_ep": Use Mooncake EP low-latency kernels with elastic buffers
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "passthrough": No all2all at all: the MoE backend dispatches and combines
@@ -873,6 +875,7 @@ class ParallelConfig:
                 "mori_low_latency",
                 "mori",
                 "nixl_ep",
+                "mooncake_ep",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
@@ -895,6 +898,7 @@ class ParallelConfig:
             in (
                 "deepep_low_latency",
                 "nixl_ep",
+                "mooncake_ep",
                 "alltoall_batched",
             )
             and self.enable_expert_parallel

@@ -46,7 +46,7 @@ logger = init_logger(__name__)
 
 # All2all backends that support fault-tolerant timeout + rank masking,
 # required for FT under DP+EP MoE deployments.
-FT_BACKEND_SET = frozenset({"deepep_low_latency", "nixl_ep"})
+FT_BACKEND_SET = frozenset({"deepep_low_latency", "nixl_ep", "mooncake_ep"})
 
 
 def _reinit_cpu_group(

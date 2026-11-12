@@ -2107,6 +2107,7 @@ class VllmConfig:
                     "deepep_low_latency",
                     "deepep_high_throughput",
                     "nixl_ep",
+                    "mooncake_ep",
                 ]
             assert a2a_backend in supported_backends, (
                 "Microbatching currently only supports the "
