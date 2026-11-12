@@ -531,7 +531,7 @@ class EngineCore:
                 {
                     "group_idx": group_idx,
                     "kind": get_kv_cache_kind(
-                        group.manager_config, group.kv_cache_specs.values()
+                        group.manager_config, group.distinct_specs
                     ).value,
                     "block_size": manager.block_size,
                     "sliding_window": getattr(

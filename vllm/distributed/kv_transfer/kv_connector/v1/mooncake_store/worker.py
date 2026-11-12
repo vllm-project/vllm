@@ -2032,7 +2032,7 @@ class MooncakeStoreWorker:
     def _group_tp_replication_factor(self, group: KVCacheGroup) -> int:
         if self.dcp_size > 1:
             return 1
-        inner_specs = group.kv_cache_specs.values()
+        inner_specs = group.distinct_specs
         if any(isinstance(inner, MambaSpec) for inner in inner_specs):
             return 1
         factors = [

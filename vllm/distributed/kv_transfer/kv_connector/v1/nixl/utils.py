@@ -12,10 +12,8 @@ import zmq
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     KVCacheGroup,
     KVCacheSpec,
-    MambaSpec,
     MLAAttentionSpec,
 )
 
@@ -56,12 +54,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
 
 
 def get_representative_spec_type(group: KVCacheGroup) -> type[KVCacheSpec]:
-    if group.kv_cache_specs:
-        return type(next(iter(group.kv_cache_specs.values())))
-    # A PP stage holding none of the group's layers transfers none of them.
-    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
-
-    return MambaSpec if issubclass(group.manager_cls, MambaManager) else AttentionSpec
+    return type(group.distinct_specs[0])
 
 
 def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroup]) -> set[int]:

@@ -1426,6 +1426,7 @@ def _project_kv_cache_groups_to_worker(
                 kv_cache_specs={
                     name: group.kv_cache_specs[name] for name in worker_layer_names
                 },
+                unprojected_specs=group.distinct_specs,
             )
         )
     return projected_groups

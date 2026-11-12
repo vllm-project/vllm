@@ -455,6 +455,9 @@ def new_kv_cache_group(
         layer = KVCacheLayerConfig(manager_config or manager_cls.config(), layer)
     else:
         assert manager_config is None
+    if not layer_names:
+        # A pipeline stage holding none of the group's layers.
+        kwargs.setdefault("unprojected_specs", (layer.spec,))
     return KVCacheGroup(
         dict.fromkeys(layer_names, layer.spec),
         layer.manager_config,

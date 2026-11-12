@@ -83,7 +83,7 @@ def get_offloading_event_group_spec(
 ) -> OffloadingEventGroupSpec:
     return OffloadingEventGroupSpec(
         kv_cache_spec_kind=get_kv_cache_kind(
-            kv_cache_group.manager_config, kv_cache_group.kv_cache_specs.values()
+            kv_cache_group.manager_config, kv_cache_group.distinct_specs
         ).value,
         kv_cache_spec_sliding_window=getattr(
             kv_cache_group.manager_config.params, "sliding_window", None

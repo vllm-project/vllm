@@ -52,6 +52,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseResidentManager,
     MambaManager,
     SlidingWindowManager,
+    get_kv_cache_kind,
 )
 from vllm.v1.hisparse.layout import (
     get_hisparse_kv_cache_groups,
@@ -67,6 +68,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
+    prefix_lookup_groups,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -679,6 +681,42 @@ def test_project_kv_cache_groups_to_worker():
         "layer1": layer_a.spec,
         "layer3": layer_a.spec,
     }
+
+
+@pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])
+def test_group_on_pp_stage_keeps_the_whole_groups_specs(stage_layers):
+    """A PP stage holding none or only some of a group's layers answers what
+    the whole group holds."""
+    global_groups = [
+        KVCacheGroup.from_layers(
+            {
+                "mixed_mla": full_layer(new_mla_spec()),
+                "mixed_attn": full_layer(new_kv_cache_spec()),
+            }
+        ),
+        new_kv_cache_group(["mla"], new_mla_spec()),
+        new_kv_cache_group(["attn1", "attn2"], new_kv_cache_spec()),
+        new_kv_cache_group(["attn3"], new_kv_cache_spec(num_kv_heads=4)),
+        new_kv_cache_group(["mamba"], new_mamba_spec()),
+    ]
+    projected = kv_cache_planning._project_kv_cache_groups_to_worker(
+        global_groups, dict.fromkeys(stage_layers, full_layer(new_kv_cache_spec()))
+    )
+
+    def kinds(groups):
+        return [get_kv_cache_kind(g.manager_config, g.distinct_specs) for g in groups]
+
+    assert [g.layer_names for g in projected] == [
+        [name for name in g.layer_names if name in stage_layers] for g in global_groups
+    ]
+    assert [g.distinct_specs for g in projected] == [
+        g.distinct_specs for g in global_groups
+    ]
+    assert kinds(projected) == kinds(global_groups)
+    assert [g.uses_slot_mapping for g in projected] == [
+        g.uses_slot_mapping for g in global_groups
+    ]
+    assert prefix_lookup_groups(projected) == prefix_lookup_groups(global_groups)
 
 
 def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():

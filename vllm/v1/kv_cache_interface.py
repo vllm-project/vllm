@@ -704,6 +704,9 @@ class KVCacheGroup:
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+    # The whole group's distinct specs, set on a group projected onto a
+    # pipeline stage.
+    unprojected_specs: tuple[KVCacheSpec, ...] = field(default=(), compare=False)
 
     @classmethod
     def from_layers(
@@ -732,6 +735,15 @@ class KVCacheGroup:
         return list(self.kv_cache_specs)
 
     @property
+    def distinct_specs(self) -> tuple[KVCacheSpec, ...]:
+        """The distinct specs of the whole group's layers, for what kinds of
+        cache it holds. The same on every pipeline stage, unlike
+        `kv_cache_specs`."""
+        return self.unprojected_specs or tuple(
+            dict.fromkeys(self.kv_cache_specs.values())
+        )
+
+    @property
     def page_size_bytes(self) -> int:
         """Bytes one block of the group occupies across all its layers."""
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
@@ -754,9 +766,8 @@ class KVCacheGroup:
 
     @property
     def uses_slot_mapping(self) -> bool:
-        return self.manager_cls.uses_slot_mapping and (
-            not self.kv_cache_specs
-            or any(spec.uses_slot_mapping for spec in self.kv_cache_specs.values())
+        return self.manager_cls.uses_slot_mapping and any(
+            spec.uses_slot_mapping for spec in self.distinct_specs
         )
 
     def max_allocated_blocks_per_request(self, vllm_config: VllmConfig) -> int:
@@ -816,8 +827,7 @@ def prefix_lookup_groups(
             continue
         # A lookup takes the EAGLE last-block drop if any member does, so only
         # groups with equal layouts share one. TODO: drop with the EAGLE drop.
-        specs = set(g.kv_cache_specs.values())
-        layout = specs.pop() if len(specs) == 1 else tuple(g.kv_cache_specs)
+        layout = g.distinct_specs[0] if len(g.distinct_specs) == 1 else i
         key = (g.manager_config, g.block_size, g.dcp_sharded, layout)
         lookup = lookups.setdefault(
             key, PrefixLookupGroup(g.manager_config, g.block_size, [])

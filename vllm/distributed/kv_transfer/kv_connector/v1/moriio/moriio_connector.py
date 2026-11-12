@@ -680,8 +680,7 @@ class MoRIIOConnectorScheduler:
             if self.mode == MoRIIOMode.WRITE and any(
                 issubclass(g.manager_cls, SlidingWindowManager)
                 and not any(
-                    isinstance(spec, MLAAttentionSpec)
-                    for spec in g.kv_cache_specs.values()
+                    isinstance(spec, MLAAttentionSpec) for spec in g.distinct_specs
                 )
                 for g in kv_cache_config.transfer_groups
             ):

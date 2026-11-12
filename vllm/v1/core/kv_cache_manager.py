@@ -209,9 +209,7 @@ class KVCacheManager:
         self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
         self.kv_cache_event_metadata = tuple(
             (
-                get_kv_cache_kind(
-                    group.manager_config, group.kv_cache_specs.values()
-                ).value,
+                get_kv_cache_kind(group.manager_config, group.distinct_specs).value,
                 getattr(group.manager_config.params, "sliding_window", None),
             )
             for group in kv_cache_config.kv_cache_groups
@@ -764,8 +762,7 @@ class KVCacheManager:
         clipped_block_ids: list[list[int]] = []
         for group, ids in zip(self.kv_cache_config.kv_cache_groups, block_ids):
             is_attention = all(
-                isinstance(spec, AttentionSpec)
-                for spec in group.kv_cache_specs.values()
+                isinstance(spec, AttentionSpec) for spec in group.distinct_specs
             )
             if not is_attention or issubclass(group.manager_cls, CrossAttentionManager):
                 clipped_block_ids.append(ids)

@@ -1216,7 +1216,7 @@ class SimpleCPUOffloadScheduler:
                             extra_keys=to_event_extra_keys(extra_keys and [extra_keys]),
                             group_idx=group_idx,
                             kv_cache_spec_kind=get_kv_cache_kind(
-                                group.manager_config, group.kv_cache_specs.values()
+                                group.manager_config, group.distinct_specs
                             ).value,
                             kv_cache_spec_sliding_window=getattr(
                                 group.manager_config.params, "sliding_window", None
