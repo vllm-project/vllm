@@ -73,13 +73,22 @@ def test_sparse_attention_selects_through_tied_scores(
 
 
 @pytest.mark.parametrize(
-    "tp, dim_first", [(2, False), (4, False), (4, True), (8, False)]
+    "tp, dim_first, saturate",
+    [
+        (2, False, False),
+        (4, False, False),
+        (4, True, False),
+        (8, False, False),
+        (4, False, True),
+    ],
 )
 def test_kda_layer_matches_vllm_ops(
-    monkeypatch: pytest.MonkeyPatch, tp: int, dim_first: bool
+    monkeypatch: pytest.MonkeyPatch, tp: int, dim_first: bool, saturate: bool
 ):
     _ready(tp)
-    multi_process_parallel(monkeypatch, tp, 1, _ffn._worker(_kda._check, dim_first))
+    multi_process_parallel(
+        monkeypatch, tp, 1, _ffn._worker(_kda._check, dim_first, saturate)
+    )
 
 
 @pytest.mark.parametrize(

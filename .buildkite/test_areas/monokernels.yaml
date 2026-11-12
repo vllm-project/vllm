@@ -185,6 +185,7 @@ steps:
 
 - label: ':amd: (MI355) GLM-5.3-Flash Mono Decode Kernel'
   key: glm53-flash-mono-decode-kernel-amd
+  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8

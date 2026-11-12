@@ -162,7 +162,9 @@ def _box(rt, name, n, packed=False):
     return words[: 2 * n : 2].contiguous().view(torch.float32)
 
 
-def _check(rank: int, tp: int, device, dim_first: bool) -> None:
+def _check(rank: int, tp: int, device, dim_first: bool, saturate: bool) -> None:
+    """`saturate` drives half the gate channels far below the sigmoid's range
+    (amp * g < -88.7), where exp(-amp * g) is inf and the gate divides by it."""
     import torch.distributed as dist
 
     from vllm.distributed import get_tp_group
@@ -181,6 +183,8 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
     lay, kda = _Layer(rank, tp, device), _Kda(rank, tp, device)
     if not dim_first:
         kda.conv0 = kda.conv0.transpose(1, 2).contiguous()
+    if saturate:
+        kda.dt_bias[::2] = -1e3
     n_in = FlashShard(tp).kda_in_rows
     group = get_tp_group().cpu_group
     for S in ROWS:
@@ -212,6 +216,7 @@ def _check(rank: int, tp: int, device, dim_first: bool) -> None:
         outs = [t.clone() for t in op.launch(x, res, post, comb, state, idx)]
         torch.accelerator.synchronize()
         assert not rt.words.any(), f"S={S}: expired waits {rt.words.tolist()}"
+        assert state.rec_state.isfinite().all(), f"S={S}: non-finite state"
         y, r2, p2, c2 = outs
 
         gathered = [torch.empty_like(y).cpu() for _ in range(tp)]
