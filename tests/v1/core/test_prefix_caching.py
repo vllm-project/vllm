@@ -2824,9 +2824,9 @@ _EAGLE_HYBRID_MODEL_TEST_CASES = [
         3,
         id="4g-interleaved-full+sw+sw_large",
     ),
-    # Shapes below carry a mamba group. Their expectation is the reconciled
-    # 48 tokens on current main; #57128 and #45614 would move them to 32, so
-    # keep the mamba rows adjacent and update them together.
+    # Shapes below carry a mamba group: their 48-token expectation depends on
+    # the mamba read-side drop semantics, so keep the mamba rows adjacent and
+    # update them together.
     pytest.param(["full", "mamba", "full", "mamba"], 3, id="4g-interleaved-full+mamba"),
     pytest.param(
         ["sliding_window", "mamba", "sliding_window_large", "mamba"],
@@ -2976,7 +2976,7 @@ def test_prefill_hybrid_model_eagle_mixed_block_sizes():
     assert num_computed_tokens == 0
 
     # Two chunks; the first ends at the 48-token EAGLE replay boundary (the
-    # value ``replay_boundaries`` yields for this prompt). Written out rather
+    # value `replay_boundaries` yields for this prompt). Written out rather
     # than derived, as in the table test above.
     _allocate_in_chunks(manager, req0, (48, len(all_token_ids) - 48), num_groups)
 
