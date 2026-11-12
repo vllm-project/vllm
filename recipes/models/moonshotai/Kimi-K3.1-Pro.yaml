@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-09
+  date_updated: 2026-11-12
   tasks:
     - multimodal
     - text
@@ -77,6 +77,9 @@ features:
     # is gated off on TPU until it lands.
     hardware:
       ironwood: unsupported
+      # The generic DSpark config has no ROCm draft backend, and the target
+      # KV here is fp8_ds_mla. DSpark under DCP on gfx942 is still #64261.
+      mi325x: unsupported
   text_only:
     description: "Skip the vision encoder for text-only workloads; frees its memory for KV cache."
     # Always on in the TPU override (the TPU path is text-only), so the toggle
@@ -103,7 +106,7 @@ features:
       ppu: unsupported
       # The fused decode path has CUDA and ROCm kernels only.
       ironwood: unsupported
-      # CuTe DSL latency_specialized decode is a CUDA path.
+      # FlyDSL latency_specialized kernels are gfx950-only (#60997 adds gfx942).
       mi325x: unsupported
     args:
       - "--additional-config"
@@ -1515,10 +1518,11 @@ strategy_overrides:
           VLLM_DEEPEPLL_RECV_HOOK: "0"
           VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: "1"
           DEEPEP_COMBINE_TOKEN_BALANCED: "1"
-  # gfx942 (8x MI325X), single-node TP8 only. Applied only when MI325X is
-  # selected, so the MI355X AgentX preset and hardware_overrides.amd stay as
-  # they are. On MI325X this block stands in for that shared AMD env, which
-  # turns on the MI355X SiTUv2 MoE path.
+  # gfx942 (8x MI325X), single-node TP8. Stacked on hardware_overrides.amd,
+  # which already sets AITER, fast safetensors, breakable graphs, the ready
+  # timeout and SiTUv2=1 (a4w4, the same as the unset auto default). The
+  # scored runs set those four and did not set SiTUv2. This block only adds
+  # INT6 quick all-reduce.
   single_node_tp:
     hardware_overrides:
       mi325x:
@@ -1546,10 +1550,6 @@ strategy_overrides:
           - "--compilation-config"
           - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
         extra_env:
-          VLLM_ROCM_USE_AITER: "1"
-          SAFETENSORS_FAST_GPU: "1"
-          VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
-          VLLM_ENGINE_READY_TIMEOUT_S: "7200"
           VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT6"
   # TEP on one B300 node: experts on MegaMoE, which dispatches tokens over
   # NVLink one-sided all-to-all.
@@ -1605,18 +1605,20 @@ notes:
 
       MI325X is single-node TP8 with DCP8 (`a2a`) and `--max-num-seqs 64`.
       The default of 1024 does not start: it exceeds the KDA state slots.
-      Speculative decoding was not part of that run. The tool-call parser is
-      on by default in this recipe and was not in that command either.
+      Speculative decoding is off: the toggle would render the generic DSpark
+      config, which has no ROCm draft backend, and DSpark under DCP on gfx942
+      is still open (vllm-project/vllm#64261). The tool-call parser is on by
+      default in this recipe and was not in that command either.
 
 troubleshooting:
-  - title: "fp8_ds_mla requires gfx950, or gfx942 with an fnuz aiter"
+  - title: "fp8_ds_mla requires gfx950 on the generic image"
     when: { hardware: [mi325x] }
     body: |
       Startup raises `NotImplementedError: ROCM_AITER_MLA_SPARSE with
-      kv_cache_dtype=fp8_ds_mla requires gfx950, or gfx942 with an aiter
-      whose sparse_mla_fwd reads the fp8_dsv32_mla layout in fnuz.` This
-      means the server was started from an image other than
-      `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`. Use that image.
+      kv_cache_dtype=fp8_ds_mla requires gfx950 (aiter Triton
+      sparse_mla_fwd, fp8_dsv32_mla layout).` That is the error from main
+      and from the generic `kimi-k31` ROCm image. Use
+      `amdsiloai/vllm:vllm-openai-rocm-kimi-k31-gfx942`.
 
 guide: |
   ## Overview
@@ -1761,9 +1763,13 @@ guide: |
   available Mamba cache blocks`. 64 was verified to start on this node. Prefill chunk size stays
   at vLLM's default; the accuracy and throughput runs used `--max-num-seqs 8` and
   `--max-num-batched-tokens 4096`. CUDA graphs are `FULL_AND_PIECEWISE`
-  with `VLLM_USE_BREAKABLE_CUDAGRAPH=1`:
+  with `VLLM_USE_BREAKABLE_CUDAGRAPH=1`.
   K3.1 has no `torch.compile` submodule, so without breakable graphs vLLM captures decode only.
-  `VLLM_ROCM_USE_AITER=1` and `SAFETENSORS_FAST_GPU=1` are set. The accuracy numbers below were
+  That flag, `VLLM_ROCM_USE_AITER=1`, `SAFETENSORS_FAST_GPU=1` and
+  `VLLM_ENGINE_READY_TIMEOUT_S=7200` come from the AMD profile, which also sets
+  `VLLM_ROCM_USE_AITER_MOE_SITUV2=1`. On this vLLM that is a4w4, the same as leaving
+  SiTUv2 unset. The scored runs set the first four and did not set SiTUv2. The accuracy
+  numbers below were
   measured on checkpoint revision `6d0a0202956796543364d666ab19c6ad1a494ee1`. The following
   revision, `d9e99b0792a5e93b78ea9bea62a68167e36ddd9e`, only changes `encoding_k3.py` and drops
   "medium" as a thinking effort.
@@ -1798,8 +1804,8 @@ guide: |
   INT4 roughly doubled the speedup (time to first token −9.6%), but it lowered answer
   confidence at 120k on 6 of the 7 passkey depths, so the recipe does not use it.
 
-  Expert parallelism, speculative decoding, multi-node TP and prefill/decode disaggregation has
-  not been tested yet on MI325X.
+  Expert parallelism, multi-node TP and prefill/decode disaggregation have not been
+  tested on MI325X. Speculative decoding is off (vllm-project/vllm#64261).
 
   ## Client usage
 
