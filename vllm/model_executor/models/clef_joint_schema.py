@@ -3,20 +3,20 @@
 """Shared joint schema head for Clef decision models.
 
 The head reads the final hidden states of the whole prompt, so it runs as a
-``token_classify`` pooler.
+`token_classify` pooler.
 
-Each request carries its schema in ``PoolingParams.extra_kwargs`` under
-``"joint_schema"``:
+Each request carries its schema in `PoolingParams.extra_kwargs` under
+`"joint_schema"`:
 
-- ``question_types``: 0 (noul), 1 (choice) or 2 (score) per question.
-- ``question_spans``: the ``[start, end)`` of each question's instructions.
-- ``option_spans``: the ``[start, end)`` of each option, question by question.
-- ``option_counts``: the number of options of each question.
+- `question_types`: 0 (noul), 1 (choice) or 2 (score) per question.
+- `question_spans`: the `[start, end)` of each question's instructions.
+- `option_spans`: the `[start, end)` of each option, question by question.
+- `option_counts`: the number of options of each question.
 
-Spans count from the end of the prompt (``-len(prompt) <= start < end <= 0``),
+Spans count from the end of the prompt (`-len(prompt) <= start < end <= 0`),
 so they hold after multimodal placeholders are expanded. The output has one
-value per option, in ``option_spans`` order: its probability within its
-question, or its logit with ``use_activation=False``.
+value per option, in `option_spans` order: its probability within its
+question, or its logit with `use_activation=False`.
 """
 
 import math
@@ -24,6 +24,7 @@ from collections.abc import Callable, Set
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -55,17 +56,17 @@ class SchemaIndices:
     positions: torch.Tensor
     """Every token of every span, questions first."""
     span_ids: torch.Tensor
-    """The span of each of ``positions``."""
+    """The span of each of `positions`."""
     span_lengths: torch.Tensor
-    """``[Q + O]``."""
+    """`[Q + O]`."""
     question_types: torch.Tensor
-    """``[Q]``."""
+    """`[Q]`."""
     option_question: torch.Tensor
-    """The question of each option, ``[O]``."""
+    """The question of each option, `[O]`."""
     option_slots: torch.Tensor
-    """Each option's flat index in a ``[Q, max_options]`` grid, ``[O]``."""
+    """Each option's flat index in a `[Q, max_options]` grid, `[O]`."""
     option_mask: torch.Tensor
-    """``[Q, max_options]``, true at the slots of options."""
+    """`[Q, max_options]`, true at the slots of options."""
 
 
 class EvidenceRoutingLayer(nn.Module):
@@ -150,8 +151,8 @@ class JointSchemaHead(nn.Module):
         lexical: torch.Tensor,
         schema: SchemaIndices,
     ) -> torch.Tensor:
-        """The ``[O]`` option logits of one prompt, from its ``[L, hidden]``
-        final hidden states and each option's ``[O, hidden]`` mean output
+        """The `[O]` option logits of one prompt, from its `[L, hidden]`
+        final hidden states and each option's `[O, hidden]` mean output
         embedding."""
         num_questions = schema.question_types.shape[0]
         option_question = schema.option_question
@@ -313,31 +314,45 @@ class JointSchemaPooler(Pooler):
         """The schema's indices, plus the option tokens' positions (on the CPU)
         and their option spans, for the lexical embeddings."""
         num_questions = len(types)
-        lengths = torch.tensor([end - start for start, end in spans])
-        span_ids = torch.repeat_interleave(torch.arange(len(spans)), lengths)
-        positions = torch.cat([torch.arange(start, end) for start, end in spans])
+        lengths = np.array([end - start for start, end in spans], dtype=np.int64)
+        span_ids = np.repeat(np.arange(len(spans)), lengths)
+        positions = np.concatenate([np.arange(start, end) for start, end in spans])
         num_question_tokens = int(lengths[:num_questions].sum())
-
-        counts_cpu = torch.tensor(counts)
+        counts_cpu = np.array(counts)
         max_options = max(counts)
-        option_question = torch.repeat_interleave(
-            torch.arange(num_questions), counts_cpu
+        option_question = np.repeat(np.arange(num_questions), counts_cpu)
+        option_slots = np.concatenate(
+            [np.arange(count) + q * max_options for q, count in enumerate(counts)]
         )
-        option_slots = torch.cat(
-            [torch.arange(count) + q * max_options for q, count in enumerate(counts)]
-        )
+        vectors = [
+            positions,
+            span_ids,
+            lengths,
+            np.array(types),
+            option_question,
+            option_slots,
+            span_ids[num_question_tokens:] - num_questions,
+        ]
+        packed = async_tensor_h2d(np.concatenate(vectors), device, dtype=torch.long)
+        (
+            positions_d,
+            span_ids_d,
+            lengths_d,
+            types_d,
+            option_question_d,
+            option_slots_d,
+            lexical_span_ids,
+        ) = packed.split([len(vector) for vector in vectors])
         schema = SchemaIndices(
-            positions=async_tensor_h2d(positions, device),
-            span_ids=async_tensor_h2d(span_ids, device),
-            span_lengths=async_tensor_h2d(lengths, device),
-            question_types=async_tensor_h2d(types, device, dtype=torch.long),
-            option_question=async_tensor_h2d(option_question, device),
-            option_slots=async_tensor_h2d(option_slots, device),
+            positions=positions_d,
+            span_ids=span_ids_d,
+            span_lengths=lengths_d,
+            question_types=types_d,
+            option_question=option_question_d,
+            option_slots=option_slots_d,
             option_mask=async_tensor_h2d(
-                torch.arange(max_options) < counts_cpu[:, None], device
+                np.arange(max_options) < counts_cpu[:, None], device
             ),
         )
-        lexical_span_ids = async_tensor_h2d(
-            span_ids[num_question_tokens:] - num_questions, device
-        )
-        return schema, positions[num_question_tokens:], lexical_span_ids
+        lexical_ids = torch.from_numpy(positions[num_question_tokens:])
+        return schema, lexical_ids, lexical_span_ids

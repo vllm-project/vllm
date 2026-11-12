@@ -20,7 +20,7 @@ from vllm.logprobs import FlatLogprobs, create_sample_logprobs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
-from vllm.v1.outputs import LogprobsLists
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 
 def _make_processor(
@@ -175,3 +175,29 @@ def test_sample_logprobs_skip_detokenize():
         processor._update_sample_logprobs(step)
     assert isinstance(processor.logprobs, FlatLogprobs)
     assert set(processor.logprobs.decoded_tokens) == {None}
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_prompt_logprob_start_pads_unscored_positions(flat_logprobs):
+    """Positions up to prompt_logprob_start are None, so the rows the worker
+    returns from the start onward stay aligned with prompt positions."""
+    params = SamplingParams(
+        prompt_logprobs=0, prompt_logprob_start=2, flat_logprobs=flat_logprobs
+    )
+    processor = LogprobsProcessor.from_new_request(
+        None, SimpleNamespace(sampling_params=params)
+    )
+    processor._update_prompt_logprobs(
+        LogprobsTensors(
+            logprob_token_ids=torch.tensor([[7], [8]]),
+            logprobs=torch.tensor([[-0.5], [-1.5]]),
+            selected_token_ranks=torch.tensor([1, 1]),
+        )
+    )
+
+    prompt_logprobs = processor.pop_prompt_logprobs()
+    assert prompt_logprobs is not None
+    assert len(prompt_logprobs) == 5
+    assert not any(prompt_logprobs[i] for i in range(3))
+    assert prompt_logprobs[3][7].logprob == -0.5
+    assert prompt_logprobs[4][8].logprob == -1.5

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::borrow::Cow;
+
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -13,17 +15,83 @@ mod xgrammar;
 /// Structured-output backend selected for EngineCore grammar compilation.
 ///
 /// Python vLLM stores this in `StructuredOutputsParams._backend` after request
-/// validation. The Rust frontend picks the backend itself and ignores any
-/// user-supplied `_backend` value: gRPC constraints and parser-built output
-/// grammars use xgrammar, other HTTP constraints use guidance.
+/// validation. The Rust frontend has no request-level selection: every
+/// request uses the server's configured backend, set when the request is
+/// lowered to [`EngineCoreStructuredOutputsParams`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StructuredOutputBackend {
-    Xgrammar,
+    /// The server default. Python's `auto` maps here: the Rust frontend has no
+    /// per-request fallback to another backend.
     #[default]
+    #[serde(alias = "auto")]
+    Xgrammar,
     Guidance,
     Outlines,
     LmFormatEnforcer,
+}
+
+impl StructuredOutputBackend {
+    /// Reject a constraint this backend cannot compile, or would accept but
+    /// enforce only in part, as Python's request validation for the backend
+    /// does.
+    fn check_supported(self, constraint: &StructuredOutputConstraint) -> Result<()> {
+        use StructuredOutputBackend::*;
+        use StructuredOutputConstraint::*;
+
+        let unsupported = |message: &str| {
+            Err(Error::InvalidStructuredOutputsParams {
+                message: message.to_string(),
+            })
+        };
+        match (self, constraint) {
+            (Xgrammar, Json(schema)) => {
+                let schema = match schema {
+                    // `StructuredOutputsParams::validate` has already parsed it.
+                    Value::String(schema) => {
+                        Cow::Owned(serde_json::from_str(schema).unwrap_or_default())
+                    }
+                    schema => Cow::Borrowed(schema),
+                };
+                if xgrammar::has_unsupported_json_features(&schema) {
+                    return unsupported(
+                        "The provided JSON schema contains features not supported by xgrammar.",
+                    );
+                }
+                Ok(())
+            }
+            (Guidance, StructuralTag(tag)) if !is_legacy_structural_tag(tag) => unsupported(
+                "The guidance structured outputs backend only supports structural tags \
+                 with `structures` and `triggers`.",
+            ),
+            (Outlines, JsonObject) => unsupported(
+                "Outlines structured outputs backend does not support json_object specifications",
+            ),
+            (Outlines, Grammar(_)) => unsupported(
+                "Outlines structured outputs backend does not support grammar specifications",
+            ),
+            (Outlines, StructuralTag(_)) => unsupported(
+                "Outlines structured outputs backend does not support structural_tag \
+                 specifications",
+            ),
+            (LmFormatEnforcer, Grammar(_)) => unsupported(
+                "LM Format Enforcer structured outputs backend does not support grammar \
+                 specifications",
+            ),
+            (LmFormatEnforcer, StructuralTag(_)) => unsupported(
+                "LM Format Enforcer structured outputs backend does not support structural_tag \
+                 specifications",
+            ),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Whether a structural tag uses the legacy `structures`/`triggers` shape, the
+/// only one the guidance backend reads.
+fn is_legacy_structural_tag(tag: &str) -> bool {
+    serde_json::from_str::<Value>(tag)
+        .is_ok_and(|tag| tag.get("structures").is_some() && tag.get("triggers").is_some())
 }
 
 /// The single structured-output constraint selected for a request.
@@ -66,12 +134,6 @@ pub struct StructuredOutputOptions {
 pub struct StructuredOutputsParams {
     pub constraint: StructuredOutputConstraint,
     pub options: StructuredOutputOptions,
-    /// Structured-output backend, mirroring Python's internal `_backend`.
-    ///
-    /// User-supplied values are ignored during deserialization. This matches
-    /// Python's request boundary, where `_backend` is set by validation rather
-    /// than accepted as a request-level backend selector.
-    pub backend: StructuredOutputBackend,
 }
 
 impl StructuredOutputsParams {
@@ -105,7 +167,6 @@ impl StructuredOutputsParams {
         Self {
             constraint,
             options: StructuredOutputOptions::default(),
-            backend: StructuredOutputBackend::default(),
         }
     }
 
@@ -127,9 +188,9 @@ impl StructuredOutputsParams {
                         message: "Invalid JSON grammar specification.".to_string(),
                     }
                 })?;
-                self.validate_json_schema(&schema)
+                nesting::check_json_schema(&schema)
             }
-            StructuredOutputConstraint::Json(schema) => self.validate_json_schema(schema),
+            StructuredOutputConstraint::Json(schema) => nesting::check_json_schema(schema),
             StructuredOutputConstraint::Choice(choice) if choice.is_empty() => {
                 Err(Error::InvalidStructuredOutputsParams {
                     message: "structured_outputs.choice cannot be empty".to_string(),
@@ -160,21 +221,26 @@ impl StructuredOutputsParams {
             _ => Ok(()),
         }
     }
+}
 
-    /// Reject a schema nested too deeply to compile, or one the selected
-    /// backend would accept but enforce only in part, as Python does when
-    /// validating against xgrammar.
-    fn validate_json_schema(&self, schema: &Value) -> Result<()> {
-        nesting::check_json_schema(schema)?;
-        if self.backend == StructuredOutputBackend::Xgrammar
-            && xgrammar::has_unsupported_json_features(schema)
-        {
-            return Err(Error::InvalidStructuredOutputsParams {
-                message: "The provided JSON schema contains features not supported by xgrammar."
-                    .to_string(),
-            });
-        }
-        Ok(())
+/// Structured-output parameters of an EngineCore request: the request's
+/// constraint plus the backend selected to compile it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EngineCoreStructuredOutputsParams {
+    #[serde(flatten)]
+    pub params: StructuredOutputsParams,
+    /// Python's internal `_backend`.
+    #[serde(rename = "_backend")]
+    pub backend: StructuredOutputBackend,
+}
+
+impl EngineCoreStructuredOutputsParams {
+    /// Select `backend` for `params`, rejecting constraints that are invalid or
+    /// that the backend cannot enforce.
+    pub fn new(params: StructuredOutputsParams, backend: StructuredOutputBackend) -> Result<Self> {
+        params.validate()?;
+        backend.check_supported(&params.constraint)?;
+        Ok(Self { params, backend })
     }
 }
 
@@ -199,12 +265,6 @@ struct WireStructuredOutputsParams {
     disable_additional_properties: bool,
     whitespace_pattern: Option<String>,
     structural_tag: Option<String>,
-    #[serde(
-        default,
-        rename = "_backend",
-        deserialize_with = "serde_with::rust::deserialize_ignore_any"
-    )]
-    backend: StructuredOutputBackend,
 }
 
 impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
@@ -259,7 +319,6 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
                 disable_additional_properties: raw.disable_additional_properties,
                 whitespace_pattern: raw.whitespace_pattern,
             },
-            backend: raw.backend,
         };
         params.validate()?;
         Ok(params)
@@ -272,7 +331,6 @@ impl From<StructuredOutputsParams> for WireStructuredOutputsParams {
             disable_any_whitespace: params.options.disable_any_whitespace,
             disable_additional_properties: params.options.disable_additional_properties,
             whitespace_pattern: params.options.whitespace_pattern,
-            backend: params.backend,
             ..Self::default()
         };
 
@@ -316,18 +374,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn structured_outputs_backend_ignores_deserialized_value() {
+    fn structured_outputs_ignores_request_backend() {
         let params: StructuredOutputsParams = serde_json::from_value(serde_json::json!({
             "json_object": true,
-            "_backend": "xgrammar",
+            "_backend": "outlines",
         }))
         .unwrap();
 
-        assert_eq!(params.backend, StructuredOutputBackend::Guidance);
         assert_eq!(params.constraint, StructuredOutputConstraint::JsonObject);
-
         let value = serde_json::to_value(params).unwrap();
-        assert_eq!(value["_backend"], "guidance");
+        assert!(value.get("_backend").is_none());
     }
 
     #[test]
@@ -408,20 +464,101 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_json_features_xgrammar_ignores() {
+    fn backend_rejects_json_features_xgrammar_ignores() {
         let schema = serde_json::json!({ "type": "array", "uniqueItems": true });
         for params in [
             StructuredOutputsParams::json(schema.clone()),
             StructuredOutputsParams::json(Value::String(schema.to_string())),
         ] {
-            assert!(params.validate().is_ok(), "guidance enforces {schema}");
-            let error = StructuredOutputsParams {
-                backend: StructuredOutputBackend::Xgrammar,
-                ..params
-            }
-            .validate()
-            .unwrap_err();
+            assert!(
+                EngineCoreStructuredOutputsParams::new(
+                    params.clone(),
+                    StructuredOutputBackend::Guidance
+                )
+                .is_ok(),
+                "guidance enforces {schema}"
+            );
+            let error =
+                EngineCoreStructuredOutputsParams::new(params, StructuredOutputBackend::Xgrammar)
+                    .unwrap_err();
             assert!(error.to_string().contains("not supported by xgrammar"));
+        }
+    }
+
+    #[test]
+    fn backend_rejects_constraint_kinds_it_cannot_compile() {
+        use StructuredOutputBackend::*;
+
+        let legacy_tag = serde_json::json!({
+            "structures": [{ "begin": "<f>", "schema": {}, "end": "</f>" }],
+            "triggers": ["<f>"],
+        })
+        .to_string();
+        let format_tag = serde_json::json!({
+            "type": "structural_tag",
+            "format": { "type": "any_text" },
+        })
+        .to_string();
+        let grammar = StructuredOutputsParams::grammar("root ::= \"a\"");
+        let cases = [
+            (
+                Xgrammar,
+                StructuredOutputsParams::structural_tag(&format_tag),
+                None,
+            ),
+            (
+                Xgrammar,
+                StructuredOutputsParams::structural_tag(&legacy_tag),
+                None,
+            ),
+            (
+                Guidance,
+                StructuredOutputsParams::structural_tag(&legacy_tag),
+                None,
+            ),
+            (
+                Guidance,
+                StructuredOutputsParams::structural_tag(&format_tag),
+                Some("only supports structural tags with `structures` and `triggers`"),
+            ),
+            (Guidance, grammar.clone(), None),
+            (
+                Outlines,
+                StructuredOutputsParams::json_object(),
+                Some("does not support json_object"),
+            ),
+            (Outlines, grammar.clone(), Some("does not support grammar")),
+            (
+                Outlines,
+                StructuredOutputsParams::structural_tag(&legacy_tag),
+                Some("does not support structural_tag"),
+            ),
+            (
+                Outlines,
+                StructuredOutputsParams::choice(vec!["a".into()]),
+                None,
+            ),
+            (LmFormatEnforcer, grammar, Some("does not support grammar")),
+            (
+                LmFormatEnforcer,
+                StructuredOutputsParams::structural_tag(&legacy_tag),
+                Some("does not support structural_tag"),
+            ),
+            (
+                LmFormatEnforcer,
+                StructuredOutputsParams::json_object(),
+                None,
+            ),
+        ];
+        for (backend, params, expected) in cases {
+            let result = EngineCoreStructuredOutputsParams::new(params.clone(), backend);
+            match expected {
+                None => assert!(result.is_ok(), "{backend:?} {params:?}: {result:?}"),
+                Some(expected) => {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains(expected), "{backend:?} {params:?}: {error}");
+                }
+            }
         }
     }
 
@@ -493,19 +630,21 @@ mod tests {
     }
 
     #[test]
-    fn structured_outputs_serializes_through_raw_shape() {
-        let params = StructuredOutputsParams {
-            constraint: StructuredOutputConstraint::StructuralTag(
-                r#"{"type":"structural_tag"}"#.to_string(),
-            ),
-            options: StructuredOutputOptions::default(),
-            backend: StructuredOutputBackend::Xgrammar,
-        };
+    fn engine_structured_outputs_serializes_through_raw_shape() {
+        let params = EngineCoreStructuredOutputsParams::new(
+            StructuredOutputsParams::structural_tag(r#"{"type":"structural_tag"}"#),
+            StructuredOutputBackend::Xgrammar,
+        )
+        .unwrap();
 
-        let value = serde_json::to_value(params).unwrap();
+        let value = serde_json::to_value(&params).unwrap();
 
         assert_eq!(value["structural_tag"], r#"{"type":"structural_tag"}"#);
         assert_eq!(value["_backend"], "xgrammar");
         assert!(value.get("json").is_none());
+
+        let bytes = rmp_serde::to_vec_named(&params).unwrap();
+        let decoded: EngineCoreStructuredOutputsParams = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, params);
     }
 }

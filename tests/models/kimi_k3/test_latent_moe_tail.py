@@ -33,24 +33,25 @@ EPS = 0.1
 TOP_K = 8
 
 
-def test_deferred_finalize_enabled_before_moe_kernel_setup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeMoEConfig:
-        tp_size = 8
-        dp_size = 1
-        ep_size = 1
-        pcp_size = 1
-        is_sequence_parallel = False
-        hidden_dim = LATENT_SIZE
-        hidden_dim_unpadded = LATENT_SIZE
-        experts_per_token = 16
-        _defer_moe_finalize = False
-        defer_moe_finalize_max_num_tokens = -1
-        defer_moe_finalize = FusedMoEConfig.defer_moe_finalize
-        limit_deferred_moe_finalize = FusedMoEConfig.limit_deferred_moe_finalize
-        use_deferred_moe_finalize = FusedMoEConfig.use_deferred_moe_finalize
+class FakeMoEConfig:
+    tp_size = 8
+    dp_size = 1
+    ep_size = 1
+    pcp_size = 1
+    is_sequence_parallel = False
+    hidden_dim = LATENT_SIZE
+    hidden_dim_unpadded = LATENT_SIZE
+    experts_per_token = 16
+    _defer_moe_finalize = False
+    defer_moe_finalize_max_num_tokens = -1
+    defer_moe_finalize = FusedMoEConfig.defer_moe_finalize
+    limit_deferred_moe_finalize = FusedMoEConfig.limit_deferred_moe_finalize
+    use_deferred_moe_finalize = FusedMoEConfig.use_deferred_moe_finalize
 
+
+def build_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[latent_moe_runner.LatentMoERunner, FakeMoEConfig, dict[str, object]]:
     moe_config = FakeMoEConfig()
     quant_method = SimpleNamespace(
         experts_cls=TrtLlmMxfp4ExpertsMonolithic,
@@ -94,14 +95,20 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         "get_current_vllm_config",
         lambda: SimpleNamespace(
             parallel_config=SimpleNamespace(use_ubatching=False),
-            model_config=SimpleNamespace(enable_sleep_mode=False),
         ),
     )
     monkeypatch.setattr(KimiK3LatentMoETailOp, "initialize", fake_tail_initialize)
 
-    latent_moe_runner.LatentMoERunner()
+    return latent_moe_runner.LatentMoERunner(), moe_config, initialized_with
 
-    assert moe_config.use_deferred_moe_finalize
+
+def test_deferred_finalize_enabled_before_moe_kernel_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, moe_config, initialized_with = build_runner(monkeypatch)
+
+    # The stand-in deliberately borrows the real config's property.
+    assert moe_config.use_deferred_moe_finalize  # type: ignore[misc]
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
 

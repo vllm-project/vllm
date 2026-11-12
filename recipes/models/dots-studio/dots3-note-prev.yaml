@@ -29,8 +29,6 @@ model:
   base_args:
     - "--served-model-name"
     - "dots3-note-prev"
-    - "--gpu-memory-utilization"
-    - "0.9"
     - "--max-model-len"
     - "262144"
     - "--max-num-batched-tokens"
@@ -85,9 +83,6 @@ variants:
     precision: bf16
     vram_minimum_gb: 692
     description: "Full BF16 checkpoint using the Triton unquantized-MoE backend; its indexed weights total about 576.9 GB before runtime and KV-cache memory."
-    extra_args:
-      - "--gpu-memory-utilization"
-      - "0.95"
     hardware_overrides:
       nvidia:
         extra_args:
@@ -133,16 +128,15 @@ guide: |
   The examples expose an OpenAI-compatible endpoint on all network interfaces. Remove
   `--host 0.0.0.0` if the service should only be reachable locally. The general
   strategy examples use the FP8 checkpoint. BF16 needs a different MoE backend and
-  a larger memory budget, so use the explicit BF16 command below instead of only
+  more memory, so use the explicit BF16 command below instead of only
   replacing the model ID.
 
   ### BF16 tensor parallel + expert parallel (TP=8, EP=8)
 
   This command serves the full multimodal BF16 checkpoint. Triton is required because
-  DeepGEMM does not support unquantized MoE weights. A 0.95 memory-utilization target
-  leaves enough KV-cache capacity for the 262,144-token serving limit after profiling
-  the multimodal encoders. If the target hardware cannot reserve that much memory,
-  lower `--max-model-len` or add `--language-model-only` for text workloads.
+  DeepGEMM does not support unquantized MoE weights. If the KV cache cannot hold the
+  262,144-token serving limit, lower `--max-model-len` or add `--language-model-only`
+  for text workloads.
 
   ```bash
   vllm serve dots-studio/dots3-note-prev \
@@ -150,7 +144,6 @@ guide: |
     --host 0.0.0.0 \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
-    --gpu-memory-utilization 0.95 \
     --max-model-len 262144 \
     --max-num-batched-tokens 8192 \
     --block-size 64 \
@@ -168,7 +161,6 @@ guide: |
     --served-model-name dots3-note-prev \
     --host 0.0.0.0 \
     --tensor-parallel-size 8 \
-    --gpu-memory-utilization 0.9 \
     --max-model-len 262144 \
     --max-num-batched-tokens 8192 \
     --block-size 64 \
@@ -187,7 +179,6 @@ guide: |
     --host 0.0.0.0 \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
-    --gpu-memory-utilization 0.9 \
     --max-model-len 262144 \
     --max-num-batched-tokens 8192 \
     --block-size 64 \
@@ -207,7 +198,6 @@ guide: |
     --host 0.0.0.0 \
     --data-parallel-size 8 \
     --enable-expert-parallel \
-    --gpu-memory-utilization 0.9 \
     --max-model-len 262144 \
     --max-num-batched-tokens 8192 \
     --block-size 64 \
@@ -228,7 +218,6 @@ guide: |
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --language-model-only \
-    --gpu-memory-utilization 0.9 \
     --max-model-len 262144 \
     --max-num-batched-tokens 8192 \
     --block-size 64 \
@@ -249,7 +238,6 @@ guide: |
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
-    --gpu-memory-utilization 0.9 \
     --max-model-len 262144 \
     --max-num-batched-tokens 8192 \
     --block-size 64 \
@@ -271,7 +259,6 @@ guide: |
     --enable-expert-parallel \
     --enable-auto-tool-choice \
     --tool-call-parser dots \
-    --gpu-memory-utilization 0.9 \
     --max-model-len 262144 \
     --max-num-batched-tokens 8192 \
     --block-size 64 \
@@ -300,9 +287,8 @@ guide: |
     capacity or long-context KV cache is the priority.
   - `--language-model-only` skips multimodal encoder loading but does not change the
     checkpoint's model type or architecture.
-  - Full multimodal BF16 serving at 262,144 tokens may not have enough KV-cache memory
-    with `--gpu-memory-utilization 0.9`; the BF16 variant uses `0.95`. Lower
-    `--max-model-len` instead when the extra memory cannot be reserved.
+  - Full multimodal BF16 serving at 262,144 tokens may not have enough KV-cache memory;
+    lower `--max-model-len` or add `--language-model-only` if so.
   - DeepGEMM is specific to the native FP8 checkpoint in this recipe. BF16 is
     unquantized and must use `--moe-backend triton`.
   - MTP changes decode scheduling and memory use. Benchmark it against non-speculative

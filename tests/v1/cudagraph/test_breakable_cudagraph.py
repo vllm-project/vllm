@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -68,10 +69,11 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
 
         return forward_fn
 
+    capture_stream = object()
     with (
         patch(
             "vllm.v1.worker.gpu.cudagraph_utils.graph_capture",
-            return_value=nullcontext(),
+            return_value=nullcontext(SimpleNamespace(stream=capture_stream)),
         ),
         patch(
             "vllm.v1.worker.gpu.cudagraph_utils.is_global_first_rank",
@@ -80,6 +82,7 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     ):
         manager.capture(create_forward_fn)
 
+    assert manager.capture_stream is capture_stream
     assert [warmup for warmup, _ in create_calls] == [True, False]
     assert [mode for _, mode, _ in forward_calls] == [
         CUDAGraphMode.NONE,
@@ -103,9 +106,9 @@ def _reset_breakable_tls():
 def cuda_capture_stream():
     """A non-default CUDA stream suitable for cudagraph capture.
 
-    ``CUDAGraph.capture_begin`` refuses to capture from the default
+    `CUDAGraph.capture_begin` refuses to capture from the default
     stream, so all capture-using tests need to run under
-    ``torch.cuda.stream(...)`` for a separate stream.
+    `torch.cuda.stream(...)` for a separate stream.
     """
     if not HAS_DEVICE_GRAPH:
         pytest.skip("CUDA or XPU graph required")
@@ -353,7 +356,7 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
     Note: during capture, the *captured* kernels are recorded but NOT
     executed (that's CUDA-graph semantics). Only the eager segments
     actually mutate state at capture time. So we check correctness after
-    ``replay()``, not after ``with cap:`` exits.
+    `replay()`, not after `with cap:` exits.
     """
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
@@ -596,7 +599,7 @@ def test_exception_in_body_clears_active(cuda_capture_stream):
 def test_nested_decorated_op_runs_inline(cuda_capture_stream):
     """A decorated op invoked from inside another decorated op's eager
     body must execute inline -- starting a second eager break mid-flight
-    corrupts the segment state and explodes ``_begin_segment``'s assert.
+    corrupts the segment state and explodes `_begin_segment`'s assert.
 
     This mirrors the deepseek_v4_attention case where the outer attention
     op's impl internally dispatches sparse_attn_indexer (also decorated).
