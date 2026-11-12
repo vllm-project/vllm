@@ -1326,6 +1326,7 @@ steps:
 
 - label: ":amd: (MI355) Mamba SSM Kernels"
   key: amd-mamba-ssm-kernels-mi355
+  automatic_shard: true
   dind: false
   device: mi355_1
   num_devices: 1
