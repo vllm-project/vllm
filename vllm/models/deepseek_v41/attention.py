@@ -43,6 +43,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
         RocmSparseMQAIndexer,
     )
+    from vllm.models.deepseek_v41.nvidia.ops.candidate_indexer import (
+        CandidateIndexer,
+    )
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -70,13 +73,17 @@ from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
 from vllm.models.deepseek_v41.common.ops.fused_layout import Q_CHUNK
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+from vllm.models.deepseek_v41.shardq import dsv41_shardq_eligible
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
 )
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionMetadata,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
@@ -86,6 +93,7 @@ from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.attention.ops.shardq import ShardQMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -310,8 +318,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv: torch.Tensor,
         positions: torch.Tensor,
         output: torch.Tensor,
+        shardq: "ShardQMetadata | None" = None,
     ) -> None:
-        """Platform-specific sparse MLA forward; writes attention into `output`."""
+        """Platform-specific sparse MLA forward; writes attention into `output`.
+
+        `shardq` (ShardQ layers only) carries a token-sharded prefill step:
+        the decode prefix is still head-sharded, while the post-decode tokens
+        are laid out and attended per rank in `shardq.attn_metadata`.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -350,6 +364,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         candidate_block_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
+        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -1093,7 +1108,46 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
-        self.forward_mqa(q, kv, positions, out)
+        shardq = self._shardq_from_context()
+        if shardq is None:
+            self.forward_mqa(q, kv, positions, out)
+        else:
+            self.forward_mqa(q, kv, positions, out, shardq=shardq)
+
+    def _shardq_from_context(self) -> ShardQMetadata | None:
+        """This step's ShardQ view, when the metadata builders produced one."""
+        if not getattr(self, "use_shardq", False):
+            return None
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return None
+        swa_metadata = attn_metadata.get(self.swa_cache_layer.prefix)
+        shardq = (
+            getattr(swa_metadata, "shardq", None) if swa_metadata is not None else None
+        )
+        compressed = None
+        if self.compressed_cache_prefix is not None:
+            compressed = attn_metadata.get(self.compressed_cache_prefix)
+            if shardq is None and compressed is not None:
+                shardq = getattr(compressed, "shardq", None)
+        if shardq is None:
+            return None
+        sharded: dict[str, AttentionMetadata] = {}
+        if compressed is not None and getattr(compressed, "shardq", None) is not None:
+            sharded[self.compressed_cache_prefix] = compressed.shardq.attn_metadata
+        if (
+            swa_metadata is not None
+            and getattr(swa_metadata, "shardq", None) is not None
+        ):
+            sharded[self.swa_cache_layer.prefix] = swa_metadata.shardq.attn_metadata
+        out = ShardQMetadata(
+            num_decode_tokens=shardq.num_decode_tokens,
+            num_tokens_per_rank=shardq.num_tokens_per_rank,
+            token_ids=shardq.token_ids,
+            rank_offsets=shardq.rank_offsets,
+        )
+        out.attn_metadata = sharded  # type: ignore[assignment]
+        return out
 
     def _fused_qnorm_rope_kv_insert(
         self,
@@ -1308,7 +1362,9 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.dtype = dtype
         self.compress_ratio = compress_ratio
         vllm_config = get_current_vllm_config()
+        self.vllm_config = vllm_config
         self.sparse_logits = vllm_config.attention_config.indexer_sparse_logits
+        self.candidate_indexer = False
         # aiter's paged MXFP4 kernels write this cache and read it in place.
         self.rocm_mxfp4 = current_platform.is_rocm() and dsa_indexer_uses_fp4(
             vllm_config
@@ -1356,10 +1412,15 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
                     if uses_fp8_ds_mla_layout and _use_v41_mxfp8_kv_record()
                     else page_alignment,
                 )
-                if self.sparse_logits and not self.rocm_mxfp4
+                if self.sparse_logits
+                and not self.rocm_mxfp4
+                and not current_platform.is_device_capability_family(90)
                 else None
             ),
         )
+
+    # The attention path and the indexer must reject the same splits.
+    shardq_eligibility = staticmethod(dsv41_shardq_eligible)
 
     def forward(self): ...
 
@@ -1371,8 +1432,40 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
 
             return DeepseekV41RocmMxfp4IndexerBackend
         if self.sparse_logits:
+            if (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(90)
+            ):
+                if not self.candidate_indexer:
+                    return DeepseekV41IndexerBackend
+                from .nvidia.ops.candidate_indexer import CandidateIndexerBackend
+
+                return CandidateIndexerBackend
             return DeepseekV41SparseIndexerBackend
         return DeepseekV41IndexerBackend
+
+
+def _short_context_topk_rows(
+    positions: torch.Tensor,
+    indexer_metadata: Any,
+) -> tuple[torch.Tensor, int]:
+    """Positions the short-context top-k fill reads, and how many rows.
+
+    ShardQ keeps the step's decodes in place and packs this rank's tokens
+    after them, so the fill must use those compact rows' positions instead of
+    the batch's first rows.
+    """
+    gather = (
+        indexer_metadata.prefill.shardq_gather_indices
+        if indexer_metadata.prefill is not None
+        else None
+    )
+    if gather is None:
+        return (
+            positions,
+            indexer_metadata.num_decode_tokens + indexer_metadata.num_prefill_tokens,
+        )
+    return positions[gather], gather.numel()
 
 
 class DeepseekV4Indexer(nn.Module):
@@ -1477,14 +1570,19 @@ class DeepseekV4Indexer(nn.Module):
             self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.k_cache = k_cache
 
-        # Candidate consumers can score only the candidate blocks (opt-in);
+        # Candidate consumers can score only the candidate blocks;
         # the candidate source and pre-candidate indexers stay dense.
         use_sparse_logits = (
             vllm_config.attention_config.indexer_sparse_logits
             and candidate_block_buffer is not None
             and not candidate_write
         )
-        self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
+        self.indexer_op: (
+            SparseAttnIndexer
+            | SparseMQAIndexer
+            | RocmSparseMQAIndexer
+            | CandidateIndexer
+        )
         if use_sparse_logits:
             # DeepGEMM's sparse kernels (SM100) take either indexer cache;
             # aiter's ROCm path is MXFP4-only.
@@ -1495,7 +1593,17 @@ class DeepseekV4Indexer(nn.Module):
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
-            self.indexer_op = self.mqa_cls(
+            mqa_cls: type[
+                SparseMQAIndexer | RocmSparseMQAIndexer | CandidateIndexer
+            ] = self.mqa_cls
+            if (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(90)
+            ):
+                from .nvidia.ops import candidate_indexer
+
+                mqa_cls = candidate_indexer.CandidateIndexer
+            self.indexer_op = mqa_cls(
                 self.k_cache,
                 self.topk_tokens,
                 self.head_dim,
@@ -1624,14 +1732,13 @@ class DeepseekV4Indexer(nn.Module):
                 if self.owns_k:
                     self._produce_k(cache_latent, cache_positions, rotary_emb)
                 assert self.topk_indices_buffer is not None
-                num_tokens = (
-                    indexer_metadata.num_decode_tokens
-                    + indexer_metadata.num_prefill_tokens
+                short_positions, num_tokens = _short_context_topk_rows(
+                    positions, indexer_metadata
                 )
                 if num_tokens > 0:
                     fill_short_context_topk_indices[(num_tokens,)](
                         self.topk_indices_buffer,
-                        positions,
+                        short_positions,
                         TOP_K=self.topk_tokens,
                         COMPRESS_RATIO=self.compress_ratio,
                         PADDED_TOP_K=triton.next_power_of_2(self.topk_tokens),
