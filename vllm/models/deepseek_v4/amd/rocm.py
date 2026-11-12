@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import inspect
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
@@ -58,17 +59,17 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekV4SWACache,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-    Dsv4UnifiedKVGrid,
-    _dsv4_aiter_sparse_prefill,
-    _dsv4_index_buffer,
-    _dsv4_slot_to_record,
-    build_dsv4_unified_prefill_indices,
     build_prefill_topk_ragged_indices,
     build_ragged_indices_from_dense,
-    dsv4_aiter_sparse_decode_unified,
+    dsv4_aiter_csa_decode,
+    dsv4_aiter_csa_prefill,
+    dsv4_aiter_grid_decode,
+    dsv4_aiter_grid_prefill,
+    dsv4_aiter_hca_prefill_prepare,
+    dsv4_aiter_hca_prepare,
     dsv4_aiter_sparse_mla_kernels,
-    dsv4_aiter_sparse_prefill_unified,
-    dsv4_unified_kv_grid,
+    dsv4_aiter_swa_rows,
+    dsv4_q_pack_buffers,
     rocm_inv_rope_einsum,
     rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
@@ -82,6 +83,10 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+# (rows, heads, device) whose Q-pack buffers exist: they are allocated on the
+# eager profile run, and a CUDA-graph capture only packs Q once they do.
+_q_pack_ready: set = set()
 
 
 def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
@@ -644,154 +649,6 @@ def compute_global_topk_ragged_indices_and_indptr(
     return global_topk_ragged, topk_indptr, topk_lens
 
 
-@triton.jit
-def _dsv4_unified_decode_indices_kernel(
-    out_ptr,
-    out_indptr_ptr,
-    swa_idx_ptr,
-    swa_indptr_ptr,
-    topk_indices_ptr,
-    topk_indices_stride,
-    topk_indptr_ptr,
-    token_to_req_indices_ptr,
-    block_table_ptr,
-    block_table_stride,
-    block_size,
-    a_base,
-    a_blk_rows,
-    b_base,
-    b_blk_rows,
-    num_tokens,
-    A_PAGE: tl.constexpr,
-    B_PAGE: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    """One decode token's row of the unified stream: its SWA records, then its
-    top-k records, at `swa_indptr[t] + topk_indptr[t]`.
-
-    The top-k half is `_pack_global_topk_ragged_kernel`'s block-table walk
-    and the record mapping is `_dsv4_merge_streams_kernel`'s, fused so the
-    global-slot ragged array and the merge pass over it are never written.
-    """
-    t = tl.program_id(0)
-    blk = tl.program_id(1)
-    off = blk * BLOCK + tl.arange(0, BLOCK)
-
-    a_start = tl.load(swa_indptr_ptr + t)
-    a_end = tl.load(swa_indptr_ptr + t + 1)
-    a_len = a_end - a_start
-    b_start = tl.load(topk_indptr_ptr + t)
-    b_end = tl.load(topk_indptr_ptr + t + 1)
-    b_len = b_end - b_start
-    total = a_len + b_len
-
-    # Store before the early exit, so a token with no keys keeps its entry;
-    # blk == 0 only, so the row's blocks do not all rewrite it.
-    out_start = a_start + b_start
-    if blk == 0:
-        tl.store(out_indptr_ptr + t, out_start)
-        if t == num_tokens - 1:
-            tl.store(out_indptr_ptr + num_tokens, a_end + b_end)
-
-    if blk * BLOCK >= total:
-        return
-
-    in_a = off < a_len
-    mask = off < total
-
-    a_pos = tl.where(in_a, off, 0)
-    slot_a = tl.load(swa_idx_ptr + a_start + a_pos, mask=mask & in_a, other=0)
-
-    # The top-k row holds local compressed positions; its first b_len entries
-    # are the live ones (b_len counts them), as in the separate packer.
-    b_mask = mask & (~in_a)
-    b_pos = tl.where(in_a, 0, off - a_len)
-    req_idx = tl.load(token_to_req_indices_ptr + t)
-    local_idx = tl.load(
-        topk_indices_ptr + t * topk_indices_stride + b_pos, mask=b_mask, other=-1
-    )
-    valid = b_mask & (local_idx >= 0)
-    block_numbers = tl.load(
-        block_table_ptr + req_idx * block_table_stride + local_idx // block_size,
-        mask=valid,
-        other=0,
-    )
-    slot_b = tl.where(valid, block_numbers * block_size + local_idx % block_size, -1)
-
-    rec_a = _dsv4_slot_to_record(slot_a, a_base, a_blk_rows, A_PAGE)
-    rec_b = _dsv4_slot_to_record(slot_b, b_base, b_blk_rows, B_PAGE)
-    rec = tl.where(in_a, rec_a, rec_b)
-    rec = tl.where(rec < 0, 0, rec)
-    tl.store(out_ptr + out_start + off, rec.to(tl.int32), mask=mask)
-
-
-def compute_dsv4_unified_decode_indices(
-    topk_indices: torch.Tensor,
-    token_to_req_indices: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    is_valid_token: torch.Tensor,
-    swa_indices: torch.Tensor,
-    swa_indptr: torch.Tensor,
-    grid: Dsv4UnifiedKVGrid,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """The C4A decode's SWA + top-k streams, written once as one stream of
-    record-grid indices.
-
-    Same result as `compute_global_topk_ragged_indices_and_indptr` followed
-    by `_dsv4_merge_to_unified_kv_buffer`, one launch and one pass shorter.
-    """
-    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
-    num_tokens, topk = topk_indices.shape
-    dev = topk_indices.device
-
-    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=dev)
-    _compute_topk_lens_kernel[(num_tokens,)](
-        topk_lens,
-        topk_indices,
-        topk_indices.stride(0),
-        topk,
-        is_valid_token,
-        TRITON_BLOCK_SIZE=1024,
-    )
-    topk_indptr = _build_indptr_from_lengths(topk_lens)
-
-    # The grid bound must NOT come from the lengths: that is a device->host
-    # sync. The SWA stream's dense width and topk bound it exactly.
-    swa_width = swa_indices.numel() // num_tokens if num_tokens else 0
-    total = swa_indices.numel() + num_tokens * topk
-    out_idx = _dsv4_index_buffer("buf", total, dev)[:total]
-    out_indptr = _dsv4_index_buffer("indptr", num_tokens + 1, dev)[: num_tokens + 1]
-    if num_tokens == 0 or swa_width + topk == 0:
-        out_indptr.zero_()
-        return out_idx, out_indptr
-    block = 128
-    _dsv4_unified_decode_indices_kernel[
-        (num_tokens, triton.cdiv(swa_width + topk, block))
-    ](
-        out_idx,
-        out_indptr,
-        swa_indices,
-        swa_indptr,
-        topk_indices,
-        topk_indices.stride(0),
-        topk_indptr,
-        token_to_req_indices,
-        block_table,
-        block_table.stride(0),
-        block_size,
-        grid.bases[0],
-        grid.blk_rows[0],
-        grid.bases[1],
-        grid.blk_rows[1],
-        num_tokens,
-        A_PAGE=grid.pages[0],
-        B_PAGE=grid.pages[1],
-        BLOCK=block,
-    )
-    return out_idx, out_indptr
-
-
 def _copy_ragged_to_graph_buffers(
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
@@ -1153,6 +1010,35 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             dsv4_aiter_sparse_mla_kernels() is not None
             and self.kv_cache_dtype == "fp8_ds_mla"
         )
+        # HCA (C128A) layers: aiter's fused KV insert writes the layer's
+        # decode and prefill index lists (COPY_HCA_KV_INDICES[_PREFILL]).
+        kernels = dsv4_aiter_sparse_mla_kernels()
+        self._hca_copy_kv_indices = (
+            self._use_gfx1250_aiter_sparse_mla and self.compress_ratio == 128
+        )
+        if self._hca_copy_kv_indices:
+            assert kernels is not None
+            params = inspect.signature(kernels.qnorm_rope_kv_insert).parameters
+            missing = [
+                k
+                for k in ("hca_kv_indices", "hca_kv_indices_prefill")
+                if k not in params
+            ]
+            if missing:
+                raise RuntimeError(
+                    "DSv4 on gfx1250 needs aiter's fused KV insert with "
+                    f"{missing} (the HCA index copy); update aiter"
+                )
+        self._hca_pending = None
+        self._hca_prefill_pending = None
+        # Pure-decode steps: the fused KV insert packs Q to fp8 (pack_q=True)
+        # into persistent buffers sized for the largest decode batch, and
+        # skips the bf16 Q store, so the decode needs no Q-pack launch.
+        spec = vllm_config.speculative_config
+        self._q_pack_rows = vllm_config.scheduler_config.max_num_seqs * (
+            1 + (spec.num_speculative_tokens if spec is not None else 0)
+        )
+        self._q_packed_pending = None
 
     def _run_sequential_pipeline(
         self,
@@ -1263,8 +1149,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         """Aiter's fused Q-norm/RoPE + KV insert when the SWA cache holds the
         aligned 640 B record; the base's producer (packed record) otherwise.
 
-        The aiter decode packs Q to fp8 itself (`_dsv4_aiter_sparse_decode`),
-        so this writes the bf16 Q only.
+        On a pure-decode step it also packs Q to fp8 for the decode and skips
+        the bf16 Q; otherwise it writes the bf16 Q and the decode packs it.
         """
         kernels = dsv4_aiter_sparse_mla_kernels()
         if kernels is None or not isinstance(attn_metadata, dict):
@@ -1277,7 +1163,95 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return super()._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
         assert positions.dtype == torch.int64
-        return kernels.qnorm_rope_kv_insert(
+        hca_kv_indices = None
+        self._hca_pending = None
+        if self._hca_copy_kv_indices and swa_metadata.num_decode_tokens > 0:
+            rocm_metadata = attn_metadata.get(self.prefix)
+            assert rocm_metadata is not None and self.kv_cache is not None
+            assert rocm_metadata.c128a_decode_topk_ragged_indices is not None
+            assert rocm_metadata.c128a_decode_topk_ragged_indptr is not None
+            assert swa_metadata.decode_swa_ragged_indices is not None
+            assert swa_metadata.decode_swa_ragged_indptr is not None
+            prepared = dsv4_aiter_hca_prepare(
+                swa_kv_cache,
+                swa_metadata.decode_swa_ragged_indices,
+                swa_metadata.decode_swa_ragged_indptr,
+                swa_metadata.decode_swa_width,
+                self.kv_cache,
+                rocm_metadata.c128a_decode_topk_ragged_indices,
+                rocm_metadata.c128a_decode_topk_ragged_indptr,
+                swa_metadata.num_decode_tokens,
+            )
+            if prepared is not None:
+                hca_kv_indices, handle = prepared
+                self._hca_pending = (get_forward_context(), handle)
+        hca_kwargs = (
+            {} if hca_kv_indices is None else {"hca_kv_indices": hca_kv_indices}
+        )
+        self._hca_prefill_pending = None
+        if self._hca_copy_kv_indices and swa_metadata.num_prefill_tokens > 0:
+            rocm_metadata = attn_metadata.get(self.prefix)
+            assert rocm_metadata is not None and self.kv_cache is not None
+            assert rocm_metadata.c128a_prefill_topk_indices is not None
+            assert swa_metadata.prefill_swa_ragged_indices is not None
+            assert swa_metadata.prefill_swa_ragged_indptr is not None
+            assert swa_metadata.token_to_req_indices is not None
+            assert swa_metadata.query_start_loc is not None
+            assert swa_metadata.seq_lens is not None
+            assert swa_metadata.is_valid_token is not None
+            prepared = dsv4_aiter_hca_prefill_prepare(
+                swa_kv_cache,
+                swa_metadata.prefill_swa_ragged_indices,
+                swa_metadata.prefill_swa_ragged_indptr,
+                self.kv_cache,
+                rocm_metadata.c128a_prefill_topk_indices,
+                swa_metadata.token_to_req_indices,
+                swa_metadata.query_start_loc,
+                swa_metadata.seq_lens,
+                swa_metadata.is_valid_token,
+                rocm_metadata.block_table,
+                rocm_metadata.block_size // self.compress_ratio,
+                swa_metadata.num_decode_tokens,
+            )
+            if prepared is not None:
+                hca_kwargs["hca_kv_indices_prefill"] = prepared[0]
+                self._hca_prefill_pending = (get_forward_context(), prepared[1])
+        # Pure decode: pack Q here, off the registers the norm and RoPE used,
+        # and skip the bf16 Q (nothing reads it on this path). A batch with
+        # prefill tokens keeps the bf16 Q, which the prefill reads.
+        num_tokens = q.shape[0]
+        self._q_packed_pending = None
+        pack = (
+            swa_metadata.num_prefills == 0
+            and 0 < num_tokens <= self._q_pack_rows
+            and (
+                (self._q_pack_rows, self.padded_heads, q.device) in _q_pack_ready
+                or not torch.cuda.is_current_stream_capturing()
+            )
+        )
+        if not pack:
+            return kernels.qnorm_rope_kv_insert(
+                q,
+                kv,
+                swa_kv_cache,
+                swa_metadata.slot_mapping,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                swa_metadata.block_size,
+                self.eps,
+                self.padded_heads,
+                apply_q_norm=True,
+                pack_q=False,
+                write_q=True,
+                q_packed_out=None,
+                q_rope_out=None,
+                **hca_kwargs,
+            )
+        q_packed_buf, q_rope_buf = dsv4_q_pack_buffers(
+            self._q_pack_rows, self.padded_heads, q.device
+        )
+        _q_pack_ready.add((self._q_pack_rows, self.padded_heads, q.device))
+        q_out, q_packed, q_rope = kernels.qnorm_rope_kv_insert(
             q,
             kv,
             swa_kv_cache,
@@ -1288,11 +1262,14 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.eps,
             self.padded_heads,
             apply_q_norm=True,
-            pack_q=False,
-            write_q=True,
-            q_packed_out=None,
-            q_rope_out=None,
+            pack_q=True,
+            write_q=False,
+            q_packed_out=q_packed_buf[:num_tokens],
+            q_rope_out=q_rope_buf[:num_tokens],
+            **hca_kwargs,
         )
+        self._q_packed_pending = (get_forward_context(), q_packed, q_rope)
+        return q_out
 
     def _prepare_and_attn(
         self,
@@ -1868,6 +1845,70 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.rope_head_dim,
             )
 
+    def _forward_decode_gfx1250(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor | None,
+        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
+        swa_only: bool,
+        output: torch.Tensor,
+        q_packed: torch.Tensor | None,
+        q_rope: torch.Tensor | None,
+    ) -> None:
+        """gfx1250 decode: aiter's pa_decode_sparse over the 640 B record grid,
+        one index list per step. C4A: SWA rows once per step, this layer's
+        top-k rows in place. C128A: the list the fused KV insert wrote.
+        SWA-only: the window's rows once per step. No other reader of the
+        aligned record exists, so a layout these cannot read raises."""
+        num_decodes = swa_metadata.num_decodes
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        swa_cache = self.swa_cache_layer.kv_cache
+        assert swa_metadata.decode_swa_ragged_indices is not None
+        assert swa_metadata.decode_swa_ragged_indptr is not None
+        if swa_only:
+            handle = dsv4_aiter_swa_rows(
+                swa_cache,
+                swa_metadata.decode_swa_ragged_indices,
+                swa_metadata.decode_swa_ragged_indptr[: num_decode_tokens + 1],
+                swa_metadata.decode_swa_width,
+                "dec",
+            )
+        elif self.compress_ratio == 4:
+            assert attn_metadata is not None and kv_cache is not None
+            assert self.topk_indices_buffer is not None
+            assert swa_metadata.is_valid_token is not None
+            dsv4_aiter_csa_decode(
+                q,
+                swa_cache,
+                swa_metadata.decode_swa_ragged_indices,
+                swa_metadata.decode_swa_ragged_indptr,
+                swa_metadata.decode_swa_width,
+                kv_cache,
+                self.topk_indices_buffer[:num_decode_tokens],
+                swa_metadata.token_to_req_indices,
+                attn_metadata.block_table[:num_decodes],
+                attn_metadata.block_size // self.compress_ratio,
+                swa_metadata.is_valid_token[:num_decode_tokens],
+                self.attn_sink,
+                self.scale,
+                output,
+                q_packed,
+                q_rope,
+            )
+            return
+        else:
+            pending = self._hca_pending
+            if pending is None or pending[0] is not get_forward_context():
+                raise RuntimeError(
+                    "DSv4 C128A decode: the fused KV insert did not write this "
+                    "layer's index list for this forward"
+                )
+            handle = pending[1]
+        dsv4_aiter_grid_decode(
+            q, *handle, self.attn_sink, self.scale, output, q_packed, q_rope
+        )
+
     def _forward_decode(
         self,
         q: torch.Tensor,
@@ -1882,6 +1923,23 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         """Returns how many leading rows the decode epilogue inverse-RoPE'd."""
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
+        q_packed = q_rope = None
+        pending = self._q_packed_pending
+        if pending is not None and pending[0] is get_forward_context():
+            q_packed = pending[1][:num_decode_tokens]
+            q_rope = pending[2][:num_decode_tokens]
+        if self._use_gfx1250_aiter_sparse_mla:
+            self._forward_decode_gfx1250(
+                q,
+                kv_cache,
+                swa_metadata,
+                attn_metadata,
+                swa_only,
+                output,
+                q_packed,
+                q_rope,
+            )
+            return 0
 
         topk_indices = None
         topk_lens = None
@@ -1892,42 +1950,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             assert swa_metadata.is_valid_token is not None
             block_size = attn_metadata.block_size // self.compress_ratio
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-            if (
-                self.compress_ratio == 4
-                and self._use_gfx1250_aiter_sparse_mla
-                and positions is None
-                and output.dtype == torch.bfloat16
-            ):
-                # The per-layer top-k is packed straight into the unified
-                # record stream, with the SWA stream copied in front of it.
-                assert kv_cache is not None
-                assert self.topk_indices_buffer is not None
-                assert swa_metadata.decode_swa_ragged_indices is not None
-                assert swa_metadata.decode_swa_ragged_indptr is not None
-                grid = dsv4_unified_kv_grid(self.swa_cache_layer.kv_cache, kv_cache)
-                if grid is not None:
-                    indices, indptr = compute_dsv4_unified_decode_indices(
-                        self.topk_indices_buffer[:num_decode_tokens],
-                        swa_metadata.token_to_req_indices,
-                        attn_metadata.block_table[:num_decodes],
-                        block_size,
-                        is_valid,
-                        swa_metadata.decode_swa_ragged_indices,
-                        swa_metadata.decode_swa_ragged_indptr,
-                        grid,
-                    )
-                    dsv4_aiter_sparse_decode_unified(
-                        q,
-                        grid,
-                        indices,
-                        indptr,
-                        None
-                        if self.attn_sink is None
-                        else self.attn_sink[: q.shape[1]],
-                        self.scale,
-                        out=output,
-                    )
-                    return 0
             if self.compress_ratio == 4:
                 assert self.topk_indices_buffer is not None
                 (
@@ -1985,6 +2007,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             adaptive_splits=adaptive_splits,
             inv_rope_positions=positions,
             inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
+            q_packed=q_packed,
+            q_rope=q_rope,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
@@ -2137,6 +2161,75 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 output=output[query_start:query_end],
             )
 
+    def _forward_prefill_gfx1250(
+        self,
+        q: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,
+        swa_k_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
+        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+    ) -> None:
+        """gfx1250 prefill: aiter's pa_prefill_sparse over the 640 B record grid,
+        one index list per step, as in the decode. Raises on a layout it
+        cannot read."""
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        num_prefill_tokens = swa_metadata.num_prefill_tokens
+        assert swa_metadata.prefill_swa_ragged_indices is not None
+        assert swa_metadata.prefill_swa_ragged_indptr is not None
+        assert swa_metadata.prefill_swa_indices is not None
+        swa_width = swa_metadata.prefill_swa_indices.reshape(
+            num_prefill_tokens, -1
+        ).shape[1]
+        q = q[:num_prefill_tokens]
+        out = output[:num_prefill_tokens]
+        if attn_metadata is None:  # SWA-only layer
+            handle = dsv4_aiter_swa_rows(
+                swa_k_cache,
+                swa_metadata.prefill_swa_ragged_indices,
+                swa_metadata.prefill_swa_ragged_indptr[: num_prefill_tokens + 1],
+                swa_width,
+                "pre",
+            )
+        elif self.compress_ratio == 4:
+            assert compressed_k_cache is not None
+            assert self.topk_indices_buffer is not None
+            assert swa_metadata.token_to_req_indices is not None
+            assert swa_metadata.query_start_loc is not None
+            assert swa_metadata.seq_lens is not None
+            assert swa_metadata.is_valid_token is not None
+            dsv4_aiter_csa_prefill(
+                q,
+                swa_k_cache,
+                swa_metadata.prefill_swa_ragged_indices,
+                swa_metadata.prefill_swa_ragged_indptr,
+                swa_width,
+                compressed_k_cache,
+                self.topk_indices_buffer[
+                    num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                ],
+                swa_metadata.token_to_req_indices,
+                swa_metadata.query_start_loc,
+                swa_metadata.seq_lens,
+                swa_metadata.is_valid_token,
+                attn_metadata.block_table,
+                attn_metadata.block_size // self.compress_ratio,
+                num_decode_tokens,
+                self.attn_sink,
+                self.scale,
+                out,
+            )
+            return
+        else:
+            pending = self._hca_prefill_pending
+            if pending is None or pending[0] is not get_forward_context():
+                raise RuntimeError(
+                    "DSv4 C128A prefill: the fused KV insert did not write this "
+                    "layer's index list for this forward"
+                )
+            handle = pending[1]
+        dsv4_aiter_grid_prefill(q, *handle, self.attn_sink, self.scale, out)
+
     def _forward_prefill_aiter(
         self,
         q: torch.Tensor,
@@ -2152,6 +2245,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         num_prefill_tokens = swa_metadata.num_prefill_tokens
         assert swa_metadata.prefill_swa_ragged_indices is not None
         assert swa_metadata.prefill_swa_ragged_indptr is not None
+
+        if self._use_gfx1250_aiter_sparse_mla:
+            self._forward_prefill_gfx1250(
+                q, compressed_k_cache, swa_k_cache, output, attn_metadata, swa_metadata
+            )
+            return
 
         topk_ragged_indices = None
         topk_ragged_indptr = None
@@ -2171,41 +2270,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             else:
                 topk_indices = attn_metadata.c128a_prefill_topk_indices
             assert topk_indices is not None
-            grid = (
-                dsv4_unified_kv_grid(swa_k_cache, compressed_k_cache)
-                if self._use_gfx1250_aiter_sparse_mla
-                else None
-            )
-            if grid is not None:
-                # The top-k is compacted straight into the unified record
-                # stream, with the SWA stream copied in front of it.
-                indices, indptr = build_dsv4_unified_prefill_indices(
-                    topk_indices,
-                    swa_metadata.token_to_req_indices,
-                    swa_metadata.query_start_loc,
-                    swa_metadata.seq_lens,
-                    swa_metadata.is_valid_token,
-                    attn_metadata.block_table,
-                    block_size=attn_metadata.block_size // self.compress_ratio,
-                    compress_ratio=self.compress_ratio,
-                    num_compressed=(self.max_model_len + self.compress_ratio - 1)
-                    // self.compress_ratio,
-                    token_offset=num_decode_tokens,
-                    swa_indices=swa_metadata.prefill_swa_ragged_indices,
-                    swa_indptr=swa_metadata.prefill_swa_ragged_indptr,
-                    grid=grid,
-                    num_rows=compressed_k_cache.shape[0] * compressed_k_cache.shape[1],
-                )
-                dsv4_aiter_sparse_prefill_unified(
-                    q[:num_prefill_tokens],
-                    grid,
-                    indices,
-                    indptr,
-                    self.attn_sink,
-                    self.scale,
-                    out=output[:num_prefill_tokens],
-                )
-                return
             topk_ragged_indices, topk_ragged_indptr = build_prefill_topk_ragged_indices(
                 topk_indices,
                 swa_metadata.token_to_req_indices,
@@ -2221,20 +2285,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 num_rows=compressed_k_cache.shape[0] * compressed_k_cache.shape[1],
             )
 
-        if self._use_gfx1250_aiter_sparse_mla:
-            _dsv4_aiter_sparse_prefill(
-                q[:num_prefill_tokens],
-                swa_k_cache,
-                swa_metadata.prefill_swa_ragged_indices,
-                swa_metadata.prefill_swa_ragged_indptr,
-                compressed_k_cache,
-                topk_ragged_indices,
-                topk_ragged_indptr,
-                self.attn_sink,
-                self.scale,
-                out=output[:num_prefill_tokens],
-            )
-            return
         self._aiter_sparse_mla(
             q[:num_prefill_tokens],
             output[:num_prefill_tokens],
