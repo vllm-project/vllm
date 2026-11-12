@@ -337,8 +337,7 @@ pub fn to_prompt_info(
 
 pub fn to_prefill_progress(progress: &PrefillProgress) -> pb::PrefillProgress {
     pb::PrefillProgress {
-        request_id: progress.request_id.clone(),
-        remaining_compute_tokens: u32::try_from(progress.remaining_prefill_tokens)
+        remaining_prefill_tokens: u32::try_from(progress.remaining_prefill_tokens)
             .unwrap_or(u32::MAX),
     }
 }

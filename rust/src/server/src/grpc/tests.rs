@@ -1668,8 +1668,7 @@ async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
     assert!(first.prompt_info.is_none());
     assert!(first.outputs.is_none());
     let progress = first.prefill_progress.expect("prefill progress");
-    assert_eq!(progress.request_id, "progress-request");
-    assert_eq!(progress.remaining_compute_tokens, 1);
+    assert_eq!(progress.remaining_prefill_tokens, 1);
 
     let responses: Vec<_> = tokio::time::timeout(
         Duration::from_secs(10),

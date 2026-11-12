@@ -195,13 +195,8 @@ message GenerateResponse {
 }
 
 message PrefillProgress {
-  string request_id = 1;
   // Tokens still to compute for this request's prefill.
-  uint32 remaining_compute_tokens = 7;
-  reserved 2 to 6, 8 to 11;
-  reserved "phase", "prompt_tokens", "total_compute_tokens", "completed_compute_tokens",
-      "local_cached_tokens", "external_cached_tokens", "pending_kv_transfer_tokens",
-      "cache_accounting_final";
+  uint32 remaining_prefill_tokens = 1;
 }
 
 message SequenceOutput {
