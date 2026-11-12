@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base
     StoreTriggerHandler,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
 from vllm.v1.kv_offload.base import GPULoadStoreSpec, StoreTrigger
 
 
@@ -150,10 +151,18 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
                 # Requests that did not load from the offload tier keep their
                 # EAGLE tail in the GPU prefix cache; skip the store.
                 continue
-            boundaries = {boundary for _, _, boundary in entries}
-            assert len(boundaries) == 1
-            boundary = boundaries.pop()
             req = req_status.req
+            cache_hit_alignment = self._config.cache_hit_alignment_tokens
+            assert cache_hit_alignment is not None
+            boundary = get_mamba_prefill_checkpoint_position(
+                req.num_prompt_tokens,
+                cache_hit_alignment,
+                drop_eagle_block=self._config.drop_eagle_checkpoint_block,
+                num_hash_lookahead_tokens=self._config.num_hash_lookahead_tokens,
+            )
+            entries = [entry for entry in entries if entry[2] == boundary]
+            if not entries:
+                continue
             group_states = {
                 group.group_idx: state
                 for group, state in zip(
@@ -186,11 +195,15 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             assert self._cow_source_groups.issubset(cow_blocks)
 
             assert boundary % partial_tail_block_size != 0
-            block_idx = boundary // partial_tail_block_size
+            group_block_idx = [
+                (boundary - 1) // group.tokens_per_block
+                for group in self._config.kv_group_configs
+            ]
             if any(
                 group.group_idx not in self._cow_source_groups
-                and block_idx >= len(group_states[group.group_idx].block_ids)
-                for group in self._config.kv_group_configs
+                and group_block_idx[config_idx]
+                >= len(group_states[group.group_idx].block_ids)
+                for config_idx, group in enumerate(self._config.kv_group_configs)
             ):
                 continue
             key_tokens = [
@@ -204,8 +217,10 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             block_ids = [
                 cow_blocks[group.group_idx]
                 if group.group_idx in self._cow_source_groups
-                else group_states[group.group_idx].block_ids[block_idx]
-                for group in self._config.kv_group_configs
+                else group_states[group.group_idx].block_ids[
+                    group_block_idx[config_idx]
+                ]
+                for config_idx, group in enumerate(self._config.kv_group_configs)
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
@@ -227,10 +242,10 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
             group_sizes = [0] * len(self._config.kv_group_configs)
             block_indices = [0] * len(self._config.kv_group_configs)
-            for group_idx in accepted_groups:
-                group_sizes[group_idx] = 1
-                block_indices[group_idx] = block_idx
-            source_blocks = [block_ids[group_idx] for group_idx in accepted_groups]
+            for config_idx in accepted_groups:
+                group_sizes[config_idx] = 1
+                block_indices[config_idx] = group_block_idx[config_idx]
+            source_blocks = [block_ids[config_idx] for config_idx in accepted_groups]
 
             sink.add_job(
                 req_id,

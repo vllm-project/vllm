@@ -114,6 +114,8 @@ class SchedulerOffloadConfig(NamedTuple):
     eagle_proof_margins: tuple[int, ...] = ()
     # Lookahead block hashes already cover positions past the computed tokens.
     num_hash_lookahead_tokens: int = 0
+    cache_hit_alignment_tokens: int | None = None
+    drop_eagle_checkpoint_block: bool = False
 
     @property
     def supports_handoff(self) -> bool:
@@ -124,7 +126,8 @@ class SchedulerOffloadConfig(NamedTuple):
     def partial_tail_block_size(self) -> int:
         if not self.supports_partial_tail:
             return 0
-        return self.kv_group_configs[0].tokens_per_block
+        assert self.alignment_tokens is not None
+        return self.alignment_tokens
 
     @property
     def max_eagle_proof_margin(self) -> int:
@@ -235,26 +238,34 @@ class SchedulerOffloadConfig(NamedTuple):
                 )
             )
         kv_group_configs = tuple(kv_group_configs_list)
-        group_block_sizes = {config.tokens_per_block for config in kv_group_configs}
         has_partial_recurrent_group = any(
-            config.requires_cow_source
-            and config.tokens_per_block > spec.tokens_per_hash
-            for config in kv_group_configs
+            config.requires_cow_source for config in kv_group_configs
         )
-        # Partial tails currently require one physical block per offload chunk
-        # and uniform, non-windowed groups so one boundary identifies every
-        # group's source. EAGLE groups key their partial tail at a proof
-        # position past the boundary. DCP needs additional hand-off semantics.
+        # Store sub-block tails only when core can reuse them. Recurrent blocks
+        # stay unsharded under DCP and must divide the full-attention chunk.
+        # EAGLE proof positions are not validated under DCP yet.
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        cache_hit_alignment = kv_cache_config.cache_hit_alignment_tokens
         supports_partial_tail = (
             spec.blocks_per_chunk == 1
-            and len(group_block_sizes) == 1
+            and alignment_tokens is not None
+            and cache_hit_alignment is not None
+            and cache_hit_alignment < alignment_tokens
             and has_partial_recurrent_group
             and all(
                 config.sliding_window_size_in_chunks is None
-                or config.requires_cow_source
+                or (
+                    config.requires_cow_source
+                    and alignment_tokens % config.tokens_per_block == 0
+                    and config.tokens_per_block % spec.tokens_per_hash == 0
+                )
                 for config in kv_group_configs
             )
-            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and spec.tokens_per_hash % dcp_world_size == 0
+            and (
+                dcp_world_size == 1
+                or not any(config.is_eagle_group for config in kv_group_configs)
+            )
         )
 
         # Core's prefix cache matches an EAGLE group this many tokens past a
@@ -264,14 +275,14 @@ class SchedulerOffloadConfig(NamedTuple):
         # the groups need no margin.
         eagle_proof_margins: tuple[int, ...] = ()
         if supports_partial_tail and vllm_config.num_hash_lookahead_tokens == 0:
-            partial_tail_block_size = kv_group_configs[0].tokens_per_block
-            alignment = kv_cache_config.cache_hit_alignment_tokens
+            assert alignment_tokens is not None
             partial_hash_hits = (
-                alignment is not None and alignment < partial_tail_block_size
+                cache_hit_alignment is not None
+                and cache_hit_alignment < alignment_tokens
             )
             eagle_proof_margins = tuple(
                 eagle_proof_margin(
-                    partial_tail_block_size,
+                    alignment_tokens,
                     spec.tokens_per_hash,
                     partial_hash_hits
                     and config.manager_cls.supports_fine_grained_hash_lookup,
@@ -307,7 +318,7 @@ class SchedulerOffloadConfig(NamedTuple):
             supports_partial_tail=supports_partial_tail,
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
-            dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_world_size=dcp_world_size,
             # Per-step KV bytes (per worker) loaded within the step (0 disables).
             sync_load_budget_bytes=int(
                 spec.extra_config.get("sync_load_budget_bytes", 0)
@@ -319,6 +330,10 @@ class SchedulerOffloadConfig(NamedTuple):
             ),
             eagle_proof_margins=eagle_proof_margins,
             num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
+            cache_hit_alignment_tokens=cache_hit_alignment,
+            drop_eagle_checkpoint_block=(
+                use_eagle_block_drop and vllm_config.num_hash_lookahead_tokens == 0
+            ),
         )
 
 
