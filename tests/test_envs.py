@@ -199,6 +199,74 @@ def test_rust_bench_auto_path_missing_fails_fast() -> None:
         environment_variables["VLLM_RUST_FRONTEND_PATH"]()
 
 
+@pytest.mark.parametrize(
+    ("name", "raw", "expected"),
+    [
+        ("NO_COLOR", "yes", True),
+        ("NO_COLOR", "2", True),
+        ("NO_COLOR", "0", False),
+        ("FORCE_COLOR", "yes", True),
+        ("FORCE_COLOR", "2", True),
+        ("FORCE_COLOR", "0", False),
+    ],
+)
+def test_color_env_flags_preserve_nonzero_semantics(
+    monkeypatch: pytest.MonkeyPatch, name: str, raw: str, expected: bool
+) -> None:
+    monkeypatch.setenv(name, raw)
+    assert environment_variables[name]() is expected
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "VLLM_BATCH_INVARIANT",
+        "VLLM_NO_USAGE_STATS",
+        "VLLM_TRITON_USE_TD",
+        "VLLM_USE_FLASHINFER_SAMPLER",
+        "VLLM_USE_HW_AGNOSTIC",
+        "VLLM_HUMMING_USE_F16_ACCUM",
+        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+    ],
+)
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1", True),
+        ("true", True),
+        (" TRUE ", True),
+        ("0", False),
+        ("false", False),
+        (" FALSE ", False),
+    ],
+)
+def test_bool_env_parsing_is_consistent(
+    monkeypatch: pytest.MonkeyPatch, name: str, raw: str, expected: bool
+) -> None:
+    monkeypatch.setenv(name, raw)
+    assert environment_variables[name]() is expected
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "VLLM_BATCH_INVARIANT",
+        "VLLM_NO_USAGE_STATS",
+        "VLLM_TRITON_USE_TD",
+        "VLLM_USE_FLASHINFER_SAMPLER",
+        "VLLM_USE_HW_AGNOSTIC",
+        "VLLM_HUMMING_USE_F16_ACCUM",
+        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+    ],
+)
+def test_bool_env_rejects_invalid_value(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv(name, "2")
+    with pytest.raises(ValueError, match=name):
+        environment_variables[name]()
+
+
 class TestEnvWithChoices:
     """Test cases for env_with_choices function."""
 
@@ -571,7 +639,9 @@ class TestVllmConfigureLogging:
             if hasattr(envs.__getattr__, "cache_clear"):
                 envs.__getattr__.cache_clear()
 
-            with pytest.raises(ValueError, match="invalid literal for int"):
+            with pytest.raises(
+                ValueError, match="VLLM_CONFIGURE_LOGGING must be one of"
+            ):
                 _ = envs.VLLM_CONFIGURE_LOGGING
 
 
