@@ -13,7 +13,7 @@ from vllm import (
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
-from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
@@ -214,13 +214,29 @@ class PoolingIOProcessor:
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        # `add_special_tokens` is an explicit offline API knob. User-provided
-        # `tokenization_kwargs` still wins if it sets the same key.
-        tok_kwargs: dict[str, Any] = {
-            "add_special_tokens": ctx.add_special_tokens,
-        }
-        tok_kwargs.update(ctx.tokenization_kwargs or {})
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
+        # `add_special_tokens` is tri-state on the offline context. When
+        # unset (`None`), keep the per-path default that mirrors the online
+        # request mixins:
+        #   - completion: `True`  (`CompletionRequestMixin.add_special_tokens`)
+        #   - chat:       `False` (`ChatRequestOptionsMixin.add_special_tokens`)
+        # An explicit `True` / `False` overrides both paths.
+        # User-provided `tokenization_kwargs` still wins over the default.
+        def _build_tok_params(add_special_tokens: bool) -> TokenizeParams:
+            tok_kwargs: dict[str, Any] = {
+                "add_special_tokens": add_special_tokens,
+            }
+            tok_kwargs.update(ctx.tokenization_kwargs or {})
+            return self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
+
+        if ctx.add_special_tokens is not None:
+            cmpl_add_special_tokens = ctx.add_special_tokens
+            chat_add_special_tokens = ctx.add_special_tokens
+        else:
+            cmpl_add_special_tokens = True
+            chat_add_special_tokens = False
+
+        cmpl_tok_params = _build_tok_params(cmpl_add_special_tokens)
+        chat_tok_params = _build_tok_params(chat_add_special_tokens)
 
         chat_params = ctx.build_chat_params(
             self.chat_template, self.chat_template_content_format
@@ -242,7 +258,7 @@ class PoolingIOProcessor:
                     yield EncodeChatRenderParams(
                         conversations=conversations,
                         chat_params=chat_params,
-                        tok_params=tok_params,
+                        tok_params=chat_tok_params,
                         prompt_extras=prompt_extras,
                         skip_mm_cache=False,
                         params=params_seq[i],
@@ -258,7 +274,7 @@ class PoolingIOProcessor:
                     )
                     yield EncodeCMPLRenderParams(
                         prompts=parsed_prompt,
-                        tok_params=tok_params,
+                        tok_params=cmpl_tok_params,
                         prompt_extras=prompt_extras,
                         skip_mm_cache=False,
                         params=params_seq[i],

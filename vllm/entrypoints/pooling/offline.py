@@ -82,7 +82,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         add_generation_prompt: bool = False,
         continue_final_message: bool = False,
-        add_special_tokens: bool = False,
+        add_special_tokens: bool | None = None,
         chat_template: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption | None = None,
@@ -115,8 +115,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             continue_final_message: If true, leave the final chat message
                 open-ended so the model continues it. Mutually exclusive with
                 `add_generation_prompt`.
-            add_special_tokens: If true, add special tokens (e.g. BOS) on top
-                of what the chat template produces.
+            add_special_tokens: Whether to add special tokens (e.g. BOS).
+                `None` (default) keeps the per-path default: `True` for
+                completion inputs, `False` for chat inputs. Explicit
+                `True`/`False` overrides both.
             chat_template: Override the model's default chat template.
             chat_template_kwargs: Extra keyword args forwarded to the chat
                 template renderer.
@@ -255,7 +257,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         add_generation_prompt: bool = False,
         continue_final_message: bool = False,
-        add_special_tokens: bool = False,
+        add_special_tokens: bool | None = None,
         chat_template: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption | None = None,
@@ -286,8 +288,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             continue_final_message: If true, leave the final chat message
                 open-ended so the model continues it. Mutually exclusive with
                 `add_generation_prompt`.
-            add_special_tokens: If true, add special tokens (e.g. BOS) on top
-                of what the chat template produces.
+            add_special_tokens: Whether to add special tokens (e.g. BOS).
+                `None` (default) keeps the per-path default: `True` for
+                completion inputs, `False` for chat inputs. Explicit
+                `True`/`False` overrides both.
             chat_template: Override the model's default chat template.
             chat_template_kwargs: Extra keyword args forwarded to the chat
                 template renderer.
@@ -342,7 +346,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         add_generation_prompt: bool = False,
         continue_final_message: bool = False,
-        add_special_tokens: bool = False,
+        add_special_tokens: bool | None = None,
         chat_template: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption | None = None,
@@ -373,8 +377,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             continue_final_message: If true, leave the final chat message
                 open-ended so the model continues it. Mutually exclusive with
                 `add_generation_prompt`.
-            add_special_tokens: If true, add special tokens (e.g. BOS) on top
-                of what the chat template produces.
+            add_special_tokens: Whether to add special tokens (e.g. BOS).
+                `None` (default) keeps the per-path default: `True` for
+                completion inputs, `False` for chat inputs. Explicit
+                `True`/`False` overrides both.
             chat_template: Override the model's default chat template.
             chat_template_kwargs: Extra keyword args forwarded to the chat
                 template renderer.
@@ -424,7 +430,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         tokenization_kwargs: dict[str, Any] | None = None,
         add_generation_prompt: bool = False,
         continue_final_message: bool = False,
-        add_special_tokens: bool = False,
+        add_special_tokens: bool | None = None,
         chat_template: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption | None = None,
@@ -463,15 +469,16 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-
             tokenization_kwargs: Overrides for `tokenizer.encode`.
             add_generation_prompt: If true, add the generation prompt to the
                 chat template.
             continue_final_message: If true, leave the final chat message
                 open-ended so the model continues it. Mutually exclusive with
                 `add_generation_prompt`.
-            add_special_tokens: If true, add special tokens (e.g. BOS) on top
-                of what the chat template produces.
+            add_special_tokens: Whether to add special tokens (e.g. BOS).
+                `None` (default) keeps the per-path default: `True` for
+                completion inputs, `False` for chat inputs. Explicit
+                `True`/`False` overrides both.
             chat_template: The chat template to use for scoring. If None, use
                 the chat template passed to the LLM constructor.
             chat_template_kwargs: Extra keyword args forwarded to the chat

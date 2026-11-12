@@ -586,11 +586,15 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             pooling_params=ctx.pooling_params
         )
 
-        # `add_special_tokens` is an explicit offline API knob. User-provided
-        # `tokenization_kwargs` still wins if it sets the same key.
-        tok_kwargs: dict[str, Any] = {
-            "add_special_tokens": ctx.add_special_tokens,
-        }
+        # `add_special_tokens` is tri-state on the offline context. The
+        # cross-encoder path is completion-only, so when unset (`None`) we
+        # keep the renderer default (`True`, matching
+        # `CompletionRequestMixin.add_special_tokens`). An explicit `True` /
+        # `False` overrides it, and user-provided `tokenization_kwargs` wins
+        # over the default.
+        tok_kwargs: dict[str, Any] = {}
+        if ctx.add_special_tokens is not None:
+            tok_kwargs["add_special_tokens"] = ctx.add_special_tokens
         tok_kwargs.update(ctx.tokenization_kwargs or {})
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(**tok_kwargs)
 

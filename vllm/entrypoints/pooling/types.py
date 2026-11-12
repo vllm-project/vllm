@@ -151,7 +151,11 @@ class OfflineInputsContext:
     # Mirror ChatRequestOptionsMixin.
     add_generation_prompt: bool = False
     continue_final_message: bool = False
-    add_special_tokens: bool = False
+    # Tri-state: `None` means "not specified" and falls back to the per-path
+    # default — `True` for completion, `False` for chat (mirroring
+    # `CompletionRequestMixin` and `ChatRequestOptionsMixin` respectively).
+    # Explicit `True`/`False` overrides both.
+    add_special_tokens: bool | None = None
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     chat_template_content_format: ChatTemplateContentFormatOption
