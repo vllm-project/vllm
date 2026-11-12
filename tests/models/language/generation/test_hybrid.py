@@ -314,6 +314,46 @@ def test_distributed_correctness(
     )
 
 
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model", ["ibm-granite/granite-4.0-tiny-preview"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_pipeline_parallel_correctness(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    """Each pipeline stage must load and run only its own layers. A MoE
+    checkpoint also covers the router-to-gate weight rename."""
+    with vllm_runner(
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
+    ) as vllm_model:
+        vllm_outputs_pp_1 = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+
+    with vllm_runner(
+        model,
+        pipeline_parallel_size=2,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
+    ) as vllm_model:
+        vllm_outputs_pp_2 = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=vllm_outputs_pp_1,
+        outputs_1_lst=vllm_outputs_pp_2,
+        name_0="vllm_pp_1",
+        name_1="vllm_pp_2",
+    )
+
+
 @pytest.mark.parametrize("model", FULL_CUDA_GRAPH_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
