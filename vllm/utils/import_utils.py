@@ -403,7 +403,7 @@ class LazyLoader(ModuleType):
 def _has_module(module_name: str) -> bool:
     """Return True if *module_name* can be imported in the current environment.
 
-    Uses ``importlib.util.find_spec`` as a fast pre-check, then performs a
+    Uses `importlib.util.find_spec` as a fast pre-check, then performs a
     trial import to verify that native dependencies (shared libraries, etc.)
     are also satisfied. Any failure during the trial import is treated as the
     module being unavailable. The result is cached so that subsequent queries
@@ -512,7 +512,7 @@ def has_deep_ep_v2() -> bool:
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available.
 
-    Prefers an externally installed ``deep_gemm`` package (so users can
+    Prefers an externally installed `deep_gemm` package (so users can
     override with a newer version), then falls back to the vendored copy
     bundled in the vLLM wheel.
     """
@@ -534,7 +534,7 @@ def check_moonep_system_support() -> None:
 
     MoonEP's symmetric-memory buffers require CUDA VMM plus NVSwitch multicast
     (SHARP) on every EP rank; NVLink-only topologies without NVSwitch (e.g.
-    4x H100 NV6) fail deep inside ``moonep.Buffer`` otherwise.
+    4x H100 NV6) fail deep inside `moonep.Buffer` otherwise.
     """
     if not has_moonep():
         raise RuntimeError(
@@ -572,7 +572,7 @@ def get_triton_kernels_version() -> str | None:
     """The triton_kernels MoE-API generation ("3.5.1"/"3.6"/"3.8"), or None.
 
     Inferred by capability since the package exposes no usable version: 3.8
-    replaced ``matmul_ogs`` with ``matmul``, and 3.5.1 predates ``SparseMatrix``.
+    replaced `matmul_ogs` with `matmul`, and 3.5.1 predates `SparseMatrix`.
     """
     if not has_triton_kernels():
         return None
@@ -609,11 +609,6 @@ def has_tilelang() -> bool:
     return True
 
 
-def has_arctic_inference() -> bool:
-    """Whether the optional `arctic_inference` package is available."""
-    return _has_module("arctic_inference")
-
-
 def has_helion() -> bool:
     """Whether the optional `helion` package is available.
 
@@ -637,6 +632,32 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+# First release with single-node CCO windows (ROCm/mori#704).
+MORI_EPV2_MIN_VERSION = "1.2.4"
+
+
+def mori_epv2_unavailable_reason() -> str | None:
+    """Why the installed MoRI cannot run EPv2, or None if it can.
+
+    Requires the cco and dispatch_combine_v2 modules and MoRI >= 1.2.4.
+    """
+    if not _has_module("mori"):
+        return "MoRI is not installed"
+    if not (_has_module("mori.cco") and _has_module("mori.ops.dispatch_combine_v2")):
+        return "the installed MoRI has no EPv2 modules"
+    import mori  # type: ignore[import-not-found]
+    from packaging.version import InvalidVersion, Version
+
+    version = getattr(mori, "__version__", "unknown")
+    try:
+        too_old = Version(version) < Version(MORI_EPV2_MIN_VERSION)
+    except InvalidVersion:
+        too_old = True
+    if too_old:
+        return f"MoRI {version} is older than {MORI_EPV2_MIN_VERSION}"
+    return None
 
 
 def has_fbgemm_gpu() -> bool:
