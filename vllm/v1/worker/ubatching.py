@@ -5,7 +5,6 @@ import threading
 import torch
 
 from vllm import forward_context
-from vllm.distributed import parallel_state
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import current_stream
@@ -15,6 +14,7 @@ logger = init_logger(__name__)
 _THREAD_ID_TO_CONTEXT: dict = {}
 # Here we hardcode the number of microbatches to 2 for default.
 _NUM_UBATCHES: int = 2
+_SCHEDULE: str | None = None
 _CURRENT_CONTEXTS: list["UBatchContext | None"] = []
 
 
@@ -32,7 +32,7 @@ class UBatchContext:
         cpu_signal_event: threading.Event,
         gpu_comm_done_event: torch.Event,
         gpu_compute_done_event: torch.Event,
-        schedule: str = "default",
+        schedule: str | None = "default",
         token_offset: int = 0,
     ):
         self.id = id
@@ -111,7 +111,10 @@ class UBatchContext:
     def switch_to_compute(self):
         self.update_stream(self.compute_stream)
 
-    def switch_to_comm_sync(self):
+    def switch_to_comm_sync(self, schedule: str | None = None):
+        """With `schedule`, a no-op unless that schedule is running."""
+        if schedule is not None and schedule != self.schedule:
+            return
         self._signal_compute_done()
         self.update_stream(self.comm_stream)
         self._wait_compute_done()
@@ -139,7 +142,10 @@ class UBatchContext:
         self.update_stream(self.comm_stream)
         self._wait_compute_done()
 
-    def yield_and_switch_from_comm_to_compute(self):
+    def yield_and_switch_from_comm_to_compute(self, schedule: str | None = None):
+        """With `schedule`, a no-op unless that schedule is running."""
+        if schedule is not None and schedule != self.schedule:
+            return
         assert current_stream() == self.comm_stream
         self._signal_comm_done()
         self._cpu_yield()
@@ -148,8 +154,9 @@ class UBatchContext:
         self._wait_comm_done()
 
 
-def dbo_enabled() -> bool:
-    return len(_THREAD_ID_TO_CONTEXT) > 0
+def dbo_enabled(schedule: str | None = None) -> bool:
+    """With `schedule`, whether that schedule is running."""
+    return len(_THREAD_ID_TO_CONTEXT) > 0 and schedule in (None, _SCHEDULE)
 
 
 def dbo_current_ubatch_id() -> int:
@@ -217,13 +224,14 @@ def make_ubatch_contexts(
     comm_stream: torch.cuda.Stream,
     forward_contexts: list[ForwardContext],
     ready_barrier: threading.Barrier,
-    schedule: str = "default",
+    schedule: str | None = "default",
     token_offsets: list[int] | None = None,
 ) -> list[UBatchContext]:
-    global _NUM_UBATCHES, _CURRENT_CONTEXTS
+    global _NUM_UBATCHES, _CURRENT_CONTEXTS, _SCHEDULE
     assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
 
     _NUM_UBATCHES = num_micro_batches
+    _SCHEDULE = schedule
     # Ensure the global context list is large enough
     if len(_CURRENT_CONTEXTS) < num_micro_batches:
         _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))
@@ -253,19 +261,6 @@ def make_ubatch_contexts(
         ctxs.append(ctx)
 
     return ctxs
-
-
-# DBO under pure TP: each TP all-reduce is a hand-off point and runs on the comm
-# stream while the other microbatch computes.
-def enable_dbo_tp_overlap(parallel_config, comm_stream: torch.cuda.Stream) -> None:
-    """Collective: every rank calls it in the same order."""
-    if not parallel_config.dbo_tp_only:
-        return
-    tp = parallel_state.get_tp_group()
-    pynccl_comm = getattr(tp.device_communicator, "pynccl_comm", None)
-    if pynccl_comm is not None:
-        pynccl_comm.bind_stream(comm_stream)
-    tp.dbo_overlap = True
 
 
 def dbo_comm_stream_priority() -> int:

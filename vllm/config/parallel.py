@@ -39,6 +39,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+DBOSchedule = Literal["dispatch-combine-overlap", "all-reduce-overlap"]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl", "symm_mem"
 ]
@@ -291,6 +292,13 @@ class ParallelConfig:
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
+
+    dbo_schedule: DBOSchedule | None = None
+    """What one microbatch overlaps with the other's compute:
+    `dispatch-combine-overlap` its expert all-to-all, `all-reduce-overlap` its
+    TP all-reduces. `all-reduce-overlap` needs tensor parallelism on one DP rank
+    without expert parallelism and is the default there; everywhere else the
+    default is `dispatch-combine-overlap`."""
 
     disable_nccl_for_dp_synchronization: bool | None = None
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
@@ -726,16 +734,6 @@ class ParallelConfig:
     @property
     def num_ubatches(self) -> int:
         return 2 if self.enable_dbo else self.ubatch_size
-
-    @property
-    def dbo_tp_only(self) -> bool:
-        """DBO with TP and no EP"""
-        return (
-            self.use_ubatching
-            and self.data_parallel_size == 1
-            and not self.enable_expert_parallel
-            and self.tensor_parallel_size > 1
-        )
 
     @property
     def local_engines_only(self) -> bool:
@@ -1292,6 +1290,21 @@ class ParallelConfig:
             raise ValueError(
                 "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
                 f"be at least the number of microbatches ({self.num_ubatches})."
+            )
+
+        pure_tp = (
+            self.tensor_parallel_size > 1
+            and self.data_parallel_size == 1
+            and not self.enable_expert_parallel
+        )
+        if self.dbo_schedule is None:
+            self.dbo_schedule = (
+                "all-reduce-overlap" if pure_tp else "dispatch-combine-overlap"
+            )
+        elif self.dbo_schedule == "all-reduce-overlap" and not pure_tp:
+            raise ValueError(
+                "dbo_schedule=all-reduce-overlap needs tensor parallelism on one "
+                "DP rank without expert parallelism."
             )
 
         return self

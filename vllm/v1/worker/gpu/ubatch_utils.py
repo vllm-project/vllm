@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.forward_context import (
     DPMetadata,
     ForwardContext,
@@ -36,7 +36,6 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.ubatching import (
     dbo_comm_stream_priority,
-    enable_dbo_tp_overlap,
     make_ubatch_contexts,
 )
 from vllm.v1.worker.utils import AttentionGroup
@@ -358,7 +357,14 @@ class UBatchRunner:
         self.capture_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
-        enable_dbo_tp_overlap(self.parallel_config, self.comm_stream)
+        if self.parallel_config.dbo_schedule == "all-reduce-overlap":
+            # The TP all-reduces run on the comm stream. Collective: every rank
+            # binds in the same order.
+            pynccl_comm = getattr(
+                get_tp_group().device_communicator, "pynccl_comm", None
+            )
+            if pynccl_comm is not None:
+                pynccl_comm.bind_stream(self.comm_stream)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
         current_platform.prepare_ubatch_streams(
@@ -512,6 +518,7 @@ class UBatchRunner:
             compute_stream=compute_stream,
             forward_contexts=ubatch_state.forward_contexts,
             ready_barrier=self.ready_barrier,
+            schedule=self.parallel_config.dbo_schedule,
             token_offsets=[s.token_slice.start for s in ubatch_slices],
         )
 
@@ -611,12 +618,15 @@ def maybe_build_ubatch_runner(
     """Build the microbatch runner, or None when DBO is not in use.
 
     With more than one DP rank, the DP handshake agrees on each split. With one
-    DP rank, only pure-TP DBO splits, as a local decision.
+    DP rank, only `all-reduce-overlap` splits, as a local decision.
     """
     parallel_config = vllm_config.parallel_config
     if not parallel_config.use_ubatching:
         return None
-    if parallel_config.data_parallel_size <= 1 and not parallel_config.dbo_tp_only:
+    if (
+        parallel_config.data_parallel_size <= 1
+        and parallel_config.dbo_schedule == "dispatch-combine-overlap"
+    ):
         return None
 
     logger.info_once("Dual batch overlap is enabled.")
