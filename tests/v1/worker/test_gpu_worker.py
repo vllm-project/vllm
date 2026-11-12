@@ -112,6 +112,8 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     )
 
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    # No PP group here; "auto" would set up a PP transport.
+    monkeypatch.setenv("VLLM_PP_TRANSPORT", "nccl")
     monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
     monkeypatch.setattr(
         gpu_worker, "set_current_vllm_config", lambda config: nullcontext()
@@ -178,6 +180,31 @@ def test_scoped_max_split_keeps_freed_large_blocks_releasable():
         SimpleNamespace(), max_split_size_mb=20
     )
     assert reserved_while_small_is_live(scoped) - baseline < large
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike()
+    or not torch.accelerator.is_available()
+    or torch.cuda.memory.get_allocator_backend() != "native",
+    reason="needs the native CUDA or ROCm allocator",
+)
+@create_new_process_for_each_test("spawn")
+def test_scoped_max_split_reuses_freed_small_tensor_segments():
+    """Freed 1-10 MiB tensors (20 MiB segments) must be reused under load_model's
+    limit, not stranded: a loader that yields many of them filled the device."""
+    torch.accelerator.empty_cache()
+    with gpu_worker.Worker._scoped_allocator_max_split(
+        SimpleNamespace(), gpu_worker._MAX_SPLIT_SIZE_MB
+    ):
+        before = torch.accelerator.memory_reserved()
+        for i in range(100):
+            tensor = torch.empty(
+                (1 + i % 9) * 1024 * 1024 + 4096, dtype=torch.uint8, device="cuda"
+            )
+            del tensor
+        grown = torch.accelerator.memory_reserved() - before
+    # One segment is enough; at max_split_size_mb:20 this grows by 2000 MiB.
+    assert grown <= 20 * 1024 * 1024
 
 
 @pytest.mark.skipif(
@@ -410,6 +437,7 @@ def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None
         parallel_config=SimpleNamespace(world_size=1),
         init_snapshot=SimpleNamespace(free_memory=free_memory),
         cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_bytes),
+        _pp_transport=None,
     )
 
 
@@ -438,6 +466,7 @@ def test_startup_plan_fingerprint_sensitivity(plan_env):
     assert base == fp(_plan_worker().vllm_config, 0, 1)
     assert base != fp(_plan_worker("other").vllm_config, 0, 1)
     assert base != fp(_plan_worker().vllm_config, 1, 2)
+    assert base != fp(_plan_worker().vllm_config, 0, 1, "copy_engine")
     with patch.object(startup_plan, "current_platform", _plan_platform("NVIDIA A100")):
         assert base != fp(_plan_worker().vllm_config, 0, 1)
     with patch("vllm.__version__", "0.0.0+plan-test"):
@@ -608,6 +637,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
+        _pp_transport=None,
     )
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
@@ -774,12 +804,15 @@ def test_ranks_agree_on_extensible_kv_cache(
         reduced.append((value, op))
         return int(any_rank_unsupported)
 
-    monkeypatch.setattr(gpu_worker, "vmm_unavailable_reason", lambda: local_reason)
+    monkeypatch.setattr(
+        gpu_worker, "vmm_unavailable_reason", lambda export_handle_types: local_reason
+    )
     monkeypatch.setattr(gpu_worker, "all_reduce_int", all_reduce_int)
     monkeypatch.setattr(
         gpu_worker, "get_world_group", lambda: SimpleNamespace(cpu_group=None)
     )
-    assert Worker.extensible_kv_cache_unsupported_reason(SimpleNamespace()) == expected
+    worker = SimpleNamespace(vllm_config=SimpleNamespace(kv_transfer_config=None))
+    assert Worker.extensible_kv_cache_unsupported_reason(worker) == expected
     assert reduced == [(int(local_reason is not None), dist.ReduceOp.MAX)]
 
 

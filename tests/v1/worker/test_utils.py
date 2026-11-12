@@ -656,7 +656,8 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy(monkeypatch):
 
 
 @pytest.mark.parametrize("is_host_writer", [False, True])
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+# Restores are one batched driver copy (cuMemcpyBatchAsync), so they need a device.
+@pytest.mark.parametrize("device", ["cuda"])
 def test_hisparse_tail_restore_preserves_imported_rows(
     monkeypatch, request, is_host_writer, device
 ):
@@ -1372,6 +1373,7 @@ class _TestReplaySSMMixer(MambaMixer2):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
         self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
+        self.use_replayssm_trackers = self.use_flashinfer_replayssm
         self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
