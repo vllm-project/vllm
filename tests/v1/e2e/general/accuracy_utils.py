@@ -18,6 +18,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.engine.logprobs import LogprobsProcessor
+from vllm.v1.structured_output.utils import allocate_token_bitmask
 
 
 @dataclass(frozen=True)
@@ -434,7 +435,7 @@ class SamplingReference:
             self.matcher = xgr.GrammarMatcher(
                 compiled, override_stop_tokens=sorted(self.stop_ids) or None
             )
-            self.bitmask = xgr.allocate_token_bitmask(1, vocab_size)
+            self.bitmask = allocate_token_bitmask(1, vocab_size)
 
     def accept_history(self, generated_ids: list[int]) -> bool:
         """Validate newly generated grammar tokens, including the final EOS.

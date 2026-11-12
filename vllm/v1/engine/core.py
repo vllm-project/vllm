@@ -2259,10 +2259,8 @@ class EngineCoreProc(EngineCore):
                             self._handle_mm_cache_miss(req, e)
                             continue
                         except VLLMValidationError as e:
-                            # Note(arpera):
-                            # Currently we validate in engine core
-                            # only if request uses the same structured output backend
-                            # as engine core latched
+                            # Report request validation errors without terminating
+                            # the engine.
                             self._handle_request_validation_error(req, e)
                             continue
                         except Exception:

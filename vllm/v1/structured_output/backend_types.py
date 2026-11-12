@@ -126,15 +126,5 @@ class StructuredOutputBackend(ABC):
         """
 
     @abstractmethod
-    def allocate_token_bitmask(self, max_num_seqs: int) -> "torch.Tensor":
-        """Allocates a token bitmask for the specified maximum number of sequences.
-
-        Args:
-            max_num_seqs (int): The maximum number of sequences for which
-                to allocate the bitmask.
-
-        """
-
-    @abstractmethod
     def destroy(self):
         """Backend-specific cleanup."""
