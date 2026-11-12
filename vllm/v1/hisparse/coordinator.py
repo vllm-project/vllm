@@ -433,6 +433,8 @@ class HiSparseCoordinator:
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
+        if not state.pinned_clean:
+            return
         self._unpin_pages(request_id, state, sorted(state.pinned_clean, reverse=True))
 
     def _on_block_reused(self, block: KVCacheBlock) -> None:
