@@ -1994,11 +1994,14 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
 )
 def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
     supported = current_platform.is_cuda() and (
-        current_platform.is_device_capability(90)
+        current_platform.is_device_capability_family(80)
+        or current_platform.is_device_capability(90)
         or current_platform.is_device_capability_family(120)
     )
     if not supported:
-        pytest.skip("Native FlashInfer prefill with sinks requires SM90 or SM12x.")
+        pytest.skip(
+            "Native FlashInfer prefill with sinks requires SM8x, SM90 or SM12x."
+        )
 
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
