@@ -97,10 +97,19 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         # XPUExperts does not support batch invariance; TRITON is kept as a
         # fallback so VLLM_BATCH_INVARIANT=1 still resolves to a valid
         # (batch-invariant) backend on XPU.
-        _AVAILABLE_BACKENDS = [
-            UnquantizedMoeBackend.XPU,
-            UnquantizedMoeBackend.TRITON,
-        ]
+        #
+        # XPUExperts cannot consume the batched activation format, so prefer
+        # BATCHED_TRITON when the dispatch emits it.
+        if moe_config.use_batched_activation_format:
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.BATCHED_TRITON,
+                UnquantizedMoeBackend.XPU,
+            ]
+        else:
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.XPU,
+                UnquantizedMoeBackend.TRITON,
+            ]
     elif current_platform.is_cpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
     return _AVAILABLE_BACKENDS
@@ -343,9 +352,9 @@ def select_unquantized_moe_backend(
 def aiter_moe_intermediate_alignment(intermediate: int) -> int:
     """Intermediate-size alignment required by AITER's CK 2stages MoE kernel.
 
-    AITER dispatches on ``inter_dim <= 192``: below the threshold both stages
+    AITER dispatches on `inter_dim <= 192`: below the threshold both stages
     use 64-wide tiles, above it at least one stage uses a 128-wide tile, and
-    CK's ``IsSupportedArgument`` rejects a size not divisible by that width.
+    CK's `IsSupportedArgument` rejects a size not divisible by that width.
     """
     return 64 if intermediate <= 192 else 128
 

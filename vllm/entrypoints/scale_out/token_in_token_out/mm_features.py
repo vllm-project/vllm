@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import cast
 
 import torch
@@ -30,6 +30,7 @@ from vllm.multimodal.inputs import (
     MultiModalFlatField,
     MultiModalKwargsItem,
     MultiModalKwargsOptionalItems,
+    PlaceholderRange,
 )
 
 
@@ -50,7 +51,7 @@ def _encode_metadata_items(
     *,
     declared: Collection[str],
 ) -> list[str | None]:
-    """Serialize placeholder-metadata and ``keep_on_cpu`` fields per item."""
+    """Serialize placeholder-metadata and `keep_on_cpu` fields per item."""
     metadata_items: list[str | None] = []
     for item in items:
         if item is None:
@@ -100,7 +101,7 @@ def _encode_mm_kwargs_with_metadata(
 def mm_kwargs_from_features(
     features: MultiModalFeatures,
 ) -> dict[str, list[MultiModalKwargsItem | None]]:
-    """Deserialize ``features`` into per-modality kwargs for ``mm_input``."""
+    """Deserialize `features` into per-modality kwargs for `mm_input`."""
     mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
     kwargs_data = features.kwargs_data or {}
     mm_metadata = features.mm_metadata or {}
@@ -193,10 +194,29 @@ def validate_qwen_image_features(
             )
 
 
+def rebuild_mm_placeholders(
+    mm_placeholders: Mapping[str, list[PlaceholderRangeInfo]],
+) -> dict[str, list[PlaceholderRange]]:
+    """Inverse of `placeholder_ranges_from_engine_input`."""
+    return {
+        modality: [
+            PlaceholderRange(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None
+                if p.is_embed is None
+                else torch.tensor(p.is_embed, dtype=torch.bool),
+            )
+            for p in ranges
+        ]
+        for modality, ranges in mm_placeholders.items()
+    }
+
+
 def placeholder_ranges_from_engine_input(
     engine_input: EngineInput,
 ) -> dict[str, list[PlaceholderRangeInfo]] | None:
-    """Return per-modality placeholder ranges, or ``None`` for text-only prompts."""
+    """Return per-modality placeholder ranges, or `None` for text-only prompts."""
     if engine_input.get("type") != "multimodal":
         return None
 
@@ -205,7 +225,12 @@ def placeholder_ranges_from_engine_input(
     ]
     return {
         modality: [
-            PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None if p.is_embed is None else p.is_embed.tolist(),
+            )
+            for p in ranges
         ]
         for modality, ranges in raw_placeholders.items()
     }
@@ -219,11 +244,11 @@ def extract_mm_features(
 ) -> MultiModalFeatures | None:
     """Extract multimodal features from a rendered engine prompt.
 
-    Returns ``None`` for text-only prompts. ``mm_metadata`` keeps the
+    Returns `None` for text-only prompts. `mm_metadata` keeps the
     intersection of processed kwargs that prefill needs after EC transfer:
     fields declared as embedding metadata, plus fields marked
-    ``keep_on_cpu`` (for example M-RoPE grid dims). With
-    ``mm_payload="none"`` neither is serialized.
+    `keep_on_cpu` (for example M-RoPE grid dims). With
+    `mm_payload="none"` neither is serialized.
     """
     if engine_input.get("type") != "multimodal":
         return None
