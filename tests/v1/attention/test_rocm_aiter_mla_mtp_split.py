@@ -219,6 +219,7 @@ def test_build_hands_common_causal_flag_to_aiter_builder(monkeypatch, causal):
     )
     builder = object.__new__(AiterMLAMetadataBuilder)
     builder._fp8_prefill_enabled = False
+    builder._fused_prefill_enabled = False
 
     builder.build(0, SimpleNamespace(causal=causal))
 
@@ -959,6 +960,7 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
         init_common_builder,
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "_fused_mla_prefill_supported", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
     # The probe is cached per process; running it against the stub aiter
     # would leave a wrong answer for later tests.
@@ -1111,6 +1113,7 @@ def test_builder_sizes_metadata_for_every_decode_qlen(monkeypatch):
         rocm_aiter_mla.MLACommonMetadataBuilder, "__init__", init_common_builder
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "_fused_mla_prefill_supported", lambda: False)
     monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
 
     config = SimpleNamespace(

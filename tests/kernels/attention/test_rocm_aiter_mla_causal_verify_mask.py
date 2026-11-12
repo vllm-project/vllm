@@ -82,6 +82,7 @@ def _run_verify_block():
     )
     from vllm.config import SpeculativeConfig
     from vllm.config.vllm import set_current_vllm_config
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -124,12 +125,19 @@ def _run_verify_block():
     builder_cls = backend_cls.get_builder_cls()
     impl_cls = backend_cls.get_impl_cls()
 
-    # The builder reads layer.prefill_backend from static_forward_context; a
-    # stub with the attribute is enough for metadata construction.
+    prefill_backend = get_mla_prefill_backend(vllm_config)(
+        num_heads=NUM_QUERY_HEADS,
+        scale=(QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM) ** -0.5,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        v_head_dim=V_HEAD_DIM,
+        vllm_config=vllm_config,
+    )
     layer_name = "placeholder"
     vllm_config.compilation_config.static_forward_context[layer_name] = (
         types.SimpleNamespace(
-            prefill_backend=torch.empty((1,)),
+            prefill_backend=prefill_backend,
             q_lora_rank=None,
             kv_lora_rank=KV_LORA_RANK,
             qk_nope_head_dim=QK_NOPE_HEAD_DIM,

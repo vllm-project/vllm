@@ -83,6 +83,7 @@ def _build_decode_metadata():
     )
     from vllm.config.vllm import set_current_vllm_config
     from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.worker.workspace import init_workspace_manager
@@ -115,10 +116,19 @@ def _build_decode_metadata():
     # so the stub carries both; the dims come from the model config to stay in
     # step with the checkpoint.
     mla_dims = get_mla_dims(vllm_config.model_config)
+    prefill_backend = get_mla_prefill_backend(vllm_config)(
+        num_heads=NUM_QUERY_HEADS,
+        scale=(mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim) ** -0.5,
+        kv_lora_rank=mla_dims.kv_lora_rank,
+        qk_nope_head_dim=mla_dims.qk_nope_head_dim,
+        qk_rope_head_dim=mla_dims.qk_rope_head_dim,
+        v_head_dim=mla_dims.v_head_dim,
+        vllm_config=vllm_config,
+    )
     layer_name = "placeholder"
     vllm_config.compilation_config.static_forward_context[layer_name] = (
         types.SimpleNamespace(
-            prefill_backend=torch.empty((1,)),
+            prefill_backend=prefill_backend,
             q_lora_rank=mla_dims.q_lora_rank,
             kv_lora_rank=mla_dims.kv_lora_rank,
             qk_nope_head_dim=mla_dims.qk_nope_head_dim,
