@@ -593,10 +593,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def _sub_connector_handshake_metadata(
         self, metadata: dict[Any, KVConnectorHandshakeMetadata], index: int
     ) -> dict[Any, KVConnectorHandshakeMetadata]:
-        """The entries of `metadata` that sub-connector `index` reported."""
+        """The entries of `metadata` that sub-connector `index` reported.
+
+        Subclasses that override `get_handshake_metadata` report other
+        metadata types; every sub-connector receives those unchanged.
+        """
         selected = {}
         for key, multi_metadata in metadata.items():
-            assert isinstance(multi_metadata, MultiKVConnectorHandshakeMetadata)
+            if not isinstance(multi_metadata, MultiKVConnectorHandshakeMetadata):
+                return metadata
             if (sub_metadata := multi_metadata.metadata[index]) is not None:
                 selected[key] = sub_metadata
         return selected

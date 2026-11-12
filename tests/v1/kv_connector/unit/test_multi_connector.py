@@ -185,6 +185,23 @@ class HandshakeTestConnector(ExampleConnector):
         self.received_handshake_metadata = metadata
 
 
+def _handshake_child(agent: str) -> dict[str, Any]:
+    return {
+        "kv_connector": "HandshakeTestConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+        "kv_connector_extra_config": {"agent": agent},
+    }
+
+
+class LastHandshakeMultiConnector(MultiConnector):
+    """Reports only its last sub-connector's handshake metadata, as Dynamo's
+    PdConnector does for NIXL."""
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        return self._connectors[-1].get_handshake_metadata()
+
+
 # Register mock connectors
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 KVConnectorFactory.register_connector(
@@ -1300,19 +1317,10 @@ def test_handshake_metadata_reaches_only_its_connector():
     reported. A sibling that reports none, such as a KV store next to NIXL on a
     PP prefill instance, would reject pp_rank > 0 in the base class, and the
     engine would fail to start."""
-
-    def handshake_child(agent: str) -> dict[str, Any]:
-        return {
-            "kv_connector": "HandshakeTestConnector",
-            "kv_role": "kv_both",
-            "kv_connector_module_path": __name__,
-            "kv_connector_extra_config": {"agent": agent},
-        }
-
     children = [
-        handshake_child("first"),
+        _handshake_child("first"),
         {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
-        handshake_child("third"),
+        _handshake_child("third"),
     ]
     vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
@@ -1342,6 +1350,39 @@ def test_handshake_metadata_reaches_only_its_connector():
         assert handshake_connector.received_handshake_metadata == {
             (0, 0): expected,
             (1, 0): expected,
+        }
+
+
+@pytest.mark.cpu_test
+def test_handshake_metadata_of_subclass_reaches_every_connector():
+    """A MultiConnector subclass that reports one sub-connector's handshake
+    metadata itself keeps the behavior it was written for: every sub-connector
+    receives that metadata."""
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [_handshake_child("store"), _handshake_child("nixl")]
+        },
+        kv_role="kv_both",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    worker = LastHandshakeMultiConnector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    scheduler = LastHandshakeMultiConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+
+    scheduler.set_xfer_handshake_metadata_pp_aware(
+        {(0, 0): worker.get_handshake_metadata()}
+    )
+
+    for connector in scheduler.sub_connectors:
+        assert isinstance(connector, HandshakeTestConnector)
+        assert connector.received_handshake_metadata == {
+            (0, 0): HandshakeTestMetadata(agent="nixl")
         }
 
 
