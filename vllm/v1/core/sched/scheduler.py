@@ -87,8 +87,8 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
-# Reports per prefill: the cadence stays tied to the scheduled chunks but a
-# request never exceeds this many updates.
+# A request reports at most this many times during its prefill, spaced evenly
+# over the work it had left when it first reported.
 PREFILL_PROGRESS_UPDATES_PER_REQUEST = 32
 
 
@@ -99,6 +99,8 @@ class _PrefillProgressState:
     client_index: int
     # Remaining tokens at the last report; None reports on the first step.
     last_remaining: int | None = None
+    # Tokens of progress between two reports, fixed by the first report.
+    step: int = 0
 
 
 class Scheduler(SchedulerInterface):
@@ -2269,8 +2271,9 @@ class Scheduler(SchedulerInterface):
         """Queue a progress update for one scheduled request.
 
         A request that finishes prefill reports a final zero and stops being
-        tracked; while it is prefilling it reports after each
-        `1 / PREFILL_PROGRESS_UPDATES_PER_REQUEST` of its remaining work.
+        tracked; while it is prefilling it reports at most
+        `PREFILL_PROGRESS_UPDATES_PER_REQUEST` times, evenly spaced over the
+        work it had left when it first reported.
         """
         computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
         remaining = request.num_tokens - computed
@@ -2292,14 +2295,15 @@ class Scheduler(SchedulerInterface):
             return
         if state is None:
             state = _PrefillProgressState(client_index=request.client_index)
+            state.step = max(1, remaining // PREFILL_PROGRESS_UPDATES_PER_REQUEST)
             self._prefill_progress[request.request_id] = state
-        if (
+        elif (
             state.last_remaining is not None
-            and remaining * PREFILL_PROGRESS_UPDATES_PER_REQUEST
-            > state.last_remaining * (PREFILL_PROGRESS_UPDATES_PER_REQUEST - 1)
+            and state.last_remaining - remaining < state.step
         ):
             return
         state.last_remaining = remaining
+        logger.debug("PP emit %s remaining=%d", request.request_id, remaining)
         pending.setdefault(state.client_index, []).append(
             PrefillProgress(
                 request_id=request.request_id, remaining_prefill_tokens=remaining
@@ -2342,7 +2346,11 @@ class Scheduler(SchedulerInterface):
         # itself rather than from the outputs.
         for scheduled_id in scheduler_output.num_scheduled_tokens:
             scheduled = self.requests.get(scheduled_id)
-            if scheduled is None or scheduled.num_output_tokens:
+            if scheduled is None:
+                logger.debug("PP skip missing %s", scheduled_id)
+                continue
+            if scheduled.num_output_tokens:
+                logger.debug("PP skip decode %s", scheduled_id)
                 continue
             self._report_prefill_progress(scheduled, prefill_progress)
         spec_decoding_stats: SpecDecodingStats | None = None
