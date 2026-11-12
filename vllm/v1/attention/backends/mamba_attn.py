@@ -334,11 +334,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
         return num_computed_tokens_p_cpu, query_start_loc_p_cpu
 
+    @staticmethod
     def _build_chunk_metadata_tensors(
-        self,
         chunk_size: int,
-        common: M,
-        common_attn_metadata: CommonAttentionMetadata,
+        num_computed_tokens_p_cpu: torch.Tensor,
+        query_start_loc_p_cpu: torch.Tensor,
+        device: torch.device,
         checkpoint_offsets_p: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute chunk metadata and return as device tensors.
@@ -347,26 +348,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         it has one entry per prefill row, holding the logical chunk that ends
         on the checkpoint, and 0 for rows that decline.
         """
-        num_prefills = common.num_prefills
-
-        num_computed_tokens_p_cpu, query_start_loc_p_cpu = self._prefill_cpu_metadata(
-            common_attn_metadata,
-            common.num_reqs,
-            num_prefills,
-            common.num_decode_tokens,
-        )
-
         cu_chunk_seqlen, seq_idx, last_chunk_indices, ckpt_idxs = (
-            self._compute_chunk_metadata(
+            BaseMambaAttentionMetadataBuilder._compute_chunk_metadata(
                 chunk_size,
-                num_prefills,
+                query_start_loc_p_cpu.numel() - 1,
                 num_computed_tokens_p_cpu,
                 query_start_loc_p_cpu,
                 checkpoint_offsets_p,
             )
         )
 
-        device = common_attn_metadata.query_start_loc.device
         # Build on pinned CPU and upload non-blocking to avoid the synchronous
         # H2D copy that `torch.as_tensor(list, device=cuda)` would force.
         cu_chunk_seqlen_p = async_tensor_h2d(

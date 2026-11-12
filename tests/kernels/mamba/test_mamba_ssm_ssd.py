@@ -6,6 +6,13 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from tests.kernels.mamba.utils import selective_state_update_ref
+from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+from vllm.config.mamba import MambaConfig
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
     _chunk_scan_fwd,
     _chunk_scan_fwd_kernel,
@@ -13,9 +20,20 @@ from vllm.model_executor.layers.mamba.ops.ssd_chunk_scan import (
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.model_executor.layers.mamba.ops.ssd_dispatch import (
+    get_mamba_ssd_backend,
+    initialize_mamba_ssd_backend,
+)
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backends.mamba2_attn import compute_varlen_chunk_metadata
+from vllm.utils.flashinfer import is_flashinfer_ssd_supported
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionMetadata,
+    build_ssd_prefill_metadata,
+    compute_varlen_chunk_metadata,
+)
+from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 
 # All kernels exercised here are pure Triton, so they run on any backend
 # that the vLLM platform layer treats as a CUDA-alike device or as XPU.
@@ -625,3 +643,235 @@ def test_chunk_scan_fwd_every_config_matches(monkeypatch):
                 rtol=2e-2,
                 msg=lambda m, config=config: f"{config}: {m}",
             )
+
+
+@pytest.mark.parametrize(
+    ("provider", "checkpoints", "state_dtype"),
+    [
+        ("triton", True, torch.float32),
+        ("flashinfer", False, torch.float16),
+        ("flashinfer", True, torch.float32),
+    ],
+    ids=["triton_checkpoint", "flashinfer", "flashinfer_checkpoint"],
+)
+def test_mamba_ssd_dispatch_preserves_outputs_cache_and_checkpoint_resume(
+    monkeypatch, dist_init, provider, checkpoints, state_dtype
+):
+    """Exercise mixer dispatch with real SSD kernels and an FP64 recurrence."""
+    if provider == "flashinfer" and not is_flashinfer_ssd_supported():
+        pytest.skip("FlashInfer SSD is unavailable on this platform")
+
+    set_random_seed(0)
+    seqlens = (224, 129, 3) if checkpoints else (127, 126, 3)
+    heads, groups, dim, dstate, chunk_size = 8, 2, 64, 128, 256
+    tokens, width = sum(seqlens), heads * dim + 2 * groups * dstate
+    x = torch.randn(tokens, heads, dim, device=DEVICE, dtype=torch.bfloat16)
+    dt = torch.randn(tokens, heads, device=DEVICE, dtype=torch.bfloat16) - 4
+    B = torch.randn(tokens, groups, dstate, device=DEVICE, dtype=torch.bfloat16)
+    C = torch.randn_like(B)
+    A = -torch.exp(torch.rand(heads, device=DEVICE))
+    D = torch.randn(heads, device=DEVICE, dtype=torch.bfloat16)
+    bias = torch.randn_like(D)
+    raw_qkv = torch.cat((x.flatten(1), B.flatten(1), C.flatten(1)), dim=-1)
+    gate = torch.zeros(tokens, heads * dim, device=DEVICE, dtype=torch.bfloat16)
+    projected = torch.cat((gate, raw_qkv, dt), dim=-1)
+    x, B, C = (F.silu(value.float()).bfloat16() for value in (x, B, C))
+    payload = heads * dim * dstate
+    storage = torch.full((7, payload + 13), 17, device=DEVICE, dtype=state_dtype)
+    cache = storage[:, :payload].view(7, heads, dim, dstate)
+    cache[2].normal_()
+    before = storage.clone()
+    indices = torch.tensor([5, 2, 4], dtype=torch.int32, device=DEVICE)
+    has_initial = torch.tensor([False, True, False], device=DEVICE)
+    initial = torch.where(has_initial[:, None, None, None], cache[indices], 0)
+    if is_conv_state_dim_first():
+        conv_cache = torch.full((7, width, 3), 17, device=DEVICE, dtype=x.dtype)
+        conv_state = conv_cache
+    else:
+        conv_cache = torch.full((7, 3, width), 17, device=DEVICE, dtype=x.dtype)
+        conv_state = conv_cache.transpose(-1, -2)
+
+    def metadata(lengths, slots, has_states, computed, checkpoint=None):
+        starts = torch.tensor((0, *lengths), dtype=torch.int32).cumsum(0).int()
+        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+            starts, device=torch.device(DEVICE)
+        )
+        return build_ssd_prefill_metadata(
+            Mamba2AttentionMetadata(
+                num_prefills=len(lengths),
+                num_prefill_tokens=sum(lengths),
+                num_decodes=0,
+                num_decode_tokens=0,
+                num_reqs=len(lengths),
+                has_initial_states_p=has_states,
+                query_start_loc_p=starts.to(DEVICE),
+                state_indices_tensor_p=slots,
+                state_indices_tensor_d=None,
+                query_start_loc_d=None,
+                num_accepted_tokens=None,
+                seq_lens=torch.tensor(lengths, dtype=torch.int32, device=DEVICE),
+                nums_dict=nums_dict,
+                batch_ptr=batch_ptr,
+                token_chunk_offset_ptr=token_chunk_offset_ptr,
+                prep_initial_states=any(computed),
+                chunk_size=chunk_size,
+                checkpoint_meta=checkpoint,
+            ),
+            torch.tensor(computed),
+            starts,
+            (heads, dim, dstate),
+            state_dtype,
+        )
+
+    def reference(x, dt, B, C, initial, lengths):
+        # FP64 avoids TF32 in the independent output contraction.
+        state = initial.double().clone()
+        x, dt, B, C = (value.double() for value in (x, dt, B, C))
+        dt = dt.unsqueeze(-1).expand(-1, -1, dim)
+        A_ref = A.double()[:, None, None].expand(-1, dim, dstate)
+        D_ref = D.double()[:, None].expand(-1, dim)
+        bias_ref = bias.double()[:, None].expand(-1, dim)
+        output, checkpoint_state, start = torch.empty_like(x), None, 0
+        for row, length in enumerate(lengths):
+            for token in range(start, start + length):
+                output[token] = selective_state_update_ref(
+                    state[row : row + 1],
+                    x[token : token + 1],
+                    dt[token : token + 1],
+                    A_ref,
+                    B[token : token + 1],
+                    C[token : token + 1],
+                    D=D_ref,
+                    dt_bias=bias_ref,
+                    dt_softplus=True,
+                )[0]
+                if row == 0 and token == 95:
+                    checkpoint_state = state[row].clone()
+            start += length
+        return output, state, checkpoint_state
+
+    checkpoint = (
+        MambaPrefillCheckpointMetadata(
+            torch.tensor([96, 0, 0], dtype=torch.int32, device=DEVICE),
+            torch.tensor([1, 0, 0], dtype=torch.int32, device=DEVICE),
+            offsets=[96, 0, 0],
+        )
+        if checkpoints
+        else None
+    )
+    vllm_config = VllmConfig(mamba_config=MambaConfig(prefill_backend=provider))
+    with (
+        set_current_vllm_config(vllm_config),
+        set_default_torch_dtype(x.dtype),
+        torch.device(DEVICE),
+    ):
+        mixer = MambaMixer2(
+            hidden_size=64,
+            ssm_state_size=dstate,
+            conv_kernel_size=4,
+            intermediate_size=heads * dim,
+            use_conv_bias=False,
+            use_bias=False,
+            n_groups=groups,
+            num_heads=heads,
+            head_dim=dim,
+            cache_config=CacheConfig(),
+            prefix="mixer",
+        )
+    with torch.no_grad():
+        mixer.conv1d.weight.zero_()
+        mixer.conv_weights[:, -1] = 1
+        mixer.A.copy_(A)
+        mixer.D.copy_(D)
+        mixer.dt_bias.copy_(bias)
+    mixer.kv_cache = (conv_cache, cache)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssd_dispatch._mamba_ssd_backend", None
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=7,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["mixer"],
+                kv_cache_spec=MambaSpec(
+                    block_size=256,
+                    shapes=((heads, dim, dstate),),
+                    dtypes=(state_dtype,),
+                ),
+            )
+        ],
+    )
+    initialize_mamba_ssd_backend(vllm_config.mamba_config, kv_cache_config)
+    assert get_mamba_ssd_backend().name == provider
+
+    def run(attn_metadata, projected_states):
+        output = torch.empty(
+            projected_states.shape[0], heads * dim, device=DEVICE, dtype=x.dtype
+        )
+        with set_forward_context({"mixer": attn_metadata}, vllm_config):
+            mixer.conv_ssm_forward(projected_states, output)
+        return output.view(-1, heads, dim).double()
+
+    expected_out, expected_states, expected_checkpoint = reference(
+        x, dt, B, C, initial, seqlens
+    )
+    output = run(
+        metadata(seqlens, indices, has_initial, [0, 5, 0], checkpoint), projected
+    )
+    torch.testing.assert_close(output, expected_out, atol=0.1, rtol=0.06)
+    torch.testing.assert_close(
+        cache[indices].double(), expected_states, atol=0.05, rtol=0.05
+    )
+    untouched = [0, 3, 6] + ([] if checkpoints else [1])
+    torch.testing.assert_close(storage[untouched], before[untouched], atol=0, rtol=0)
+    torch.testing.assert_close(
+        storage[:, payload:], before[:, payload:], atol=0, rtol=0
+    )
+    if checkpoints:
+        torch.testing.assert_close(
+            cache[1].double(), expected_checkpoint, atol=0.05, rtol=0.05
+        )
+        torch.testing.assert_close(conv_state[1], raw_qkv[93:96].T, atol=0, rtol=0)
+        expected_suffix, expected_final, _ = reference(
+            x[96:224], dt[96:224], B[96:224], C[96:224], cache[1:2], (128,)
+        )
+        suffix = run(
+            metadata(
+                (128,), indices.new_tensor([1]), has_initial.new_tensor([True]), [96]
+            ),
+            projected[96:224],
+        )
+        torch.testing.assert_close(suffix, expected_suffix, atol=0.1, rtol=0.06)
+        torch.testing.assert_close(
+            cache[1:2].double(), expected_final, atol=0.05, rtol=0.05
+        )
+
+    # A batch shorter than one 128-token chunk with no cached state, written
+    # into occupied cache slots.
+    cold_lengths = (90, 5)
+    cold_tokens = sum(cold_lengths)
+    cold_slots = indices.new_tensor([3, 6])
+    expected_cold, expected_cold_states, _ = reference(
+        x[:cold_tokens],
+        dt[:cold_tokens],
+        B[:cold_tokens],
+        C[:cold_tokens],
+        torch.zeros_like(cache[cold_slots]),
+        cold_lengths,
+    )
+    before_cold = storage.clone()
+    cold_output = run(
+        metadata(cold_lengths, cold_slots, has_initial.new_zeros(2), [0, 0]),
+        projected[:cold_tokens],
+    )
+    torch.testing.assert_close(cold_output, expected_cold, atol=0.1, rtol=0.06)
+    torch.testing.assert_close(
+        cache[cold_slots].double(), expected_cold_states, atol=0.05, rtol=0.05
+    )
+    torch.testing.assert_close(
+        storage[[0, 1, 2, 4, 5]], before_cold[[0, 1, 2, 4, 5]], atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        storage[:, payload:], before_cold[:, payload:], atol=0, rtol=0
+    )

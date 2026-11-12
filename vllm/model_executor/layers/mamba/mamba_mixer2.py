@@ -38,17 +38,16 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+    gather_initial_states,
+)
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
+from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
-from vllm.model_executor.layers.mamba.ops.ssd_combined import (
+from vllm.model_executor.layers.mamba.ops.ssd_dispatch import (
     mamba_chunk_scan_combined_varlen,
-)
-from vllm.model_executor.layers.mamba.ops.ssd_flashinfer import (
-    FLASHINFER_SSD_HEAD_DIM,
-    FLASHINFER_SSD_STATE_SIZE,
-    mamba_chunk_scan_flashinfer,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     plan_replayssm_decode,
@@ -71,7 +70,10 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionMetadata,
+    build_ssd_prefill_metadata,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
@@ -547,22 +549,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.mamba_config = vllm_config.mamba_config
         self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
         self.state_alignment = mamba_state_alignment(vllm_config)
-        self.use_flashinfer_prefill = (
-            self.mamba_config.prefill_backend == MambaBackendEnum.FLASHINFER
-        )
-        if self.use_flashinfer_prefill and (
-            self.head_dim != FLASHINFER_SSD_HEAD_DIM
-            or self.ssm_state_size != FLASHINFER_SSD_STATE_SIZE
-            or (model_config is not None and model_config.dtype != torch.bfloat16)
-        ):
-            raise ValueError(
-                "--mamba-prefill-backend flashinfer requires bfloat16 activations, "
-                f"head_dim {FLASHINFER_SSD_HEAD_DIM} and ssm_state_size "
-                f"{FLASHINFER_SSD_STATE_SIZE}; got head_dim {self.head_dim}, "
-                f"ssm_state_size {self.ssm_state_size}"
-            )
-        self.D_bf16_cache: torch.Tensor | None = None
-        self.D_bf16_version = -1
         if self.use_replayssm and self.num_heads % self.tp_size != 0:
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
@@ -599,6 +585,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
+
+        if model_config is not None:
+            # Prefill states are indexed by a block-table column.
+            spec = self.get_kv_cache_spec(vllm_config)
+            assert spec is not None and isinstance(spec, MambaSpec)
+            self._state_indices_stride = 1 + spec.num_speculative_blocks
+            scatter_states.register_warmup(
+                state_shape=spec.shapes[1],
+                state_dtype=spec.dtypes[1],
+                indices_dtype=torch.int32,
+                max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
+                indices_stride=self._state_indices_stride,
+            )
 
     def forward(
         self,
@@ -641,33 +640,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         return output
 
-    def D_bf16(self) -> torch.Tensor:
-        """`D` cast to bfloat16 for FlashInfer's SSD, refreshed whenever the
-        float32 parameter is (re)loaded."""
-        if self.D_bf16_cache is None or self.D_bf16_version != self.D._version:
-            self.D_bf16_cache = self.D.detach().to(torch.bfloat16)
-            self.D_bf16_version = self.D._version
-        return self.D_bf16_cache
-
-    def _warmup_ssd_kernels(self, projected_states: torch.Tensor) -> None:
-        """Run a minimal SSD forward pass to trigger Triton autotuning
-        while GPU memory is still plentiful (before SSM cache allocation).
-        """
-        if self._ssd_kernels_warmed_up:
+    def _warmup_ssd_kernels(self) -> None:
+        """Run a minimal SSD forward pass to trigger kernel compilation and
+        autotuning before the first prefill."""
+        if self._ssd_kernels_warmed_up or self.model_config is None:
             return
         self._ssd_kernels_warmed_up = True
-        logger.info_once("Warming up Mamba2 SSD Triton kernels...")
+        logger.info_once("Warming up Mamba2 SSD kernels...")
 
-        device = projected_states.device
-        dtype = projected_states.dtype
+        device = self.A.device
+        dtype = self.model_config.dtype
 
         nheads = self.num_heads // self.tp_size
         ngroups = self.n_groups // self.tp_size
         headdim = self.head_dim
         dstate = self.ssm_state_size
 
-        if self.model_config is None:
-            return
         chunk_size = self.model_config.get_mamba_chunk_size()
 
         # Triton's autotuner includes tensor dtypes in its cache key,
@@ -678,27 +666,39 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # not on sequence length or batch size, so a single shape suffices.
         seqlen = chunk_size
         batch = 1
-        nchunks = seqlen // chunk_size  # = 1
 
         x = torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
         dt = torch.randn(seqlen, nheads, device=device, dtype=dtype)
         B = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
         C = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
-        cu_seqlens = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
-        cu_chunk_seqlens = torch.tensor(
-            [i * chunk_size for i in range(nchunks + 1)],
-            device=device,
-            dtype=torch.int32,
-        )
-        last_chunk_indices = torch.tensor(
-            [nchunks - 1], device=device, dtype=torch.int32
-        )
-        seq_idx = torch.zeros(nchunks, device=device, dtype=torch.int32)
         out = torch.empty(seqlen, nheads, headdim, device=device, dtype=dtype)
         final_states = torch.empty(
             batch, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
         )
         final_state_indices = torch.zeros(batch, device=device, dtype=torch.int32)
+        query_start_loc_cpu = torch.tensor([0, seqlen], dtype=torch.int32)
+        query_start_loc = query_start_loc_cpu.to(device)
+        metadata = build_ssd_prefill_metadata(
+            Mamba2AttentionMetadata(
+                num_prefills=batch,
+                num_prefill_tokens=seqlen,
+                num_decodes=0,
+                num_decode_tokens=0,
+                num_reqs=batch,
+                has_initial_states_p=None,
+                query_start_loc_p=query_start_loc,
+                state_indices_tensor_p=None,
+                state_indices_tensor_d=None,
+                query_start_loc_d=None,
+                num_accepted_tokens=None,
+                seq_lens=torch.tensor([seqlen], device=device, dtype=torch.int32),
+                chunk_size=chunk_size,
+            ),
+            torch.zeros(batch, dtype=torch.int32),
+            query_start_loc_cpu,
+            (nheads, headdim, dstate),
+            ssm_state_dtype,
+        )
 
         # Two kernels (_state_passing_fwd, _chunk_scan_fwd) use
         # HAS_INITSTATES as a constexpr, and _state_passing_fwd also
@@ -717,7 +717,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     dtype=ssm_state_dtype,
                 )
                 if use_initial_states
-                else None
+                else metadata.zero_initial_states_p
             )
             try:
                 mamba_chunk_scan_combined_varlen(
@@ -727,17 +727,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     B=B,
                     C=C,
                     chunk_size=chunk_size,
-                    cu_seqlens=cu_seqlens,
-                    cu_chunk_seqlens=cu_chunk_seqlens,
-                    last_chunk_indices=last_chunk_indices,
-                    seq_idx=seq_idx,
+                    cu_seqlens=query_start_loc,
+                    cu_chunk_seqlens=metadata.cu_chunk_seqlen_p,
+                    last_chunk_indices=metadata.last_chunk_indices_p,
+                    seq_idx=metadata.seq_idx_p,
                     out=out,
                     D=self.D,
-                    z=None,
                     dt_bias=self.dt_bias,
                     initial_states=initial_states,
                     dt_softplus=True,
-                    dt_limit=(0.0, float("inf")),
                     state_dtype=ssm_state_dtype,
                     final_states_out=final_states if write_final_states else None,
                     final_state_indices=(
@@ -755,24 +753,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     exc_info=True,
                 )
 
-        if self.use_flashinfer_prefill:
-            for use_initial_states in (False, True):
-                mamba_chunk_scan_flashinfer(
-                    x,
-                    dt,
-                    self.A,
-                    B,
-                    C,
-                    self.D_bf16(),
-                    self.dt_bias,
-                    cu_seqlens,
-                    out,
-                    final_states,
-                    final_state_indices,
-                    torch.ones(batch, device=device, dtype=torch.bool)
-                    if use_initial_states
-                    else None,
-                )
+        state = torch.zeros(
+            1, nheads, headdim, dstate, device=device, dtype=ssm_state_dtype
+        )
+        indices = torch.zeros(
+            self._state_indices_stride, device=device, dtype=torch.int32
+        )
+        has_initial_states = torch.ones(1, device=device, dtype=torch.bool)
+        gather_initial_states(
+            state, indices[:: self._state_indices_stride], has_initial_states
+        )
 
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
@@ -828,6 +818,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            zero_initial_states_p = attn_metadata.zero_initial_states_p
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             replayssm_state_indices_d = attn_metadata.replayssm_state_indices_d
@@ -836,12 +827,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
             num_decodes = attn_metadata.num_decodes
             num_decode_tokens = attn_metadata.num_decode_tokens
             checkpoint_chunk_idx = attn_metadata.checkpoint_chunk_idx
+            checkpoint_token_indices_p = attn_metadata.checkpoint_token_indices_p
+            checkpoint_states_p = attn_metadata.checkpoint_states_p
             checkpoint_meta = attn_metadata.checkpoint_meta
 
         if attn_metadata is None:
-            # V1 profile run -- warm up SSD kernels so that autotuning
-            # completes before SSM cache allocation.
-            self._warmup_ssd_kernels(projected_states)
             hidden_states_B_C = (
                 hidden_states_B_C.transpose(0, 1).clone().transpose(0, 1)
             ).contiguous()
@@ -900,89 +890,64 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
 
             # 3. State Space Model sequence transformation
-            # NOTE: final output is an in-place update of out tensor
-            assert preallocated_ssm_out_p is not None
-            assert state_indices_tensor_p is not None
-            has_checkpoints = checkpoint_chunk_idx is not None
-            if self.use_flashinfer_prefill and not has_checkpoints:
-                assert query_start_loc_p is not None
-                mamba_chunk_scan_flashinfer(
-                    hidden_states_p.view(
-                        num_prefill_tokens,
-                        self.num_heads // self.tp_size,
-                        self.head_dim,
-                    ),
-                    dt_p,
-                    self.A,
-                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                    self.D_bf16(),
-                    self.dt_bias,
-                    query_start_loc_p,
-                    preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
-                    ssm_state,
-                    state_indices_tensor_p,
-                    has_initial_states_p if prep_initial_states else None,
-                )
-            else:
-                initial_states = None
-                if has_initial_states_p is not None and prep_initial_states:
+            initial_states = zero_initial_states_p
+            if has_initial_states_p is not None and prep_initial_states:
+                assert state_indices_tensor_p is not None
+                if ssm_state.is_cpu:
                     initial_states = torch.where(
                         has_initial_states_p[:, None, None, None],
                         ssm_state[state_indices_tensor_p],
                         0,
                     )
-                # Without checkpoints, the SSD scan writes each sequence's final
-                # state straight into its ssm_state slot.
-                varlen_states = mamba_chunk_scan_combined_varlen(
-                    hidden_states_p.view(
-                        num_prefill_tokens,
-                        self.num_heads // self.tp_size,
-                        self.head_dim,
-                    ),
-                    dt_p,
-                    self.A,
-                    B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                    C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                    chunk_size=chunk_size,
-                    D=self.D,
-                    z=None,
-                    dt_bias=self.dt_bias,
-                    seq_idx=seq_idx_p,
-                    cu_seqlens=query_start_loc_p,
-                    cu_chunk_seqlens=cu_chunk_seqlen_p,
-                    last_chunk_indices=last_chunk_indices_p,
-                    initial_states=initial_states,
-                    return_intermediate_states=has_checkpoints,
-                    dt_softplus=True,
-                    dt_limit=(0.0, float("inf")),
-                    out=preallocated_ssm_out_p.view(
-                        num_prefill_tokens, -1, self.head_dim
-                    ),
-                    state_dtype=ssm_state.dtype,
-                    final_states_out=None if has_checkpoints else ssm_state,
-                    final_state_indices=None
-                    if has_checkpoints
-                    else state_indices_tensor_p,
-                )
+                else:
+                    initial_states = gather_initial_states(
+                        ssm_state, state_indices_tensor_p, has_initial_states_p
+                    )
 
-            if has_checkpoints:
-                # update ssm states
-                # - varlen state is a (num_chunks, nheads, headdim, dstate)
-                #   tensor
-                final_states = varlen_states[last_chunk_indices_p]
+            # NOTE: final output is an in-place update of out tensor
+            assert preallocated_ssm_out_p is not None
+            assert query_start_loc_p is not None
+            assert state_indices_tensor_p is not None
+            # The SSD scan writes each sequence's final state straight into its
+            # ssm_state slot.
+            checkpoint_states = mamba_chunk_scan_combined_varlen(
+                hidden_states_p.view(
+                    num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
+                ),
+                dt_p,
+                self.A,
+                B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                chunk_size=chunk_size,
+                D=self.D,
+                dt_bias=self.dt_bias,
+                seq_idx=seq_idx_p,
+                cu_seqlens=query_start_loc_p,
+                cu_chunk_seqlens=cu_chunk_seqlen_p,
+                last_chunk_indices=last_chunk_indices_p,
+                initial_states=initial_states,
+                checkpoint_chunk_indices=checkpoint_chunk_idx,
+                dt_softplus=True,
+                out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
+                state_dtype=ssm_state.dtype,
+                final_states_out=ssm_state,
+                final_state_indices=state_indices_tensor_p,
+                checkpoint_token_indices=checkpoint_token_indices_p,
+                checkpoint_states=checkpoint_states_p,
+            )
+
+            if checkpoint_states is not None:
                 assert checkpoint_meta is not None
                 assert query_start_loc_p is not None
                 self._checkpoint_exporter.export(
                     checkpoint_meta,
                     raw_qkv=x.transpose(0, 1),
                     conv_state=conv_state,
-                    recurrent_checkpoint=varlen_states,
+                    recurrent_checkpoint=checkpoint_states,
                     recurrent_state=ssm_state,
                     cu_seqlens=query_start_loc_p,
                     recurrent_rows=checkpoint_chunk_idx,
                 )
-                ssm_state[state_indices_tensor_p] = final_states
             if (
                 ring_start is not None
                 and not self.use_flashinfer_replayssm
@@ -1044,7 +1009,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             if self.use_replayssm:
                 assert self.replayssm_buffer_len is not None
-                if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+                if (
+                    self.mamba_config.effective_decode_backend
+                    == MambaBackendEnum.FLASHINFER
+                ):
                     assert ring_start is not None
                     assert prev_num_accepted is not None
                     assert attn_metadata.replayssm_scratch is not None
@@ -1212,7 +1180,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 n_groups=self.n_groups,
                 tp_world_size=tp_world_size,
                 logical_window=self.replayssm_buffer_len,
-                backend=self.mamba_config.backend,
+                backend=self.mamba_config.effective_decode_backend,
                 num_speculative_tokens=self.num_spec,
             )
         return base_shape

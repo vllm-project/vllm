@@ -20,6 +20,10 @@ from tests.v1.attention.utils import (
 )
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.mamba.ops import ssd_dispatch
+from vllm.model_executor.layers.mamba.ops.ssd_dispatch import (
+    initialize_mamba_ssd_backend,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import (
@@ -255,14 +259,19 @@ def _input_batch(
     ],
 )
 def test_replayssm_uses_built_mamba_decode_split(
-    query_lens, seq_lens, prefilling, prompt_tail, for_capture, expected
+    monkeypatch, query_lens, seq_lens, prefilling, prompt_tail, for_capture, expected
 ):
     """ReplaySSM uses Mamba's split, including resumed chunks and graph padding."""
     gdn_builder = _create_gdn_builder(num_speculative_tokens=3, full_cuda_graph=True)
     config = gdn_builder.vllm_config
     config.model_config.hf_text_config.mamba_chunk_size = 256
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64), (4, 8, 16)),
+        dtypes=(torch.float16, torch.float32),
+    )
     mamba_builder = Mamba2AttentionMetadataBuilder(
-        gdn_builder.kv_cache_spec, ["mamba"], config, DEVICE
+        mamba_spec, ["mamba"], config, DEVICE
     )
     # Classification uses the provider-independent Mamba builder on CPU.
     state_config = create_vllm_config(max_num_seqs=4, max_num_batched_tokens=16)
@@ -294,6 +303,8 @@ def test_replayssm_uses_built_mamba_decode_split(
             KVCacheGroupSpec(group.layer_names, group.kv_cache_spec) for group in groups
         ],
     )
+    monkeypatch.setattr(ssd_dispatch, "_mamba_ssd_backend", None)
+    initialize_mamba_ssd_backend(state_config.mamba_config, kv_cache_config)
     num_reqs, num_tokens = len(query_lens), sum(query_lens)
     padded_reqs = len(expected) if expected is not None else num_reqs
     buffers = InputBuffers(padded_reqs, num_tokens, DEVICE)

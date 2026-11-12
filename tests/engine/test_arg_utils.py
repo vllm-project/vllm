@@ -4,6 +4,7 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from copy import deepcopy
 from dataclasses import replace
 from typing import Annotated, Literal
 
@@ -17,6 +18,7 @@ from vllm.config import (
     ModelConfig,
     config,
 )
+from vllm.config.mamba import MambaConfig
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -169,6 +171,72 @@ def test_engram_config_cli_optional(options, provided, dp_shared_memory):
     if provided:
         assert args.engram_config.cpu_offload is True
         assert args.engram_config.dp_shared_memory is dp_shared_memory
+
+
+@pytest.mark.parametrize(
+    ("nested", "options", "expected"),
+    [
+        (MambaConfig(backend="flashinfer"), [], ("triton", "triton", "triton")),
+        (
+            {"decode_backend": "triton"},
+            ["--mamba-backend", "flashinfer"],
+            ("flashinfer", "triton", "flashinfer"),
+        ),
+        (
+            {"decode_backend": "flashinfer"},
+            ["--mamba-decode-backend", "triton"],
+            ("triton", "triton", "triton"),
+        ),
+        (
+            {"prefill_backend": "flashinfer", "decode_backend": "triton"},
+            ["--mamba-backend", "flashinfer", "--mamba-prefill-backend", "triton"],
+            ("flashinfer", "triton", "triton"),
+        ),
+    ],
+)
+def test_mamba_config_backend_precedence(nested, options, expected):
+    original = deepcopy(nested)
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    namespace = parser.parse_args(["--model", "facebook/opt-125m", *options])
+    namespace.mamba_config = nested
+    args = EngineArgs.from_cli_args(namespace)
+    unmerged = deepcopy(args.mamba_config)
+    config = args.create_engine_config().mamba_config
+
+    assert (
+        config.backend.value,
+        config.effective_decode_backend.value,
+        config.effective_prefill_backend.value,
+    ) == expected
+    assert nested == original
+    assert args.mamba_config == unmerged
+
+
+@pytest.mark.parametrize("backend_flag", ["--mamba-backend", "--mamba-decode-backend"])
+def test_mamba_config_cli_validates_after_backend_merge(backend_flag):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(
+        parser.parse_args(
+            [
+                "--model",
+                "facebook/opt-125m",
+                backend_flag,
+                "flashinfer",
+                "--mamba-ssu-algorithm",
+                "vertical",
+            ]
+        )
+    )
+
+    config = args.create_engine_config().mamba_config
+
+    assert config.ssu_algorithm == "vertical"
+
+
+def test_mamba_config_rejects_invalid_algorithm_backend_after_merge():
+    args = EngineArgs(model="facebook/opt-125m", mamba_ssu_algorithm="vertical")
+    with pytest.raises(ValueError, match="FlashInfer"):
+        args.create_engine_config()
 
 
 @pytest.mark.parametrize(

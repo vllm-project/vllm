@@ -815,7 +815,7 @@ class NemotronHForCausalLM(
                 n_groups=hf_config.n_groups,
                 tp_world_size=parallel_config.tensor_parallel_size,
                 logical_window=cache_config.replayssm_buffer_len,
-                backend=vllm_config.mamba_config.backend,
+                backend=vllm_config.mamba_config.effective_decode_backend,
                 num_speculative_tokens=vllm_config.num_speculative_tokens,
             )
         return base_shape

@@ -223,6 +223,21 @@ def is_flashinfer_cutedsl_bf16_gemm_supported() -> bool:
         return False
 
 
+@functools.cache
+def is_flashinfer_ssd_supported() -> bool:
+    """Return whether FlashInfer's Mamba2 SSD runs on this device (SM10x)."""
+    if not current_platform.is_cuda() or not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.mamba")
+    if mod is None or not callable(getattr(mod, "ssd_combined_fwd", None)):
+        return False
+    try:
+        from flashinfer.utils import is_sm100a_supported
+    except ImportError:
+        return False
+    return is_sm100a_supported(torch.device("cuda"))
+
+
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable FlashInfer backend."""
     raise RuntimeError(
@@ -1452,6 +1467,7 @@ __all__ = [
     "has_flashinfer_concat_mla_kv_quant_fp8",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
+    "is_flashinfer_ssd_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
