@@ -293,7 +293,10 @@ class GroupedTopKRouter(BaseRouter):
 
     @property
     def masks_padding(self) -> bool:
-        return self.skip_padding or not rocm_aiter_ops.is_fused_moe_enabled()
+        # CPU expert kernels index buffers with the expert id and cannot take -1.
+        return self.skip_padding or not (
+            rocm_aiter_ops.is_fused_moe_enabled() or current_platform.is_cpu()
+        )
 
     @property
     def routing_method_type(self) -> RoutingMethodType:

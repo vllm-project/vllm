@@ -228,8 +228,8 @@ def FusedMoEFactory(
         routed_experts_cls: Custom RoutedExperts class (None = use default)
         moe_config_cls: Custom FusedMoEConfig class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
-        skip_padding: With ROCm AITER fused MoE, let grouped routing mask
-            padding rows under DeepEP v2; otherwise it follows
+        skip_padding: With ROCm AITER fused MoE or on CPU, let grouped routing
+            mask padding rows under DeepEP v2; otherwise it follows
             VLLM_MOE_SKIP_PADDING.
 
     Returns:
