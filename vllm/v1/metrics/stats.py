@@ -254,6 +254,12 @@ class SchedulerStats:
 
     perf_stats: PerfStats | None = None
 
+    # Set by a scheduler with persistent state: state slots by session
+    # state, and stream admission refusals and deadline expiries since startup.
+    stream_occupied: dict[str, int] | None = None
+    stream_refusals: dict[str, int] | None = None
+    stream_expiries: dict[str, int] | None = None
+
 
 @dataclass(slots=True)
 class RequestStateStats:

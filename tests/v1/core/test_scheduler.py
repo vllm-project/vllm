@@ -44,7 +44,11 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
@@ -63,8 +67,15 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     SlidingWindowManager,
 )
-from vllm.v1.engine import CheckpointState, FinishReason
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine import (
+    CheckpointState,
+    EngineCoreRequest,
+    FinishReason,
+    StreamAdmissionContext,
+    StreamAdmissionResult,
+    StreamOutput,
+)
+from vllm.v1.engine.core import ADMIT_STREAM_CALL, EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
@@ -83,6 +94,7 @@ from vllm.v1.outputs import (
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
 from .utils import (
@@ -9027,7 +9039,14 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
 # docs/design/persistent_state.md for the design.
 
 
-def _state_scheduler(*, max_num_seqs=2, log_stats=False):
+def _state_scheduler(
+    *,
+    max_num_seqs=2,
+    max_num_active_seqs=None,
+    log_stats=False,
+    stream_admission_timeouts=None,
+    **scheduler_kwargs,
+):
     from tests.v1.core.utils import (
         create_state_spec,
         get_kv_cache_configs,
@@ -9035,7 +9054,13 @@ def _state_scheduler(*, max_num_seqs=2, log_stats=False):
     )
     from vllm.v1.core.sched.state_scheduler import StateScheduler
 
-    base = create_scheduler(max_num_seqs=max_num_seqs, max_model_len=32)
+    base = create_scheduler(
+        max_num_seqs=max_num_seqs,
+        max_num_active_seqs=max_num_active_seqs,
+        max_model_len=32,
+        stream_admission_timeouts=stream_admission_timeouts,
+        **scheduler_kwargs,
+    )
     base.vllm_config.cache_config.kv_cache_layout = "LBNHC"
     spec = create_state_spec()
     config = get_kv_cache_configs(
@@ -9826,3 +9851,936 @@ def test_state_held_error_does_not_keep_a_drain_loop_alive():
     after = [step() for _ in range(3)]
     errors = [o for outputs in after for o in _finished_outputs(outputs, "stream")]
     assert [error.finish_reason for error in errors] == [FinishReason.ERROR]
+
+
+# Stream admission: a slot reserved before any input, deadlines, per-input
+# rejection and the retirement notice. The stream's request ID is "stream"
+# unless a test names another; the monotonic clock that deadlines read is the
+# test's own.
+
+_NEVER_FED_TIMEOUT = 15.0
+_PARKED_IDLE_TIMEOUT = 60.0
+_DRAINING_TIMEOUT = 40.0
+
+
+class _StreamClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def stream_clock(monkeypatch):
+    """The monotonic clock, which only the test advances."""
+    clock = _StreamClock()
+    monkeypatch.setattr("vllm.v1.core.stream_admission.monotonic", lambda: clock.now)
+    return clock
+
+
+def _admission(request_id="stream", **fields):
+    """A valid admission request, with `fields` replacing its defaults."""
+    sampling_params = SamplingParams(max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    return EngineCoreRequest(
+        **{
+            "request_id": request_id,
+            "prompt_token_ids": None,
+            "mm_features": None,
+            "sampling_params": sampling_params,
+            "pooling_params": None,
+            "arrival_time": 1.0,
+            "lora_request": None,
+            "cache_salt": None,
+            "data_parallel_rank": None,
+            "resumable": True,
+            **fields,
+        }
+    )
+
+
+def _admit(scheduler, request_id="stream", **fields):
+    result = scheduler.admit_stream(_admission(request_id, **fields))
+    assert result == StreamAdmissionResult(True, request_id)
+    return result
+
+
+def _admitted_input(
+    update_seq=1,
+    *,
+    request_id="stream",
+    closed=False,
+    resumable=True,
+    tokens=(1, 2, 3),
+    mm_features=None,
+    client_index=0,
+    **params,
+):
+    """Input `update_seq` of an admitted stream; with `resumable=False`, the
+    close that carries no input."""
+    sampling_params = SamplingParams(max_tokens=params.pop("max_tokens", 4), **params)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=list(tokens),
+        sampling_params=sampling_params,
+        pooling_params=None,
+        mm_features=mm_features,
+        client_index=client_index,
+        resumable=resumable,
+        stream_admission=StreamAdmissionContext(
+            input_closed=closed or not resumable, update_seq=update_seq
+        ),
+    )
+
+
+def _step(scheduler, *, sampled=42, acknowledge=True):
+    step = scheduler.schedule()
+    return scheduler.update_from_output(
+        step, _state_output(step, sampled=sampled, acknowledge=acknowledge)
+    )
+
+
+def _outputs_of(outputs, request_id="stream"):
+    return [
+        output
+        for batch in outputs.values()
+        for output in batch.outputs
+        if output.request_id == request_id
+    ]
+
+
+def _retired(outputs):
+    return {
+        client_index: batch.retired_streams
+        for client_index, batch in outputs.items()
+        if batch.retired_streams
+    }
+
+
+def _session(scheduler, request_id="stream"):
+    """What a refused admission or input must leave as it is."""
+    session = scheduler.stream_admissions.sessions[request_id]
+    request = scheduler.requests[request_id]
+    return (
+        dataclasses.replace(session),
+        _state_manager(scheduler).get(request_id),
+        request.status,
+        list(request.prompt_token_ids),
+        len(request.streaming_queue),
+    )
+
+
+def test_stream_admission_reserves_a_slot_before_any_input(stream_clock):
+    """An admission reserves one slot under its request ID and creates an
+    empty resumable request that waits for its first input, with the session
+    never fed; the first input then runs under the handle from admission."""
+    scheduler = _state_scheduler(log_stats=True)
+    manager = _state_manager(scheduler)
+    assert scheduler.admit_stream(_admission()) == StreamAdmissionResult(
+        accepted=True, request_id="stream", reason=None
+    )
+    handle = manager.get("stream")
+    assert handle is not None and manager.num_free_slots == 1
+    request = scheduler.requests["stream"]
+    assert request.resumable and not request.prompt_token_ids
+    assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert scheduler.make_stats().stream_occupied["never_fed"] == 1
+    scheduler.add_request(_admitted_input())
+    step = scheduler.schedule()
+    assert step.state_slot_handles == {"stream": {"state": handle}}
+
+
+def test_never_fed_stream_is_not_unfinished_work(stream_clock):
+    """A never-fed stream waits for input as a parked request does: the
+    scheduler has no work, so the engine goes idle and a pause that waits for
+    requests to finish is not delayed."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    assert scheduler.get_num_unfinished_requests() == 0
+    assert not scheduler.has_requests()
+    assert not scheduler.has_queued_requests()
+    assert not scheduler.schedule().num_scheduled_tokens
+
+
+def _invalid_admissions():
+    structured = SamplingParams(structured_outputs=StructuredOutputsParams(regex="a"))
+    kv_transfer = SamplingParams(extra_args={"kv_transfer_params": {"a": 1}})
+    ec_transfer = SamplingParams(extra_args={"ec_transfer_params": {"a": 1}})
+    final_only = SamplingParams(output_kind=RequestOutputKind.FINAL_ONLY)
+    return {
+        "not_resumable": {"resumable": False},
+        "empty_id": {"request_id": ""},
+        "non_string_id": {"request_id": 7},
+        "long_id": {"request_id": "x" * 257},
+        "prompt": {"prompt_token_ids": [1]},
+        "prompt_embeds": {"prompt_embeds": torch.zeros(1, 4)},
+        "prompt_is_token_ids": {"prompt_is_token_ids": [True]},
+        "multimodal": {"mm_features": _misplaced_input(0, 1).mm_features},
+        "pooling": {
+            "sampling_params": None,
+            "pooling_params": PoolingParams(task="embed"),
+        },
+        "n": {"sampling_params": SamplingParams(n=2)},
+        "final_only": {"sampling_params": final_only},
+        "stop_string": {"sampling_params": SamplingParams(stop=["end"])},
+        "structured_outputs": {"sampling_params": structured},
+        "kv_transfer": {"sampling_params": kv_transfer},
+        "ec_transfer": {"sampling_params": ec_transfer},
+        "context": {"stream_admission": StreamAdmissionContext()},
+        "abort_immediately": {"abort_immediately": True},
+        "data_parallel_rank": {"data_parallel_rank": 1},
+        "current_wave": {"current_wave": 1},
+    }
+
+
+_INVALID_ADMISSION = "Admission (request_id must|requires an empty)"
+
+
+@pytest.mark.parametrize("invalid", list(_invalid_admissions()))
+def test_invalid_stream_admission_raises_and_changes_nothing(stream_clock, invalid):
+    """An admission request that is not valid raises ValueError: no slot, no
+    request, no session, and no refusal is counted."""
+    scheduler = _state_scheduler(log_stats=True)
+    request = _admission(**_invalid_admissions()[invalid])
+    with pytest.raises(ValueError, match=_INVALID_ADMISSION):
+        scheduler.admit_stream(request)
+    assert _state_manager(scheduler).num_free_slots == 2
+    assert not scheduler.requests
+    stats = scheduler.make_stats()
+    assert not any(stats.stream_occupied.values())
+    assert stats.stream_refusals == {}
+
+
+def test_stream_admission_accepts_a_request_id_of_256_characters(stream_clock):
+    _admit(_state_scheduler(), "x" * 256)
+
+
+@pytest.mark.parametrize(
+    ("configuration", "message"),
+    [
+        ({"diffusion_canvas_length": 8}, "does not support resumable requests"),
+        (
+            {"use_ec_connector": True, "ec_role": "ec_consumer"},
+            "does not support transfer connectors",
+        ),
+    ],
+    ids=["unsupported_model", "transfer_connector"],
+)
+def test_stream_admission_raises_on_an_unsupported_configuration(
+    stream_clock, configuration, message
+):
+    """admit_stream raises ValueError when the model does not support
+    resumable requests or a transfer connector is configured."""
+    scheduler = _state_scheduler(**configuration)
+    request = _admission()
+    with pytest.raises(ValueError, match=message):
+        scheduler.admit_stream(request)
+    assert not scheduler.requests
+
+
+@pytest.mark.parametrize("invalid", ["prompt", "not_resumable", "n"])
+def test_stream_admission_under_an_id_in_use_is_refused_whatever_its_fields(
+    stream_clock, invalid
+):
+    """An admission whose ID names a session is refused as request_id_in_use
+    even when its other fields are not those of a valid admission."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    result = scheduler.admit_stream(_admission(**_invalid_admissions()[invalid]))
+    assert result == StreamAdmissionResult(False, "stream", "request_id_in_use")
+
+
+def test_duplicate_stream_admission_with_prompt_embeddings_is_refused_as_in_use(
+    stream_clock,
+):
+    """An admission that carries prompt embeddings reaches the scheduler
+    through the admission's wire decoding with its tensor, and under an ID in
+    use it is refused as request_id_in_use rather than raising."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    duplicate = _admission(prompt_embeds=torch.ones(1, 4))
+    frames = MsgpackEncoder().encode((0, 1, "admit_stream", (duplicate,)))
+    *_, (received,) = MsgpackDecoder(ADMIT_STREAM_CALL).decode(frames)
+    assert torch.equal(received.prompt_embeds, duplicate.prompt_embeds)
+    result = scheduler.admit_stream(received)
+    assert result == StreamAdmissionResult(False, "stream", "request_id_in_use")
+
+
+def test_stream_id_is_in_use_until_its_retirement_notice_is_delivered(stream_clock):
+    """An aborted stream that was never scheduled frees its slot at once,
+    but its ID stays in use until its retirement notice has gone out: an
+    admission under it is refused before the next output batch and accepted
+    after it."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+    assert _state_manager(scheduler).num_free_slots == 2
+    refused = scheduler.admit_stream(_admission())
+    assert refused == StreamAdmissionResult(False, "stream", "request_id_in_use")
+    assert _retired(_step(scheduler)) == {0: ["stream"]}
+    _admit(scheduler)
+
+
+def _refusal_setups():
+    """Each E3 condition, set up on a scheduler with one slot unless the
+    condition needs a second."""
+
+    def session(scheduler):
+        _admit(scheduler)
+
+    def other_request(scheduler):
+        scheduler.add_request(_stream_input())
+
+    def retiring(scheduler):
+        _hold_slot(scheduler, "retiring")
+
+    def paused_new(scheduler):
+        scheduler.set_pause_state(PauseState.PAUSED_NEW)
+
+    def paused_all(scheduler):
+        scheduler.set_pause_state(PauseState.PAUSED_ALL)
+
+    def full(scheduler):
+        _admit(scheduler, "holder")
+
+    def full_retiring(scheduler):
+        _hold_slot(scheduler, "retiring", "holder")
+
+    def at_limit(scheduler):
+        # Queued to run and still without a slot.
+        scheduler.add_request(_stream_input("queued"))
+
+    return {
+        "session": (session, "request_id_in_use", 2, None),
+        "other_request": (other_request, "request_id_in_use", 2, None),
+        "retiring_slot": (retiring, "request_id_in_use", 2, None),
+        "paused_new": (paused_new, "engine_paused", 2, None),
+        "paused_all": (paused_all, "engine_paused", 2, None),
+        "no_free_slot": (full, "capacity", 1, None),
+        "only_retiring_slot": (full_retiring, "capacity", 1, None),
+        "active_limit": (full, "active_limit", 2, 1),
+        "active_limit_counts_queued": (at_limit, "active_limit", 2, 1),
+    }
+
+
+@pytest.mark.parametrize("condition", list(_refusal_setups()))
+def test_stream_admission_refusal_reasons(stream_clock, condition):
+    """A valid admission that cannot be admitted is refused with the reason
+    that applies; it reserves no slot, creates no request and adds one to the
+    refusals counted for that reason. Requests in every state count toward
+    max_num_active_seqs, and a retiring slot is neither free nor its ID."""
+    setup, reason, max_num_seqs, max_num_active_seqs = _refusal_setups()[condition]
+    scheduler = _state_scheduler(
+        max_num_seqs=max_num_seqs,
+        max_num_active_seqs=max_num_active_seqs,
+        log_stats=True,
+    )
+    manager = _state_manager(scheduler)
+    setup(scheduler)
+    before = (dict(scheduler.requests), manager.num_free_slots, manager.get("stream"))
+    result = scheduler.admit_stream(_admission(priority=1))
+    assert result == StreamAdmissionResult(False, "stream", reason)
+    assert before == (
+        dict(scheduler.requests),
+        manager.num_free_slots,
+        manager.get("stream"),
+    )
+    assert scheduler.make_stats().stream_refusals == {reason: 1}
+
+
+def _refusal_order_setups():
+    def in_use_and_paused(scheduler):
+        _admit(scheduler)
+        scheduler.set_pause_state(PauseState.PAUSED_ALL)
+
+    def paused_and_full(scheduler):
+        _admit(scheduler, "holder")
+        scheduler.set_pause_state(PauseState.PAUSED_NEW)
+
+    def full_and_at_limit(scheduler):
+        _admit(scheduler, "holder")
+
+    return {
+        "in_use_before_paused": (in_use_and_paused, "request_id_in_use"),
+        "paused_before_capacity": (paused_and_full, "engine_paused"),
+        "capacity_before_active_limit": (full_and_at_limit, "capacity"),
+    }
+
+
+@pytest.mark.parametrize("pair", list(_refusal_order_setups()))
+def test_stream_admission_reports_the_first_refusal_in_order(stream_clock, pair):
+    """When two refusals apply, the admission reports the earlier of
+    request_id_in_use, engine_paused, capacity and active_limit."""
+    setup, reason = _refusal_order_setups()[pair]
+    scheduler = _state_scheduler(max_num_seqs=1)
+    setup(scheduler)
+    assert scheduler.admit_stream(_admission()).reason == reason
+
+
+def test_admitted_stream_inputs_run_in_arrival_order(stream_clock):
+    """An input is applied at once to a never-fed session or queued behind
+    the running turn; each replaces the prompt, whatever its update_seq."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    scheduler.add_request(_admitted_input(5, tokens=[1, 2, 3]))
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+    scheduler.add_request(_admitted_input(2, tokens=[8, 9]))
+    assert scheduler.requests["stream"].prompt_token_ids == [1, 2, 3]
+    scheduler.update_from_output(step, _state_output(step, sampled=EOS_TOKEN_ID))
+    assert scheduler.requests["stream"].prompt_token_ids == [8, 9]
+    assert scheduler.schedule().num_scheduled_tokens == {"stream": 2}
+
+
+def test_accepted_input_makes_the_session_live_without_a_deadline(stream_clock):
+    """Accepting a resumable input that does not close input makes the
+    session live and clears its deadline, so it does not expire while it
+    runs."""
+    scheduler = _state_scheduler(log_stats=True)
+    _admit(scheduler)
+    scheduler.add_request(_admitted_input())
+    assert scheduler.make_stats().stream_occupied["live"] == 1
+    stream_clock.advance(10 * _PARKED_IDLE_TIMEOUT)
+    outputs = _step(scheduler)
+    (output,) = _outputs_of(outputs)
+    assert output.finish_reason is None
+    assert scheduler.make_stats().stream_expiries == {}
+
+
+@pytest.mark.parametrize("pause_state", [PauseState.UNPAUSED, PauseState.PAUSED_NEW])
+def test_admitted_stream_input_is_scheduled_ahead_of_requests_needing_a_slot(
+    stream_clock, pause_state
+):
+    """The session holds its slot from admission, so its input is scheduled
+    ahead of an older queued request that still needs a slot, also while the
+    scheduler takes no new requests."""
+    scheduler = _state_scheduler()
+    for request_id in ("stream", "other"):
+        _admit(scheduler, request_id)
+    (blocked,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(blocked)
+    scheduler.set_pause_state(pause_state)
+    scheduler.add_request(_admitted_input())
+    assert scheduler.schedule().num_scheduled_tokens == {"stream": 3}
+    assert blocked.status == RequestStatus.WAITING
+
+
+def _rejected_inputs():
+    """Each refusal the scheduler makes: the refused request, whether the
+    session's input is closed first, and the context the rejection carries."""
+    ghost = _admitted_input(4, request_id="ghost", client_index=7)
+    untagged = _stream_input(client_index=7)
+    unsupported = _admitted_input(4, client_index=7, n=2)
+    late = _admitted_input(4, client_index=7)
+    empty = _admitted_input(4, client_index=7, tokens=())
+    misplaced = _admitted_input(
+        4, client_index=7, mm_features=_misplaced_input(5, 1).mm_features
+    )
+    return {
+        "unknown_admission": (ghost, False, ghost.stream_admission),
+        "identity_mismatch": (untagged, False, None),
+        "unsupported_update": (unsupported, False, unsupported.stream_admission),
+        "input_closed": (late, True, late.stream_admission),
+        "empty_update": (empty, False, empty.stream_admission),
+        "validation_error": (misplaced, False, misplaced.stream_admission),
+    }
+
+
+@pytest.mark.parametrize("reason", list(_rejected_inputs()))
+def test_rejected_stream_input_leaves_the_session_unchanged(stream_clock, reason):
+    """A refused input applies and queues nothing, creates no request and
+    leaves the session as it was; the refused request's client gets one
+    rejection output with the request's own context and the reason, which
+    finishes no request and does not end the stream."""
+    refused, closed_first, context = _rejected_inputs()[reason]
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    if closed_first:
+        scheduler.add_request(_admitted_input(1, closed=True))
+    before = _session(scheduler)
+    scheduler.add_request(refused)
+    assert _session(scheduler) == before
+    assert list(scheduler.requests) == ["stream"]
+    outputs = _step(scheduler)
+    (rejection,) = outputs[7].outputs
+    assert rejection.request_id == refused.request_id
+    assert rejection.new_token_ids == []
+    assert rejection.finish_reason == FinishReason.ERROR
+    assert rejection.ends_stream is False
+    assert rejection.error is None
+    assert rejection.stream_output == StreamOutput(context, reason)
+    assert not outputs[7].finished_requests
+
+
+@pytest.mark.parametrize(
+    ("first", "refused"),
+    [
+        ("unsupported_update", {"n": 2}),
+        ("input_closed", {"tokens": ()}),
+        ("empty_update", {"tokens": (), "mm_features": "misplaced"}),
+    ],
+)
+def test_rejected_stream_input_reports_the_first_reason_in_order(
+    stream_clock, first, refused
+):
+    """When several of the scheduler's reasons apply to an input of a session
+    whose input is closed, it reports the first of unsupported_update,
+    input_closed, empty_update and validation_error."""
+    if refused.get("mm_features"):
+        refused = {**refused, "mm_features": _misplaced_input(5, 1).mm_features}
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    if first != "empty_update":
+        scheduler.add_request(_admitted_input(1, closed=True))
+    scheduler.add_request(_admitted_input(2, client_index=7, **refused))
+    (rejection,) = _step(scheduler)[7].outputs
+    assert rejection.stream_output.rejection == first
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_resumable_closing_input_runs_then_ends_the_session(stream_clock, queued):
+    """A resumable input with input_closed runs like any input, and the
+    session ends when its turn finishes, here on EOS, with one output that
+    ends the stream."""
+    scheduler = _state_scheduler(log_stats=True)
+    _admit(scheduler)
+    if queued:
+        scheduler.add_request(_admitted_input(1))
+        step = scheduler.schedule()
+        scheduler.add_request(_admitted_input(2, closed=True, tokens=[8, 9]))
+        scheduler.update_from_output(step, _state_output(step, sampled=EOS_TOKEN_ID))
+    else:
+        scheduler.add_request(_admitted_input(2, closed=True, tokens=[8, 9]))
+    assert scheduler.make_stats().stream_occupied["draining"] == 1
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 2}
+    outputs = scheduler.update_from_output(
+        step, _state_output(step, sampled=EOS_TOKEN_ID)
+    )
+    (end,) = _outputs_of(outputs)
+    assert end.finish_reason == FinishReason.STOP and end.ends_stream is True
+    assert end.stream_output == StreamOutput(StreamAdmissionContext(True, 2))
+    assert "stream" not in scheduler.requests
+
+
+@pytest.mark.parametrize("state", ["never_fed", "parked"])
+def test_bare_close_ends_an_idle_session_at_once(stream_clock, state):
+    """A request that is not resumable is a close that carries no input: on a
+    session that is parked or never fed with nothing queued, the session ends
+    at once with one output (stop, no tokens) carrying the close's context."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    if state == "parked":
+        scheduler.add_request(_admitted_input(1))
+        _step(scheduler, sampled=EOS_TOKEN_ID)
+    scheduler.add_request(_admitted_input(2, resumable=False, tokens=[0]))
+    assert "stream" not in scheduler.requests
+    (end,) = _outputs_of(_step(scheduler))
+    assert end.new_token_ids == []
+    assert end.finish_reason == FinishReason.STOP and end.ends_stream is True
+    assert end.stream_output == StreamOutput(StreamAdmissionContext(True, 2))
+
+
+def test_bare_close_behind_a_running_turn_ends_the_session_after_it(stream_clock):
+    """A close accepted while a turn runs ends the session when that turn
+    finishes; the ending output carries the context of the input that ran."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    scheduler.add_request(_admitted_input(1))
+    step = scheduler.schedule()
+    scheduler.add_request(_admitted_input(2, resumable=False, tokens=[0]))
+    assert scheduler.requests["stream"].status == RequestStatus.RUNNING
+    outputs = scheduler.update_from_output(
+        step, _state_output(step, sampled=EOS_TOKEN_ID)
+    )
+    (end,) = _outputs_of(outputs)
+    assert end.finish_reason == FinishReason.STOP and end.ends_stream is True
+    assert end.stream_output == StreamOutput(StreamAdmissionContext(False, 1))
+    assert "stream" not in scheduler.requests
+
+
+def test_first_close_starts_the_draining_deadline_and_later_closes_keep_it(
+    stream_clock,
+):
+    """The first accepted close makes the session draining and starts its
+    draining timeout; a later close is accepted and changes nothing, so the
+    session expires that long after the first close."""
+    scheduler = _state_scheduler(log_stats=True)
+    _admit(scheduler)
+    scheduler.add_request(_admitted_input(1, closed=True))
+    stream_clock.advance(_DRAINING_TIMEOUT - 1)
+    before = _session(scheduler)
+    scheduler.add_request(_admitted_input(2, resumable=False, tokens=[0]))
+    assert _session(scheduler) == before
+    assert not _outputs_of(_step(scheduler), "stream")[0].finish_reason
+    stream_clock.advance(1)
+    (end,) = _outputs_of(_step(scheduler))
+    assert end.finish_reason == FinishReason.ABORT and end.ends_stream is True
+    assert scheduler.make_stats().stream_expiries == {"draining": 1}
+
+
+def test_stream_outputs_carry_the_context_of_the_input_they_ran_on(stream_clock):
+    """Every output of an admitted stream carries the context of the input it
+    ran on; the last output of one input never carries the next input's
+    number, although stop handling applies the queued input."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    scheduler.add_request(_admitted_input(1))
+    (first,) = _outputs_of(_step(scheduler))
+    assert first.stream_output == StreamOutput(StreamAdmissionContext(False, 1))
+    scheduler.add_request(_admitted_input(2, tokens=[8, 9]))
+    (last,) = _outputs_of(_step(scheduler, sampled=EOS_TOKEN_ID))
+    assert last.finish_reason == FinishReason.STOP and last.ends_stream is False
+    assert last.stream_output == StreamOutput(StreamAdmissionContext(False, 1))
+    (second,) = _outputs_of(_step(scheduler))
+    assert second.stream_output == StreamOutput(StreamAdmissionContext(False, 2))
+
+
+@pytest.mark.parametrize("cause", ["length", "stop_token", "failed_step"])
+def test_admitted_session_end_is_marked_on_exactly_one_output(stream_clock, cause):
+    """A turn that stops on length or a stop token, and a failed state step,
+    end an admitted session with one output that has ends_stream set; later
+    steps produce none, and a later input creates no request."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    params = {"stop_token_ids": [42]} if cause == "stop_token" else {}
+    max_tokens = 1 if cause == "length" else 4
+    scheduler.add_request(_admitted_input(1, max_tokens=max_tokens, **params))
+    outputs = _step(scheduler, acknowledge=cause != "failed_step")
+    later = [_step(scheduler) for _ in range(2)]
+    ends = _outputs_of(outputs) + [o for out in later for o in _outputs_of(out)]
+    (end,) = [output for output in ends if output.finish_reason is not None]
+    assert end.ends_stream is True
+    assert (
+        end.finish_reason
+        == {
+            "length": FinishReason.LENGTH,
+            "stop_token": FinishReason.STOP,
+            "failed_step": FinishReason.ERROR,
+        }[cause]
+    )
+    assert end.stream_output == StreamOutput(StreamAdmissionContext(False, 1))
+    scheduler.add_request(_admitted_input(2, client_index=7))
+    assert "stream" not in scheduler.requests
+    (rejection,) = _step(scheduler)[7].outputs
+    assert rejection.stream_output.rejection == "unknown_admission"
+
+
+def test_never_fed_stream_expires_and_releases_its_slot_at_once(stream_clock):
+    """A session that gets no input within the never-fed timeout expires at
+    the next schedule: one abort output with the context update_seq=0 ends
+    the stream, the never-scheduled slot is free at once, and the same batch
+    carries the retirement notice."""
+    scheduler = _state_scheduler(log_stats=True)
+    manager = _state_manager(scheduler)
+    _admit(scheduler)
+    stream_clock.advance(_NEVER_FED_TIMEOUT - 1)
+    assert not scheduler.schedule().num_scheduled_tokens
+    assert "stream" in scheduler.requests
+    stream_clock.advance(1)
+    outputs = _step(scheduler)
+    (end,) = _outputs_of(outputs)
+    assert end.new_token_ids == []
+    assert end.finish_reason == FinishReason.ABORT and end.ends_stream is True
+    assert end.stream_output == StreamOutput(StreamAdmissionContext(False, 0))
+    assert manager.num_free_slots == 2 and not scheduler.state_retirements
+    assert _retired(outputs) == {0: ["stream"]}
+    assert scheduler.make_stats().stream_expiries == {"never_fed": 1}
+
+
+def test_parked_stream_expires_and_retires_behind_the_fence(stream_clock):
+    """A park starts the parked-idle timeout; when it passes, the session
+    expires and its scheduled slot is released only after its cleanup is
+    acknowledged."""
+    scheduler = _state_scheduler(log_stats=True)
+    manager = _state_manager(scheduler)
+    _admit(scheduler)
+    scheduler.add_request(_admitted_input())
+    stream_clock.advance(_NEVER_FED_TIMEOUT)
+    _step(scheduler, sampled=EOS_TOKEN_ID)
+    stream_clock.advance(_PARKED_IDLE_TIMEOUT - 1)
+    assert not _outputs_of(_step(scheduler))
+    stream_clock.advance(1)
+    step = scheduler.schedule()
+    assert "stream" not in scheduler.requests
+    assert manager.num_free_slots == 1
+    outputs = scheduler.update_from_output(step, _state_output(step))
+    (end,) = _outputs_of(outputs)
+    assert end.finish_reason == FinishReason.ABORT and end.ends_stream is True
+    assert manager.num_free_slots == 2
+    assert scheduler.make_stats().stream_expiries == {"parked_idle": 1}
+
+
+def test_stream_deadlines_are_read_before_an_admission(stream_clock):
+    """The clock is read before every admission, so a session whose deadline
+    has passed gives up its never-scheduled slot to the admission."""
+    scheduler = _state_scheduler(max_num_seqs=1)
+    _admit(scheduler, "idle")
+    stream_clock.advance(_NEVER_FED_TIMEOUT)
+    _admit(scheduler)
+    assert list(scheduler.requests) == ["stream"]
+
+
+def test_input_after_expiry_is_rejected_as_unknown_admission(stream_clock):
+    """The clock is read before every input: an input that arrives after its
+    session's deadline finds no session and creates no request."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    stream_clock.advance(_NEVER_FED_TIMEOUT)
+    scheduler.add_request(_admitted_input(1, client_index=7))
+    assert not scheduler.requests
+    (rejection,) = _step(scheduler)[7].outputs
+    assert rejection.stream_output.rejection == "unknown_admission"
+
+
+@pytest.mark.parametrize("deadline", ["never_fed", "parked_idle", "draining"])
+def test_scheduler_reads_stream_deadlines_from_its_config(stream_clock, deadline):
+    """A key of stream_admission_timeouts sets that timeout, and an absent
+    key keeps its default."""
+    scheduler = _state_scheduler(
+        log_stats=True, stream_admission_timeouts={f"{deadline}_timeout": 5.0}
+    )
+    _admit(scheduler)
+    if deadline == "parked_idle":
+        scheduler.add_request(_admitted_input())
+        _step(scheduler, sampled=EOS_TOKEN_ID)
+    elif deadline == "draining":
+        scheduler.add_request(_admitted_input(closed=True))
+    else:
+        _admit(scheduler, "parked")
+        scheduler.add_request(_admitted_input(request_id="parked"))
+        _step(scheduler, sampled=EOS_TOKEN_ID)
+    stream_clock.advance(4.0)
+    _step(scheduler)
+    assert scheduler.make_stats().stream_expiries == {}
+    stream_clock.advance(1.0)
+    _step(scheduler)
+    assert scheduler.make_stats().stream_expiries == {deadline: 1}
+    if deadline == "never_fed":
+        assert "parked" in scheduler.requests
+
+
+@pytest.mark.parametrize("trigger", ["schedule", "admission", "input"])
+def test_no_stream_expires_while_all_requests_are_paused(stream_clock, trigger):
+    """Under PAUSED_ALL neither a schedule nor an admission nor an input
+    evaluates a deadline: the session whose deadline has passed is still
+    there, and its input is accepted."""
+    scheduler = _state_scheduler(log_stats=True)
+    _admit(scheduler)
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    stream_clock.advance(10 * _NEVER_FED_TIMEOUT)
+    if trigger == "schedule":
+        assert not _outputs_of(_step(scheduler))
+    elif trigger == "admission":
+        assert not scheduler.admit_stream(_admission("other")).accepted
+    else:
+        scheduler.add_request(_admitted_input())
+    assert "stream" in scheduler.requests
+    stats = scheduler.make_stats()
+    assert stats.stream_expiries == {}
+    assert stats.stream_occupied["live" if trigger == "input" else "never_fed"] == 1
+
+
+def test_close_during_a_pause_starts_a_draining_deadline_that_runs_from_the_resume(
+    stream_clock,
+):
+    """A close accepted under PAUSED_ALL makes the session draining, but its
+    draining timeout runs in full only from the resume."""
+    scheduler = _state_scheduler(log_stats=True)
+    _admit(scheduler)
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.add_request(_admitted_input(closed=True))
+    assert scheduler.make_stats().stream_occupied["draining"] == 1
+    stream_clock.advance(2 * _DRAINING_TIMEOUT)
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    stream_clock.advance(_DRAINING_TIMEOUT - 1)
+    (running,) = _outputs_of(_step(scheduler))
+    assert running.finish_reason is None
+    stream_clock.advance(1)
+    (end,) = _outputs_of(_step(scheduler))
+    assert end.finish_reason == FinishReason.ABORT
+    assert scheduler.make_stats().stream_expiries == {"draining": 1}
+
+
+@pytest.mark.parametrize("ended_by", ["bare_close", "client_abort"])
+def test_session_ended_during_a_pause_delivers_its_output_and_notice(
+    stream_clock, ended_by
+):
+    """A bare close that ends an idle session and a client abort still end a
+    session under PAUSED_ALL: the scheduler has work, and its next step
+    delivers the close's ending output and the retirement notice."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    if ended_by == "bare_close":
+        scheduler.add_request(_admitted_input(1, resumable=False, tokens=[0]))
+    else:
+        scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+    assert scheduler.has_requests()
+    outputs = _step(scheduler)
+    ends = [output.finish_reason for output in _outputs_of(outputs)]
+    assert ends == ([FinishReason.STOP] if ended_by == "bare_close" else [])
+    assert _retired(outputs) == {0: ["stream"]}
+
+
+@pytest.mark.parametrize("resumed", [PauseState.UNPAUSED, PauseState.PAUSED_NEW])
+def test_stream_deadlines_restart_in_full_when_the_pause_ends(stream_clock, resumed):
+    """When the scheduler leaves PAUSED_ALL, a session's deadline runs again
+    in full from that moment."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    stream_clock.advance(_NEVER_FED_TIMEOUT - 1)
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    stream_clock.advance(5)
+    scheduler.set_pause_state(resumed)
+    stream_clock.advance(_NEVER_FED_TIMEOUT - 1)
+    assert not _outputs_of(_step(scheduler))
+    assert "stream" in scheduler.requests
+    stream_clock.advance(1)
+    (end,) = _outputs_of(_step(scheduler))
+    assert end.finish_reason == FinishReason.ABORT
+
+
+def test_deadline_started_during_a_pause_runs_from_the_resume(stream_clock):
+    """A deadline that starts while everything is paused, here the park of a
+    turn that was running when the pause began, is recorded but runs only
+    from the resume."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    scheduler.add_request(_admitted_input())
+    step = scheduler.schedule()
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.update_from_output(step, _state_output(step, sampled=EOS_TOKEN_ID))
+    assert scheduler.requests["stream"].status == (
+        RequestStatus.WAITING_FOR_STREAMING_REQ
+    )
+    stream_clock.advance(2 * _PARKED_IDLE_TIMEOUT)
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    stream_clock.advance(_PARKED_IDLE_TIMEOUT - 1)
+    assert not _outputs_of(_step(scheduler))
+    stream_clock.advance(1)
+    (end,) = _outputs_of(_step(scheduler))
+    assert end.finish_reason == FinishReason.ABORT
+
+
+def test_retirement_notice_follows_the_fenced_release_once(stream_clock):
+    """The notice for an admitted stream goes out, once, in the batch of the
+    step that releases its slot, for the client index of the admission and
+    even when the batch has no other output; the scheduler keeps stepping
+    until then."""
+    scheduler = _state_scheduler()
+    _admit(scheduler, client_index=3)
+    scheduler.add_request(_admitted_input(client_index=3))
+    step = scheduler.schedule()
+    scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+    assert _retired(scheduler.update_from_output(step, _state_output(step))) == {}
+    assert scheduler.has_requests()
+    outputs = _step(scheduler)
+    assert _retired(outputs) == {3: ["stream"]}
+    assert outputs[3].outputs == []
+    assert not scheduler.has_requests()
+    assert _retired(_step(scheduler)) == {}
+
+
+def test_stream_that_was_not_admitted_has_no_deadline_rejection_or_notice(
+    stream_clock,
+):
+    """A resumable request that was not admitted stays parked however long
+    it idles; a refused input ends it with an ordinary error output that has
+    no stream_output, and its slot retires without a retirement notice."""
+    scheduler = _state_scheduler(log_stats=True)
+    _hold_slot(scheduler, "parked")
+    stream_clock.advance(10 * _PARKED_IDLE_TIMEOUT)
+    assert not _outputs_of(_step(scheduler))
+    assert "stream" in scheduler.requests
+    scheduler.add_request(_misplaced_input(5, 1))
+    assert "stream" not in scheduler.requests
+    outputs = [_step(scheduler) for _ in range(3)]
+    (error,) = [o for batch in outputs for o in _outputs_of(batch)]
+    assert error.finish_reason == FinishReason.ERROR
+    assert error.stream_output is None
+    assert [_retired(batch) for batch in outputs] == [{}, {}, {}]
+    assert not scheduler.state_retirements
+    assert scheduler.make_stats().stream_expiries == {}
+
+
+def test_retirement_notice_is_held_back_from_dropped_steps(stream_clock):
+    """A notice due while queued outputs are held, in steps whose outputs the
+    caller drops, goes out once in the first step after the hold."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    with scheduler.holding_queued_outputs():
+        scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+        assert _retired(_step(scheduler)) == {}
+        assert not scheduler.has_requests()
+    assert scheduler.has_requests()
+    assert [_retired(_step(scheduler)) for _ in range(2)] == [{0: ["stream"]}, {}]
+
+
+def test_admitted_stream_that_ends_before_its_first_schedule_frees_its_slot(
+    stream_clock,
+):
+    """An admitted stream holds its slot from admission; when it ends before
+    any input is scheduled, the slot returns to the pool at once, with no
+    cleanup step."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    _admit(scheduler)
+    scheduler.add_request(_admitted_input())
+    assert manager.num_free_slots == 1
+    scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+    assert manager.num_free_slots == 2
+    assert not scheduler.state_retirements
+    _admit(scheduler, "other")
+
+
+def test_never_fed_stream_counts_as_a_held_slot_for_a_cache_clear(stream_clock):
+    """A slot reserved by admission is held from admission, so a reset that
+    would end running requests is refused before the stream has any input."""
+    scheduler = _state_scheduler()
+    _admit(scheduler)
+    with pytest.raises(RuntimeError) as refused:
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert str(refused.value) == _RESET_HELD.format(n=1)
+    assert "stream" in scheduler.requests
+
+
+def test_scheduler_stats_count_slots_by_session_state(stream_clock):
+    """stream_occupied counts each held slot under its session's state, an
+    ordinary request with a slot as parked or live, and a slot that is
+    retiring until the fence releases it."""
+    scheduler = _state_scheduler(max_num_seqs=6, log_stats=True)
+    for request_id in ("parked", "retiring"):
+        _admit(scheduler, request_id)
+        scheduler.add_request(_admitted_input(request_id=request_id))
+    scheduler.add_request(_stream_input("ordinary"))
+    _step(scheduler, sampled=EOS_TOKEN_ID)
+    scheduler.finish_requests("retiring", RequestStatus.FINISHED_ABORTED)
+    _admit(scheduler, "never_fed")
+    _admit(scheduler, "live")
+    scheduler.add_request(_admitted_input(request_id="live"))
+    _admit(scheduler, "draining")
+    scheduler.add_request(_admitted_input(request_id="draining", closed=True))
+    assert scheduler.make_stats().stream_occupied == {
+        "never_fed": 1,
+        "live": 1,
+        "parked": 2,
+        "draining": 1,
+        "retiring": 1,
+    }
+
+
+def test_scheduler_stats_have_no_stream_fields_without_persistent_state():
+    base = create_scheduler()
+    stats = Scheduler(
+        vllm_config=base.vllm_config,
+        kv_cache_config=base.kv_cache_config,
+        block_size=16,
+        log_stats=True,
+        structured_output_manager=base.structured_output_manager,
+    ).make_stats()
+    assert stats.stream_occupied is None
+    assert stats.stream_refusals is None
+    assert stats.stream_expiries is None

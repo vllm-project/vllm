@@ -98,6 +98,9 @@ from vllm.v1.engine import (
     PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
+    StreamAdmissionResult,
+    StreamOutput,
+    StreamUpdateRejection,
     UtilityOutput,
     UtilityResult,
 )
@@ -555,6 +558,13 @@ class EngineCore:
             )
         return metadata
 
+    def admit_stream(self, request: EngineCoreRequest) -> StreamAdmissionResult:
+        """Admit a stream before it has any input: reserve its state slot, or
+        refuse with a reason. Raises ValueError for an invalid admission."""
+        if not isinstance(self.scheduler, StateScheduler):
+            raise ValueError("Stream admission requires persistent state")
+        return self.scheduler.admit_stream(request)
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
@@ -715,7 +725,13 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
-            return {}, False
+            # A step with no request to run still expires idle admitted
+            # streams, whose expiry then gives the step its work.
+            if not isinstance(self.scheduler, StateScheduler):
+                return {}, False
+            self.scheduler.stream_admissions.expire()
+            if not self.scheduler.has_requests():
+                return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         if scheduler_output.total_num_scheduled_tokens > 0:
             self.num_executed_steps += 1
@@ -1311,6 +1327,17 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        if request.stream_admission is not None:
+            # Before any preprocessing, so a refused input has no side effects.
+            scheduler = self.scheduler
+            if not isinstance(scheduler, StateScheduler):
+                raise VLLMValidationError("Stream admission requires persistent state")
+            if scheduler.stream_admissions.unsupported_input(request):
+                raise VLLMValidationError("Unsupported parameters for a stream input")
+            if scheduler._misplaced_multimodal_input(request):
+                raise VLLMValidationError(
+                    "Multimodal position outside the stream input's prompt"
+                )
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
@@ -1373,6 +1400,11 @@ _INPUTS_HANDLED_DURING_STEP = (
 # While waiting for a step's output, how long to busy-poll for new inputs
 # before falling back to a blocking wait for the output.
 _INPUT_SPIN_DURATION_S = 1.0
+
+# An admit_stream utility call. Utility calls are decoded as builtins; the
+# request of this one is then decoded again as an ADD's is, so its prompt and
+# tensors arrive as they do for add_request.
+ADMIT_STREAM_CALL = tuple[int, int, str, tuple[EngineCoreRequest]]
 
 
 class EngineCoreProc(EngineCore):
@@ -1893,10 +1925,22 @@ class EngineCoreProc(EngineCore):
                     waited = True
             block = self.process_input_queue_block
             try:
+                deadline = (
+                    self.scheduler.stream_admissions.next_deadline()
+                    if block and isinstance(self.scheduler, StateScheduler)
+                    else None
+                )
                 with get_watch_dog().disable():
-                    req = self.input_queue.get(block=block)
+                    if deadline is not None:
+                        # Wake at the earliest stream deadline.
+                        req = self.input_queue.get(
+                            timeout=max(0.0, deadline - time.monotonic())
+                        )
+                    else:
+                        req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
+                # step() expires idle streams before its early exit.
                 break
             if not block:
                 break
@@ -2053,7 +2097,10 @@ class EngineCoreProc(EngineCore):
             "[shutdown] EngineCore: rejecting new request request_id=%s",
             request.request_id,
         )
-        self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        if not self._reject_stream_input(request, "shutdown", FinishReason.ABORT):
+            self._send_abort_outputs_to_client(
+                [request.request_id], request.client_index
+            )
         return True
 
     def _reject_add_while_paused(self, request: Request) -> bool:
@@ -2069,9 +2116,10 @@ class EngineCoreProc(EngineCore):
             message="Generation is paused. Please retry after it resumes.",
             retryable=True,
         )
-        self._send_finish_outputs_to_client(
-            [request.request_id], request.client_index, FinishReason.ERROR, error
-        )
+        if not self._reject_stream_input(request, "engine_paused", error=error):
+            self._send_finish_outputs_to_client(
+                [request.request_id], request.client_index, FinishReason.ERROR, error
+            )
         if request.kv_transfer_params:
             # Let the KV connector free any remote blocks held for it.
             request.abort_immediately = True
@@ -2112,6 +2160,20 @@ class EngineCoreProc(EngineCore):
             logger.exception("Invocation of %s method failed", name)
             output.failure_message = f"Call to {name} method failed: {str(e)}"
         enqueue_output(output)
+
+    @staticmethod
+    def _decode_admission_call(
+        decoder: MsgpackDecoder, frames: Sequence[Any], call: Any
+    ) -> tuple[Any, UtilityOutput | None]:
+        """Decode an admit_stream call's frames again with its request typed.
+        A request that cannot be decoded fails its own call: the generically
+        decoded `call` is returned with the failure to send its caller."""
+        try:
+            return decoder.decode(frames), None
+        except Exception as e:
+            logger.exception("Decoding of an admit_stream call failed")
+            message = f"Call to admit_stream method failed: {str(e)}"
+            return call, UtilityOutput(call[1], failure_message=message)
 
     @staticmethod
     def _convert_msgspec_args(method, args):
@@ -2228,6 +2290,9 @@ class EngineCoreProc(EngineCore):
             EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
         )
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
+        admission_decoder = MsgpackDecoder(
+            ADMIT_STREAM_CALL, oob_tensor_provider=self.tensor_ipc_receiver
+        )
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
@@ -2306,6 +2371,18 @@ class EngineCoreProc(EngineCore):
                     elif request_type == EngineCoreRequestType.UTILITY:
                         request = generic_decoder.decode(data_frames)
                         client_idx, call_id, method, args = request
+                        if method == "admit_stream":
+                            request, failure = self._decode_admission_call(
+                                admission_decoder, data_frames, request
+                            )
+                            if failure is not None:
+                                self.output_queue.put_nowait(
+                                    (
+                                        client_idx,
+                                        EngineCoreOutputs(utility_output=failure),
+                                    )
+                                )
+                                continue
                         if method == FT_UTILITY_METHOD:
                             self.ft_sentinel.handle_command(
                                 client_idx, call_id, args[0]
@@ -2408,6 +2485,10 @@ class EngineCoreProc(EngineCore):
             request.request_id,
             err.mm_hashes,
         )
+        if self._reject_stream_input(
+            request, "mm_cache_miss", mm_cache_miss_hashes=err.mm_hashes
+        ):
+            return
         self.output_queue.put_nowait(
             (
                 request.client_index,
@@ -2450,17 +2531,22 @@ class EngineCoreProc(EngineCore):
         logger.exception(
             "Unexpected error pre-processing request %s", request.request_id
         )
+        if self._reject_stream_input(request, "preprocessing_error"):
+            return
         self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def _handle_request_validation_error(
         self, request: EngineCoreRequest, error: VLLMValidationError
     ) -> None:
         logger.info("Request %s failed validation: %s", request.request_id, error)
+        request_error = RequestError(code="validation_error", message=str(error))
+        if self._reject_stream_input(request, "validation_error", error=request_error):
+            return
         self._send_finish_outputs_to_client(
             [request.request_id],
             request.client_index,
             FinishReason.ERROR,
-            RequestError(code="validation_error", message=str(error)),
+            request_error,
         )
 
     def pause_scheduler(
@@ -2597,6 +2683,32 @@ class EngineCoreProc(EngineCore):
         ]
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
         self.output_queue.put_nowait((client_index, eco))
+
+    def _reject_stream_input(
+        self,
+        request: EngineCoreRequest | Request,
+        rejection: StreamUpdateRejection,
+        finish_reason: FinishReason = FinishReason.ERROR,
+        *,
+        error: RequestError | None = None,
+        mm_cache_miss_hashes: list[str] | None = None,
+    ) -> bool:
+        """Send the rejection of an admitted stream's input, which leaves its
+        session running; False when `request` is not such an input."""
+        context = request.stream_admission
+        if context is None:
+            return False
+        output = EngineCoreOutput(
+            request.request_id,
+            [],
+            finish_reason=finish_reason,
+            error=error,
+            mm_cache_miss_hashes=mm_cache_miss_hashes,
+            stream_output=StreamOutput(context, rejection),
+        )
+        eco = EngineCoreOutputs(engine_index=self.engine_index, outputs=[output])
+        self.output_queue.put_nowait((request.client_index, eco))
+        return True
 
     def _send_abort_outputs_to_client(
         self, req_ids: list[str], client_index: int

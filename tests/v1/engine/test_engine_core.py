@@ -81,6 +81,25 @@ def make_request() -> EngineCoreRequest:
 
 
 @create_new_process_for_each_test()
+def test_stream_admission_requires_persistent_state():
+    """On an engine without persistent state admit_stream raises ValueError;
+    see docs/design/persistent_state.md for the design."""
+    vllm_config = EngineArgs(model=MODEL_NAME).create_engine_config()
+    with set_default_torch_num_threads(1):
+        engine_core = EngineCore(
+            vllm_config=vllm_config,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=False,
+        )
+    admission = make_request()
+    admission.prompt_token_ids = None
+    admission.resumable = True
+    with pytest.raises(ValueError, match="Stream admission requires persistent state"):
+        engine_core.admit_stream(admission)
+    assert not engine_core.scheduler.has_requests()
+
+
+@create_new_process_for_each_test()
 def test_engine_core():
     """Setup the EngineCore."""
     engine_args = EngineArgs(model=MODEL_NAME)
@@ -850,6 +869,7 @@ def test_pause_generation_rejects_new_requests(mode, user_pause, kind, rejected)
     request = MagicMock(
         request_id="r",
         client_index=1,
+        stream_admission=None,
         abort_immediately=kind == "cleanup",
         kv_transfer_params={"do_remote_prefill": True} if kind == "pd" else None,
     )

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Mapping
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
@@ -40,6 +41,11 @@ class SchedulerConfig:
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
     DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP: ClassVar[int] = 256
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
+    DEFAULT_STREAM_ADMISSION_TIMEOUTS: ClassVar[dict[str, float]] = {
+        "never_fed_timeout": 15.0,
+        "parked_idle_timeout": 60.0,
+        "draining_timeout": 40.0,
+    }
 
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
@@ -73,6 +79,10 @@ class SchedulerConfig:
     lowers only the number of requests that may occupy RUNNING, so decode
     batches stay smaller without shrinking runner or graph capacity. Must
     be `<= max_num_seqs`. `None` (default) keeps current behavior.
+
+    Stream admission for a model with persistent state compares this limit
+    with the requests the scheduler holds in every state, including requests
+    queued to run and streams waiting for input.
     """
 
     max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
@@ -270,6 +280,21 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    stream_admission_timeouts: dict[str, float] = Field(default_factory=dict)
+    """Seconds a stream admitted to a model with persistent state may stay
+    in a state before the engine ends it. A key sets that timeout and an
+    absent key keeps its default:
+
+    - `never_fed_timeout` (15.0): waiting for its first input.
+    - `parked_idle_timeout` (60.0): waiting for its next input.
+    - `draining_timeout` (40.0): finishing after its input closes.
+
+    Each value must be a finite, positive number. A model without persistent
+    state makes no use of this option.
+
+    On the command line this is a JSON object, e.g.
+    `--stream-admission-timeouts '{"never_fed_timeout": 30}'`."""
+
     @staticmethod
     def default_factory(**kwargs):
         """Create a `SchedulerConfig` with default values for its `InitVar`s."""
@@ -343,6 +368,7 @@ class SchedulerConfig:
             "prefill_schedule_interval",
             "async_scheduling",
             "stream_interval",
+            "stream_admission_timeouts",
         }
         return get_compile_factors(self, ignored_factors)
 
@@ -351,6 +377,32 @@ class SchedulerConfig:
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
         return None if value is None else handler(value)
+
+    @field_validator("stream_admission_timeouts", mode="before")
+    @classmethod
+    def _validate_stream_admission_timeouts(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            raise ValueError(
+                "stream_admission_timeouts must be a mapping of timeout names "
+                f"to seconds, got {value!r}"
+            )
+        for key, seconds in value.items():
+            if key not in cls.DEFAULT_STREAM_ADMISSION_TIMEOUTS:
+                raise ValueError(
+                    f"Unknown stream admission timeout {key!r}; expected one of "
+                    f"{sorted(cls.DEFAULT_STREAM_ADMISSION_TIMEOUTS)}"
+                )
+            if (
+                isinstance(seconds, bool)
+                or not isinstance(seconds, (int, float))
+                or not math.isfinite(seconds)
+                or seconds <= 0
+            ):
+                raise ValueError(
+                    f"Stream admission timeout {key!r} must be a finite, "
+                    f"positive number of seconds, got {seconds!r}"
+                )
+        return value
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:

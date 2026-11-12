@@ -99,6 +99,7 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    stream_admission_timeouts: dict[str, float] | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -150,6 +151,11 @@ def create_scheduler(
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
+        **(
+            {}
+            if stream_admission_timeouts is None
+            else {"stream_admission_timeouts": stream_admission_timeouts}
+        ),
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

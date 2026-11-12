@@ -834,26 +834,6 @@ def test_extensible_kv_cache_connector_needs_block_compact_layout():
 # docs/design/persistent_state.md for the design.
 
 
-@pytest.fixture
-def state_stub_models(request):
-    """Register the plugin's stub persistent-state classes in this process."""
-    from tests.plugins.vllm_add_dummy_model.vllm_add_dummy_model import (
-        my_persistent_state as stub,
-    )
-    from vllm.model_executor.models.registry import ModelRegistry
-
-    for cls in (
-        stub.StubPersistentStateForCausalLM,
-        stub.StubUndeclaredPersistentStateForCausalLM,
-    ):
-        if cls.__name__ not in ModelRegistry.models:
-            ModelRegistry.register_model(cls.__name__, cls)
-            request.addfinalizer(
-                lambda name=cls.__name__: ModelRegistry.models.pop(name, None)
-            )
-    return stub
-
-
 def _state_config(path, **overrides):
     return EngineArgs(
         model=path,
@@ -1055,3 +1035,87 @@ def test_persistent_state_defaults_leave_other_models_alone(caplog_vllm):
     caplog_vllm.clear()
     EngineArgs(model="facebook/opt-125m").create_engine_config()
     assert _persistent_state_warnings(caplog_vllm) == []
+
+
+# Stream admission deadlines: SchedulerConfig.stream_admission_timeouts.
+
+
+def _scheduler_config(**engine_args):
+    """The scheduler config of an engine whose model has no persistent state."""
+    args = EngineArgs(model="facebook/opt-125m", **engine_args)
+    return args.create_engine_config().scheduler_config
+
+
+def test_stream_admission_timeouts_from_cli():
+    """--stream-admission-timeouts takes a JSON object whose keys set those
+    timeouts."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--stream-admission-timeouts",
+            '{"never_fed_timeout": 5, "parked_idle_timeout": 7.5}',
+        ]
+    )
+    config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert config.scheduler_config.stream_admission_timeouts == {
+        "never_fed_timeout": 5,
+        "parked_idle_timeout": 7.5,
+    }
+
+
+def test_stream_admission_timeouts_cli_value_must_be_json():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parser.exit_on_error = False
+    with pytest.raises(ArgumentError, match="argument --stream-admission-timeouts"):
+        parser.parse_args(["--stream-admission-timeouts", "never_fed_timeout=5"])
+
+
+@pytest.mark.parametrize(
+    ("timeouts", "named"),
+    [
+        *(
+            pytest.param({"parked_idle_timeout": value}, "parked_idle_timeout", id=id_)
+            for id_, value in {
+                "inf": float("inf"),
+                "nan": float("nan"),
+                "zero": 0,
+                "negative": -1.5,
+                "bool": True,
+                "string": "5",
+                "none": None,
+            }.items()
+        ),
+        pytest.param({"idle_timeout": 5.0}, "idle_timeout", id="unknown_key"),
+        pytest.param([5.0], "stream_admission_timeouts", id="list"),
+        pytest.param("never_fed_timeout", "stream_admission_timeouts", id="str"),
+        pytest.param(5.0, "stream_admission_timeouts", id="number"),
+    ],
+)
+def test_stream_admission_timeouts_reject_an_invalid_value(timeouts, named):
+    """Each timeout is a finite, positive int or float under a known key, in
+    a mapping; anything else fails startup naming the key or the option,
+    also on an engine without persistent state."""
+    with pytest.raises(ValueError, match=named):
+        _scheduler_config(stream_admission_timeouts=timeouts)
+
+
+def test_stream_admission_timeouts_accepted_with_persistent_state(
+    state_stub_models, dummy_state_model_path
+):
+    config = _state_config(
+        dummy_state_model_path,
+        async_scheduling=False,
+        enforce_eager=True,
+        stream_admission_timeouts={"draining_timeout": 3},
+    )
+    assert config.scheduler_config.stream_admission_timeouts == {"draining_timeout": 3}
+
+
+def test_stream_admission_timeouts_do_not_change_the_compile_cache_key():
+    from vllm.config.utils import hash_config
+
+    assert _scheduler_config().stream_admission_timeouts == {}
+    short = _scheduler_config(stream_admission_timeouts={"never_fed_timeout": 1.0})
+    long = _scheduler_config(stream_admission_timeouts={"never_fed_timeout": 99.0})
+    assert short.stream_admission_timeouts != long.stream_admission_timeouts
+    assert hash_config(short) == hash_config(long)

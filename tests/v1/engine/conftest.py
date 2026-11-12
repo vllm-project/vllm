@@ -85,3 +85,23 @@ def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
         for tokens_list in dtv.prompt_tokens
     ]
     return dtv
+
+
+@pytest.fixture
+def state_stub_models(request):
+    """Register the plugin's stub persistent-state classes in this process."""
+    from tests.plugins.vllm_add_dummy_model.vllm_add_dummy_model import (
+        my_persistent_state as stub,
+    )
+    from vllm.model_executor.models.registry import ModelRegistry
+
+    for cls in (
+        stub.StubPersistentStateForCausalLM,
+        stub.StubUndeclaredPersistentStateForCausalLM,
+    ):
+        if cls.__name__ not in ModelRegistry.models:
+            ModelRegistry.register_model(cls.__name__, cls)
+            request.addfinalizer(
+                lambda name=cls.__name__: ModelRegistry.models.pop(name, None)
+            )
+    return stub

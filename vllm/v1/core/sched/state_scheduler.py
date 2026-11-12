@@ -2,29 +2,37 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Scheduler for models with scheduler-owned persistent state.
 
-See docs/design/persistent_state.md for the slot and release-fence contracts
-this scheduler implements.
+See docs/design/persistent_state.md for the slot, release-fence and stream
+admission contracts this scheduler implements.
 """
 
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from typing import Any
 
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.state_slot_manager import StateSlotRetirement
+from vllm.v1.core.stream_admission import StreamAdmissions
 from vllm.v1.engine import (
     EngineCoreEventType,
     EngineCoreOutput,
     EngineCoreOutputs,
+    EngineCoreRequest,
     FinishReason,
+    StreamAdmissionContext,
+    StreamAdmissionResult,
+    StreamOutput,
+    StreamUpdateRejection,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     StateSlotHandle,
 )
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 
@@ -72,8 +80,8 @@ def get_scheduler_cls(
 
 
 class StateScheduler(Scheduler):
-    """Owns per-request state slots: allocation through the KV cache manager
-    and retirement behind the worker's release fence."""
+    """Owns per-request state slots: allocation through the KV cache manager,
+    retirement behind the worker's release fence, and stream admission."""
 
     def __init__(
         self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, *args, **kwargs
@@ -87,14 +95,43 @@ class StateScheduler(Scheduler):
         self.state_error_outputs: list[tuple[int, EngineCoreOutput]] = []
         self.state_outputs_held = False
         self.state_ended_streams: set[str] = set()
+        # The context of the input each admitted stream's stopped turn ran on.
+        self.state_turn_contexts: dict[str, StreamAdmissionContext] = {}
+        # Released admitted streams not yet reported, by client index.
+        self.retired_streams: dict[int, list[str]] = {}
+        self.stream_admissions = StreamAdmissions(self)
 
     @property
     def state_managers(self):
         return self.kv_cache_manager.coordinator.state_managers
 
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        self.stream_admissions.expire()
+        return super().schedule(throttle_prefills)
+
+    def admit_stream(self, request: EngineCoreRequest) -> StreamAdmissionResult:
+        """Admit a stream before it has any input, or refuse it with a reason."""
+        self.stream_admissions.expire()
+        return self.stream_admissions.admit(request)
+
+    def set_pause_state(self, pause_state: PauseState) -> None:
+        resumed = (
+            self.pause_state == PauseState.PAUSED_ALL
+            and pause_state != PauseState.PAUSED_ALL
+        )
+        super().set_pause_state(pause_state)
+        if resumed:
+            # Deadlines did not run during the pause, so each starts again.
+            for session in self.stream_admissions.sessions.values():
+                if session.deadline_name is not None:
+                    self.stream_admissions.start_deadline(
+                        session, session.deadline_name
+                    )
+
     def _holds_kv_blocks(self, request: Request) -> bool:
         # A replacement prompt restarts at zero computed tokens while the
-        # request keeps its slot. Slot ownership, not computed tokens, decides
+        # request keeps its slot, and an admitted stream holds its slot before
+        # any token is computed. Slot ownership, not computed tokens, decides
         # the holding queue, so the stream drains ahead of requests that still
         # need a slot and under PAUSED_NEW.
         return any(
@@ -179,13 +216,17 @@ class StateScheduler(Scheduler):
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
         session.max_tokens = update.max_tokens
+        if update.stream_admission is not None:
+            session.stream_admission = update.stream_admission
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
 
-    def _misplaced_multimodal_input(self, request: Request | StreamingUpdate) -> bool:
+    def _misplaced_multimodal_input(
+        self, request: EngineCoreRequest | Request | StreamingUpdate
+    ) -> bool:
         """Whether a multimodal item falls outside the input's own prompt.
 
         Each stream input replaces the prompt, so positions are relative to it.
@@ -226,13 +267,34 @@ class StateScheduler(Scheduler):
     ) -> dict[int, EngineCoreOutputs]:
         self._complete_state_slots(scheduler_output, model_runner_output)
         outputs = super().update_from_output(scheduler_output, model_runner_output)
-        if self.state_ended_streams:
-            for batch in outputs.values():
-                for output in batch.outputs:
-                    if output.request_id in self.state_ended_streams:
-                        output.ends_stream = True
-            self.state_ended_streams.clear()
+        self._mark_stream_outputs(outputs)
+        if not self.state_outputs_held:
+            for client_index, request_ids in self.retired_streams.items():
+                if (batch := outputs.get(client_index)) is None:
+                    outputs[client_index] = batch = EngineCoreOutputs()
+                batch.retired_streams = request_ids
+            self.retired_streams = {}
         return outputs
+
+    def _mark_stream_outputs(self, outputs: dict[int, EngineCoreOutputs]) -> None:
+        """Mark the outputs that end a stream, and give each output of an
+        admitted stream the context of the input it ran on."""
+        for batch in outputs.values():
+            for output in batch.outputs:
+                request_id = output.request_id
+                if output.stream_output is not None:
+                    continue
+                if request_id in self.state_ended_streams:
+                    output.ends_stream = True
+                # A stopped turn's context was read before stop handling
+                # could apply the next queued input.
+                context = self.state_turn_contexts.get(request_id)
+                if context is None and (request := self.requests.get(request_id)):
+                    context = request.stream_admission
+                if context is not None:
+                    output.stream_output = StreamOutput(context)
+        self.state_ended_streams.clear()
+        self.state_turn_contexts.clear()
 
     def _add_queued_outputs(self, outputs: dict[int, list[EngineCoreOutput]]) -> None:
         if self.state_outputs_held:
@@ -245,16 +307,63 @@ class StateScheduler(Scheduler):
         # A state stream parks only at EOS; any other stop leaves model state
         # mid-turn, so the stream ends instead of resuming, and the turn's
         # output also ends the client's stream.
+        # An input that closes input ends its session once it has run.
+        context = request.stream_admission
+        if context is not None:
+            self.state_turn_contexts[request.request_id] = context
         if request.resumable and (
             request.status != RequestStatus.FINISHED_STOPPED
             or request.stop_reason is not None
+            or (context is not None and context.input_closed)
         ):
             request.resumable = False
             self.state_ended_streams.add(request.request_id)
-        return super()._handle_stopped_request(request)
+        finished = super()._handle_stopped_request(request)
+        if finished and context is not None:
+            self.state_ended_streams.add(request.request_id)
+        session = self.stream_admissions.sessions.get(request.request_id)
+        if (
+            request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+            and session is not None
+            and not session.input_closed
+        ):
+            session.status = "parked"
+            self.stream_admissions.start_deadline(session, "parked_idle")
+        return finished
 
     def add_request(self, request: Request) -> None:
-        if request.resumable and self._misplaced_multimodal_input(request):
+        self.stream_admissions.expire()
+        admitted = self.stream_admissions.sessions.get(request.request_id)
+        closed = admitted is not None and admitted.input_closed
+        rejection = self.stream_admissions.accept_input(request)
+        if rejection is not None:
+            # The engine core aborts a request that asks for it once it is
+            # added; a refused input must leave its session running.
+            request.abort_immediately = False
+            self._queue_state_error(request, rejection)
+            return
+        if closed:
+            # A close after the first changes nothing.
+            return
+        session = self.requests.get(request.request_id)
+        if (
+            request.stream_admission is not None
+            and not request.resumable
+            and session is not None
+            and session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        ):
+            # A close with nothing left to run ends the session at once.
+            session.stream_admission = request.stream_admission
+            for ended_request in self.finish_requests(
+                request.request_id, RequestStatus.FINISHED_STOPPED
+            ):
+                self._queue_state_error(ended_request)
+            return
+        if (
+            request.stream_admission is None
+            and request.resumable
+            and self._misplaced_multimodal_input(request)
+        ):
             # Every refusal precedes the first mutation; the replacement itself
             # is applied later and must not be able to fail. A continuation
             # ends its stream at once, even mid-turn, so its slot retires; a
@@ -317,6 +426,11 @@ class StateScheduler(Scheduler):
     def _free_request_blocks(self, request: Request) -> None:
         # Retire the slot before the generic block free; it returns to the
         # pool only once the worker acknowledges its release fence.
+        stream_client = (
+            request.client_index
+            if self.stream_admissions.sessions.pop(request.request_id, None)
+            else None
+        )
         for name, manager in self.state_managers.items():
             last_step = manager.last_scheduled.pop(request.request_id, 0)
             fence = self.state_step_seq + 1 if last_step else 0
@@ -324,7 +438,7 @@ class StateScheduler(Scheduler):
             if handle is not None:
                 self.state_retirements.append(
                     StateSlotRetirement(
-                        manager, handle, fence, request.request_id, name
+                        manager, handle, fence, request.request_id, name, stream_client
                     )
                 )
         self._drain_state_retirements()
@@ -333,18 +447,39 @@ class StateScheduler(Scheduler):
     def has_finished_requests(self) -> bool:
         # Held errors wait for the step after the hold, so they must not keep
         # the held steps going.
-        deliverable = self.state_error_outputs and not self.state_outputs_held
+        deliverable = (
+            self.state_error_outputs or self.retired_streams
+        ) and not self.state_outputs_held
         return (
             bool(deliverable or self.state_retirements)
             or super().has_finished_requests()
         )
 
+    def make_stats(self, *args: Any, **kwargs: Any) -> SchedulerStats | None:
+        stats = super().make_stats(*args, **kwargs)
+        if stats is not None:
+            stats.stream_occupied = self.stream_admissions.occupied()
+            stats.stream_refusals = dict(self.stream_admissions.refusals)
+            stats.stream_expiries = dict(self.stream_admissions.expiries)
+        return stats
+
     def _drain_state_retirements(self) -> None:
-        self.state_retirements = [
-            entry
-            for entry in self.state_retirements
-            if not entry.allocator.release(entry.handle, entry.fence_step)
-        ]
+        released = []
+        retiring = []
+        for entry in self.state_retirements:
+            if entry.allocator.release(entry.handle, entry.fence_step):
+                released.append(entry)
+            else:
+                retiring.append(entry)
+        self.state_retirements = retiring
+        # A stream retires once its last state manager releases its slot.
+        still_retiring = {entry.request_id for entry in retiring}
+        for entry in released:
+            if entry.stream_client is None or entry.request_id in still_retiring:
+                continue
+            request_ids = self.retired_streams.setdefault(entry.stream_client, [])
+            if entry.request_id not in request_ids:
+                request_ids.append(entry.request_id)
 
     def _complete_state_slots(
         self, scheduled: SchedulerOutput, output: ModelRunnerOutput
@@ -400,7 +535,17 @@ class StateScheduler(Scheduler):
             for request in self.finish_requests(failed, RequestStatus.FINISHED_ERROR):
                 self._queue_state_error(request)
 
-    def _queue_state_error(self, request: Request) -> None:
+    def _queue_state_error(
+        self, request: Request, rejection: StreamUpdateRejection | None = None
+    ) -> None:
+        """Queue an output with no tokens: the rejection of an input, or
+        the end of `request`, which ends the stream of an admitted session."""
+        context = request.stream_admission
+        stream_output = None
+        if rejection is not None:
+            stream_output = StreamOutput(context, rejection)
+        elif context is not None:
+            stream_output = StreamOutput(context)
         self.state_error_outputs.append(
             (
                 request.client_index,
@@ -409,9 +554,11 @@ class StateScheduler(Scheduler):
                     new_token_ids=[],
                     finish_reason=(
                         request.get_finished_reason()
-                        if request.is_finished()
+                        if rejection is None and request.is_finished()
                         else FinishReason.ERROR
                     ),
+                    ends_stream=rejection is None and context is not None,
+                    stream_output=stream_output,
                     events=request.take_events(),
                     trace_headers=request.trace_headers,
                 ),
