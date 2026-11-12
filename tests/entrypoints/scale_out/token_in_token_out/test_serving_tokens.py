@@ -33,6 +33,11 @@ def get_vocab_size(model_name):
 
 
 @pytest.fixture(scope="module")
+def model_name():
+    return MODEL_NAME
+
+
+@pytest.fixture(scope="module")
 def tokenizer():
     return AutoTokenizer.from_pretrained(MODEL_NAME)
 
@@ -46,7 +51,7 @@ def messages():
 
 
 @pytest.fixture(scope="module")
-def server(request):
+def server(request, model_name):
     args = [
         "--dtype",
         "bfloat16",
@@ -85,7 +90,7 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(model_name, args) as remote_server:
         yield remote_server
 
 
@@ -138,6 +143,61 @@ async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
     }
     resp = await client.post(GEN_ENDPOINT, json=followup)
     resp.raise_for_status()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["IFM/K2-Horizon-0.9B"], scope="module")
+@pytest.mark.parametrize(
+    "server",
+    [["--trust-remote-code", "--reasoning-parser", "k2_horizon"]],
+    indirect=True,
+    scope="module",
+)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("effort", ["123", None, []], ids=["unknown", "null", "list"])
+async def test_invalid_reasoning_effort_does_not_stop_engine(
+    client, model_name, stream, effort
+):
+    """Reject invalid request-local parser kwargs and keep serving valid requests."""
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    payload = {
+        "model": model_name,
+        "token_ids": tokenizer.encode("Hello", add_special_tokens=False),
+        "sampling_params": {
+            "max_tokens": 4,
+            "temperature": 0.0,
+            "ignore_eos": True,
+            "structured_outputs": {"json": {"type": "boolean"}},
+        },
+        "reasoning_parser_kwargs": {
+            "chat_template_kwargs": {"reasoning_effort": effort}
+        },
+        "stream": stream,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    if stream:
+        assert resp.status_code == 200
+        events = [
+            line.removeprefix("data: ")
+            for line in resp.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert len(events) == 2
+        assert events[-1] == "[DONE]"
+        error = json.loads(events[0])["error"]
+    else:
+        assert resp.status_code == 400
+        error = resp.json()["error"]
+    assert error["code"] == 400
+    assert "Unsupported reasoning_effort" in error["message"]
+
+    payload["reasoning_parser_kwargs"] = {
+        "chat_template_kwargs": {"reasoning_effort": "high"}
+    }
+    payload["stream"] = False
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    assert len(resp.json()["choices"][0]["token_ids"]) == 4
 
 
 @pytest.mark.asyncio

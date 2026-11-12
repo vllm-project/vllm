@@ -12,6 +12,7 @@ from transformers import AutoTokenizer
 
 from vllm.config import (
     DeviceConfig,
+    ParallelConfig,
     SchedulerConfig,
     StructuredOutputsConfig,
     VllmConfig,
@@ -22,6 +23,7 @@ from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.reasoning import ReasoningParser
+from vllm.reasoning.k2_horizon_reasoning_parser import K2HorizonReasoningParser
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -137,6 +139,7 @@ def _build_harness(
     reasoning_parser_kwargs: dict | None = None,
     structured_outputs: StructuredOutputsParams | None = None,
     num_spec_tokens: int = NUM_SPEC_TOKENS,
+    reasoner_cls: type[ReasoningParser] = MockReasoner,
 ) -> tuple[StructuredOutputManager, Request]:
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
@@ -154,7 +157,7 @@ def _build_harness(
     )
     manager = StructuredOutputManager(vllm_config)
     if use_reasoner:
-        manager.reasoner_cls = MockReasoner
+        manager.reasoner_cls = reasoner_cls
 
     sampling_params = SamplingParams(
         structured_outputs=structured_outputs
@@ -186,6 +189,76 @@ def _build_harness(
             prompt_ids,
         )
     return manager, request
+
+
+@pytest.mark.parametrize("executor_backend", ["uni", "external_launcher"])
+def test_invalid_reasoning_effort_fails_before_scheduling(
+    executor_backend, monkeypatch
+):
+    """Parser construction errors fail the request and leave valid requests usable."""
+    # External launcher updates this environment variable during configuration.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    manager = StructuredOutputManager(
+        VllmConfig(
+            model_config=ModelConfig(
+                model="IFM/K2-Horizon-0.9B",
+                trust_remote_code=True,
+                enforce_eager=True,
+                max_model_len=128,
+            ),
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                distributed_executor_backend=executor_backend,
+            ),
+            structured_outputs_config=StructuredOutputsConfig(
+                backend="xgrammar", reasoning_parser="k2_horizon"
+            ),
+        )
+    )
+
+    def make_request(effort: object) -> Request:
+        params = StructuredOutputsParams(json='{"type": "boolean"}')
+        params._backend = "xgrammar"
+        return Request(
+            request_id=f"effort-{effort!r}",
+            prompt_token_ids=manager.tokenizer.encode("Hello"),
+            sampling_params=SamplingParams(max_tokens=4, structured_outputs=params),
+            pooling_params=None,
+            reasoning_parser_kwargs={
+                "chat_template_kwargs": {"reasoning_effort": effort}
+            },
+        )
+
+    try:
+        invalid_efforts: tuple[object, ...] = ("123", None, {}, 123)
+        for effort in invalid_efforts:
+            request = make_request(effort)
+            manager.grammar_init(request)
+            _wait_for_grammar(request)
+            structured_req = request.structured_output_request
+            assert structured_req is not None
+            error = structured_req.grammar
+            assert isinstance(error, ValueError)
+            assert str(error) == (
+                f"Unsupported reasoning_effort {effort!r}. "
+                "Supported values: high, medium, low."
+            )
+            assert structured_req.reasoner is None
+
+        valid = make_request("high")
+        manager.grammar_init(valid)
+        _wait_for_grammar(valid)
+        structured_req = valid.structured_output_request
+        assert structured_req is not None
+        assert structured_req.grammar is not None
+        assert not isinstance(structured_req.grammar, Exception)
+        reasoner = structured_req.reasoner
+        assert isinstance(reasoner, K2HorizonReasoningParser)
+        assert reasoner.start_token == "<ifm|think>"
+        manager.grammar_bitmask({valid.request_id: valid}, [valid.request_id], {})
+        assert structured_req.reasoner is reasoner
+    finally:
+        manager.clear_backend()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -462,9 +535,8 @@ def test_real_flow(
         prefix=case.prefix,
         reasoning_ended=case.reasoning_ended,
         reasoning_parser_kwargs=reasoner_kwargs,
+        reasoner_cls=MockEngineReasoner if case.engine_reasoner else MockReasoner,
     )
-    if case.engine_reasoner:
-        manager.reasoner_cls = MockEngineReasoner
 
     raw_drafts = _to_token_ids(tokenizer, case.raw_drafts)
     expected_texts = (
@@ -520,8 +592,8 @@ def test_reasoning_rows_mask_grammar_invalid_implicit_end(
             "end_marker": _single_token(tokenizer, THINK_END),
         },
         structured_outputs=structured_outputs,
+        reasoner_cls=MockEngineReasoner,
     )
-    manager.reasoner_cls = MockEngineReasoner
     drafts = _to_token_ids(tokenizer, raw_drafts)
 
     bitmask = manager.grammar_bitmask(
@@ -544,8 +616,8 @@ def test_parallel_fill_masks_grammar_invalid_implicit_end(
         reasoning_ended=False,
         reasoning_parser_kwargs={"marker": marker, "end_marker": end},
         num_spec_tokens=0,
+        reasoner_cls=MockEngineReasoner,
     )
-    manager.reasoner_cls = MockEngineReasoner
 
     def row_pattern() -> str:
         bitmask = manager.grammar_bitmask(
