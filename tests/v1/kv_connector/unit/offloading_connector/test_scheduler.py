@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -41,6 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
+    TransferJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
@@ -52,8 +54,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
-    RequestOffloadState,
     _create_req_context,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
+    RequestOffloadState,
+    SchedulerOffloadConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
+    OnComputeStoreHandler,
+    OnHandoffStoreHandler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -100,6 +109,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
+    StoreTrigger,
     get_offload_block_hash,
     get_offload_group_idx,
     make_offload_key,
@@ -270,11 +280,20 @@ def test_swa_offload_window_covers_unaligned_hit(
     ready += short[boundary // 32 - 4 : boundary // 32]
     if left_state in ("present", "loading"):
         ready.append(left_key)
-    store = manager.prepare_store(ready, state.req_context)
+    store = manager.prepare_store(
+        ready, state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert store is not None and not store.evicted_keys
-    manager.complete_store(store.keys_to_store, state.req_context)
+    manager.complete_store(
+        store.keys_to_store, state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
     if left_state == "pending":
-        assert manager.prepare_store([left_key], state.req_context) is not None
+        assert (
+            manager.prepare_store(
+                [left_key], state.req_context, trigger=StoreTrigger.ON_COMPUTE
+            )
+            is not None
+        )
     if left_state == "loading":
         assert sched._chunks_being_loaded is not None
         sched._chunks_being_loaded.add(left_key)
@@ -304,8 +323,8 @@ def test_swa_offload_window_covers_unaligned_hit(
         m.allocate_external_computed_blocks(request.request_id, 0, external)
     blocks = KVCacheBlocks(tuple(m.req_to_blocks[request.request_id] for m in managers))
     sched.update_state_after_alloc(request, blocks, external)
-    assert len(sched._jobs) == 1
-    job = next(iter(sched._jobs.values()))
+    assert len(sched._job_statuses) == 1
+    job = next(iter(sched._job_statuses.values()))
     if needs_left:
         assert {left_key, swa[end - 1]} <= set(job.keys)
     manager.complete_load(job.keys, state.req_context)
@@ -316,6 +335,8 @@ def _make_partial_tail_scheduler(
     eagle: bool = False,
     cache_hit_alignment_tokens: int | None = 4,
     manager: OffloadingManager | None = None,
+    change_config: Callable[[SchedulerOffloadConfig], SchedulerOffloadConfig]
+    | None = None,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
@@ -334,7 +355,16 @@ def _make_partial_tail_scheduler(
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
     if manager is not None:
         spec.manager = manager
-    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    if change_config is None:
+        return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    # Change the config before the scheduler gives it to its handlers.
+    from_spec = SchedulerOffloadConfig.from_spec
+    with patch.object(
+        SchedulerOffloadConfig,
+        "from_spec",
+        lambda *args: change_config(from_spec(*args)),
+    ):
+        return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
 def _make_partial_tail_request(
@@ -388,6 +418,36 @@ def test_create_req_context_preserves_kv_hints():
     assert _create_req_context(request, MagicMock()).kv_hints is kv_hints
 
 
+def _on_compute(scheduler: OffloadingConnectorScheduler) -> OnComputeStoreHandler:
+    handler = scheduler._store_handlers[StoreTrigger.ON_COMPUTE]
+    assert isinstance(handler, OnComputeStoreHandler)
+    return handler
+
+
+def _on_handoff(scheduler: OffloadingConnectorScheduler) -> OnHandoffStoreHandler:
+    handler = scheduler._store_handlers[StoreTrigger.ON_HANDOFF]
+    assert isinstance(handler, OnHandoffStoreHandler)
+    return handler
+
+
+def _partial_tail_store_jobs(
+    scheduler: OffloadingConnectorScheduler, scheduler_output: Any
+) -> dict[int, TransferJob]:
+    handler = _on_handoff(scheduler)
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
+    handler.build_store_jobs(scheduler_output, scheduler._req_status, sink)
+    return sink.jobs
+
+
+def _store_jobs(
+    scheduler: OffloadingConnectorScheduler, scheduler_output: Any
+) -> dict[int, TransferJob]:
+    handler = _on_compute(scheduler)
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
+    handler.build_store_jobs(scheduler_output, scheduler._req_status, sink)
+    return sink.jobs
+
+
 def _reduce_kv_connector_stats(runner):
     reduced: dict[str, int | float] = {}
     for payload in runner.kv_connector_stats:
@@ -407,8 +467,8 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
     output = SimpleNamespace(
@@ -418,7 +478,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
             boundary_state_offloads={"req": [(1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     assert len(jobs) == 1
     offered_keys = _as_mock(scheduler.manager.prepare_store).call_args.args[0]
@@ -440,7 +500,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         scheduler._events_tracker.take_events(
             [
                 OffloadingEvent(
-                    keys=list(scheduler._jobs[job_id].keys),
+                    keys=list(scheduler._job_statuses[job_id].keys),
                     medium=Medium.CPU,
                     removed=False,
                 )
@@ -475,8 +535,8 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
     output = SimpleNamespace(
@@ -486,7 +546,7 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
             boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     assert len(jobs) == 2
     src_specs = [
@@ -502,28 +562,51 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
 
 
 def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
-    scheduler = _make_partial_tail_scheduler()
-    indexer_config = scheduler.config.kv_group_configs[1]
-    scheduler.config = scheduler.config._replace(kv_group_configs=(indexer_config,))
+    scheduler = _make_partial_tail_scheduler(
+        change_config=lambda config: config._replace(
+            kv_group_configs=(config.kv_group_configs[1],)
+        )
+    )
     _make_partial_tail_request(scheduler)
-    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
-    jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 98, 16)]})
-
-    [job] = jobs.values()
+    handler = _on_handoff(scheduler)
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
+    handler._build_aligned_boundary_store_jobs(
+        {"req": [(1, 98, 16)]}, scheduler._req_status, sink
+    )
+    [job_id] = sink.jobs
+    job = sink.jobs[job_id]
     assert isinstance(job.src_spec, GPULoadStoreSpec)
     assert job.src_spec.group_sizes == [1]
     assert job.src_spec.block_indices == [0]
+    assert scheduler._job_statuses[job_id].trigger is StoreTrigger.ON_HANDOFF
+
+
+def test_handoff_handler_runs_before_the_selected_trigger():
+    scheduler = _make_partial_tail_scheduler()
+    assert list(scheduler._store_handlers) == [
+        StoreTrigger.ON_HANDOFF,
+        StoreTrigger.ON_COMPUTE,
+    ]
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    assert _on_handoff(scheduler).first_live_chunk_idx(req_status, 1) is None
+
+
+def test_handoff_handler_is_absent_without_handoffs(request_runner):
+    runner = request_runner(block_size=4, num_gpu_blocks=32, async_scheduling=False)
+    assert list(runner.connector_scheduler._store_handlers) == [StoreTrigger.ON_COMPUTE]
 
 
 @pytest.mark.parametrize("cow_reuse", [False, True])
 def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
-    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
     output = SchedulerOutput.make_empty()
@@ -609,11 +692,11 @@ def test_partial_tail_supported_with_mixed_block_sizes_under_dcp():
     scheduler = _make_dcp_shaped_hybrid_scheduler()
     assert scheduler.config.supports_partial_tail
     # the window a tail can lie in is the DCP-scaled full-attention block
-    assert scheduler._partial_tail_block_size == 32
+    assert scheduler.config.partial_tail_block_size == 32
     # at dcp == 1 nothing is scaled and the window is the shared block size
     dcp1 = _make_dcp_shaped_hybrid_scheduler(decode_context_parallel_size=1)
     assert dcp1.config.supports_partial_tail
-    assert dcp1._partial_tail_block_size == 16
+    assert dcp1.config.partial_tail_block_size == 16
     # hash boundaries must split evenly across DCP ranks
     assert not _make_dcp_shaped_hybrid_scheduler(
         decode_context_parallel_size=3
@@ -642,7 +725,7 @@ def test_partial_tail_store_addresses_each_group_block_size_under_dcp():
     # full-attention (32-token) blocks: [0,32) [32,64); recurrent (16) blocks
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 0, 0, 24]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -655,7 +738,7 @@ def test_partial_tail_store_addresses_each_group_block_size_under_dcp():
             boundary_state_offloads={"req": [(1, 99, 44)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     assert len(jobs) == 1
     [job_id] = jobs
@@ -665,7 +748,7 @@ def test_partial_tail_store_addresses_each_group_block_size_under_dcp():
     assert src_spec.group_sizes == [1, 1]
     assert src_spec.block_indices == [1, 2]
     assert scheduler._block_id_to_pending_jobs == {12: {job_id}, 99: {job_id}}
-    keys = scheduler._jobs[job_id].keys
+    keys = scheduler._job_statuses[job_id].keys
     assert {get_offload_group_idx(k) for k in keys} == {0, 1}
     assert {get_offload_block_hash(k) for k in keys} == {b"h10"}
 
@@ -688,7 +771,7 @@ def test_partial_tail_store_skips_aligned_boundary_under_dcp():
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12, 13]
     req_status.group_states[1].block_ids[:] = [0, 0, 0, 0, 25]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     # 64 is a full-attention chunk boundary: handled by the aligned path only
@@ -699,7 +782,7 @@ def test_partial_tail_store_skips_aligned_boundary_under_dcp():
             boundary_state_offloads={"req": [(1, 99, 64)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
     assert len(jobs) == 1
     [job] = jobs.values()
     assert job.src_spec.block_ids.tolist() == [99]
@@ -717,17 +800,18 @@ def _dcp_partial_tail_store(
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = recurrent_blocks
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
-    return scheduler._build_partial_tail_store_jobs(
+    return _partial_tail_store_jobs(
+        scheduler,
         SimpleNamespace(
             kv_connector_block_state=KVConnectorBlockState(
                 req_ids=set(),
                 resolve_block_ids={}.__getitem__,
                 boundary_state_offloads={"req": handoff},
             )
-        )
+        ),
     )
 
 
@@ -747,9 +831,9 @@ def test_partial_tail_store_uses_prompt_checkpoint_under_dcp():
     assert aligned.src_spec.group_sizes == [0, 1]
     assert pair.src_spec.block_ids.tolist() == [12, 25]
     assert pair.src_spec.block_indices == [1, 3]
-    assert {get_offload_block_hash(k) for k in scheduler._jobs[max(jobs)].keys} == {
-        b"h13"
-    }
+    assert {
+        get_offload_block_hash(k) for k in scheduler._job_statuses[max(jobs)].keys
+    } == {b"h13"}
 
 
 @pytest.mark.parametrize(
@@ -837,15 +921,15 @@ def test_normal_store_excludes_align_mode_mamba_sources():
             req_status.req_context.get_offload_key_position(group_state.offload_keys[0])
             == group_config.tokens_per_chunk
         )
-    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
     output = SimpleNamespace(
         num_scheduled_tokens={"req": 16},
         finished_req_ids=set(),
     )
-    jobs = scheduler._build_store_jobs(output)
+    jobs = _store_jobs(scheduler, output)
 
     assert len(jobs) == 1
     [job] = jobs.values()
@@ -898,14 +982,16 @@ def test_partial_tail_lookup_delays_duplicate_inflight_load():
     first_state.num_locally_computed_tokens = 16
     first_state.update_offload_keys()
     boundary_keys = [
-        scheduler._make_boundary_key(
-            first, group_config.group_idx, 28, first_state.req_context
-        )
+        first_state.register_boundary_key(group_config.group_idx, 28)
         for group_config in scheduler.config.kv_group_configs
     ]
-    stored = manager.prepare_store(boundary_keys, first_state.req_context)
+    stored = manager.prepare_store(
+        boundary_keys, first_state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert stored is not None
-    manager.complete_store(stored.keys_to_store, first_state.req_context)
+    manager.complete_store(
+        stored.keys_to_store, first_state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     assert scheduler.get_num_new_matched_tokens(first, 16) == (12, True)
     scheduler.update_state_after_alloc(
@@ -918,10 +1004,10 @@ def test_partial_tail_lookup_delays_duplicate_inflight_load():
         ),
         num_external_tokens=12,
     )
-    assert len(scheduler._jobs) == 1
+    assert len(scheduler._job_statuses) == 1
 
     assert scheduler.get_num_new_matched_tokens(second, 16) == (None, False)
-    assert len(scheduler._jobs) == 1
+    assert len(scheduler._job_statuses) == 1
 
 
 def test_sync_partial_tail_load_targets_hashed_blocks():
@@ -1052,12 +1138,15 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
     assert request.shared_prefix_boundary == 16
 
     # The recompute's Mamba state at the junction is handed off and stored.
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
-    jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 77, 16)]})
-    [job_id] = jobs
-    stored.update(scheduler._jobs[job_id].keys)
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
+    _on_handoff(scheduler)._build_aligned_boundary_store_jobs(
+        {"req": [(1, 77, 16)]}, scheduler._req_status, sink
+    )
+    [job_id] = sink.jobs
+    stored.update(scheduler._job_statuses[job_id].keys)
 
     scheduler._req_status["req"].transfer_jobs.clear()
     tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
@@ -1109,9 +1198,15 @@ def test_pending_attention_outside_hit_keeps_shared_prefix_junction():
     pending = [keys[0][2]]
     manager = spec.get_manager()
     producer = ReqContext("producer")
-    assert manager.prepare_store(ready, producer) is not None
-    manager.complete_store(ready, producer)
-    assert manager.prepare_store(pending, producer) is not None
+    assert (
+        manager.prepare_store(ready, producer, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(ready, producer, trigger=StoreTrigger.ON_COMPUTE)
+    assert (
+        manager.prepare_store(pending, producer, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
     assert manager.lookup(pending[0], producer) is LookupResult.HIT_PENDING
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
@@ -1139,9 +1234,15 @@ def test_unconfirmed_attention_does_not_register_junction():
     ready = [make_offload_key(first_hash, 1)]
     manager = spec.get_manager()
     producer = ReqContext("producer")
-    assert manager.prepare_store(pending, producer) is not None
-    assert manager.prepare_store(ready, producer) is not None
-    manager.complete_store(ready, producer)
+    assert (
+        manager.prepare_store(pending, producer, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    assert (
+        manager.prepare_store(ready, producer, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(ready, producer, trigger=StoreTrigger.ON_COMPUTE)
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
     assert request.shared_prefix_boundary == 0
@@ -1159,8 +1260,9 @@ def test_no_shared_prefix_junction_when_sparse_group_hits():
 
 
 def test_max_load_tokens_rounds_down_without_partial_tail():
-    scheduler = _make_partial_tail_scheduler()
-    scheduler.config = scheduler.config._replace(supports_partial_tail=False)
+    scheduler = _make_partial_tail_scheduler(
+        change_config=lambda config: config._replace(supports_partial_tail=False)
+    )
     request = _make_partial_tail_request(
         scheduler, kv_transfer_params={"max_load_tokens": 20}
     )
@@ -1824,11 +1926,20 @@ def test_partial_lookup_keeps_tail_below_longer_attention_prefix(
     pending_boundary = 16 if expected_hit < 16 else 48 if eagle else 32
     pending_key = make_offload_key(request.block_hashes[pending_boundary // 4 - 1], 0)
     ready_keys = [key for key in keys if not pending_anchor or key != pending_key]
-    store = scheduler.manager.prepare_store(ready_keys, context)
+    store = scheduler.manager.prepare_store(
+        ready_keys, context, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert store is not None
-    scheduler.manager.complete_store(store.keys_to_store, context)
+    scheduler.manager.complete_store(
+        store.keys_to_store, context, trigger=StoreTrigger.ON_COMPUTE
+    )
     if pending_anchor:
-        assert scheduler.manager.prepare_store([pending_key], context) is not None
+        assert (
+            scheduler.manager.prepare_store(
+                [pending_key], context, trigger=StoreTrigger.ON_COMPUTE
+            )
+            is not None
+        )
 
     assert scheduler.get_num_new_matched_tokens(
         request, 0, max_num_new_tokens=max_new_tokens
@@ -1855,11 +1966,10 @@ def test_eagle_proof_margin_follows_core_hit_alignment(
     )
     if cache_hit_alignment_tokens in (None, 16):
         assert not scheduler.config.supports_partial_tail
-        assert scheduler._eagle_proof_margins == {}
+        assert scheduler.config.eagle_proof_margins == ()
         return
-    attention, mamba = scheduler.config.kv_group_configs
-    assert scheduler._partial_tail_key_tokens(attention, 24) == proof_tokens
-    assert scheduler._partial_tail_key_tokens(mamba, 24) == 24
+    assert scheduler.config.partial_tail_key_tokens(0, 24) == proof_tokens
+    assert scheduler.config.partial_tail_key_tokens(1, 24) == 24
 
 
 def test_eagle_partial_tail_store_keys_attention_at_proof():
@@ -1876,7 +1986,7 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
     req_status.loaded_from_offload = True
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -1888,7 +1998,7 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
             boundary_state_offloads={"req": [(1, 99, 24)]},
         ),
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = _partial_tail_store_jobs(scheduler, output)
 
     [job_id] = jobs
     offered_keys = scheduler.manager.prepare_store.call_args.args[0]
@@ -1903,7 +2013,7 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
         scheduler._events_tracker.take_events(
             [
                 OffloadingEvent(
-                    keys=list(scheduler._jobs[job_id].keys),
+                    keys=list(scheduler._job_statuses[job_id].keys),
                     medium=Medium.CPU,
                     removed=False,
                 )
@@ -1938,7 +2048,7 @@ def test_eagle_partial_tail_store_needs_proof_in_prompt(
     req_status.loaded_from_offload = True
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -1951,7 +2061,7 @@ def test_eagle_partial_tail_store_needs_proof_in_prompt(
         ),
     )
 
-    assert bool(scheduler._build_partial_tail_store_jobs(output)) == stored
+    assert bool(_partial_tail_store_jobs(scheduler, output)) == stored
     assert scheduler.manager.prepare_store.called == stored
 
 
@@ -1999,7 +2109,7 @@ def test_eagle_partial_lookup_loads_attention_proof(missing):
     load_job = scheduler._current_batch_load_jobs[load_job_id]
     assert {
         (get_offload_group_idx(key), get_offload_block_hash(key))
-        for key in scheduler._jobs[load_job_id].keys
+        for key in scheduler._job_statuses[load_job_id].keys
     } == {(0, b"h3"), (0, b"h6"), (1, b"h5")}
     dst_spec = load_job.dst_spec
     assert isinstance(dst_spec, GPULoadStoreSpec)
@@ -2093,7 +2203,7 @@ def test_eagle_partial_lookup_after_recurrent_group_tightens_hit():
     [load_job_id] = scheduler._current_batch_load_jobs
     assert {
         (get_offload_group_idx(key), get_offload_block_hash(key))
-        for key in scheduler._jobs[load_job_id].keys
+        for key in scheduler._job_statuses[load_job_id].keys
     } == {(0, b"h3"), (0, b"h7"), (0, b"h9"), (1, b"h8")}
 
 
@@ -2112,7 +2222,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
     scheduler.manager.lookup.side_effect = lambda key, req_context: (
         LookupResult.HIT if key in stored else LookupResult.MISS
     )
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -2128,7 +2238,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
             )
         meta = scheduler.build_connector_meta(output)
         for job_id in meta.store_jobs:
-            stored.update(scheduler._jobs[job_id].keys)
+            stored.update(scheduler._job_statuses[job_id].keys)
         scheduler.update_connector_output(
             KVConnectorOutput(
                 kv_connector_worker_meta=OffloadingWorkerMetadata(
@@ -2176,7 +2286,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
         num_external_tokens=24,
     )
     [load_job_id] = scheduler._current_batch_load_jobs
-    assert scheduler._jobs[load_job_id].keys == (
+    assert scheduler._job_statuses[load_job_id].keys == (
         make_offload_key(consumer.block_hashes[3], 0),
         make_offload_key(consumer.block_hashes[6], 0),
         make_offload_key(consumer.block_hashes[5], 1),
@@ -2198,7 +2308,7 @@ def test_eagle_partial_tail_store_needs_offload_load(host_hit):
         and (get_offload_group_idx(key) == 0 or get_offload_block_hash(key) == b"h5")
         else LookupResult.MISS
     )
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     request = _make_partial_tail_request(scheduler)
@@ -2217,6 +2327,14 @@ def test_eagle_partial_tail_store_needs_offload_load(host_hit):
         ),
         num_external_tokens=num_external_tokens,
     )
+    # The load completes before the step that computes the proof.
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs=dict.fromkeys(scheduler._current_batch_load_jobs, 1)
+            )
+        )
+    )
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
@@ -2231,7 +2349,7 @@ def test_eagle_partial_tail_store_needs_offload_load(host_hit):
         ),
     )
 
-    assert bool(scheduler._build_partial_tail_store_jobs(output)) == host_hit
+    assert bool(_partial_tail_store_jobs(scheduler, output)) == host_hit
     assert scheduler.manager.prepare_store.called == host_hit
 
 
@@ -2417,7 +2535,7 @@ def test_scheduler_reports_allocation_failure(request_runner):
         async_scheduling=False,
     )
     runner.new_request(token_ids=[0] * 4)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: None
 
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
@@ -2451,7 +2569,7 @@ def test_final_sampled_token_does_not_complete_an_offloaded_block(
         async_scheduling=async_scheduling,
     )
     runner.new_request(token_ids=[0] * (2 * block_size + prompt_offset))
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(list(keys))
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0,))
@@ -2507,7 +2625,7 @@ def test_finish_mid_prefill_stores_only_computed_blocks(
     runner = request_runner(
         block_size=block_size, num_gpu_blocks=16, async_scheduling=False
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     # Chunked prefill: 6 of the 16 prompt tokens per step.
@@ -2554,7 +2672,7 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
         num_gpu_blocks=8,
         async_scheduling=False,
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: None
     runner.new_request(token_ids=[0] * (block_size * 2))
     runner.run(decoded_tokens=[1])
 
@@ -2567,22 +2685,23 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
 
     missing_hash = req.block_hashes.pop()
     group_state.offload_keys.pop()
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={req_id: 0}, finished_req_ids=set()
     )
 
-    jobs = runner.connector_scheduler._build_store_jobs(scheduler_output)
+    on_compute = _on_compute(runner.connector_scheduler)
+    jobs = _store_jobs(runner.connector_scheduler, scheduler_output)
     assert len(jobs) == 1
-    assert group_state.next_stored_chunk_idx == 1
+    assert on_compute.first_live_chunk_idx(req_status, 0) == 1
 
     req.block_hashes.append(missing_hash)
     req_status.update_offload_keys()
-    jobs = runner.connector_scheduler._build_store_jobs(scheduler_output)
+    jobs = _store_jobs(runner.connector_scheduler, scheduler_output)
     assert len(jobs) == 1
-    assert group_state.next_stored_chunk_idx == 2
+    assert on_compute.first_live_chunk_idx(req_status, 0) == 2
 
 
 def test_scheduler_reports_lookup_sync_delay(request_runner):
@@ -2592,7 +2711,7 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
         async_scheduling=False,
     )
     runner.new_request(token_ids=[1] * 4)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
 
@@ -2616,7 +2735,7 @@ def test_on_schedule_end_is_the_last_manager_call_of_a_step(request_runner):
         num_gpu_blocks=8,
         async_scheduling=False,
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
 
@@ -2665,7 +2784,7 @@ def test_step_releases_the_manager_before_the_model_runs(request_runner):
         num_gpu_blocks=10,
         async_scheduling=False,
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
 
@@ -2734,7 +2853,7 @@ def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
         async_scheduling=False,
     )
     runner.manager.lookup.side_effect = [LookupResult.RETRY, LookupResult.MISS]
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
 
@@ -2754,7 +2873,7 @@ def test_max_offload_tokens_zero_does_not_record_pending_lookups(request_runner)
     )
     runner.manager.lookup.return_value = LookupResult.RETRY
     runner.manager.take_events.return_value = []
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -2793,7 +2912,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
 
     runner.manager.lookup.return_value = LookupResult.RETRY
     runner.manager.take_events.side_effect = take_raw_events
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
 
@@ -2852,7 +2971,7 @@ def test_promotion_hit_precedes_stored_event_translation(
     )
     token_ids = [1] * 4 * blocks_per_chunk
 
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.new_request(token_ids=token_ids)
@@ -2875,7 +2994,7 @@ def test_promotion_hit_precedes_stored_event_translation(
 
     runner.manager.lookup.side_effect = lookup
     runner.manager.take_events.side_effect = take_raw_events
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     publisher = MagicMock()
@@ -2906,7 +3025,7 @@ def test_streaming_session_stores_new_chunks(request_runner, async_scheduling: b
     runner = request_runner(
         block_size=4, num_gpu_blocks=100, async_scheduling=async_scheduling
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -2934,7 +3053,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     # 3 blocks, store just the middle block (skip first and last)
     # blocks = [0, 1, 2], [3, 4, 5], [6, 7, 8]
     runner.new_request(token_ids=[0] * tokens_per_chunk * 3)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(list(keys)[1:2])
     )
     runner.run(decoded_tokens=[0])
@@ -2946,19 +3065,19 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     )
 
     # +1 token -> single block, fail prepare_store
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: None
     runner.run(decoded_tokens=[0])
     runner.manager.prepare_store.assert_called()
 
     # 1 more block (+ token for async scheduling)
     # now set block_hashes_to_store = []
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(decoded_tokens=[0] * (tokens_per_chunk + 1))
 
     # 1 more block (+ token for kicking off offloading)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -2983,7 +3102,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.new_request(
         token_ids=[0] * block_size + [1] * (tokens_per_chunk - block_size)
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
@@ -2991,7 +3110,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
 
     # single block lookup with no hits
     runner.new_request(token_ids=[1] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
@@ -3000,7 +3119,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     # single block lookup with a hit
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
@@ -3008,7 +3127,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
 
     # single block lookup with a hit in a middle block
     runner.new_request(token_ids=[0] * tokens_per_chunk * 2 + [1] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
@@ -3035,12 +3154,12 @@ def test_small_hit_loads_synchronously(request_runner, async_scheduling: bool):
 
     def store_all():
         runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 0
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
 
     def store_none():
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output([])
         )
 
@@ -3116,7 +3235,7 @@ def test_request_preemption(request_runner, async_scheduling: bool, cpu_hit: boo
     # 2 blocks, store all, without flushing
     # blocks = [0, 1, 2], [3, 4, 5]
     runner.new_request(token_ids=[0] * tokens_per_chunk * 2)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -3125,7 +3244,7 @@ def test_request_preemption(request_runner, async_scheduling: bool, cpu_hit: boo
     )
 
     # decode 2 more blocks - 1 gpu block, storing [6, 7, 8] (no flush)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -3148,7 +3267,7 @@ def test_request_preemption(request_runner, async_scheduling: bool, cpu_hit: boo
     free_block_queue.num_free_blocks = num_free_blocks_empty
     runner.scheduler.reset_prefix_cache()
 
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     if cpu_hit:
@@ -3226,6 +3345,99 @@ def test_req_context_counts_live_until_request_finished(registered):
     assert all(getattr(synthetic, name) is None for name in counts)
 
 
+def test_stores_pass_the_trigger_to_prepare_and_complete(request_runner):
+    """The scheduler gives a store job's trigger to both prepare_store and
+    complete_store."""
+    tokens_per_block = 4
+    blocks_per_chunk = 3
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=tokens_per_block,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[0] * tokens_per_block * blocks_per_chunk)
+    prepared: list[StoreTrigger] = []
+    completed: list[StoreTrigger] = []
+
+    def prepare_store(keys, req_context, trigger):
+        prepared.append(trigger)
+        return generate_store_output(keys)
+
+    def complete_store(keys, req_context, *, trigger, success=True):
+        completed.append(trigger)
+
+    runner.manager.prepare_store.side_effect = prepare_store
+    runner.manager.complete_store.side_effect = complete_store
+
+    runner.run(decoded_tokens=[0, 0], expected_stored=(0, 1, 2))
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    assert prepared and set(prepared) == {StoreTrigger.ON_COMPUTE}
+    assert completed == [StoreTrigger.ON_COMPUTE]
+
+
+class _RecordingStoreHandler(OnComputeStoreHandler):
+    """An ON_COMPUTE handler that records the hooks the scheduler calls."""
+
+    def __init__(self, *args: Any):
+        super().__init__(*args)
+        self.removed: list[str] = []
+
+    def on_request_removed(self, req_id):
+        self.removed.append(req_id)
+        super().on_request_removed(req_id)
+
+
+def _install_recording_handler(runner) -> _RecordingStoreHandler:
+    sched = runner.connector_scheduler
+    handler = _RecordingStoreHandler(sched.config, sched._events_tracker)
+    sched._store_handlers[StoreTrigger.ON_COMPUTE] = handler
+    return handler
+
+
+def test_store_handler_hears_each_request_removal(request_runner):
+    """Each path that removes a request tells the handler, so a handler can
+    drop its own state of the request."""
+    block_size = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = block_size * blocks_per_chunk
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+    )
+    handler = _install_recording_handler(runner)
+    sched = runner.connector_scheduler
+
+    # Finished with no store job.
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output([])
+    )
+    runner.new_request(token_ids=[1] * tokens_per_chunk)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+    assert handler.removed == [str(runner.req_id)]
+
+    # Finished, then the last store job completes.
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
+    )
+    runner.new_request(token_ids=[2] * tokens_per_chunk)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
+    assert handler.removed[1:] == [str(runner.req_id)]
+
+    # Finished with a store job in flight, then a cache reset.
+    runner.new_request(token_ids=[3] * tokens_per_chunk)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
+    store_statuses = [s for s in sched._job_statuses.values() if s.is_store]
+    assert store_statuses
+    assert all(s.trigger is StoreTrigger.ON_COMPUTE for s in store_statuses)
+    assert handler.removed[2:] == []
+    sched.reset_cache()
+    assert handler.removed[2:] == [str(runner.req_id)]
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_on_request_finished_not_deferred_until_store_completion(
     request_runner, async_scheduling: bool
@@ -3258,7 +3470,7 @@ def test_on_request_finished_not_deferred_until_store_completion(
             ("complete_store", req_context.req_id)
         )
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -3307,7 +3519,7 @@ def test_on_request_finished_fires_after_final_block_store(
 ):
     """on_request_finished fires after the final prepare_store of the request.
 
-    request_finished() keeps req_status alive so _build_store_jobs can retry a
+    request_finished() keeps req_status alive so the ON_COMPUTE handler can retry a
     block on the next step; the retry must be issued before the manager is told
     the request is over. Every attempt made before the request finishes is
     declined here, so the store that succeeds is the one from the finishing
@@ -3328,7 +3540,7 @@ def test_on_request_finished_fires_after_final_block_store(
     runner.new_request(token_ids=[0] * block_size)
     request = runner.scheduler.requests[str(runner.req_id)]
 
-    def prepare_store(keys, req_context):
+    def prepare_store(keys, req_context, trigger):
         finished = request.is_finished()
         calls.append(
             ("stored_after_finish" if finished else "prepare_store", req_context.req_id)
@@ -3368,7 +3580,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
 
     # store 1 blocks
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -3401,7 +3613,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
     assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
 
     # complete transfers
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(
@@ -3432,7 +3644,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
 
     # store 1 blocks
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -3514,13 +3726,13 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
 
     # Blocks [0, 1, 2] miss
     runner.new_request(token_ids=[0] * block_size * 3)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0])
 
     # store 3 more block
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -3583,7 +3795,7 @@ def test_sliding_window_chunk_with_null_block_is_not_stored(
 
     stored_keys: set[OffloadKey] = set()
 
-    def store(keys, req_context):
+    def store(keys, req_context, trigger):
         stored_keys.update(keys)
         return generate_store_output(keys)
 
@@ -3591,7 +3803,7 @@ def test_sliding_window_chunk_with_null_block_is_not_stored(
         LookupResult.HIT if key in stored_keys else LookupResult.MISS
     )
 
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.new_request(token_ids=[0] * (3 * block_size))
@@ -3639,11 +3851,13 @@ def test_swa_retry_keeps_internal_null_block_in_store_spec(request_runner):
             output, create_model_runner_output(runner.scheduler.running, token_id=0)
         )
 
-    state = runner.connector_scheduler._req_status[str(runner.req_id)].group_states[0]
-    assert state.next_stored_chunk_idx == 0
+    req_status = runner.connector_scheduler._req_status[str(runner.req_id)]
+    handler = runner.connector_scheduler._store_handlers[StoreTrigger.ON_COMPUTE]
+    assert handler._next_idxs(req_status) == [0]
+    state = req_status.group_states[0]
     assert state.block_ids[6] == 0
-    runner.manager.prepare_store.side_effect = lambda keys, ctx: generate_store_output(
-        keys
+    runner.manager.prepare_store.side_effect = lambda keys, ctx, trigger: (
+        generate_store_output(keys)
     )
     output = runner.scheduler.schedule()
     [job] = output.kv_connector_metadata.store_jobs.values()
@@ -3700,7 +3914,7 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # Group 0 blocks: [0, 1], ending_token_offset = 24
     # Group 1 blocks: [0,], ending_token_offset = 16
     runner.new_request(token_ids=[0] * 25)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0])
@@ -3748,7 +3962,7 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # Total 48 tokens can be loaded
     runner.new_request(token_ids=[0] * 48)
     runner.manager.lookup.return_value = LookupResult.HIT
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(
@@ -3764,7 +3978,7 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # extra tokens [0, 32] (block [3, 4]) from the second group
     runner.new_request(token_ids=[0] * (48 + 37))
     runner.manager.lookup.return_value = LookupResult.HIT
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(
@@ -4151,14 +4365,23 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
     sched = runner.connector_scheduler
     manager = CPUOffloadingManager(num_chunks=16)
     sched.manager = manager
+    sched._store_handlers[StoreTrigger.ON_COMPUTE] = OnComputeStoreHandler(
+        sched.config, sched._events_tracker
+    )
     runner.new_request(token_ids=list(range(17)))
     state = sched._req_status["0"]
     state.update_offload_keys()
     full, swa = (g.offload_keys for g in state.group_states)
-    ready = manager.prepare_store(full[:4] + swa[:2], state.req_context)
+    ready = manager.prepare_store(
+        full[:4] + swa[:2], state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert ready is not None
-    manager.complete_store(ready.keys_to_store, state.req_context)
-    pending = manager.prepare_store(swa[3:4], state.req_context)
+    manager.complete_store(
+        ready.keys_to_store, state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
+    pending = manager.prepare_store(
+        swa[3:4], state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert pending is not None
 
     # The last SWA chunk is still being written; the preceding one is missing.
@@ -4249,7 +4472,7 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
 
     # Store 1 offloaded chunk (3 GPU blocks) via a normal request.
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -4268,7 +4491,7 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
     # New request with 2 offloaded chunks; first matches what's in CPU.
     runner.new_request(token_ids=[0] * tokens_per_chunk * 2)
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -4303,6 +4526,30 @@ def test_loads_do_not_populate_fence_index(request_runner):
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
 
+def test_no_store_job_while_a_load_is_pending(request_runner):
+    """A request with a load in flight gets no store job in later steps, so
+    _track_store_job never sees a store next to a pending load."""
+    runner = request_runner(
+        blocks_per_chunk=3,
+        block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+    )
+    sched = runner.connector_scheduler
+    runner.new_request(token_ids=[0] * 24)
+    sched._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    req_status = sched._req_status[str(runner.req_id)]
+    (load_job_id,) = req_status.transfer_jobs
+    assert not sched._job_statuses[load_job_id].is_store
+
+    for _ in range(3):
+        runner.run(decoded_tokens=[], complete_transfers=False)
+        assert req_status.transfer_jobs == {load_job_id}
+        assert not any(s.is_store for s in sched._job_statuses.values())
+
+
 def test_fence_at_update_state_after_alloc(request_runner):
     """A load reusing a finished request's pending-store block triggers
     a flush via update_state_after_alloc's fence.
@@ -4318,7 +4565,7 @@ def test_fence_at_update_state_after_alloc(request_runner):
     )
 
     runner.new_request(token_ids=[0] * 4)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -4345,7 +4592,7 @@ def test_fence_at_update_state_after_alloc(request_runner):
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * 4)
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(
@@ -4360,7 +4607,7 @@ def test_fence_at_update_state_after_alloc(request_runner):
 def test_fence_at_build_store_jobs(request_runner):
     """A new prefill (no load -> update_state_after_alloc returns early)
     reusing a finished request's pending-store block is flushed by
-    _build_store_jobs's fence."""
+    build_store_jobs's fence."""
     runner = request_runner(
         blocks_per_chunk=1,
         block_size=4,
@@ -4369,7 +4616,7 @@ def test_fence_at_build_store_jobs(request_runner):
     )
 
     runner.new_request(token_ids=[0] * 4)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -4396,7 +4643,7 @@ def test_fence_at_build_store_jobs(request_runner):
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[1] * 4)
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 0
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(
@@ -4421,7 +4668,7 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
         async_scheduling=async_scheduling,
     )
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -4463,7 +4710,7 @@ def test_store_job_preserves_order_and_deduplicates_keys(
     runner.new_request(token_ids=[0] * (tokens_per_chunk * 2))
     returned_keys = []
 
-    def prepare_store(keys, req_context):
+    def prepare_store(keys, req_context, trigger):
         keys = list(keys)
         returned_keys.extend(keys)
         output = generate_store_output(keys)
@@ -4474,7 +4721,7 @@ def test_store_job_preserves_order_and_deduplicates_keys(
     job_keys = {}
 
     def capture_job_keys():
-        job_keys.update(runner.connector_scheduler._jobs.items())
+        job_keys.update(runner.connector_scheduler._job_statuses.items())
 
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
@@ -4503,13 +4750,13 @@ def test_complete_store_waits_for_all_worker_acks(
         worker_count=3,
     )
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
-    assert len(runner.connector_scheduler._jobs) == 1
-    job_id = next(iter(runner.connector_scheduler._jobs))
-    assert runner.connector_scheduler._jobs[job_id].pending_count == 3
+    assert len(runner.connector_scheduler._job_statuses) == 1
+    job_id = next(iter(runner.connector_scheduler._job_statuses))
+    assert runner.connector_scheduler._job_statuses[job_id].pending_count == 3
     runner.manager.complete_store.reset_mock()
 
     runner.connector_scheduler.update_connector_output(
@@ -4520,7 +4767,7 @@ def test_complete_store_waits_for_all_worker_acks(
         )
     )
     assert runner.manager.complete_store.call_count == 0
-    assert runner.connector_scheduler._jobs[job_id].pending_count == 2
+    assert runner.connector_scheduler._job_statuses[job_id].pending_count == 2
 
     runner.connector_scheduler.update_connector_output(
         KVConnectorOutput(
@@ -4530,7 +4777,7 @@ def test_complete_store_waits_for_all_worker_acks(
         )
     )
     assert runner.manager.complete_store.call_count == 1
-    assert job_id not in runner.connector_scheduler._jobs
+    assert job_id not in runner.connector_scheduler._job_statuses
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -4552,11 +4799,11 @@ def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling
         worker_count=3,
     )
     runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
-    job_id = next(iter(runner.connector_scheduler._jobs))
+    job_id = next(iter(runner.connector_scheduler._job_statuses))
     runner.manager.complete_store.reset_mock()
 
     runner.connector_scheduler.update_connector_output(
@@ -4592,11 +4839,11 @@ def test_successful_store_is_published(request_runner, async_scheduling: bool):
         worker_count=3,
     )
     runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
-    job_id = next(iter(runner.connector_scheduler._jobs))
+    job_id = next(iter(runner.connector_scheduler._job_statuses))
     runner.manager.complete_store.reset_mock()
 
     runner.connector_scheduler.update_connector_output(
@@ -4658,7 +4905,7 @@ def test_failed_load_ends_or_reruns_its_request(
     )
     runner.scheduler.recompute_kv_load_failures = recompute
     runner.new_request(token_ids=[0] * block_size * 3)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
@@ -4678,7 +4925,7 @@ def test_failed_load_ends_or_reruns_its_request(
     runner.new_request(token_ids=[0] * (block_size * 3 + 1))
     request = runner.scheduler.requests[str(runner.req_id)]
     runner.manager.lookup.return_value = LookupResult.HIT
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     handler.fail_loads = True
@@ -4719,7 +4966,7 @@ def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
             token_ids=[0] * tokens_per_chunk * 3,
             kv_transfer_params={"max_offload_tokens": max_offload_tokens},
         )
-        r.manager.prepare_store.side_effect = lambda keys, req_context: (
+        r.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
 
@@ -4818,7 +5065,7 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
         extra_config_overrides={"offload_prompt_only": True},
     )
 
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -4841,7 +5088,7 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_reset_cache(request_runner, async_scheduling: bool):
     """reset_cache flushes in-flight loads, calls manager.reset_cache(), resets
-    next_stored_chunk_idx for active requests and clears job tracking."""
+    the ON_COMPUTE progress of active requests and clears job tracking."""
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -4856,7 +5103,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
 
     # Store 1 offloaded chunk (3 GPU blocks) to CPU.
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -4869,7 +5116,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * tokens_per_chunk)
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(decoded_tokens=[], complete_transfers=False)
@@ -4877,7 +5124,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # Capture in-flight load job IDs before reset.
     load_job_ids = {
         jid
-        for jid, status in runner.connector_scheduler._jobs.items()
+        for jid, status in runner.connector_scheduler._job_statuses.items()
         if not status.is_store
     }
     assert load_job_ids, "expected in-flight load jobs before reset"
@@ -4885,11 +5132,12 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # Record job counter to verify the reset counter is set correctly.
     job_counter_before_reset = runner.connector_scheduler._job_counter
 
-    # After update_state_after_alloc, next_stored_chunk_idx is advanced to
+    # After update_state_after_alloc, the ON_COMPUTE progress is advanced to
     # skip the loaded prefix; reset_cache must bring it back to 0.
+    on_compute = _on_compute(runner.connector_scheduler)
     for req_status in runner.connector_scheduler._req_status.values():
-        for group_state in req_status.group_states:
-            assert group_state.next_stored_chunk_idx > 0
+        for idx in range(len(req_status.group_states)):
+            assert on_compute.first_live_chunk_idx(req_status, idx) > 0
 
     # Reset the cache
     runner.connector_scheduler.reset_cache()
@@ -4902,7 +5150,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     assert load_job_ids <= runner.connector_scheduler._current_batch_jobs_to_flush
 
     # All internal job tracking must be cleared.
-    assert not runner.connector_scheduler._jobs
+    assert not runner.connector_scheduler._job_statuses
     assert not runner.connector_scheduler._block_id_to_pending_jobs
     if runner.connector_scheduler._chunks_being_loaded is not None:
         assert not runner.connector_scheduler._chunks_being_loaded
@@ -4911,11 +5159,11 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # pre-reset jobs arriving from workers are silently discarded.
     assert runner.connector_scheduler._stale_job_threshold == job_counter_before_reset
 
-    # next_stored_chunk_idx must be reset to 0 for every active request so
+    # The ON_COMPUTE progress must be reset to 0 for every active request so
     # that post-reset stores restart from block 0.
     for req_status in runner.connector_scheduler._req_status.values():
-        for group_state in req_status.group_states:
-            assert group_state.next_stored_chunk_idx == 0
+        for idx in range(len(req_status.group_states)):
+            assert on_compute.first_live_chunk_idx(req_status, idx) == 0
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -4940,7 +5188,7 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     runner.manager.on_request_finished.side_effect = lambda req_context: (
         finalized.append(req_context.req_id)
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -4957,7 +5205,7 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     req_id = str(runner.req_id)
     req_status = cs._req_status[req_id]
     assert req_status.transfer_jobs, "expected an in-flight store before finish"
-    assert any(job.is_store for job in cs._jobs.values())
+    assert any(job.is_store for job in cs._job_statuses.values())
 
     # Finish the request while its store is still in flight. The manager hook
     # is deferred because the final store decision has not happened yet.
@@ -4992,6 +5240,7 @@ def test_pending_transfer_defers_prefix_lookup():
         SimpleNamespace(group_states=[group_state], transfer_jobs={123}),
     )
     scheduler._req_status = {request.request_id: req_status}
+    scheduler._store_handlers = {}
 
     matched_tokens, is_async = scheduler.get_num_new_matched_tokens(
         request,
@@ -5012,7 +5261,7 @@ def test_prefix_cache_reset_preserves_same_step_offload_reload(
     runner = request_runner(
         block_size=4, num_gpu_blocks=100, async_scheduling=async_scheduling
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.new_request(token_ids=[0] * 8)
@@ -5026,7 +5275,7 @@ def test_prefix_cache_reset_preserves_same_step_offload_reload(
     assert request.status == RequestStatus.PREEMPTED
 
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output([])
     )
     runner.run(decoded_tokens=[], complete_transfers=False)
@@ -5034,13 +5283,13 @@ def test_prefix_cache_reset_preserves_same_step_offload_reload(
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert len(req_status.transfer_jobs) == 1
     (job_id,) = req_status.transfer_jobs
-    assert not runner.connector_scheduler._jobs[job_id].is_store
+    assert not runner.connector_scheduler._job_statuses[job_id].is_store
     assert job_id in runner.offloading_spec.handler.waiting_jobs
     runner.manager.complete_load.assert_not_called()
 
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(0, 1))
     runner.manager.complete_load.assert_called_once()
-    assert not runner.connector_scheduler._jobs
+    assert not runner.connector_scheduler._job_statuses
     assert not runner.scheduler.requests
 
 
@@ -5067,7 +5316,7 @@ def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner
 
     req_id = "0"
     runner.new_request(token_ids=[0] * tokens_per_chunk * 2)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -5081,7 +5330,8 @@ def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner
     pending_store_jobs = set(req_status.transfer_jobs)
     assert pending_store_jobs
     assert all(
-        runner.connector_scheduler._jobs[jid].is_store for jid in pending_store_jobs
+        runner.connector_scheduler._job_statuses[jid].is_store
+        for jid in pending_store_jobs
     )
 
     free_block_queue.num_free_blocks = 0
@@ -5167,13 +5417,13 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool, extra_retain
     # freed blocks before the harness records its deferred stores.
     num_tokens = 33
     runner.new_request(token_ids=[0] * num_tokens)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0])
 
     # Decode 1 more token to complete the deferred stores from above.
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -5267,7 +5517,7 @@ def test_request_level_supply_covers_consumer_demand(
     """A REQUEST_LEVEL producer must offer every key a consumer will demand.
 
     Same relation as `test_sliding_window_demand_is_store_reachable`, but at
-    the level where the key set is really built: `_build_store_jobs` prunes
+    the level where the key set is really built: `build_store_jobs` prunes
     chunks with a null GPU block and unreachable SWA chunks, while the demand
     comes from an independent scan.
     """
@@ -5288,7 +5538,7 @@ def test_request_level_supply_covers_consumer_demand(
     )
 
     def store_everything_offered():
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
 
@@ -5397,9 +5647,9 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     runner.new_request(token_ids=[0] * block_size * 3)
 
     # First step: prepare_store FAILS -> offloading delayed.
-    # next_stored_chunk_idx stays at 0, block_ids[0] still holds the
+    # The ON_COMPUTE progress stays at 0, block_ids[0] still holds the
     # original block_id for position 0.
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: None
     runner.run(decoded_tokens=[0])
     runner.manager.prepare_store.assert_called()
 
@@ -5408,14 +5658,14 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     # (it's now outside the sliding window). With num_gpu_blocks=4,
     # the freed block is immediately reused for the new allocation.
     # prepare_store still fails so offloading is still delayed.
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: None
     runner.run(decoded_tokens=[0] * block_size)
 
     # Now prepare_store succeeds.
     # Without the fix, the request would try to offload the stale block_id
     # at position 0 (now reused at position 3), causing a duplicate in
     # fenced_block_ids and eventually a KeyError.
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     # block_ids=[0, ?, 3, 1]: positions 0 and 1 are zeroed (stale blocks that
@@ -5445,7 +5695,7 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
 
     # Populate the CPU offload cache with one block.
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -5463,7 +5713,7 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
         token_ids=[0] * tokens_per_chunk,
         skip_reading_prefix_cache=True,
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -5491,7 +5741,7 @@ def test_max_load_tokens_limits_external_load(request_runner, async_scheduling: 
     )
 
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -5505,7 +5755,7 @@ def test_max_load_tokens_limits_external_load(request_runner, async_scheduling: 
         token_ids=[0] * tokens_per_chunk,
         kv_transfer_params={"max_load_tokens": 0},
     )
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -6046,7 +6296,7 @@ class TestEagle:
         assert kv_group_configs[1].is_eagle_group
 
         runner.new_request(token_ids=[0] * tokens_per_chunk * 3)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
         # 4 decoded tokens fill block 3; the extra decode steps let its store
@@ -6110,7 +6360,7 @@ class TestEagle:
         assert kv_group_configs[0].sliding_window_size_in_chunks == 2
 
         runner.new_request(token_ids=[0] * block_size * 3)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
         # 4 decoded tokens fill block 3 entirely with decode tokens. The
@@ -6158,7 +6408,7 @@ class TestEagle:
         )
 
         runner.new_request(token_ids=[0] * tokens_per_chunk)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
         runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0),))
@@ -6195,7 +6445,7 @@ class TestEagle:
         assert runner.scheduler.num_hash_lookahead_tokens == num_lookahead
 
         runner.new_request(token_ids=[0] * block_size * 4)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
 
@@ -6211,14 +6461,14 @@ class TestEagle:
         """Eagle store must not drop interior blocks across prefill chunks.
 
         Regression: the trailing-block exclusion (num_blocks - 1) was applied
-        when collecting keys, but next_stored_chunk_idx advanced by the
+        when collecting keys, but the ON_COMPUTE progress advanced by the
         non-decremented count, so the trailing chunk of every chunked-prefill
         chunk was skipped and never re-considered. With the harness chunk budget
         (1000 tokens) and block_size 4, a prompt longer than one chunk lost the
         block at the chunk boundary, leaving a permanent gap that caps prefix
         reuse at the first hole. Only the trailing decode block may be held
         back; all other blocks must be stored exactly once (no duplicates from
-        next_stored_chunk_idx regressing at the prefill->decode transition).
+        the progress regressing at the prefill->decode transition).
         """
         block_size = 4
         blocks_per_chunk = 1
@@ -6249,7 +6499,7 @@ class TestEagle:
         # Prompt spans more than one prefill chunk (chunk budget 1000 tokens).
         num_blocks = 256
         runner.new_request(token_ids=[0] * tokens_per_chunk * num_blocks)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
         # Decode a few non-EOS tokens so prefill completes across both chunks
@@ -6319,7 +6569,7 @@ class TestEagle:
         )
 
         runner.new_request(token_ids=[0] * num_tokens)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
 
@@ -6386,7 +6636,7 @@ class TestEagle:
             kv_cache_groups=kv_cache_groups,
         )
         runner.new_request(token_ids=[0] * prompt_tokens)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
 
@@ -6441,7 +6691,7 @@ class TestEagle:
         spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
         scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
         _as_mock(scheduler.manager.prepare_store).side_effect = (
-            lambda keys, req_context: generate_store_output(keys)
+            lambda keys, req_context, trigger: generate_store_output(keys)
         )
 
         request = MagicMock()
@@ -6538,7 +6788,7 @@ class TestEagle:
         )
 
         runner.new_request(token_ids=[0] * tokens_per_chunk * 3)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
         runner.run(
@@ -6557,7 +6807,7 @@ class TestEagle:
 
         runner.new_request(token_ids=[0] * tokens_per_chunk * 3 + [1])
         runner.manager.lookup.return_value = LookupResult.HIT
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output([])
         )
         runner.run(
@@ -6599,7 +6849,7 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
 
     # 4 prompt tokens → 1 GPU block (block 0)
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -6611,7 +6861,7 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
         fence_snapshots.append(
             dict(runner.connector_scheduler._block_id_to_pending_jobs)
         )
-        for js in runner.connector_scheduler._jobs.values():
+        for js in runner.connector_scheduler._job_statuses.values():
             if js.is_store:
                 job_block_ids.update(js.deferred_fence_block_ids or [])
 
@@ -6635,7 +6885,7 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
     # Run 2: block reuse triggers fence-based flush → cleanup.
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -6674,7 +6924,7 @@ def test_multiple_in_flight_stores_all_flushed_by_fence(request_runner):
 
     # Prompt: 4 tokens → block 1
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -6683,7 +6933,7 @@ def test_multiple_in_flight_stores_all_flushed_by_fence(request_runner):
         decoded_tokens=[0] * tokens_per_chunk,
         complete_transfers=False,
     )
-    assert len(runner.connector_scheduler._jobs) >= 1
+    assert len(runner.connector_scheduler._job_statuses) >= 1
 
     # Run 2: 4 more tokens + EOS → block 3 full → more jobs created.
     # Request finishes → all jobs registered in fence.
@@ -6691,13 +6941,13 @@ def test_multiple_in_flight_stores_all_flushed_by_fence(request_runner):
         decoded_tokens=[0] * tokens_per_chunk + [EOS_TOKEN_ID],
         complete_transfers=False,
     )
-    num_jobs = len(runner.connector_scheduler._jobs)
+    num_jobs = len(runner.connector_scheduler._job_statuses)
     assert num_jobs >= 2, f"Expected multiple in-flight jobs, got {num_jobs}"
 
     # Run 3: block reuse → fence flushes both jobs.
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * tokens_per_chunk * 3)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -6708,7 +6958,7 @@ def test_multiple_in_flight_stores_all_flushed_by_fence(request_runner):
 
     # Post-condition: fence cleaned up, all jobs gone.
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-    assert len(runner.connector_scheduler._jobs) == 0
+    assert len(runner.connector_scheduler._job_statuses) == 0
 
 
 def test_request_finished_mixed_full_attn_and_sliding_window(
@@ -6756,7 +7006,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
 
     # 1 block of prompt (4 tokens) — 1 block per group.
     runner.new_request(token_ids=[0] * block_size)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
 
@@ -6769,7 +7019,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
         fence_snapshots.append(
             dict(runner.connector_scheduler._block_id_to_pending_jobs)
         )
-        for js in runner.connector_scheduler._jobs.values():
+        for js in runner.connector_scheduler._job_statuses.values():
             if js.is_store:
                 sw_block_ids.update(js.fenced_block_ids or [])
                 non_sw_block_ids.update(js.deferred_fence_block_ids or [])
@@ -6803,7 +7053,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Run 2: block reuse triggers fence-based flush of the old job.
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * block_size)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -6814,7 +7064,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
 
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-    assert len(runner.connector_scheduler._jobs) == 0
+    assert len(runner.connector_scheduler._job_statuses) == 0
 
 
 def test_chunked_local_attention_reports_its_chunk_window():
@@ -6949,12 +7199,12 @@ def test_retention_interval_sparsifies_swa_stores(
 
     num_tokens = 64
     runner.new_request(token_ids=[0] * num_tokens)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0])
 
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -7029,12 +7279,12 @@ def test_retention_interval_zero_stores_only_replay_boundary(
 
     num_tokens = 64
     runner.new_request(token_ids=[0] * num_tokens)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0])
 
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
     runner.run(
@@ -7112,7 +7362,7 @@ class TestSharedGroupMTPOffload:
         assert [c.is_eagle_group for c in kv_group_configs] == [False, False]
 
         runner.new_request(token_ids=[0] * block_size * 3)
-        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
             generate_store_output(keys)
         )
         runner.run(decoded_tokens=[0])
@@ -7188,14 +7438,14 @@ class TestMambaHybridOffloadServing:
         _as_mock(scheduler.manager.lookup).side_effect = lambda key, ctx: (
             LookupResult.HIT if key in stored else LookupResult.MISS
         )
-        _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, ctx: (
-            generate_store_output(list(keys))
+        _as_mock(scheduler.manager.prepare_store).side_effect = (
+            lambda keys, ctx, trigger: generate_store_output(list(keys))
         )
 
         def complete_all_jobs():
-            job_ids = list(scheduler._jobs.keys())
+            job_ids = list(scheduler._job_statuses.keys())
             for jid in job_ids:
-                stored.update(scheduler._jobs[jid].keys)
+                stored.update(scheduler._job_statuses[jid].keys)
             if job_ids:
                 scheduler.update_connector_output(
                     KVConnectorOutput(
@@ -7243,8 +7493,8 @@ class TestMambaHybridOffloadServing:
                 boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
             ),
         )
-        scheduler._build_partial_tail_store_jobs(out)
-        scheduler._build_store_jobs(out)
+        _partial_tail_store_jobs(scheduler, out)
+        _store_jobs(scheduler, out)
         complete_all_jobs()
 
         req.num_computed_tokens = self.PROMPT_TOKENS
@@ -7253,7 +7503,7 @@ class TestMambaHybridOffloadServing:
         req_status.update_offload_keys()
         scheduler.request_finished(req)
         out2 = SimpleNamespace(num_scheduled_tokens={}, finished_req_ids={"A"})
-        scheduler._build_store_jobs(out2)
+        _store_jobs(scheduler, out2)
         complete_all_jobs()
 
         make_request("A2")
@@ -7318,7 +7568,7 @@ def test_dcp_partial_tail_supports_hash_sized_recurrent_blocks():
     """DCP still needs tails when hashing equals the unsharded Mamba block."""
     scheduler = _make_real_dcp_offload_scheduler(16, hash_size=16)
     assert scheduler.config.supports_partial_tail
-    assert scheduler._partial_tail_block_size == 32
+    assert scheduler.config.partial_tail_block_size == 32
 
 
 @pytest.mark.parametrize("split_handoffs", [False, True])
@@ -7433,7 +7683,7 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
         block_hasher=get_request_block_hasher(4, sha256, lookahead),
     )
     engine.add_request(request)
-    scheduler.manager.prepare_store.side_effect = lambda keys, ctx: (
+    scheduler.manager.prepare_store.side_effect = lambda keys, ctx, trigger: (
         generate_store_output(keys)
     )
     offered = set()
@@ -7457,3 +7707,66 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
         make_offload_key(request.block_hashes[boundary // 4 - 1], g) in offered
         for g in [0, 1]
     )
+
+
+def test_reachable_store_mask_skips_eagle_peek_with_lookahead_hashes():
+    """Lookahead hashes key an EAGLE group's tail, so its EAGLE peek must not
+    shrink the reachable store tail of a sliding-window group."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+        get_offloading_event_group_spec,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
+        GroupOffloadConfig,
+        SchedulerOffloadConfig,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.candidates import (  # noqa: E501
+        _reachable_store_block_mask,
+    )
+
+    swa_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=16,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    group = GroupOffloadConfig(
+        group_idx=0,
+        tokens_per_block=16,
+        tokens_per_chunk=16,
+        hashes_per_chunk=1,
+        kv_event_group_spec=get_offloading_event_group_spec(
+            KVCacheGroupSpec(["layer"], swa_spec)
+        ),
+        sliding_window_size_in_chunks=2,
+        kv_cache_spec=swa_spec,
+        manager_cls=SlidingWindowManager,
+        is_eagle_group=True,
+    )
+    plain_group = group._replace(is_eagle_group=False)
+
+    def mask(group_config, lookahead_tokens):
+        config = SchedulerOffloadConfig(
+            kv_group_configs=(group_config,),
+            blocks_per_chunk=1,
+            tokens_per_hash=4,
+            num_workers=1,
+            offload_prompt_only=False,
+            supports_partial_tail=False,
+            alignment_tokens=128,
+            retention_interval=None,
+            num_hash_lookahead_tokens=lookahead_tokens,
+        )
+        return _reachable_store_block_mask(
+            config=config,
+            group_config=group_config,
+            start_chunk_idx=0,
+            end_chunk_idx=16,
+            final_segment_end_chunk_idx=None,
+            reachable_boundaries=(),
+        )
+
+    # Without lookahead the EAGLE group keeps the extra peek block.
+    assert mask(group, 0) != mask(plain_group, 0)
+    # With lookahead the mask matches the non-EAGLE one.
+    assert mask(group, 8) == mask(plain_group, 8)

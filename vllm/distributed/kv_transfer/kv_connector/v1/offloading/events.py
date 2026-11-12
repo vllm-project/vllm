@@ -58,7 +58,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
         GroupOffloadConfig,
     )
     from vllm.lora.request import LoRARequest
@@ -163,7 +163,7 @@ def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Builds complete stores from request context and expands removals.
 
-    The scheduler calls `record_store` from `_build_store_jobs` and
+    The store trigger handlers call `record_store` and the scheduler calls
     `record_lookup` for allocated primary-tier hits while the `Request` is
     available. Unallocated and missing lookups add no state. Entries remain until
     the final observed residency removal or `reset`.
