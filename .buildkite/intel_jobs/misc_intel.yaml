@@ -192,7 +192,10 @@ steps:
   source_file_dependencies:
     - vllm/
     - vllm/v1/kv_offload/
+    - vllm/v1/simple_kv_offload/
+    - vllm/utils/host_memory.py
     - tests/v1/kv_offload/
+    - tests/v1/simple_kv_offload/
     - tests/v1/kv_connector/unit/test_offloading_connector.py
   commands:
     - >-
@@ -200,6 +203,7 @@ steps:
       'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/kv_offload &&
+      pytest -v -s v1/simple_kv_offload &&
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
 
 - label: ":intel: (BMG) NixlConnector PD accuracy (4 GPUs)"
