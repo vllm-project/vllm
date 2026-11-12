@@ -1129,8 +1129,15 @@ def test_mxfp4_experts_check_accepts_aiter_deployments(
         routing_method=RoutingMethodType.Renormalize,
     )
     mxfp4_backend = Mxfp4MoeBackend[backend]
-    for experts_cls in backend_to_kernel_cls(mxfp4_backend):
-        _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
+    experts_classes = backend_to_kernel_cls(mxfp4_backend)
+    rejections = []
+    for experts_cls in experts_classes:
+        try:
+            _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
+        except ValueError as e:
+            rejections.append(str(e))
+    # A backend may also list EP-only experts (MoRI); one class must accept.
+    assert len(rejections) < len(experts_classes), rejections
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")

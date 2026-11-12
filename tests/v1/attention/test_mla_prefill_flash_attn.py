@@ -28,6 +28,7 @@ def test_upstream_flash_attn_head_major_output_is_made_token_major():
     backend = object.__new__(FlashAttnPrefillBackend)
     backend.requires_v_padding = False
     backend._is_vllm_fa = False
+    backend._is_aiter_triton_fa = False
     backend.flash_attn_varlen_func = None
     q = torch.empty(num_tokens, num_heads, head_size)
     with patch(f"{_FA_MODULE}._FA4_MLA_PREFILL_KERNEL", head_major_kernel):

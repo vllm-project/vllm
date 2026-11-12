@@ -448,7 +448,12 @@ def test_mori_epv1_kernel_choice(monkeypatch, backend, internode, max_tokens, ke
     monkeypatch.setitem(
         sys.modules,
         "vllm.platforms.rocm",
-        SimpleNamespace(on_gfx942=lambda: False, on_gfx950=lambda: True),
+        SimpleNamespace(
+            get_cdna_version=lambda: 4,
+            on_gfx942=lambda: False,
+            on_gfx950=lambda: True,
+            on_gfx1250=lambda: False,
+        ),
     )
     monkeypatch.delenv(
         "VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD", raising=False
