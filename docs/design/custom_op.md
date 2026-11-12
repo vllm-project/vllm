@@ -37,7 +37,7 @@ By default, if `compilation_config.backend == "inductor"` and `compilation_confi
 
 ## How to Customise Your Configuration for CustomOp
 
-vLLM also offers fine-grained control over which custom ops to enable or disable for users, by manually passing a `--compilation-config '{"custom_ops": ["..."]}'` when launching a server.
+vLLM also offers fine-grained control over which custom ops to enable or disable for users, by manually passing a `--compilation-config '{"custom_ops": ["+op_name"]}'` when launching a server.
 
 For example:
 
