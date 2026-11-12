@@ -8,12 +8,11 @@ These tests exercise:
   - The warmup runs through the processor-only cache and clears it afterwards,
     so its dummy inputs never land in the sender cache used by the serving path
   - MM warmup is skipped entirely when mm_processor is None
-  - The multimodal warmup is launched as a task on the single-worker
-    _mm_executor to overlap engine-core init (future lifecycle, join by
-    warmup/reset/shutdown, no double-run). Routing it through the same
-    executor that serves _process_multimodal keeps the numba workqueue
-    parallel region single-threaded, avoiding the "Concurrent access has been
-    detected" fatal abort when a request arrives during warmup.
+  - The multimodal warmup is launched as a task on _mm_executor to overlap
+    engine-core init (future lifecycle, join by warmup/reset/shutdown, no
+    double-run). Routing it through the executor that serves
+    _process_multimodal keeps it ordered with serving requests while that
+    executor is single-worker (processor cache on).
   - That overlap only exists for the multiprocess clients: the in-process
     EngineCore is built synchronously, so InprocClient rejects a renderer
     (assert) and warmup stays inside renderer.warmup().
@@ -217,13 +216,11 @@ class TestWarmupFaultIsolation:
 
 
 class TestBackgroundMmWarmup:
-    # The multimodal warmup is launched as a task on the single-worker
-    # _mm_executor so it overlaps engine-core init (fork) while staying
-    # serialized with the serving path (_process_multimodal runs on the same
-    # executor). warmup()/reset_mm_cache/shutdown join it. This also fixes the
-    # numba workqueue "Concurrent access has been detected" abort: warmup and a
-    # concurrent serving request can no longer both enter the numba parallel
-    # region at once.
+    # The multimodal warmup is launched as a task on _mm_executor so it
+    # overlaps engine-core init (fork); with the processor cache on, that
+    # executor is single-worker, so the warmup stays serialized with the
+    # serving path (_process_multimodal runs on the same executor).
+    # warmup()/reset_mm_cache/shutdown join it.
 
     def _make_bg_renderer(self, mm_limits: dict[str, int]):
         # A renderer mock with a real single-worker executor so submit()

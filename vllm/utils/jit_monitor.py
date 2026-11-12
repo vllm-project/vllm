@@ -25,6 +25,7 @@ import contextlib
 import functools
 import importlib
 import os
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, cast
@@ -43,6 +44,9 @@ _cutedsl_hook_installed: bool = False
 _flydsl_hook_installed: bool = False
 _tilelang_hook_installed: bool = False
 _tilelang_jitimpl_compile_depth: int = 0
+
+# Serializes numba_workqueue_threading_layer() blocks across threads; see there.
+_numba_workqueue_lock = threading.RLock()
 
 
 def is_active() -> bool:
@@ -606,19 +610,26 @@ def numba_workqueue_threading_layer() -> Iterator[None]:
     `@njit(parallel=True)` function must happen under `workqueue` instead.
     The threading layer choice is sticky for the life of the process once
     launched, so restoring the config on exit does not undo the effect.
+
+    The `workqueue` layer is not thread-safe: two Python threads inside a
+    parallel region at once abort the process ("Concurrent access has been
+    detected"). Callers such as multimodal processors may run on a
+    multi-worker executor (`--renderer-num-workers`), so the block holds a
+    process-wide lock and only one thread runs inside it at a time.
     """
     import numba
 
     key = "NUMBA_THREADING_LAYER"
-    previous_env = os.environ.get(key)
-    previous_config = numba.config.THREADING_LAYER
-    os.environ[key] = "workqueue"
-    numba.config.THREADING_LAYER = "workqueue"
-    try:
-        yield
-    finally:
-        if previous_env is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = previous_env
-        numba.config.THREADING_LAYER = previous_config
+    with _numba_workqueue_lock:
+        previous_env = os.environ.get(key)
+        previous_config = numba.config.THREADING_LAYER
+        os.environ[key] = "workqueue"
+        numba.config.THREADING_LAYER = "workqueue"
+        try:
+            yield
+        finally:
+            if previous_env is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous_env
+            numba.config.THREADING_LAYER = previous_config

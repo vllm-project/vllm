@@ -26,8 +26,12 @@ path, since the H2D can outlive the step that issued it (see
 The writer NEVER blocks: no free slot (or an oversized tensor) falls back to
 the default pickle path, so worst case matches today's behavior.
 
-Physical memory: slots are paged in lazily, so an arena on a queue that
-never carries big tensors costs ~0. Creation is guarded by
+Physical memory: on a CUDA-alike platform the first reader that rebuilds a
+tensor registers the whole mapping with `cudaHostRegister` (see
+`_ensure_pinned`), which allocates and page-locks every page. The arena then
+costs `n_slots x slot_bytes` of resident, pinned host memory (2 GiB with the
+defaults), whether or not the slots are used. Without the registration, pages
+are only touched when a slot is written. Creation is guarded by
 `check_shm_free_space` (like `ShmRingBuffer`) so an undersized `/dev/shm`
 fails fast instead of a `SIGBUS` mid-copy.
 """
@@ -50,7 +54,7 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-# Arena sizing — internal constants (kept off the env/CLI surface).
+# Default arena sizing (ParallelConfig.shm_tensor_arena_slots / _slot_mb).
 _ARENA_SLOTS = 8
 _ARENA_SLOT_BYTES = 256 * 1024 * 1024
 # Minimum contiguous CPU-tensor size to divert into the arena; smaller tensors
@@ -99,6 +103,7 @@ class ShmTensorArena:
         self.total_bytes = (slot_bytes + self.metadata_size) * n_slots
         self._next_slot = 0
         self._fallbacks = 0
+        self._oversized = 0
         self._pin_attempted = False
         self._pinned = False
         self._pinned_ptr = 0
@@ -118,6 +123,13 @@ class ShmTensorArena:
             check_shm_free_space(self.total_bytes, allocation_name="ShmTensorArena")
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes
+            )
+            logger.info(
+                "ShmTensorArena: %d slots x %d MiB = %d MiB of /dev/shm; readers "
+                "on CUDA-alike platforms page-lock all of it.",
+                n_slots,
+                slot_bytes >> 20,
+                self.total_bytes >> 20,
             )
             assert self.shared_memory.buf is not None
             with self.shared_memory.buf[self.metadata_offset :] as meta:
@@ -156,6 +168,16 @@ class ShmTensorArena:
         (caller must then fall back to the default pickle path)."""
         nbytes = t.numel() * t.element_size()
         if nbytes > self.slot_bytes:
+            self._oversized += 1
+            if self._oversized == 1 or self._oversized % 100 == 0:
+                logger.info(
+                    "ShmTensorArena: tensor of %d bytes does not fit one slot "
+                    "(%d bytes, --shm-tensor-arena-slot-mb); falling back to the "
+                    "pickle path (%d so far).",
+                    nbytes,
+                    self.slot_bytes,
+                    self._oversized,
+                )
             return None
         try:
             # Computed before claiming a slot: exotic tensors (e.g. conjugate

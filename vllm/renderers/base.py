@@ -77,6 +77,24 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _mm_executor_workers(config: "VllmConfig") -> int:
+    """Number of workers of the multimodal preprocessing executor.
+
+    One while the multimodal processor cache is enabled: the frontend cache's
+    get_and_update must stay ordered with the engine-core cache (#38418).
+    With the cache disabled there is no order to keep, so the executor uses
+    ``renderer_num_workers`` workers and a burst of multimodal requests is
+    preprocessed in parallel instead of one request at a time.
+    """
+    model_config = config.model_config
+    if not model_config.supports_multimodal_inputs:
+        return 1
+    mm_config = model_config.multimodal_config
+    if mm_config is None or mm_config.mm_processor_cache_gb > 0:
+        return 1
+    return max(1, model_config.renderer_num_workers)
+
+
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
@@ -124,18 +142,14 @@ class BaseRenderer(ABC, Generic[_T]):
         self.tokenizer = tokenizer
 
         # Background multimodal warmup task (a future returned by
-        # _mm_executor) so it overlaps engine-core initialization while
-        # staying serialized with the serving path through the same
-        # single-worker executor. None when no background warmup has been
-        # launched (or it has already been joined). Routing the warmup through
-        # _mm_executor (max_workers=1) guarantees it can never run
-        # concurrently with a serving request inside the numba workqueue
-        # parallel region, which would otherwise hit numba's
-        # "Concurrent access has been detected" fatal abort (see
-        # vllm/utils/jit_monitor.py, which forces the workqueue layer).
-        # Joined by the first of reset_mm_cache / warmup / shutdown so the
-        # mm_processor_cache is also never touched concurrently by the warmup
-        # and the serving path.
+        # _mm_executor) so it overlaps engine-core initialization. None when
+        # no background warmup has been launched (or it has already been
+        # joined). Joined by the first of reset_mm_cache / warmup / shutdown;
+        # while the processor cache is on, _mm_executor is single-worker, so
+        # the warmup also never touches the mm_processor_cache concurrently
+        # with the serving path. Numba parallel kernels (e.g. the fused Kimi
+        # processor) are serialized by numba_workqueue_threading_layer, so
+        # several MM workers are safe for them too.
         self._mm_warmup_future: Future[None] | None = None
         # Whether warmup_mm has already run. Survives _join_mm_warmup (which
         # clears the thread pointer), so warmup() can tell that the background
@@ -150,9 +164,17 @@ class BaseRenderer(ABC, Generic[_T]):
         self._executor = _SwappableExecutor(max_workers=pool_workers)
         self._resources.callback(self._executor.shutdown, wait=False)
 
-        # Separate single-worker executor so tokenization never queues behind
-        # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
-        self._mm_executor = ThreadPoolExecutor(max_workers=1)
+        # Separate executor so tokenization never queues behind MM
+        # preprocessing. Single-worker while the multimodal processor cache is
+        # on (#38418: P0/P1 order); see _mm_executor_workers.
+        mm_workers = _mm_executor_workers(config)
+        if mm_workers > 1:
+            logger.info_once(
+                "Multimodal processor cache is disabled: multimodal "
+                "preprocessing runs on %d threads (renderer_num_workers).",
+                mm_workers,
+            )
+        self._mm_executor = ThreadPoolExecutor(max_workers=mm_workers)
         self._resources.callback(self._mm_executor.shutdown, wait=False)
 
         # Offload tokenization to the thread pool. The sync
@@ -338,29 +360,23 @@ class BaseRenderer(ABC, Generic[_T]):
             self._mm_warmup_done = True
 
     def start_mm_warmup_in_background(self) -> None:
-        # Launch the multimodal warmup as a task on the single-worker
-        # _mm_executor so it overlaps with engine-core initialization
-        # (model loading) while staying serialized with the serving path.
+        # Launch the multimodal warmup as a task on _mm_executor so it
+        # overlaps with engine-core initialization (model loading) in the
+        # main thread.
         #
-        # Why the same executor as serving (not a separate Thread):
-        # _process_multimodal runs on _mm_executor (max_workers=1) and
-        # enters the numba workqueue parallel region (e.g. Kimi K2.5 vision
-        # preprocessing via kimi_k25_vision_fused). A separate warmup Thread
-        # would run concurrently with that single serving worker, so both
-        # threads would enter the numba workqueue parallel region at the same
-        # time and trip numba's "Concurrent access has been detected" ->
-        # "Fatal Python error: Aborted" (see vllm/utils/jit_monitor.py, which
-        # forces the non-threadsafe workqueue layer). Submitting the warmup to
-        # the same single-worker executor makes warmup and serving
-        # physically incapable of overlapping on the numba threading layer,
-        # while still overlapping at the process level with the (forked)
-        # engine-core init in the main thread.
+        # Why the same executor as serving (not a separate Thread): while the
+        # processor cache is on, _mm_executor is single-worker, so the warmup
+        # and serving requests run one at a time. The frontend
+        # mm_processor_cache is not designed for concurrent access (its
+        # get_and_update must stay ordered with the engine-core cache).
+        # With the cache off, _mm_executor may have several workers; there is
+        # no cache to protect, and numba parallel kernels (e.g. the fused Kimi
+        # processor, which would otherwise abort with numba's "Concurrent
+        # access has been detected") are serialized by
+        # numba_workqueue_threading_layer in vllm/utils/jit_monitor.py.
         #
         # The warmup task is joined by the first of: reset_mm_cache, warmup, or
-        # shutdown. This also guarantees the frontend mm_processor_cache —
-        # which is not designed for concurrent access (its get_and_update must
-        # stay ordered with the engine-core cache) — is never touched
-        # concurrently by the warmup and the serving path.
+        # shutdown.
         if self.mm_processor is None:
             return  # text-only model: nothing to warm up
         if self._mm_warmup_future is not None:
