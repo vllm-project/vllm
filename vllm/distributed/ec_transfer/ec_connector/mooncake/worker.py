@@ -944,10 +944,10 @@ class ECMooncakeWorker:
     def reset(self) -> None:
         """Evict published ConsumerMemoryPool residents after a cache reset.
 
-        ``reset_encoder_cache`` already clears the worker encoder cache.
+        `reset_encoder_cache` already clears the worker encoder cache.
         Published residents would otherwise stay pinned after the
-        freed-hash list is cleared, so later ``acquire_cached`` /
-        ``take_resident`` can return a stale tensor and a full pool
+        freed-hash list is cleared, so later `acquire_cached` /
+        `take_resident` can return a stale tensor and a full pool
         cannot allocate a new destination. Residents with active
         leases are left in place. In-flight WRITING reservations are
         not cancelled. Safe to call before the receive slab is prepared.

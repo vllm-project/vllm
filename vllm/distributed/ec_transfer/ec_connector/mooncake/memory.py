@@ -209,8 +209,8 @@ class ResidentPool(Generic[_T]):
     def evict_unleased(self, key: str, evict: Callable[[str, _T], bool]) -> bool:
         """Remove one resident that has no active leases.
 
-        Unlike ``retire``, this drops the entry so later lookups miss.
-        Entries with leases stay in the pool. ``evict`` decides whether
+        Unlike `retire`, this drops the entry so later lookups miss.
+        Entries with leases stay in the pool. `evict` decides whether
         to accept the value and is responsible for releasing it.
         """
         entry = self._entries.get(key)
@@ -488,8 +488,8 @@ class ConsumerMemoryPool:
         """Evict published residents that have no in-flight leases.
 
         After the local Encoder Cache is cleared, leftover residents
-        must not stay discoverable via ``acquire_cached`` /
-        ``take_resident``, and must not strand allocator capacity.
+        must not stay discoverable via `acquire_cached` /
+        `take_resident`, and must not strand allocator capacity.
         Entries with active leases are left in place. This is a no-op
         before the receive slab is prepared.
         """
