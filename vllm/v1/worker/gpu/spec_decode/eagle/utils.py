@@ -69,6 +69,9 @@ def share_target_lm_head(
     if draft_lm_head is not None:
         del draft_model.lm_head
     draft_model.lm_head = head
+    prepare_head = getattr(draft_model, "prepare_hierarchical_lm_head", None)
+    if prepare_head is not None:
+        prepare_head()
     return head
 
 

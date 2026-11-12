@@ -38,6 +38,11 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 120
   source_file_dependencies:
+  - vllm/model_executor/layers/hierarchical_lm_head.py
+  - vllm/model_executor/models/gemma4_mtp.py
+  - vllm/model_executor/models/nemotron_h_mtp.py
+  - tests/kernels/test_hierarchical_lm_head.py
+  - vllm/v1/worker/gpu/spec_decode/eagle/utils.py
   - csrc/
   - tests/kernels/core
   - vllm/kernels/triton/
@@ -51,6 +56,7 @@ steps:
       --ignore=kernels/core/test_minimax_reduce_rms.py
       kernels/test_concat_mla_q.py
       kernels/test_fused_qk_norm_rope_gate.py
+      kernels/test_hierarchical_lm_head.py
   mirror:
     amd:
       label: ":amd: (MI300) Core Operation Kernels"

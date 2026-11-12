@@ -12,6 +12,12 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD: bool = False
+    VLLM_NEMOTRON_MTP_LM_HEAD_NUM_CLUSTERS: int = 4096
+    VLLM_NEMOTRON_MTP_LM_HEAD_CLUSTER_TOP_K: int = 32
+    VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD_PATH: str = ""
+    VLLM_NEMOTRON_MTP_SPARSE_HEAD_BACKEND: str = "compiled"
+    VLLM_NEMOTRON_MTP_MOE_ROUTING: str = "unsorted"
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
@@ -661,6 +667,27 @@ removed_environment_variables: dict[str, str] = {
 }
 
 environment_variables: dict[str, Callable[[], Any]] = {
+    # Experimental single-GPU Nemotron MTP hierarchical head.
+    "VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD", "0"))
+    ),
+    "VLLM_NEMOTRON_MTP_LM_HEAD_NUM_CLUSTERS": lambda: int(
+        os.getenv("VLLM_NEMOTRON_MTP_LM_HEAD_NUM_CLUSTERS", "4096")
+    ),
+    "VLLM_NEMOTRON_MTP_LM_HEAD_CLUSTER_TOP_K": lambda: int(
+        os.getenv("VLLM_NEMOTRON_MTP_LM_HEAD_CLUSTER_TOP_K", "32")
+    ),
+    "VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD_PATH": lambda: os.getenv(
+        "VLLM_NEMOTRON_MTP_CLUSTERED_LM_HEAD_PATH", ""
+    ),
+    # Scoring backend for the hierarchical head: compiled gather/reduce or MoE GEMM.
+    "VLLM_NEMOTRON_MTP_SPARSE_HEAD_BACKEND": env_with_choices(
+        "VLLM_NEMOTRON_MTP_SPARSE_HEAD_BACKEND", "compiled", ["compiled", "moe"]
+    ),
+    # MoE token/cluster assignment: auto, one block per route, or forced grouping.
+    "VLLM_NEMOTRON_MTP_MOE_ROUTING": env_with_choices(
+        "VLLM_NEMOTRON_MTP_MOE_ROUTING", "unsorted", ["auto", "unsorted", "sorted"]
+    ),
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
