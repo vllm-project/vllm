@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Disaggregated multimodal serving: render → generate round-trip.
+r"""Disaggregated multimodal serving: render → generate round-trip.
 
 Demonstrates the two-phase disaggregated flow:
   1. /v1/chat/completions/render  – preprocesses a multimodal chat request
@@ -8,7 +8,7 @@ Demonstrates the two-phase disaggregated flow:
   2. /inference/v1/generate       – runs inference on the preprocessed tokens.
 
 The render response is passed *directly* to generate with only
-``sampling_params`` added, showing that the two endpoints compose with
+`sampling_params` added, showing that the two endpoints compose with
 zero client-side transformation.
 
 Launch the server first:

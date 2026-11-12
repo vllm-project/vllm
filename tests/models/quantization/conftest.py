@@ -7,7 +7,7 @@ unquantized run of it. Computing that reference once per session avoids
 booting an identical engine for every quantization scheme under test.
 
 Only the outputs are cached; each engine is still torn down as usual, so
-tests keep the isolation ``VllmRunner.__exit__`` provides.
+tests keep the isolation `VllmRunner.__exit__` provides.
 """
 
 import pytest

@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod convert;
+mod features;
 mod types;
 mod validate;
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -14,26 +14,24 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use base64::Engine as _;
 use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
-use tracing::{error, info, trace};
+use tracing::{error, info};
 use tracing_futures::Instrument as _;
-use vllm_engine_core_client::protocol::dtype::Endianness;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
-use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
+    AuxOutputRows, CollectedGenerateOutput, FinishReason, GenerateOutput,
+    GenerateOutputStreamExt as _, TokenUsage, WeightVersions,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
+pub(crate) use self::features::{MmPayload, MultiModalFeatures};
 use self::types::{
-    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
-    GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
-    MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
+    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob,
+    GenerateOutputMode, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
+    GenerateStreamResponse, MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
@@ -45,9 +43,10 @@ use crate::routes::openai::utils::metrics::{
 };
 use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::output_log::{LoggedOutput, log_output};
+use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, sse_response};
+use crate::utils::npy_base64;
+use crate::utils::{openai_sse_stream, resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one token-in/token-out request and proxy it into the shared
 /// `vllm-text` stack.
@@ -59,6 +58,13 @@ pub async fn generate(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
+    if body.content_parts.is_some() && body.features.is_some() {
+        return ApiError::invalid_request(
+            "content_parts and features are mutually exclusive.",
+            Some("features"),
+        )
+        .into_response();
+    }
     let mm_features = if let Some(parts) = body.content_parts.take() {
         match state
             .chat
@@ -71,6 +77,28 @@ pub async fn generate(
                 return ApiError::invalid_request(
                     format!("failed to resolve content_parts: {}", e.as_report()),
                     Some("content_parts"),
+                )
+                .into_response();
+            }
+        }
+    } else if let Some(features) = body.features.take() {
+        let features = match features.into_prepared() {
+            Ok(features) => features,
+            Err(error) => return error.into_response(),
+        };
+        match state
+            .chat
+            .prepare_media(
+                vllm_chat::multimodal::MultimodalInput::Preprocessed(features),
+                &mut body.token_ids,
+            )
+            .await
+        {
+            Ok(features) => features,
+            Err(e) => {
+                return ApiError::invalid_request(
+                    format!("invalid features: {}", e.as_report()),
+                    Some("features"),
                 )
                 .into_response();
             }
@@ -97,6 +125,7 @@ pub async fn generate(
 
     let api_server_options = state.api_server_options;
     let stream = prepared.stream;
+    let created = unix_timestamp();
     let raw_stream = match state
         .chat
         .text()
@@ -119,7 +148,7 @@ pub async fn generate(
             prepared.options,
             mm_placeholders,
         );
-        let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
+        let sse_stream = openai_sse_stream(chunk_stream).instrument(request_span);
 
         return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
     }
@@ -140,6 +169,8 @@ pub async fn generate(
         collect_generate(
             collected,
             prepared.request_id,
+            prepared.response_model,
+            created,
             api_server_options,
             prepared.options,
             mm_placeholders,
@@ -177,10 +208,14 @@ async fn generate_chunk_stream(
     let mut prompt_token_ids = None;
     let mut usage = TokenUsage::default();
     let mut spec_decode_metrics = None;
+    let mut weight_versions = WeightVersions::default();
+    let mut routed_experts = AuxOutputRows::default();
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
+                weight_versions.append(output.weight_versions);
+                routed_experts.append(output.routed_experts);
                 if let Some(metrics) = output.spec_decode_metrics {
                     spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(*metrics));
                 }
@@ -232,25 +267,37 @@ async fn generate_chunk_stream(
 
                 let stop_reason =
                     finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
+                // Like Python, the spans and the routed-expert rows cover the
+                // whole request on the final chunk only.
+                let weight_versions = if finish_reason.is_some() {
+                    std::mem::take(&mut weight_versions).spans()
+                } else {
+                    None
+                };
+                let routed_experts = if finish_reason.is_some() {
+                    std::mem::take(&mut routed_experts)
+                        .concat()
+                        .map_err(|error| server_error!("{}", error.to_report_string()))?
+                } else {
+                    None
+                };
                 let prompt_token_ids = prompt_token_ids.take();
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
+                    output_mode: GenerateOutputMode::Tokens,
                     choices: vec![GenerateResponseStreamChoice {
                         index: 0,
                         logprobs,
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         stop_reason,
                         token_ids,
-                        routed_experts: output
-                            .routed_experts
-                            .as_deref()
-                            .map(npy_base64)
-                            .transpose()?,
+                        routed_experts: routed_experts.as_ref().map(npy_base64).transpose()?,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
-                        weight_versions: output.weight_versions,
+                        weight_versions,
                     }],
-                    usage: include_continuous_usage
-                        .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+                    usage: include_continuous_usage.then(|| {
+                        Usage::from_token_usage(usage, enable_prompt_tokens_details, None)
+                    }),
                     mm_placeholders: prompt_token_ids.as_ref().and_then(|_| mm_placeholders.take()),
                     prompt_token_ids,
                     metrics: None,
@@ -270,8 +317,13 @@ async fn generate_chunk_stream(
     if include_usage {
         y.yield_ok(GenerateStreamResponse {
             request_id,
+            output_mode: GenerateOutputMode::Tokens,
             choices: Vec::new(),
-            usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+            usage: Some(Usage::from_token_usage(
+                usage,
+                enable_prompt_tokens_details,
+                None,
+            )),
             prompt_token_ids: None,
             mm_placeholders: None,
             metrics: spec_decode_metrics.map(|speculative_decoding| PerRequestMetrics {
@@ -289,13 +341,16 @@ async fn generate_chunk_stream(
 fn collect_generate(
     collected: CollectedGenerateOutput,
     request_id: String,
+    response_model: String,
+    created: u64,
     ApiServerOptions {
         enable_log_requests,
+        enable_prompt_tokens_details,
         log_outputs,
         ..
     }: ApiServerOptions,
     ResponseOptions {
-        // Ignored: non-streaming raw generate responses do not include usage.
+        // Ignored: like Python, non-streaming responses always include usage.
         include_usage: _,
         // Ignored: continuous usage is a streaming-only option.
         include_continuous_usage: _,
@@ -352,7 +407,7 @@ fn collect_generate(
     }
     // Like Python, raw generate logs only the output token IDs.
     if log_outputs.logs_complete() && !collected.token_ids.is_empty() {
-        log_output(
+        log_outputs.log(
             LoggedOutput::Response,
             "",
             Some(&collected.token_ids),
@@ -362,6 +417,10 @@ fn collect_generate(
 
     Ok(GenerateResponse {
         request_id,
+        model: response_model,
+        created,
+        usage: Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None),
+        output_mode: GenerateOutputMode::Tokens,
         choices: vec![GenerateResponseChoice {
             index: 0,
             logprobs,
@@ -400,6 +459,9 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
             PlaceholderRangeInfo {
                 offset: feature.mm_position.offset,
                 length: feature.mm_position.length,
+                is_embed: (feature.mm_position.is_embed.as_ref())
+                    .and_then(|mask| mask.data.as_raw_view())
+                    .map(|bytes| bytes.iter().map(|&b| b != 0).collect()),
             },
         );
     }
@@ -496,84 +558,8 @@ fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, Generate
         .collect()
 }
 
-/// Encode an ndarray as Python `numpy2base64` (`np.save`, then base64) does.
-fn npy_base64(array: &WireNdArray) -> Result<String, ApiError> {
-    let Some(data) = array.data.as_raw_view() else {
-        bail_server_error!("ndarray data was not resolved");
-    };
-    // NumPy writes `|` for single-byte types; vLLM hosts are little-endian.
-    let byte_order = match array.dtype.endianness {
-        _ if array.dtype.scalar.element_size() == 1 => '|',
-        Endianness::Big => '>',
-        Endianness::Little | Endianness::Native => '<',
-    };
-    let code = &array.dtype.to_string()[1..];
-    let dims: Vec<_> = array.shape.iter().map(ToString::to_string).collect();
-    let shape = match dims.as_slice() {
-        [dim] => format!("({dim},)"),
-        dims => format!("({})", dims.join(", ")),
-    };
-    let mut header =
-        format!("{{'descr': '{byte_order}{code}', 'fortran_order': False, 'shape': {shape}, }}");
-    // NumPy reserves room to grow the first axis in place.
-    if let Some(first) = dims.first() {
-        header.push_str(&" ".repeat(21 - first.len()));
-    }
-    header.push_str(&" ".repeat(64 - (11 + header.len()) % 64));
-    header.push('\n');
-
-    let mut npy = Vec::with_capacity(10 + header.len() + data.len());
-    npy.extend_from_slice(b"\x93NUMPY\x01\x00");
-    npy.extend_from_slice(&(header.len() as u16).to_le_bytes());
-    npy.extend_from_slice(header.as_bytes());
-    npy.extend_from_slice(data);
-    Ok(base64::engine::general_purpose::STANDARD.encode(npy))
-}
-
 fn format_token_id(token_id: u32) -> String {
     format!("token_id:{token_id}")
-}
-
-/// Convert one raw-generate chunk stream into SSE events.
-#[try_stream]
-async fn generate_sse_stream(
-    stream: impl Stream<Item = Result<GenerateStreamResponse, ApiError>>,
-    mut y: TryYielder<Event, Infallible>,
-) -> Result<(), Infallible> {
-    pin_mut!(stream);
-
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
-            Err(error) => {
-                y.yield_ok(to_error_sse_event(&error)).await;
-                break;
-            }
-        }
-    }
-
-    y.yield_ok(done_sse_event()).await;
-    Ok(())
-}
-
-fn to_sse_event(chunk: &GenerateStreamResponse) -> Event {
-    trace!(?chunk, "generate emitting chunk");
-    Event::default()
-        .json_data(chunk)
-        .expect("generate chunk must serialize to JSON")
-}
-
-fn to_error_sse_event(error: &ApiError) -> Event {
-    let response = error.to_error_response();
-    trace!(?response, "generate emitting error");
-    Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
-}
-
-fn done_sse_event() -> Event {
-    trace!("generate emitting done");
-    Event::default().data("[DONE]")
 }
 
 #[cfg(test)]
@@ -585,7 +571,8 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-    use vllm_llm::{GeneratePromptInfo, PromptCacheUsage};
+    use vllm_engine_core_client::protocol::tensor::{WireNdArray, WireTensor};
+    use vllm_llm::{GeneratePromptInfo, PromptCacheUsage, WeightVersionSpan};
 
     use super::*;
 
@@ -684,8 +671,8 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
-                weight_versions: None,
-                routed_experts: None,
+                weight_versions: Default::default(),
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
@@ -706,8 +693,8 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
-                weight_versions: None,
-                routed_experts: None,
+                weight_versions: WeightVersions::new(None, 1),
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
         ]);
@@ -717,6 +704,7 @@ mod tests {
             vec![PlaceholderRangeInfo {
                 offset: 1,
                 length: 4,
+                is_embed: None,
             }],
         )]);
         let chunks: Vec<_> = generate_chunk_stream(
@@ -778,6 +766,7 @@ mod tests {
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
     ) -> GenerateOutput {
+        let weight_versions = WeightVersions::new(None, token_ids.len());
         GenerateOutput {
             request_id: String::new(),
             prompt_info: prompt_token_ids.map(|ids| {
@@ -795,8 +784,8 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
-            weight_versions: None,
-            routed_experts: None,
+            weight_versions,
+            routed_experts: Default::default(),
             timestamps: Default::default(),
         }
     }
@@ -834,6 +823,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_chunk_stream_returns_weight_versions_on_final_chunk_only() {
+        let span = |version: &str, start, end| WeightVersionSpan {
+            version: version.into(),
+            start,
+            end,
+        };
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.weight_versions = WeightVersions::new(Some("v1".into()), 1);
+        let mut last = stream_output(None, vec![44], Some(FinishReason::Length));
+        last.weight_versions = WeightVersions::new(Some("v2".into()), 1);
+
+        let chunks = collect_chunks(vec![first, last], false, None).await;
+
+        let weight_versions: Vec<_> =
+            chunks.iter().map(|chunk| chunk.choices[0].weight_versions.clone()).collect();
+        assert_eq!(
+            weight_versions,
+            [None, Some(vec![span("v1", 0, 1), span("v2", 1, 2)])]
+        );
+    }
+
+    #[tokio::test]
     async fn generate_chunk_stream_omits_prompt_metadata_by_default() {
         let chunks = collect_chunks(
             vec![
@@ -846,6 +857,7 @@ mod tests {
                 vec![PlaceholderRangeInfo {
                     offset: 1,
                     length: 4,
+                    is_embed: None,
                 }],
             )])),
         )
@@ -979,6 +991,8 @@ mod tests {
         let response = collect_generate(
             output,
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             Some(MultiModalPlaceholders::from([(
@@ -986,6 +1000,7 @@ mod tests {
                 vec![PlaceholderRangeInfo {
                     offset: 0,
                     length: 1,
+                    is_embed: None,
                 }],
             )])),
         )
@@ -996,64 +1011,28 @@ mod tests {
         assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
     }
 
-    #[test]
-    fn routed_experts_match_numpy2base64() {
-        // Expected values are numpy2base64 of the same arrays.
-        let cases = [
-            (
-                // np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
-                WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect()),
-                "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDMsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAQIDBAUGBwgJCgs=",
-            ),
-            (
-                // np.arange(6, dtype="<i4").reshape(3, 1, 2)
-                WireNdArray::from_i32(vec![3, 1, 2], (0..6).collect()).unwrap(),
-                "k05VTVBZAQB2AHsnZGVzY3InOiAnPGk0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDMsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAQAAAAIAAAADAAAABAAAAAUAAAA=",
-            ),
-            (
-                // np.arange(3, dtype="<u2")
-                WireNdArray::from_raw(TensorDtype::U16, vec![3], vec![0, 0, 1, 0, 2, 0]),
-                "k05VTVBZAQB2AHsnZGVzY3InOiAnPHUyJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDMsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAEAAgA=",
-            ),
-            (
-                // np.zeros((0, 2, 2), dtype=np.uint8)
-                WireNdArray::from_raw(TensorDtype::U8, vec![0, 2, 2], Vec::new()),
-                "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDAsIDIsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo=",
-            ),
-        ];
-        for (array, expected) in cases {
-            assert_eq!(npy_base64(&array).unwrap(), expected, "{array:?}");
-        }
-    }
-
     #[tokio::test]
     async fn generate_chunk_stream_returns_routed_experts_on_final_chunk() {
-        let rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
+        // Each output carries its own rows; the final chunk joins them.
+        let rows = |start: u8| {
+            AuxOutputRows::from(WireNdArray::from_raw(
+                TensorDtype::U8,
+                vec![1, 3, 2],
+                (start..start + 6).collect(),
+            ))
+        };
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.routed_experts = rows(0);
         let mut terminal = stream_output(None, vec![44], Some(FinishReason::Length));
-        terminal.routed_experts = Some(Box::new(rows.clone()));
+        terminal.routed_experts = rows(6);
 
-        let chunks = collect_chunks(
-            vec![stream_output(Some(&[11]), vec![33], None), terminal],
-            false,
-            None,
-        )
-        .await;
+        let chunks = collect_chunks(vec![first, terminal], false, None).await;
 
         assert_eq!(chunks[0].choices[0].routed_experts, None);
+        let all_rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
         assert_eq!(
             chunks[1].choices[0].routed_experts,
-            Some(npy_base64(&rows).unwrap())
-        );
-    }
-
-    #[test]
-    fn prompt_token_id_logprobs_match_numpy2base64() {
-        let scores =
-            WireNdArray::from_f32(vec![2, 3], vec![-0.5, -1.5, -2.5, -3.5, -4.5, -5.5]).unwrap();
-        // numpy2base64(np.array([[-0.5, -1.5, -2.5], [-3.5, -4.5, -5.5]], np.float32))
-        assert_eq!(
-            npy_base64(&scores).unwrap(),
-            "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDMpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAC/AADAvwAAIMAAAGDAAACQwAAAsMA="
+            Some(npy_base64(&all_rows).unwrap())
         );
     }
 
@@ -1085,6 +1064,8 @@ mod tests {
         let response = collect_generate(
             output,
             "raw-metrics".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             None,
@@ -1137,10 +1118,12 @@ mod tests {
                 PlaceholderRangeInfo {
                     offset: 1,
                     length: 5,
+                    is_embed: None,
                 },
                 PlaceholderRangeInfo {
                     offset: 8,
                     length: 2,
+                    is_embed: None,
                 },
             ]
         );
@@ -1149,8 +1132,29 @@ mod tests {
             vec![PlaceholderRangeInfo {
                 offset: 4,
                 length: 3,
+                is_embed: None,
             }]
         );
+    }
+
+    #[test]
+    fn extract_mm_placeholders_keeps_is_embed() {
+        let mask = vec![false, true, true, false];
+        let features = vec![MmFeatureSpec {
+            data: None,
+            modality: MmModality::Image,
+            identifier: "image-0".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 1,
+                length: 4,
+                is_embed: Some(WireTensor::from_bool(vec![4], mask.clone()).unwrap()),
+            },
+            mm_hash: None,
+        }];
+
+        let placeholders = extract_mm_placeholders(Some(&features)).expect("metadata");
+
+        assert_eq!(placeholders["image"][0].is_embed, Some(mask));
     }
 
     #[test]
@@ -1179,6 +1183,8 @@ mod tests {
         let response = collect_generate(
             output,
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 return_token_ids: true,
@@ -1217,6 +1223,8 @@ mod tests {
         let response = collect_generate(
             output_without_payload(vec![9707]),
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_prompt_logprobs: true,
@@ -1232,6 +1240,8 @@ mod tests {
         collect_generate(
             output_without_payload(vec![9707, 11]),
             "raw-2".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_prompt_logprobs: true,
@@ -1309,6 +1319,8 @@ mod tests {
         let response = collect_generate(
             output,
             "raw-stop".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             None,
@@ -1320,5 +1332,55 @@ mod tests {
             response.choices[0].stop_reason,
             Some(StopReason::TokenId(7))
         );
+    }
+
+    /// Like Python, the non-streaming envelope reports cached prompt tokens
+    /// under `--enable-prompt-tokens-details`, which is what disaggregated
+    /// serving reads from it.
+    #[test]
+    fn collect_generate_reports_cached_prompt_tokens_in_usage() {
+        let output = CollectedGenerateOutput {
+            request_id: "raw-usage".to_string(),
+            prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
+            token_ids: vec![30],
+            logprobs: None,
+            finish_reason: FinishReason::stop_eos(),
+            usage: TokenUsage {
+                prompt_token_count: 4,
+                output_token_count: 1,
+                prompt_cache_usage: PromptCacheUsage {
+                    cached_token_count: 3,
+                    cache_creation_token_count: 1,
+                },
+            },
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            prompt_token_ids: vec![10, 20, 30, 40],
+            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+            routed_experts: None,
+        };
+
+        let response = collect_generate(
+            output,
+            "raw-usage".to_string(),
+            "model".to_string(),
+            0,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
+            ResponseOptions::default(),
+            None,
+        )
+        .expect("response");
+
+        let usage = serde_json::to_value(&response.usage).expect("usage serializes");
+        assert_eq!(usage["prompt_tokens"], 4);
+        assert_eq!(usage["completion_tokens"], 1);
+        assert_eq!(usage["total_tokens"], 5);
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 3);
     }
 }

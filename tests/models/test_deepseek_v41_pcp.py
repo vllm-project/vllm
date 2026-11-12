@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -8,11 +9,94 @@ import torch
 
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.deepseek_v41 import attention as attention_module
+from vllm.models.deepseek_v41.compressor import CompressorStateCache
 from vllm.models.deepseek_v41.decoder_replay_layers import (
     DecoderReplayLayers,
     ReplayBatch,
 )
 from vllm.models.deepseek_v41.nvidia import model as model_module
+from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize(
+    "cache_cls",
+    [
+        attention_module.DeepseekV4Attention,
+        attention_module.DeepseekV4IndexerCache,
+        CompressorStateCache,
+    ],
+)
+def test_cache_specs_declare_tp_replication(cache_cls):
+    cache_config = SimpleNamespace(block_size=64, cache_dtype="fp8_ds_mla")
+    state = SimpleNamespace(
+        cache_config=cache_config,
+        is_kv_source=True,
+        kv_cache_dtype="fp8_ds_mla",
+        head_dim=512,
+        kv_cache_torch_dtype=torch.uint8,
+        dtype=torch.uint8,
+        compress_ratio=2,
+        kv_page_alignment=576,
+        compressed_bytes_per_token=584,
+        sparse_logits=True,
+        rocm_mxfp4=False,
+        block_size=8,
+        state_dim=1024,
+    )
+    if cache_cls is CompressorStateCache:
+        state.dtype = torch.float32
+    spec = cache_cls.get_kv_cache_spec(
+        state, SimpleNamespace(cache_config=cache_config)
+    )
+    assert spec.max_tp_shards == 1
+
+
+@pytest.mark.distributed(num_gpus=8)
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or current_platform.device_count() < 8,
+    reason="Requires eight CUDA GPUs",
+)
+@pytest.mark.parametrize("pp_size,dp_size", [(2, 1), (1, 2)], ids=["pp-pcp", "dp-pcp"])
+def test_pcp_generates_with_pipeline_or_data_parallelism(pp_size, dp_size):
+    """PCP composes with PP or DP through real-weight serving and generation."""
+    from tests.utils import RemoteOpenAIServer
+
+    model = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V4.1-Flash")
+    args = f"""
+        --language-model-only --tokenizer-mode deepseek_v41
+        --tensor-parallel-size 2 --prefill-context-parallel-size 2
+        --pipeline-parallel-size {pp_size} --data-parallel-size {dp_size}
+        --enable-expert-parallel --all2all-backend allgather_reducescatter
+        --distributed-executor-backend mp --attention-backend FLASHMLA_SPARSE_DSV41
+        --moe-backend marlin --engram-config {{"cpu_offload":true}}
+        --kv-cache-dtype fp8_ds_mla --block-size 64
+        --max-model-len 4096 --max-num-batched-tokens 512 --max-num-seqs 8
+        --enable-chunked-prefill --no-enable-prefix-caching --no-swa-bounded-replay
+        --enforce-eager --no-async-scheduling
+    """.split()
+    env: dict[str, str] = {}
+    if pp_size > 1:
+        env["VLLM_PP_LAYER_PARTITION"] = "14,26"
+    with (
+        RemoteOpenAIServer(model, args, env_dict=env, max_wait_seconds=1200) as server,
+        server.get_client(timeout=300) as client,
+    ):
+        for rank in range(dp_size):
+            response = client.completions.create(
+                model=model,
+                prompt="A lighthouse guides ships through the night. " * 129,
+                temperature=0,
+                max_tokens=8,
+                extra_body={"ignore_eos": True},
+                extra_headers=(
+                    {"X-data-parallel-rank": str(rank)} if dp_size > 1 else None
+                ),
+            )
+            assert len(response.choices) == 1
+            assert response.choices[0].finish_reason == "length"
+            assert response.choices[0].text
+            assert response.usage is not None
+            assert response.usage.completion_tokens == 8
 
 
 @pytest.mark.parametrize("pcp_size", [1, 2])
