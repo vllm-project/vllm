@@ -267,7 +267,9 @@ class FreeKVCacheBlockQueue:
        same sequence), the one with more hash tokens (the tail of a block
        chain) is at the front.
     Note that we maintain this order by reversing the block order when free
-    blocks of a request. This operation is outside of this class.
+    blocks of a request. Blocks to reuse first, such as those without a hash,
+    are prepended instead. Both operations are outside of this class, in
+    `BlockPool.free_blocks`.
 
     Args:
         blocks: A list of KVCacheBlock objects.
