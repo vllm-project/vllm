@@ -164,6 +164,7 @@ def test_decode_passes_shuffle_views_to_gluon(monkeypatch, kv_row_size):
     monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", True)
     impl = object.__new__(AiterFlashAttentionGluonImpl)
     impl.use_gluon_decode, impl.scale = True, 256**-0.5
+    impl._output_gate = None
     impl.num_kv_heads, impl.head_size = 4, 256
     kv_cache = torch.zeros(3, 2, 16, 4 * 256, dtype=torch.bfloat16)
     key_cache, value_cache = impl._split_kv_cache(kv_cache)
