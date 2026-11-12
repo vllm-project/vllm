@@ -114,6 +114,7 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
             (NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu", pin_memory=True
         )
     }
+    # XPU lowest priority is unusable: https://github.com/pytorch/pytorch/pull/204552
     low_pri = 0 if current_platform.is_xpu() else torch.cuda.Stream.priority_range()[0]
     backend = DmaCopyBackend()
     backend.init(

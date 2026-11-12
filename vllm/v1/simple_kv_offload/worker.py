@@ -177,7 +177,8 @@ class SimpleCPUOffloadWorker:
         )
 
         # Use lowest priority so KV cache I/O yields to compute streams.
-        # XPU reports a lowest priority that streams cannot wait on events with.
+        # XPU's lowest priority streams cannot wait on events, see
+        # https://github.com/pytorch/pytorch/pull/204552
         low_pri = (
             0 if current_platform.is_xpu() else torch.cuda.Stream.priority_range()[0]
         )
