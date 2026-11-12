@@ -7,6 +7,7 @@ Test organization:
     - TestFindBudgetGraph      — greedy budget selection logic
     - TestGetCumulativeStats   — hit/miss rate statistics
     - TestGetInputModality     — modality routing from mm_kwargs keys
+    - TestSupportsBatch        — precomputed embeddings skip the graph
     - TestDefaultBudgetTable   — subdivided default budgets, user overrides
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters
@@ -1067,6 +1068,38 @@ class TestGetInputModality:
             "video_grid_thw": [[2, 4, 4]],
         }
         assert model.get_input_modality(mm_kwargs) == "video"
+
+
+# ---------------------------------------------------------------------------
+# No-GPU tests — precomputed embeddings never take the graph path
+# ---------------------------------------------------------------------------
+
+
+class TestSupportsBatch:
+    """supports_batch keeps graph replay to batches that run the encoder."""
+
+    @pytest.mark.parametrize(
+        "modality,keys,expected",
+        [
+            ("image", ["pixel_values", "image_grid_thw"], True),
+            ("image", ["pixel_values_flat", "image_num_patches"], True),
+            ("video", ["pixel_values_videos", "video_grid_thw"], True),
+            # Phi-4MM's pixel input: match the exact key, not a suffix.
+            ("image", ["input_image_embeds", "image_sizes"], True),
+            ("image", ["image_embeds"], False),
+            ("video", ["video_embeds"], False),
+            ("image", ["image_embeds", "image_grid_thw"], False),
+            ("video", ["video_embeds", "video_grid_thw"], False),
+            ("audio", ["input_features"], False),
+        ],
+    )
+    def test_supports_batch(self, modality, keys, expected):
+        mgr = _make_manager_with_budgets([16])
+        mgr.config = EncoderCudaGraphConfig(
+            modalities=["image", "video"], buffer_keys=[], out_hidden_size=32
+        )
+        mm_kwargs = {key: torch.zeros(1) for key in keys}
+        assert mgr.supports_batch(modality, mm_kwargs) is expected
 
 
 # ---------------------------------------------------------------------------
