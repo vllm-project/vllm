@@ -16,21 +16,17 @@ mod render;
 mod routes;
 mod runtime;
 mod server_info;
+mod serving;
 mod state;
 mod tls;
 #[cfg(test)]
 mod tls_tests;
 mod utils;
 
-use std::future::Future;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use axum::Router;
-use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
     DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
@@ -38,21 +34,14 @@ pub use config::{
     OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
-use hyper::body::Incoming;
-use hyper::server::conn::http1;
-use hyper_util::rt::{TokioIo, TokioTimer};
-use hyper_util::server::graceful::GracefulShutdown;
-use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
 pub use routes::openai::utils::types::ReasoningEffort;
-use thiserror_ext::AsReport as _;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
-use tower::ServiceExt as _;
-use tracing::{info, trace, warn};
+use tracing::{info, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
@@ -63,17 +52,13 @@ pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
-use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
+use crate::listener::{Listener, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
+use crate::serving::{
+    ConnectionTimeouts, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT, serve_connections,
+};
 use crate::state::AppState;
-
-/// How often the server PINGs an idle gRPC connection to reap a dead peer;
-/// tonic enables no keepalive by default. 2h matches the gRPC-core default.
-const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
-/// How long the server waits for a keepalive PING reply before dropping the gRPC
-/// connection. 20s matches the gRPC-core default.
-const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 async fn monitor_llm_health(
     mut health: watch::Receiver<bool>,
@@ -450,67 +435,6 @@ where
     let shutdown_result = state.shutdown(shutdown_deadline).await;
     health_res?;
     shutdown_result
-}
-
-/// Per-connection timeouts applied while serving HTTP/HTTPS.
-#[derive(Clone, Copy)]
-pub(crate) struct ConnectionTimeouts {
-    /// HTTP/1 header-read timeout (bounds idle keep-alive and the head read).
-    pub(crate) header_read: Duration,
-    /// Whether HTTP/1 keep-alive is enabled; `false` closes after each response.
-    pub(crate) keep_alive_enabled: bool,
-}
-
-/// Serve `app` per connection (HTTP/1) with a keep-alive idle timeout and
-/// graceful drain. Hand-rolled on hyper because [`axum::serve()`] takes no config.
-async fn serve_connections<L>(
-    mut listener: L,
-    app: Router,
-    shutdown: impl Future<Output = ()> + Send,
-    timeouts: ConnectionTimeouts,
-) -> Result<()>
-where
-    L: axum::serve::Listener<Addr = ListenerAddr>,
-{
-    let graceful = GracefulShutdown::new();
-    let mut shutdown = std::pin::pin!(shutdown);
-    loop {
-        let (io, addr) = tokio::select! {
-            conn = listener.accept() => conn,
-            () = &mut shutdown => break,
-        };
-
-        // Expose the TCP peer to handlers, as `ConnectInfo` does for `axum::serve`.
-        let peer = match addr {
-            ListenerAddr::Tcp(addr) => Some(ConnectInfo(addr)),
-            ListenerAddr::Unix(_) => None,
-        };
-        let service =
-            TowerToHyperService::new(app.clone().map_request(move |req: Request<Incoming>| {
-                let mut req = req.map(Body::new);
-                if let Some(peer) = peer {
-                    req.extensions_mut().insert(peer);
-                }
-                req
-            }));
-        let mut builder = http1::Builder::new();
-        builder.timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
-        if !timeouts.keep_alive_enabled {
-            builder.keep_alive(false);
-        }
-        let connection = builder.serve_connection(TokioIo::new(io), service);
-        let connection = graceful.watch(connection);
-
-        tokio::spawn(async move {
-            if let Err(err) = connection.await {
-                trace!(error = %err.as_report(), "failed to serve connection");
-            }
-        });
-    }
-
-    drop(listener);
-    graceful.shutdown().await;
-    Ok(())
 }
 
 #[cfg(test)]

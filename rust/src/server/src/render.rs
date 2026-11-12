@@ -23,9 +23,10 @@ use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 use crate::lora::check_lora_module;
 use crate::model_names::ServedModelNames;
+use crate::serving::{GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT};
 use crate::{
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
-    HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig, grpc,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig,
+    grpc,
     listener::{Listener, MaybeTlsListener},
     tls,
 };
