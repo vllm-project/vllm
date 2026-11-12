@@ -945,21 +945,28 @@ steps:
   device: h100
   optional: true
   source_file_dependencies:
+    - cmake/external_projects/vllm_flash_attn.cmake
     - vllm/v1/attention
+    - vllm/v1/worker/gpu
+    - vllm/vllm_flash_attn
     - vllm/model_executor/layers
     - vllm/lora/ops/triton_ops
     - vllm/model_executor/kernels/linear
+    - vllm/config/attention.py
     - vllm/config/compilation.py
     - vllm/config/vllm.py
+    - vllm/engine/arg_utils.py
     - vllm/compilation/compiler_interface.py
     - vllm/model_executor/determinism
     - tests/v1/determinism/
+    - tests/v1/worker/test_fa3_split.py
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_hopper_native_dispatch.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+    - pytest -v -s v1/worker/test_fa3_split.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:

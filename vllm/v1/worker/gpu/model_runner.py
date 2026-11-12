@@ -1078,6 +1078,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self, randomize_inputs: bool = False) -> None:
+        if self.vllm_config.attention_config.deterministic_attention_split_stride:
+            from vllm.v1.attention.backends.fa3_split import (
+                prepare_deterministic_split_workspace,
+            )
+            from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+            if type(self.model_state) is not DefaultModelState:
+                raise ValueError("Length-keyed FA3 requires the default model state.")
+            prepare_deterministic_split_workspace(self.vllm_config)
         if self.vllm_config.aux_output_config.enabled:
             self.aux_output_connector = get_aux_output_connector(
                 self.model, self.vllm_config
@@ -2019,6 +2028,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs_padded=input_batch.num_reqs_after_padding,
             )
 
+        split_stride = (
+            self.vllm_config.attention_config.deterministic_attention_split_stride
+        )
+        if split_stride is not None and not dummy_run:
+            from vllm.v1.attention.backends.fa3_split import get_split_counts
+
+            split_counts = get_split_counts(
+                input_batch.seq_lens_cpu_upper_bound.numpy(),
+                input_batch.num_scheduled_tokens,
+                input_batch.is_prefilling_np,
+                split_stride,
+            )
+            if split_counts.max() > 1:
+                splits_out = self.input_buffers.deterministic_attention_splits[
+                    : len(split_counts)
+                ]
+                input_batch.deterministic_attention_splits = async_tensor_h2d(
+                    split_counts, out=splits_out
+                )
+                if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                    batch_desc = replace(batch_desc, split_attention=True)
+
         attn_metadata = None
         slot_mappings_by_layer = None
         ubatch_state: UBatchState | None = None
@@ -2146,6 +2177,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
+            assert batch_desc.split_attention == (
+                input_batch.deterministic_attention_splits is not None
+            )
             self.kv_connector.pre_forward(
                 scheduler_output, input_batch, attn_metadata=attn_metadata
             )

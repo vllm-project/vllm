@@ -181,6 +181,34 @@ Hopper (`SM90`). TorchInductor uses deterministic candidate selection. The
 shipped H200 unquantized expert table for Qwen3-30B-A3B (`E=128, N=768`) can
 select its tiles at runtime with one K partition.
 
+### Length-keyed FA3 split-KV
+
+On Hopper, set `--deterministic-attention-split-stride 512` (or `1024`)
+with `VLLM_BATCH_INVARIANT=1` to select FA3 splits from each decode
+request's own KV length. The default keeps single-pass attention. Prefill
+and padding use one split. Full CUDA graphs have separate captures for
+batches that do and do not require split-KV.
+
+This option requires a decoder-only BF16 model with causal full FA3
+attention, head size 128, KV pages of 16, 32, or 64 tokens, and at most 992
+padded requests (when `--max-num-seqs` is omitted, vLLM caps the default to
+992). It supports tensor parallelism. It requires the updated
+FA3 extension and does not support speculative decoding, KV transfer,
+cascade attention, fast prefill, pipeline, context or data parallelism,
+or dual-batch overlap.
+
+The worker reserves FP32 partial-output and log-sum-exp workspace during
+memory profiling. At a token budget of 8,192, the output accumulator is
+4 GiB per GPU for Qwen3-32B at TP=1 and 2 GiB per GPU for Llama-3.1-70B
+at TP=2. A worker reuses the workspace across attention layers.
+
+!!! warning
+    The split schedule is invariant within the same execution phase.
+    Above the configured stride, a generated token decoded with split-KV
+    may differ from the same token recomputed in prefill. Keep the default
+    stride when a deployment requires bitwise identity across phases, for
+    example when reusing generated KV as a prompt in later turns.
+
 ## Future Improvements
 
 The batch invariance feature is under active development. Planned improvements include:

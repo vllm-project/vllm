@@ -805,6 +805,7 @@ class EngineArgs:
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
+    deterministic_attention_split_stride: Literal[512, 1024] | None = None
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     kv_cache_dtype_skip_layers: list[str] = get_field(
@@ -1119,6 +1120,10 @@ class EngineArgs:
         )
         attention_group.add_argument(
             "--attention-backend", **attention_kwargs["backend"]
+        )
+        attention_group.add_argument(
+            "--deterministic-attention-split-stride",
+            **attention_kwargs["deterministic_attention_split_stride"],
         )
 
         # Mamba arguments
@@ -2762,6 +2767,10 @@ class EngineArgs:
 
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)
+        if self.deterministic_attention_split_stride is not None:
+            attention_config.deterministic_attention_split_stride = (
+                self.deterministic_attention_split_stride
+            )
         if self.attention_backend is not None:
             if attention_config.backend is not None:
                 raise ValueError(
@@ -3229,6 +3238,16 @@ class EngineArgs:
                 self.max_num_batched_tokens *= 2
             if orig_max_num_seqs is None:
                 self.max_num_seqs *= 2
+
+        if orig_max_num_seqs is None and (
+            self.deterministic_attention_split_stride is not None
+            or self.attention_config.deterministic_attention_split_stride is not None
+        ):
+            from vllm.v1.attention.backends.fa3_split import (
+                FA3_MAX_DYNAMIC_SPLIT_REQUESTS,
+            )
+
+            self.max_num_seqs = min(self.max_num_seqs, FA3_MAX_DYNAMIC_SPLIT_REQUESTS)
 
         if orig_max_num_batched_tokens is None:
             assert model_config.max_model_len is not None, (

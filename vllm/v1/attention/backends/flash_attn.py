@@ -23,6 +23,10 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
+from vllm.v1.attention.backends.fa3_split import (
+    FA3_MAX_DETERMINISTIC_SPLITS,
+    get_split_workspace,
+)
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
@@ -520,6 +524,8 @@ class FlashAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
+    split_workspace: tuple[torch.Tensor, torch.Tensor] | None = None
+    use_fixed_mma_warpgroups: bool = False
 
     causal: bool | torch.Tensor = True
 
@@ -616,6 +622,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         max_seq_len: int,
         causal: bool | torch.Tensor,
         max_num_splits: int,
+        num_splits_per_request: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         if not aot_schedule:
             return None
@@ -639,6 +646,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             causal=causal,
             window_size=_maybe_symmetrize_window(self.aot_sliding_window, causal),
             num_splits=max_num_splits,
+            num_splits_per_request=num_splits_per_request,
+            use_fixed_mma_warpgroups=num_splits_per_request is not None,
         )
 
     def _store_scheduler_metadata(
@@ -669,6 +678,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
         self.attention_config = vllm_config.attention_config
+        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         self.num_heads_q = get_num_attention_heads_from_layers(
             vllm_config, layer_names
@@ -846,6 +856,25 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if envs.VLLM_BATCH_INVARIANT:
             max_num_splits = 1
 
+        split_counts = common_attn_metadata.deterministic_attention_splits
+        split_workspace = None
+        if split_counts is not None:
+            if not (
+                self.aot_schedule
+                and causal is True
+                and self.aot_sliding_window == (-1, -1)
+                and self.dcp_world_size == 1
+                and self.headdim == 128
+                and self.block_size in (16, 32, 64)
+                and self.kv_cache_dtype == torch.bfloat16
+            ):
+                raise ValueError("Length-keyed splits require causal BF16 paged FA3.")
+            aot_schedule = True
+            max_num_splits = FA3_MAX_DETERMINISTIC_SPLITS
+            split_workspace = get_split_workspace(
+                self.max_num_tokens, self.num_heads_q, self.headdim
+            )
+
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
         num_decode_reqs = 0
@@ -926,6 +955,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 max_seq_len=max_seq_len,
                 causal=causal,
                 max_num_splits=max_num_splits,
+                num_splits_per_request=split_counts,
             )
         scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
 
@@ -952,6 +982,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             num_prefill_tokens=num_prefill_tokens,
             scheduler_metadata=scheduler_metadata,
             max_num_splits=max_num_splits,
+            split_workspace=split_workspace,
+            use_fixed_mma_warpgroups=(
+                self.attention_config.deterministic_attention_split_stride is not None
+            ),
             causal=causal,
         )
 
@@ -1400,6 +1434,8 @@ class FlashAttentionImpl(AttentionImpl):
                 s_aux=self.sinks,
                 mask_mod=rswa_mask_mod_fn or mm_mask_mod,
                 aux_tensors=rswa_aux or mm_aux,
+                split_workspace=attn_metadata.split_workspace,
+                use_fixed_mma_warpgroups=attn_metadata.use_fixed_mma_warpgroups,
             )
             return output
 

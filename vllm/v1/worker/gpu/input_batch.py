@@ -37,6 +37,9 @@ class InputBuffers:
         self.dcp_local_seq_lens = torch.zeros(
             max_num_reqs, dtype=torch.int32, device=device
         )
+        self.deterministic_attention_splits = torch.ones(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
 
 
 @dataclass(slots=True)
@@ -114,6 +117,8 @@ class InputBatch:
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
+
+    deterministic_attention_splits: torch.Tensor | None = None
 
     # Arms the KV-sharing fast prefill path for this step. Absent for dummy
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
