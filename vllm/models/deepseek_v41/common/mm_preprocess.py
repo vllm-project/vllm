@@ -3,14 +3,14 @@
 """Multimodal preprocessing for the DeepSeek-V4.1 vision variant.
 
 The image transform and image-span construction are ported from the
-official repository's ``image_processor.py`` so that token counts bit-match
-the reference. Each ``<｜deepseek_image｜>`` placeholder in the prompt expands
-to ``[IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h +
-[IMAGE_END]``; every span position carries ``image_token_id`` (129264) in
-``input_ids`` and the roles ride along in a per-image ``types`` tensor
-(the reference's out-of-band ``token_types``). IMAGE slots receive aligner
-rows in reading order; the delimiters take the learned ``image_start`` /
-``image_newline`` / ``image_end`` vectors.
+official repository's `image_processor.py` so that token counts bit-match
+the reference. Each `<｜deepseek_image｜>` placeholder in the prompt expands
+to `[IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h +
+[IMAGE_END]`; every span position carries `image_token_id` (129264) in
+`input_ids` and the roles ride along in a per-image `types` tensor
+(the reference's out-of-band `token_types`). IMAGE slots receive aligner
+rows in reading order; the delimiters take the learned `image_start` /
+`image_newline` / `image_end` vectors.
 
 The token stream matches the reference exactly: no compressor-alignment
 pad is inserted (the reference pools image tokens across compressor-group
@@ -134,7 +134,7 @@ def load_image(
 ):
     """Transform one PIL image into ViT patches.
 
-    Same math as the reference ``load_image``, except the image is already
+    Same math as the reference `load_image`, except the image is already
     decoded (vLLM supplies PIL images instead of a record dict).
     """
     p = patch_size
@@ -176,7 +176,7 @@ def image_token_types(n_llm_h: int, n_llm_w: int) -> torch.Tensor:
 
 class DeepseekV4VLImageProcessor:
     """Per-image transform (the PIL-input equivalent of the reference
-    ``load_image``)."""
+    `load_image`)."""
 
     def __init__(self, config: DeepseekV41Config) -> None:
         super().__init__()
@@ -201,18 +201,18 @@ class DeepseekV4VLProcessor:
     """Minimal stand-in for the HF processor of DeepSeek-V4.1 vision models.
 
     The official repository ships image preprocessing as plain functions in
-    ``image_processor.py`` (no ``auto_map`` processor), so this class wraps
-    their ports directly and the model loads without ``--trust-remote-code``.
+    `image_processor.py` (no `auto_map` processor), so this class wraps
+    their ports directly and the model loads without `--trust-remote-code`.
 
-    ``__call__`` returns a ``BatchFeature`` with one entry per image
+    `__call__` returns a `BatchFeature` with one entry per image
     (flattened across images):
 
-    - ``patches``: ``(sum(n_vit_h * n_vit_w), 3, p, p)`` bf16 ViT patches.
-    - ``vit_grid``: ``(num_images, 2)`` int64 ``[n_vit_h, n_vit_w]``.
-    - ``llm_grid``: ``(num_images, 2)`` int64 ``[n_llm_h, n_llm_w]``.
-    - ``types``: concatenated per-image pad-free span roles
+    - `patches`: `(sum(n_vit_h * n_vit_w), 3, p, p)` bf16 ViT patches.
+    - `vit_grid`: `(num_images, 2)` int64 `[n_vit_h, n_vit_w]`.
+    - `llm_grid`: `(num_images, 2)` int64 `[n_llm_h, n_llm_w]`.
+    - `types`: concatenated per-image pad-free span roles
       (IMAGE_START/IMAGE/IMAGE_NEW_LINE/IMAGE_END); every span position
-      carries ``image_token_id`` in the prompt's token ids.
+      carries `image_token_id` in the prompt's token ids.
     """
 
     def __init__(self, config: DeepseekV41Config) -> None:

@@ -109,6 +109,9 @@ from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.b12x import (
     B12xMxfp8LinearKernel,
 )
@@ -578,6 +581,11 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         TorchMxFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # AITER's FlyDSL GEMM; can_implement() claims only the (N, K) shapes
+        # AITER has tuned, the rest fall through to the next kernel. Kept out
+        # of the "aiter" --linear-backend set, which would leave those shapes
+        # without a kernel.
+        AiterFlyDSLMxfp8LinearKernel,
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
         # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
         RocmDotScaledMxfp8LinearKernel,
@@ -1033,10 +1041,10 @@ def _user_linear_activation_override_is_set() -> bool:
 def _resolve_linear_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Apply ``--quantization-config.linear.activation`` to the checkpoint's
+    """Apply `--quantization-config.linear.activation` to the checkpoint's
     activation key. The override wins: it may replace a checkpoint's MXFP4
     activations with a format a kernel computes directly (e.g. int8), or with
-    ``null`` to run the layer weight-only."""
+    `null` to run the layer weight-only."""
     user_override = _user_linear_activation_override()
     if (
         user_override is None and not _user_linear_activation_override_is_set()
