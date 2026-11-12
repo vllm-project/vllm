@@ -338,7 +338,7 @@ class OpenAIServingModels:
                             resolver.__class__.__name__,
                         )
                         return lora_request
-                    except BaseException as e:
+                    except Exception as e:
                         logger.warning(
                             "Failed to load LoRA '%s' resolved by %s: %s. "
                             "Trying next resolver.",
