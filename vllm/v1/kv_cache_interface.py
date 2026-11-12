@@ -975,11 +975,8 @@ class SlidingWindowSpec(AttentionSpec):
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
     ) -> bool:
-        # DFlash drafter layers run their own manager, so they never share a
-        # group with ordinary sliding-window layers.
         return all(
             isinstance(spec, SlidingWindowSpec)
-            and not isinstance(spec, DFlashSlidingWindowSpec)
             and spec.sliding_window == self.sliding_window
             for spec in kv_cache_specs.values()
         )
@@ -1030,15 +1027,6 @@ class DFlashSlidingWindowSpec(SlidingWindowSpec):
                 max_in_flight_tokens + self.num_lookahead_tokens, max_model_len
             ),
             (self.max_in_flight_steps + 1) * tail_blocks,
-        )
-
-    def is_uniform_with_collection(
-        self, kv_cache_specs: dict[str, KVCacheSpec]
-    ) -> bool:
-        return all(
-            isinstance(spec, DFlashSlidingWindowSpec)
-            and spec.sliding_window == self.sliding_window
-            for spec in kv_cache_specs.values()
         )
 
 
@@ -1455,6 +1443,13 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             # Different block sizes, not uniform.
             return False
         if len({spec.dcp_sharded for spec in kv_cache_specs.values()}) > 1:
+            return False
+        # Specs from different registry families run different managers.
+        families = {
+            KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
+            for spec in kv_cache_specs.values()
+        }
+        if len(families) > 1:
             return False
         first_spec = next(iter(kv_cache_specs.values()))
         return first_spec.is_uniform_with_collection(kv_cache_specs)
