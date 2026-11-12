@@ -4,7 +4,9 @@
 
 import numpy as np
 import pytest
+import torch
 
+from vllm.model_executor.models.whisper import WhisperProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ...utils import build_model_context
@@ -21,6 +23,7 @@ def test_audio_features_fit_encoder_window(
     """
     ctx = build_model_context(model_id, limit_mm_per_prompt={"audio": 1})
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, WhisperProcessingInfo)
     feature_extractor = processor.info.get_feature_extractor()
 
     sampling_rate = feature_extractor.sampling_rate
@@ -34,4 +37,5 @@ def test_audio_features_fit_encoder_window(
     )
 
     input_features = processed_inputs["mm_kwargs"].get_data()["input_features"]
+    assert isinstance(input_features, torch.Tensor)
     assert input_features.shape[-1] == feature_extractor.nb_max_frames
