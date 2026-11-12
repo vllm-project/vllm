@@ -695,3 +695,34 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
     # block_size stays significant (the daemon keys on the resolved value).
     resolved = CacheConfig(block_size=32)
     assert hash_config(_normalize_cache_config_for_hash(resolved)) != hash_config(fresh)
+
+
+def test_autotune_cache_key_separates_moe_routed_tuning_under_dp(monkeypatch):
+    """DP runs with MoE padding skip tune the precomputed-routing TRT-LLM MoE
+    ops instead of the logits ops; a cache tuned without them must not hit and
+    skip tuning. Other configs, models without such a layer, and routing
+    simulator runs (which keep the logits ops) keep their key."""
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        flashinfer_autotune_cache_hash,
+    )
+
+    class Routed(RoutedExperts):
+        supports_precomputed_routing = True
+
+    def key(dp: int, skip: str, routed: bool, sim: str = "") -> str:
+        monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", skip)
+        monkeypatch.setenv("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", sim)
+        config = VllmConfig(parallel_config=ParallelConfig(data_parallel_size=dp))
+        layers = [torch.nn.Linear(2, 2)] + ([Routed.__new__(Routed)] if routed else [])
+        model = SimpleNamespace(modules=lambda: iter(layers))
+        return flashinfer_autotune_cache_hash(
+            SimpleNamespace(vllm_config=config, get_model=lambda: model)
+        )
+
+    assert key(1, "1", routed=True) == key(1, "0", routed=True)
+    assert key(2, "1", routed=True) != key(2, "0", routed=True)
+    assert key(2, "1", routed=False) == key(2, "0", routed=False)
+    sim = "uniform_random"
+    assert key(2, "1", routed=True, sim=sim) == key(2, "0", routed=True, sim=sim)
