@@ -9,6 +9,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.utils import partial_tag_overlap
+from vllm.v1.token_buffer import rfind_tokens
 
 
 class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
@@ -70,12 +71,9 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         return self._split_model_output(model_output)
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        for token_id in reversed(input_ids):
-            if token_id == self.start_token_id:
-                return False
-            if token_id == self.end_token_id or token_id == self._tool_calls_start_id:
-                return True
-        return False
+        tokens = (self.start_token_id, self.end_token_id, self._tool_calls_start_id)
+        i = rfind_tokens(input_ids, tokens)
+        return i >= 0 and input_ids[i] != self.start_token_id
 
     def is_reasoning_end_streaming(
         self,

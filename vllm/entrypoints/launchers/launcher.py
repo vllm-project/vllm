@@ -30,6 +30,7 @@ from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 from .utils.constants import (
+    DISABLED_ROUTE_TAG,
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
@@ -50,7 +51,7 @@ class NoSignalServer(uvicorn.Server):
     Callers register their own handlers on the event loop for graceful
     shutdown; uvicorn's would race with and override them (see #49668).
 
-    With ``peer_loads`` (several API workers on one shared socket: a shared
+    With `peer_loads` (several API workers on one shared socket: a shared
     array with one slot per worker, and this worker's index), each worker
     publishes its number of open connections, and a pending connection is
     accepted by the least loaded worker. The event loop's own server would
@@ -194,7 +195,13 @@ async def serve_http(
         if methods is None or path is None:
             continue
 
-        logger.info("Route: %s, Methods: %s", path, ", ".join(methods))
+        disabled = DISABLED_ROUTE_TAG in getattr(route, "tags", ())
+        logger.info(
+            "Route: %s, Methods: %s%s",
+            path,
+            ", ".join(methods),
+            " (disabled)" if disabled else "",
+        )
 
     # other endpoints
     for route in app.routes:
@@ -259,9 +266,6 @@ async def serve_http(
     async def dummy_shutdown() -> None:
         pass
 
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
-
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
 
@@ -285,12 +289,13 @@ async def serve_http(
         server_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
-        if ssl_cert_refresher:
-            ssl_cert_refresher.stop()
 
-    shutdown_task = loop.create_task(handle_shutdown())
-
+    shutdown_task = None
     try:
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+        shutdown_task = loop.create_task(handle_shutdown())
+
         await server_task
         return dummy_shutdown()
     except asyncio.CancelledError:
@@ -306,9 +311,12 @@ async def serve_http(
         logger.info_once("[shutdown] API server: shutting down FastAPI HTTP server")
         return server.shutdown()
     finally:
-        shutdown_task.cancel()
+        if shutdown_task is not None:
+            shutdown_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
+        if ssl_cert_refresher:
+            ssl_cert_refresher.stop()
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
