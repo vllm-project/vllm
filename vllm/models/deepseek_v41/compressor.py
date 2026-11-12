@@ -7,6 +7,7 @@ from typing import Any, ClassVar, cast
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -32,6 +33,15 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
 
 
 class CompressorBackend(AttentionBackend):
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """SM100 proof: test_v41_compressor_bi_batch_chunk_pd_graph_cache_bytes."""
+        return (
+            cls is CompressorBackend
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        )
+
     def __init__(self):
         super().__init__()
 
@@ -249,6 +259,11 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         assert self.dtype == torch.float32
         # Drafts + bonus token + the previous row, as a power of two >= 8.
         rows_per_step = get_current_vllm_config().num_speculative_tokens + 2
+        if envs.VLLM_BATCH_INVARIANT and (rows_per_step != 2 or state_dim != 1024):
+            raise NotImplementedError(
+                "DS41 BI compressor requires no speculative tokens "
+                "and 1024 state columns"
+            )
         self.block_size = max(8, 1 << (rows_per_step - 1).bit_length())
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
