@@ -1031,6 +1031,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
     bounded_replay: bool = False
+    # Hit tokens a bounded replay recomputes; None replays one window.
+    replay_tokens: int | None = None
     # See MLAAttentionSpec.non_causal_multi_token_decode (windowed DSpark drafts).
     non_causal_multi_token_decode: bool = False
 
@@ -1050,7 +1052,9 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
     @property
     def prefix_replay_tokens(self) -> int:
-        return self.sliding_window if self.bounded_replay else 0
+        if not self.bounded_replay:
+            return 0
+        return self.replay_tokens or self.sliding_window
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -1064,6 +1068,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         sliding_window_set = set(spec.sliding_window for spec in specs)
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
+        replay_tokens_set = set(spec.replay_tokens for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         kv_quant_mode_set = {spec.kv_quant_mode for spec in specs}
         alignment_set = {spec.alignment for spec in specs}
@@ -1076,6 +1081,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and len(sliding_window_set) == 1
             and len(extra_retained_set) == 1
             and len(bounded_replay_set) == 1
+            and len(replay_tokens_set) == 1
             and len(block_stride_alignment_set) == 1
             and len(kv_quant_mode_set) == 1
             and len(alignment_set) == 1
@@ -1103,6 +1109,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
             bounded_replay=bounded_replay_set.pop(),
+            replay_tokens=replay_tokens_set.pop(),
             kv_quant_mode=kv_quant_mode_set.pop(),
             alignment=alignment_set.pop(),
             non_causal_multi_token_decode=any(
@@ -1117,6 +1124,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             isinstance(spec, SlidingWindowMLASpec)
             and spec.sliding_window == self.sliding_window
             and spec.bounded_replay == self.bounded_replay
+            and spec.replay_tokens == self.replay_tokens
             for spec in kv_cache_specs.values()
         )
 
