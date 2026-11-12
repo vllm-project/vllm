@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use vllm_tracing::LogLevel;
+use vllm_tracing::{LogFormatter, LogLevel};
 
 /// Python's `LoggingConfig`, from `--logging-config` and its dotted forms
 /// (`--logging-config.log_level DEBUG`).
@@ -20,12 +20,4 @@ pub struct LoggingConfig {
     pub formatter: Option<LogFormatter>,
     #[serde(flatten)]
     pub python_only: Map<String, Value>,
-}
-
-/// Python's `LoggingConfig` formatters that the Rust frontend implements.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogFormatter {
-    #[default]
-    Text,
 }
