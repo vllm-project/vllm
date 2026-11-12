@@ -1,6 +1,6 @@
 # Quantization
 
-Most quantization formats trade model precision for a smaller memory footprint, allowing large models to run on a wider range of devices. [NF12](online.md#nf12) instead losslessly compresses BF16 weights for CUDA inference.
+Quantization trades off model precision for smaller memory footprint, allowing large models to be run on a wider range of devices.
 
 !!! tip
     To get started with quantization, see [LLM Compressor](llm_compressor/README.md), a library for optimizing models for deployment with vLLM that supports FP8, INT8, INT4, and other quantization formats.
