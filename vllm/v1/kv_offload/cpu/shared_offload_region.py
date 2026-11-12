@@ -103,6 +103,8 @@ class SharedOffloadRegion:
     share, for layouts where every worker maps the same bytes. The barrier
     also waits for all shards to finish pre-faulting before returning.
     `num_segments` splits backing files beneath the contiguous mapping.
+    `populate=False` skips pre-faulting, for a mapper whose peers pre-fault
+    every page.
 
     `private=True` declares that no peer maps this file: it takes no barrier
     and the path is unlinked as soon as this worker has mapped it.
@@ -123,6 +125,7 @@ class SharedOffloadRegion:
         populate_shard: tuple[int, int] | None = None,
         num_segments: int = 1,
         private: bool = False,
+        populate: bool = True,
     ) -> None:
         assert not private or (barrier is None and populate_shard is None)
         self.page_size = mmap.PAGESIZE
@@ -265,7 +268,7 @@ class SharedOffloadRegion:
         self.is_pinned: bool = False
         self.pinned_addresses: list[int] = []
 
-        if populate_shard is not None:
+        if populate_shard is not None or not populate:
             return
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
