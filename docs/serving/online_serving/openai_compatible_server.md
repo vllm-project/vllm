@@ -146,6 +146,8 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: [examples/basic/online_serving/openai_completion_client.py](../../../examples/basic/online_serving/openai_completion_client.py)
 
+With `--enable-prompt-tokens-details`, `usage.prompt_tokens_details` reports prefix-cache hits as `cached_tokens` and the prompt tokens written to the local prefix cache as `created_cache_tokens`, as on `/v1/chat/completions`.
+
 #### Extra parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.

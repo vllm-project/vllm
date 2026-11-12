@@ -23,7 +23,7 @@ def _logprobs(i: int) -> dict[int, Logprob]:
     return {token_id: Logprob(logprob=-1.0, rank=1, decoded_token=token)}
 
 
-def _output(text: str, idxs: list[int], finished: bool) -> RequestOutput:
+def _output(text: str, idxs: list[int], finished: bool, **kwargs: int) -> RequestOutput:
     return RequestOutput(
         request_id="r",
         prompt="Hi",
@@ -40,6 +40,7 @@ def _output(text: str, idxs: list[int], finished: bool) -> RequestOutput:
             )
         ],
         finished=finished,
+        **kwargs,
     )
 
 
@@ -113,3 +114,43 @@ def test_non_stream_response_omits_null_prompt_tokens_details():
     )
 
     assert "prompt_tokens_details" not in response.model_dump()["usage"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_prompt_tokens_details_reports_cache_split(stream: bool):
+    serving = _serving()
+    serving.enable_prompt_tokens_details = True
+    request = _request(stream=stream)
+    request_metadata = RequestResponseMetadata(request_id="r")
+    output = _output(
+        "abc", [0], finished=True, num_cached_tokens=2, num_cache_creation_tokens=1
+    )
+
+    if stream:
+
+        async def results():
+            yield 0, output
+
+        async for _ in serving.completion_stream_generator(
+            request,
+            [tokens_input([9], prompt="Hi")],
+            results(),
+            "r",
+            0,
+            "m",
+            num_prompts=1,
+            tokenizer=None,
+            request_metadata=request_metadata,
+        ):
+            pass
+    else:
+        serving.request_output_to_completion_response(
+            [output], request, "r", 0, "m", None, request_metadata
+        )
+
+    usage = request_metadata.final_usage_info
+    assert usage is not None
+    assert usage.prompt_tokens_details is not None
+    details = usage.prompt_tokens_details
+    assert (details.cached_tokens, details.created_cache_tokens) == (2, 1)

@@ -123,17 +123,27 @@ async def test_generate_endpoint(client):
     [["--enable-prefix-caching", "--enable-prompt-tokens-details"]],
     indirect=True,
 )
-async def test_generate_reports_prompt_cache_split(client):
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        (
+            GEN_ENDPOINT,
+            {
+                "token_ids": list(range(1000, 1100)),
+                "sampling_params": {"max_tokens": 1},
+            },
+        ),
+        ("/v1/completions", {"prompt": list(range(2000, 2100)), "max_tokens": 1}),
+    ],
+    ids=["generate", "completions"],
+)
+async def test_reports_prompt_cache_split(client, endpoint, payload):
     """usage.prompt_tokens_details reports prefix-cache writes on a cold prompt
     and hits on a warm one, as /v1/chat/completions does."""
-    payload = {
-        "model": MODEL_NAME,
-        "token_ids": list(range(1000, 1100)),
-        "sampling_params": {"max_tokens": 1},
-    }
+    payload = {"model": MODEL_NAME, **payload}
     details = []
     for _ in range(2):
-        resp = await client.post(GEN_ENDPOINT, json=payload)
+        resp = await client.post(endpoint, json=payload)
         resp.raise_for_status()
         details.append(resp.json()["usage"]["prompt_tokens_details"])
 
