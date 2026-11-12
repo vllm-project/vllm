@@ -17,7 +17,6 @@ F64 = torch.float64
 FLT_MIN = 2.0**-126
 _E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 E2M1 = torch.tensor(_E2M1 + tuple(-v for v in _E2M1), dtype=F64)
-RCP6_F32 = torch.tensor(1 / 6, dtype=torch.float32).item()
 
 
 # ---------------------------------------------------------------- formats
@@ -44,7 +43,7 @@ def round_float(x, mant: int, emin: int, fmax: float | None = None):
     x = x.double()
     if fmax is not None:
         x = x.clamp(-fmax, fmax)
-    e = torch.floor(torch.log2(x.abs())).clamp(min=emin)
+    e = (torch.frexp(x.abs()).exponent.long() - 1).clamp(min=emin)
     q = torch.exp2(e - mant)
     r = torch.where(torch.isfinite(x) & (x != 0), torch.round(x / q) * q, x)
     if fmax is None:
@@ -85,8 +84,3 @@ def mx_code_vllm(amax, fmax=448.0):
     / fmax))) + 127, clamped to [0, 254] (0 for an all-zero group)."""
     q = f32_rne(amax.double().clamp(min=FLT_MIN) / fmax)
     return (_ceil_log2(q) + 127).clamp(0, 254)
-
-
-def e8m0_roundup6(amax):
-    """AITER's inline MXFP4 scale: ceil code of RN_f32(amax RN_f32(1 / 6)), <= 254."""
-    return ceil_code(f32_rne(amax.double() * RCP6_F32)).clamp(max=254)

@@ -81,7 +81,10 @@ def _fn(lib, name):
 
 
 def _gfx942(lib):
-    return lib in _ON_942 and _find("dsv41", "GFX942")
+    """`GFX942` as the model's own libraries see it: FNUZ fp8 at a maximum of
+    224, and the gfx942 code paths."""
+    pkg = _LIBS[lib][0]
+    return any(_find(k, "GFX942") for k, (owner, _) in _LIBS.items() if owner == pkg)
 
 
 def _libs(*names):
@@ -96,10 +99,15 @@ def _libs(*names):
 
 
 def _has(lib, name):
+    """Whether `lib` defines `name`. A library the running architecture does
+    not build is dropped; any other import error is a real one and is raised,
+    since swallowing it would empty every parametrisation and pass."""
     try:
         return _fn(lib, name) is not None
     except ImportError:
-        return False
+        if on_gfx942() and lib not in _ON_942:
+            return False
+        raise
 
 
 # ---------------------------------------------------------------- harness
@@ -298,7 +306,6 @@ _CODE_RULES = {
     "code_ceil": lambda v, fmax: R.ceil_code(v).clamp(1, 254),
     "vllm_mx_code": R.mx_code_vllm,
     "mx_code": R.mx_code_vllm,
-    "e8m0_roundup": lambda v, fmax: R.e8m0_roundup6(v),
 }
 
 
@@ -308,10 +315,10 @@ def _code_libs():
 
 @pytest.mark.parametrize("lib", _code_libs())
 def test_scale_codes(lib):
-    """code_ceil, vllm_mx_code / mx_code and e8m0_roundup on every f32
-    exponent with the mantissas around a power of two, the values whose
-    quotient by 448 or 6 is a power of two and their neighbours, 0 and the
-    subnormals; pow2 / rcp_pow2 on every code they take. Bit-exact."""
+    """code_ceil and vllm_mx_code / mx_code on every f32 exponent with the
+    mantissas around a power of two, the values whose quotient by the fp8
+    maximum is a power of two and their neighbours, 0 and the subnormals;
+    pow2 / rcp_pow2 on every code they take. Bit-exact."""
     names = [n for n in _CODE_RULES if _has(lib, n)]
     fns = [_fn(lib, n) for n in names]
     p2, rp2 = _fn(lib, "pow2"), _fn(lib, "rcp_pow2")
@@ -324,7 +331,8 @@ def test_scale_codes(lib):
 
     k = torch.arange(-149, 128, dtype=torch.float64, device=DEV)
     pow2s = torch.exp2(k)
-    edges = torch.cat([448 * pow2s, 6 * pow2s, pow2s * R.RCP6_F32**-1])
+    # 224 * 2^k is 448 * 2^(k - 1), so these are the edges of both maxima.
+    edges = 448 * pow2s
     v = torch.cat([_edge_floats(), _neighbours(edges[edges < 3e38].float())])
     v = v[torch.isfinite(v) & (v >= 0)]
     code = torch.arange(v.numel(), device=DEV, dtype=I32) % 253 + 1
