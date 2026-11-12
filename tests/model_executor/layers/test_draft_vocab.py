@@ -1,12 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
-from vllm.model_executor.layers.draft_vocab import DraftVocab, load_draft_token_ids
+from vllm.model_executor.layers.draft_vocab import (
+    DraftVocab,
+    load_draft_token_ids,
+    load_draft_token_map,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    refresh_quantized_lm_heads,
+    restore_quantized_lm_heads,
+    share_source_lm_heads,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 
 VOCAB = 200
 HIDDEN = 32
@@ -72,17 +86,38 @@ def test_token_map_drafts_over_listed_and_picked_rows(
     assert torch.equal(draft_vocab.get_top_tokens(head, hidden), logits.argmax(-1))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="quantized rows need CUDA")
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="quantized rows need CUDA"
+)
+
+
+def _bf16_head(
+    monkeypatch, vocab: int, hidden_size: int, cls=ParallelLMHead
+) -> VocabParallelEmbedding:
+    # Online methods read the model dtype from the current config.
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.fp8.get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
+    )
+    return cls(vocab, hidden_size, disable_tp=True)
+
+
+@requires_cuda
 @pytest.mark.parametrize(
     ("quantization", "max_rel_err"), [("fp8", 0.05), ("nvfp4", 0.15)]
 )
 @pytest.mark.parametrize("extra_listed_id", [False, True])
 def test_quantized_rows_track_bf16_rows(
-    default_vllm_config, dist_init, quantization, max_rel_err, extra_listed_id
+    default_vllm_config,
+    dist_init,
+    monkeypatch,
+    quantization,
+    max_rel_err,
+    extra_listed_id,
 ):
     """Quantized rows preserve logical token IDs, including unaligned maps."""
     vocab, hidden_size = 4000, 512
-    head = ParallelLMHead(vocab, hidden_size, disable_tp=True)
+    head = _bf16_head(monkeypatch, vocab, hidden_size)
     gen = torch.Generator().manual_seed(0)
     weight = torch.randn(head.weight.shape, generator=gen) * 0.02
     token_ids = torch.arange(0, vocab, 4)
@@ -113,3 +148,53 @@ def test_quantized_rows_track_bf16_rows(
     if extra_listed_id:
         assert torch.all(out[-1, kept[-1]] < 0)
     assert (out[kept] - full[kept]).norm() / full[kept].norm() < max_rel_err
+
+
+@requires_cuda
+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+def test_quantized_listed_rows_follow_target_head(
+    default_vllm_config, dist_init, monkeypatch, tmp_path, quantization
+):
+    """Refreshing the drafter's quantized heads re-derives the listed rows from
+    the updated target lm_head, in place. The head is a tied input embedding,
+    as in Qwen3.5."""
+    vocab, hidden_size = 4000, 512
+    head = _bf16_head(monkeypatch, vocab, hidden_size, VocabParallelEmbedding)
+    head = head.to("cuda", torch.bfloat16)
+    head.weight.data.normal_(std=0.02)
+    token_ids = list(range(1, vocab, 3))
+    token_map = tmp_path / "map.json"
+    token_map.write_text(str(token_ids))
+    drafter = torch.nn.Module()
+    drafter.lm_head = head
+    drafter.draft_vocab = DraftVocab(LogitsProcessor(vocab), vocab)
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_token_map=str(token_map),
+            draft_token_map_dynamic_rows=0,
+            draft_lm_head_quantization=quantization,
+        ),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(), try_get_generation_config=dict
+        ),
+    )
+    load_draft_token_map(drafter, vllm_config)
+    rows = drafter.draft_token_map_head
+    assert rows is drafter.draft_vocab.rows
+    ptrs = {k: t.data_ptr() for k, t in rows.state_dict().items()}
+
+    # A copy of some rows is never swapped in for the full head.
+    share_source_lm_heads(drafter)
+    assert drafter.draft_token_map_head is rows
+    restore_quantized_lm_heads(drafter, refresh=False)
+
+    head.weight.data.normal_(std=0.02)
+    hidden = torch.randn(64, hidden_size, device="cuda", dtype=torch.bfloat16)
+    fresh = DraftVocab(LogitsProcessor(vocab), vocab)
+    fresh.load_token_map(head, torch.tensor(token_ids), 0, quantization)
+    expected = fresh.compute_logits(head, hidden)
+    assert not torch.equal(drafter.draft_vocab.compute_logits(head, hidden), expected)
+
+    refresh_quantized_lm_heads(drafter)
+    assert torch.equal(drafter.draft_vocab.compute_logits(head, hidden), expected)
+    assert {k: t.data_ptr() for k, t in rows.state_dict().items()} == ptrs

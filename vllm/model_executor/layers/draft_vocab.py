@@ -21,7 +21,7 @@ verifies with its full head, so only the acceptance length can change.
 """
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -41,6 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     weight_amax,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
@@ -48,10 +49,7 @@ from vllm.triton_utils import tl, triton
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.model_executor.kernels.linear import (
-        FP8ScaledMMLinearKernel,
-        NvFp4LinearKernel,
-    )
+    from vllm.model_executor.kernels.linear import FP8ScaledMMLinearKernel
 
 logger = init_logger(__name__)
 
@@ -124,18 +122,15 @@ def _quantize_rows(
 
 
 class _Rows(ReplicatedLinear):
-    """lm_head rows as a linear layer, optionally weight-only quantized.
-
-    FP8 keeps one scale per row and NVFP4 one E4M3 scale per 16 weights; both
-    run on the platform's weight-only kernel.
-    """
+    """lm_head rows as a linear layer, optionally FP8 weight-only with one scale
+    per row on the platform's weight-only kernel."""
 
     weight: nn.Parameter
 
     def __init__(self, weight: torch.Tensor, quantization: str | None):
         num_rows = weight.shape[0]
-        # Weight-only kernels can require aligned output rows. The token map
-        # and dynamic candidates need not be aligned, e.g. after adding EOS.
+        # Weight-only kernels can require aligned output rows, which the
+        # dynamic candidates need not be.
         if quantization is not None and (padding := -num_rows % 8):
             weight = F.pad(weight, (0, 0, 0, padding))
         with torch.device(weight.device):
@@ -148,42 +143,34 @@ class _Rows(ReplicatedLinear):
                 disable_tp=True,
             )
         self.num_rows = num_rows
-        self.kernel: FP8ScaledMMLinearKernel | NvFp4LinearKernel | None = None
+        self.kernel: FP8ScaledMMLinearKernel | None = None
         if quantization is None:
             self.weight_loader(self.weight, weight)
             self.quant_method.process_weights_after_loading(self)
             return
-        from vllm.model_executor.kernels.linear import (
-            init_nvfp4_linear_kernel,
-            init_wfp8_a16_linear_kernel,
-        )
+        assert quantization == "fp8"
+        from vllm.model_executor.kernels.linear import init_wfp8_a16_linear_kernel
 
         # What a quantization scheme sets on its layer in create_weights.
         self.input_size_per_partition = self.input_size
         self.output_size_per_partition = self.output_size
         self.logical_widths = self.output_partition_sizes
         self.orig_dtype = self.params_dtype
-        quantized = _quantize_rows(weight, quantization)
-        if quantization == "fp8":
-            self.kernel = init_wfp8_a16_linear_kernel(
-                weight_quant_key=kFp8StaticChannelSym,
-                activation_quant_key=kFp8DynamicTensorSym,
-                weight_shape=tuple(weight.shape),
-                input_dtype=weight.dtype,
-                out_dtype=weight.dtype,
-            )
-            # The scaled-mm kernels take the weight as (K, N), tagged as such.
-            self.weight = nn.Parameter(quantized[0].t(), requires_grad=False)
-            self.weight.input_dim = 0
-            self.weight.output_dim = 1
-            self.weight_scale = nn.Parameter(quantized[1], requires_grad=False)
-            self.input_scale = None
-            self.weight_block_size = None
-        else:
-            self.kernel = init_nvfp4_linear_kernel(use_a16=True)
-            self.weight = nn.Parameter(quantized[0], requires_grad=False)
-            self.weight_scale = nn.Parameter(quantized[1], requires_grad=False)
-            self.weight_global_scale = nn.Parameter(quantized[2], requires_grad=False)
+        weight_fp8, weight_scale = _quantize_rows(weight, quantization)
+        self.kernel = init_wfp8_a16_linear_kernel(
+            weight_quant_key=kFp8StaticChannelSym,
+            activation_quant_key=kFp8DynamicTensorSym,
+            weight_shape=tuple(weight.shape),
+            input_dtype=weight.dtype,
+            out_dtype=weight.dtype,
+        )
+        # The scaled-mm kernels take the weight as (K, N), tagged as such.
+        self.weight = nn.Parameter(weight_fp8.t(), requires_grad=False)
+        self.weight.input_dim = 0
+        self.weight.output_dim = 1
+        self.weight_scale = nn.Parameter(weight_scale, requires_grad=False)
+        self.input_scale = None
+        self.weight_block_size = None
         self.kernel.process_weights_after_loading(self)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
@@ -378,7 +365,7 @@ class DraftVocab:
             )
         # Set by load_token_map.
         self.token_ids: torch.Tensor | None = None
-        self.rows: _Rows | None = None
+        self.rows: _Rows | ParallelLMHead | None = None
         self.num_dynamic_rows = 0
 
     def compute_logits(
@@ -434,7 +421,7 @@ class DraftVocab:
         lm_head: VocabParallelEmbedding,
         token_ids: torch.Tensor,
         dynamic_rows: int = 0,
-        quantization: str | None = None,
+        quantization: Literal["fp8", "nvfp4"] | None = None,
     ) -> None:
         """Restrict drafting to the `token_ids` rows of `lm_head`.
 
@@ -446,7 +433,8 @@ class DraftVocab:
             token_ids: Sorted, unique target ids of the listed rows.
             dynamic_rows: Rows outside the list picked per draft token.
             quantization: `draft_lm_head_quantization`, applied to the copied
-                rows only ("fp8" or "nvfp4", weight-only).
+                rows only. The listed rows are a quantized lm_head copy, see
+                `quantized_lm_head_copy`; the dynamic rows are weight-only.
 
         """
         head = getattr(lm_head, "base_layer", lm_head)
@@ -478,7 +466,14 @@ class DraftVocab:
 
         weight = head.weight[:vocab_size]
         self.token_ids = token_ids.to(weight.device)
-        self.rows = _Rows(weight[self.token_ids], quantization)
+        if quantization is None:
+            self.rows = _Rows(weight[self.token_ids], None)
+        else:
+            from vllm.model_executor.layers.quantization.online.lm_head import (
+                quantized_lm_head_copy,
+            )
+
+            self.rows = quantized_lm_head_copy(head, quantization, self.token_ids)
         self.num_dynamic_rows = dynamic_rows
         if dynamic_rows > 0:
             self._init_dynamic_rows(weight, quantization)
@@ -537,8 +532,10 @@ class DraftVocab:
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Logits of the listed rows, and of the picked rows with the picks as
         positions in `candidate_ids`."""
-        assert self.rows is not None
-        logits = self.rows(hidden_states)
+        assert self.rows is not None and self.token_ids is not None
+        rows = self.rows
+        logits = rows.quant_method.apply(rows, hidden_states)
+        logits = logits[..., : self.token_ids.numel()]
         if self.num_dynamic_rows == 0:
             return logits, None
         scores = self.scorer(hidden_states @ self.basis)
@@ -572,3 +569,7 @@ def load_draft_token_map(model: nn.Module, vllm_config: "VllmConfig") -> None:
         spec.draft_token_map_dynamic_rows,
         spec.draft_lm_head_quantization,
     )
+    if isinstance(draft_vocab.rows, ParallelLMHead):
+        # A submodule, so that refresh_quantized_lm_heads re-derives it from
+        # the target lm_head after weight updates.
+        model.draft_token_map_head = draft_vocab.rows
