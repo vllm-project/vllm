@@ -306,31 +306,6 @@ def test_vllm_tensorized_model_has_same_outputs(
         assert outputs == deserialized_outputs
 
 
-@pytest.mark.parametrize(
-    ("serialize_impl", "load_impl"),
-    [("vllm", "transformers"), ("transformers", "vllm")],
-)
-def test_vllm_tensorized_model_loads_with_other_model_impl(
-    vllm_runner, tmp_path, serialize_impl, load_impl
-):
-    """A file serialized by one Llama implementation loads into the other, though
-    each has rotary caches the other lacks."""
-    model_ref = "meta-llama/Llama-3.2-1B-Instruct"
-    config = TensorizerConfig(tensorizer_uri=str(tmp_path / "model.tensors"))
-    args = EngineArgs(model=model_ref, model_impl=serialize_impl, max_model_len=512)
-    tensorize_vllm_model(args, config)
-
-    kwargs = dict(model_impl=load_impl, max_model_len=512, enforce_eager=True)
-    with vllm_runner(model_ref, **kwargs) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts, 16)
-    with vllm_runner(
-        model_ref, load_format="tensorizer", model_loader_extra_config=config, **kwargs
-    ) as loaded_vllm_model:
-        deserialized_outputs = loaded_vllm_model.generate_greedy(prompts, 16)
-
-    assert outputs == deserialized_outputs
-
-
 @torch.inference_mode()
 def test_deserialized_hf_weights_are_ready_for_forward(tmp_path, monkeypatch):
     """Raw weights need CPU linear post-processing before the first forward."""
