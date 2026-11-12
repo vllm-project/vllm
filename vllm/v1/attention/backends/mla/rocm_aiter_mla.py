@@ -1859,9 +1859,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         The KV cache is bound only after the builder is made.
         """
         if self._flat_index_steps is None:
-            cache = self.compilation_config.static_forward_context[
+            layer = self.compilation_config.static_forward_context[
                 self._flat_index_layer
-            ].kv_cache
+            ]
+            cache = getattr(layer, "kv_cache", None)
             if not isinstance(cache, torch.Tensor) or cache.dim() != 3:
                 return self.kernel_block_size, 1
             self._flat_index_steps = _flat_mla_index_steps(cache)
