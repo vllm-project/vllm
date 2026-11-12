@@ -5,10 +5,11 @@
 import ast
 import functools
 import inspect
+import operator
 import textwrap
 import types
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import fx, nn
@@ -21,8 +22,9 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
     is_complete,
+    is_fn,
+    is_leaf_call,
     is_op,
-    output_value,
     peel,
     trace,
 )
@@ -176,20 +178,41 @@ class SharedExpertMLP(nn.Module):
         return out
 
 
-def _moe_block_forward(self: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
-    """Standard MoE block forward.
-
-    Routing and any shared experts are handled inside `self.experts: MoERunner`."""
+def _run_moe(experts: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Run `experts: MoERunner`, which also handles routing and any shared experts."""
     orig_shape = hidden_states.shape
     hidden_states = hidden_states.reshape(-1, orig_shape[-1])
     num_tokens = hidden_states.shape[0]
-    is_sequence_parallel = self.experts.moe_config.is_sequence_parallel
+    is_sequence_parallel = experts.moe_config.is_sequence_parallel
     if is_sequence_parallel:
         hidden_states = sequence_parallel_chunk(hidden_states)
-    out = self.experts(hidden_states, router_logits=hidden_states)
+    out = experts(hidden_states, router_logits=hidden_states)
     if is_sequence_parallel:
         out = tensor_model_parallel_all_gather(out, 0)[:num_tokens]
     return out.reshape(orig_shape)
+
+
+def _only_feeds(source: fx.Node, node: object) -> bool:
+    """Is `source` used only to compute `node`, along the first arguments `_unwrap`
+    follows, with every value on the way (and `node`) used once?"""
+    while isinstance(node, fx.Node) and len(node.users) == 1:
+        if node is source:
+            return True
+        node = node.args[0]
+    return False
+
+
+def _erase_unused(graph: fx.Graph, modules: set[str]) -> None:
+    """Erase unused nodes, keeping calls to child modules not in `modules` and
+    in-place writes, which may have side effects."""
+    for node in reversed(graph.nodes):
+        if node.users or node.op in ("placeholder", "output"):
+            continue
+        if node.op == "call_module" and node.target not in modules:
+            continue
+        if is_fn(node, operator.setitem) or str(node.target).endswith("_"):
+            continue
+        graph.erase_node(node)
 
 
 @dataclass
@@ -203,6 +226,9 @@ class MoEBlockFuser:
     shared_gate_name: str | None
     router_dtype: torch.dtype | None = None
     renormalize: bool | None = None
+    graph: fx.Graph | None = field(default=None, repr=False, compare=False)
+    """The block's forward with the routed and shared experts replaced by one call
+    to the fused MoE."""
 
     @staticmethod
     def _match_router(
@@ -254,11 +280,11 @@ class MoEBlockFuser:
     @staticmethod
     def _match_experts(
         graph: fx.Graph, experts_name: str, moe_block: nn.Module
-    ) -> tuple[fx.Node, fx.Node, fx.Node] | None:
-        """Matches `experts(x, ids, weights)` with `_, weights, ids = gate(x)`, `x`
-        being the block's input.
+    ) -> tuple[fx.Node, fx.Node, fx.Node, fx.Node] | None:
+        """Matches `experts(x, ids, weights)` with `_, weights, ids = gate(x)`.
 
-        Returns the experts call, `x` and the gate call."""
+        Returns the experts call, its hidden states argument, `x` (that argument
+        without reshapes and casts) and the gate call."""
         experts = find_node(
             graph, lambda n: n.op == "call_module" and n.target == experts_name
         )
@@ -273,8 +299,9 @@ class MoEBlockFuser:
             return None
         if len(bound.arguments) != 3:
             return None
+        hidden_states = next(iter(bound.arguments.values()))
         x, ids, weights = (_unwrap(a, moe_block) for a in bound.arguments.values())
-        if not (isinstance(x, fx.Node) and x.op == "placeholder"):
+        if not (isinstance(hidden_states, fx.Node) and isinstance(x, fx.Node)):
             return None
         if not (is_op(ids, "getitem") and is_op(weights, "getitem")):
             return None
@@ -285,7 +312,7 @@ class MoEBlockFuser:
             and weights.args == (gate, 1)
         ):
             return None
-        return experts, x, gate
+        return experts, hidden_states, x, gate
 
     @staticmethod
     def _match_shared_experts(
@@ -316,9 +343,11 @@ class MoEBlockFuser:
         experts_name: str,
         divides_shared_output: bool = False,
     ) -> "MoEBlockFuser | None":
-        """Matches a block returning `experts(x, ids, weights) [* c] [+ shared(x)]`
-        with `_, weights, ids = gate(x)`, `x` being the block's input, up to
-        reshapes, casts and `nn.Identity`.
+        """Matches a block computing `experts(x, ids, weights) [* c] [+ shared(x)]`
+        with `_, weights, ids = gate(x)`, up to reshapes, casts and `nn.Identity`.
+
+        Anything else in the block's forward, e.g. a norm before or after the
+        experts, is kept around the fused MoE.
 
         Args:
             moe_block: The MoE block.
@@ -334,45 +363,51 @@ class MoEBlockFuser:
         # Standard MoE block returns a single tensor.
         if _returns_tuple(type(moe_block)):
             return None
-        if (graph := trace(moe_block)) is None:
+        if (graph := trace(moe_block)) is None or not is_complete(graph):
             return None
+        # Only a graph that runs as traced can replace the forward.
+        for node in graph.nodes:
+            constant = node.op == "get_attr" and str(node.target).startswith("_tensor")
+            if is_leaf_call(node) or constant:
+                return None
+        source = graph.python_code("self").src
         if (matched := cls._match_experts(graph, experts_name, moe_block)) is None:
             return None
-        experts, x, gate = matched
+        experts, hidden_states, x, gate = matched
         unwrap = functools.partial(_unwrap, moe_block=moe_block)
         gate_name = gate.target
         router = cls._match_router(getattr(moe_block, gate_name))
         scoring_func, router_dtype, renormalize = router or (None, None, None)
 
-        def is_routed(n: object) -> bool:
-            return n is experts or (
+        scaled = find_node(
+            graph,
+            lambda n: (
                 is_op(n, "mul")
+                and len(n.args) == 2
                 and not isinstance(n.args[1], fx.Node)
                 and unwrap(n.args[0]) is experts
-            )
-
-        # Output: the experts' output, plus the shared expert's if any.
-        routed = out = unwrap(output_value(graph))
-        shared = None
-        if not is_routed(out):
-            if not (is_op(out, "add") and len(out.args) == 2):
-                return None
-            routed, shared = map(unwrap, out.args)
-            if is_routed(shared):
-                routed, shared = shared, routed
-            if not is_routed(routed):
-                return None
+            ),
+        )
+        routed = scaled or experts
+        # The experts' output plus the shared expert's, if any.
+        combine = find_node(
+            graph,
+            lambda n: (
+                is_op(n, "add")
+                and len(n.args) == 2
+                and any(unwrap(arg) is routed for arg in n.args)
+            ),
+        )
         shared_name = shared_gate_name = None
-        if shared is not None:
+        if combine is not None:
+            routed_idx = next(
+                i for i, a in enumerate(combine.args) if unwrap(a) is routed
+            )
+            shared = unwrap(combine.args[1 - routed_idx])
             if (match := cls._match_shared_experts(shared, x, moe_block)) is None:
-                return None
-            shared_name, shared_gate_name = match
-        # Fail closed: `rewrite_forward` runs only the experts and the detected
-        # shared expert, so any other stateful child would be dropped.
-        accounted = {experts_name, gate_name, shared_name, shared_gate_name}
-        for name, child in moe_block.named_children():
-            if name not in accounted and next(named_state(child), None) is not None:
-                return None
+                combine = None
+            else:
+                shared_name, shared_gate_name = match
         if scoring_func is not None and shared_name and divides_shared_output:
             logger.warning_once(
                 "%s could be fused but routing it in vLLM would apply "
@@ -385,7 +420,38 @@ class MoEBlockFuser:
             scoring_func = router_dtype = renormalize = None
         # Without vLLM routing, only a shared expert can move to vLLM, and only
         # if the block does not scale the experts' output (vLLM routing does).
-        if scoring_func is None and (shared_name is None or routed is not experts):
+        if scoring_func is None and (shared_name is None or scaled is not None):
+            return None
+        # The fused MoE returns the experts' output scaled and combined, so the
+        # partial values must not be used anywhere else.
+        if scaled is not None and not _only_feeds(experts, scaled.args[0]):
+            return None
+        if combine is not None:
+            routed_arg = combine.args[routed_idx]
+            if not _only_feeds(experts, routed_arg):
+                return None
+
+        # Splice: replace the experts call with the fused MoE and bypass the
+        # scale and the shared expert, which it applies.
+        with graph.inserting_before(experts):
+            runner = graph.get_attr(experts_name)
+            fused = graph.call_function(_run_moe, (runner, hidden_states))
+        experts.replace_all_uses_with(fused)
+        if scaled is not None:
+            scaled.replace_all_uses_with(scaled.args[0])
+        if combine is not None:
+            combine.replace_all_uses_with(combine.args[routed_idx])
+        moved = {gate_name, shared_name, shared_gate_name} - {None}
+        _erase_unused(graph, moved | {experts_name})
+        # Fail closed if the router or shared expert is still used elsewhere.
+        for node in graph.nodes:
+            if node.op in ("call_module", "get_attr") and (
+                str(node.target).split(".")[0] in moved
+            ):
+                return None
+        # Fail closed if the trace specialized on the input's sequence length.
+        retraced = trace(moe_block, seq_len=5)
+        if retraced is None or retraced.python_code("self").src != source:
             return None
         return cls(
             gate_name,
@@ -394,6 +460,7 @@ class MoEBlockFuser:
             shared_gate_name,
             router_dtype,
             renormalize,
+            graph,
         )
 
     def gate(
@@ -436,4 +503,9 @@ class MoEBlockFuser:
 
     def rewrite_forward(self, moe_block: nn.Module) -> None:
         """Rewrite `moe_block.forward` to route through vLLM's fused MoE."""
-        moe_block.forward = types.MethodType(_moe_block_forward, moe_block)
+        assert self.graph is not None
+        code = self.graph.python_code("self")
+        namespace = dict(code.globals)
+        filename = f"<{type(moe_block).__name__}.forward>"
+        exec(compile(code.src, filename, "exec"), namespace)
+        moe_block.forward = types.MethodType(namespace["forward"], moe_block)

@@ -290,33 +290,6 @@ def get_fse_test_model_config(
         from vllm.models.qwen4_exp.amd.model import Qwen4ExpModel
 
         return config, Qwen4ExpModel
-    if model_type == "AXK1":
-        from transformers import AXK1Config
-
-        from vllm.model_executor.models.AXK1 import AXK1Model
-
-        config = AXK1Config(
-            vocab_size=256,
-            hidden_size=128,
-            intermediate_size=32,
-            moe_intermediate_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=1,
-            num_key_value_heads=1,
-            n_shared_experts=1,
-            n_routed_experts=2,
-            num_experts_per_tok=1,
-            n_group=1,
-            topk_group=1,
-            first_k_dense_replace=0,
-            q_lora_rank=0,
-            kv_lora_rank=0,
-            qk_nope_head_dim=0,
-            qk_rope_head_dim=0,
-            v_head_dim=0,
-            quantization_config=quantization_config,
-        )
-        return config, AXK1Model
     if model_type == "glm4_moe_lite":
         from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 
@@ -1425,7 +1398,6 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         "alice_ai",
         "glm4_moe",
         "deepseek_v2",
-        "AXK1",
         "glm4_moe_lite",
         "deepseek_v32",
         "glm5_next",
@@ -1464,7 +1436,6 @@ def test_models_fse_init(
             "deepseek_v4",
             "glm4_moe",
             "deepseek_v2",
-            "AXK1",
             "glm4_moe_lite",
             "deepseek_v32",
             "glm5_next",

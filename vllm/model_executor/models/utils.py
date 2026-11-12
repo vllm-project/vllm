@@ -259,12 +259,15 @@ class AutoWeightsLoader:
         *,
         ignore_unexpected_prefixes: list[str] | None = None,
         ignore_unexpected_suffixes: list[str] | None = None,
+        ignore_unexpected_patterns: Iterable[str] | None = None,
     ) -> None:
         super().__init__()
 
         self.module = module
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
+        patterns = "|".join(f"({p})" for p in ignore_unexpected_patterns or [])
+        self.ignore_unexpected_regex = re.compile(patterns) if patterns else None
 
         # Weight tying makes two qualnames point at the same `nn.Parameter`
         # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
@@ -306,7 +309,9 @@ class AutoWeightsLoader:
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
         ius = (qualname.endswith(s) for s in self.ignore_unexpected_suffixes)
-        return any(iup) or any(ius)
+        regex = self.ignore_unexpected_regex
+        iur = regex is not None and regex.search(qualname) is not None
+        return any(iup) or any(ius) or iur
 
     def _load_param(
         self,

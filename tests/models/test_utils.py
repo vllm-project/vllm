@@ -158,6 +158,25 @@ def test_module_load_shared_params_that_are_not_tied_embeddings():
     assert torch.all(mod.gate.weight == torch.Tensor([[1, 2], [3, 4]]))
 
 
+@pytest.mark.cpu_test
+def test_ignore_unexpected_patterns_skip_only_unexpected_weights():
+    """Like Transformers' `_keys_to_ignore_on_load_unexpected`, a pattern must not
+    skip weights that a parameter loads (e.g. A.X-K1's `post_mlp_layernorm` is
+    unused only on its dense layers)."""
+    mod = torch.nn.Module()
+    mod.moe = torch.nn.Module()
+    mod.moe.norm = torch.nn.Linear(2, 2, bias=False)
+    mod.dense = torch.nn.Module()
+
+    ones = torch.ones(2, 2)
+    weights = [("moe.norm.weight", ones), ("dense.norm.weight", ones)]
+    loader = AutoWeightsLoader(mod, ignore_unexpected_patterns=[r"\.norm"])
+    loaded = loader.load_weights(iter(weights))
+
+    assert loaded == {"moe.norm.weight"}
+    assert torch.all(mod.moe.norm.weight == 1)
+
+
 class raise_if_cuda_sync:
     def __enter__(self):
         self.previous_debug_mode = torch.cuda.get_sync_debug_mode()
