@@ -109,8 +109,10 @@ SPARSE_DCP = "1-8:sparse"
 # microbenchmark of the decode alone (DCP16: 96 gathered heads, ~130 keys per row
 # and rank, L2 flushed): two tiles + the bulk exchange ahead at 7-8 rows; at 4
 # rows (one wave already) one tile stays ahead.
-SPARSE_TILES = {16: "7-8:2"}
-SPARSE_BULK = {16: "7-8:1"}
+# DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
+# decode-step A/B there.
+SPARSE_TILES = {16: "7-8:2", 8: "5-15:2"}
+SPARSE_BULK = {16: "7-8:1", 8: "5-15:1"}
 LOG2_P_SCALE = math.log2(448.0)  # E4M3 P at 448 of the row max (FlashInfer's)
 LN2 = math.log(2.0)
 

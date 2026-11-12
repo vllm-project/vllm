@@ -1911,7 +1911,9 @@ LOCAL_ABOVE_BITS = 10  # a scanned count: keys above the threshold (< n), then t
 # end-to-end A/B at c = 1 (TP16 + DCP16, DSpark k = 7) together with the DCP
 # MlaQuery-after-IndexFront launch order (overlap.QUERY_AFTER_FRONT). Without that
 # launch order the end-to-end A/B favored one CTA per row at short contexts.
-LOCAL_CLUSTER = {16: "8:4"}
+# DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
+# decode-step A/B there.
+LOCAL_CLUSTER = {16: "8:4", 8: "5-15:4"}
 LOCAL_SPLIT_FROM = 1024  # 8-key vectors: shorter rows select on CTA 0; tunable
 # A cluster's shared words (CTA 0's copy is the cluster's): this CTA's candidate count
 # and pass-4 count, then the shares' candidate prefix and total (CTA-local).

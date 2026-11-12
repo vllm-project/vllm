@@ -281,8 +281,8 @@ LAYOUT_COUNTS = {
 
 def test_sparse_layout_policy():
     """Two head tiles per CTA and the bulk exchange only for the pushing DCP16
-    decode at 7-8 rows (one wave of clusters instead of two); every other shape
-    keeps the one-tile kernel."""
+    decode at 7-8 rows (one wave of clusters instead of two) and the DCP8 decode
+    at 5-15 rows; every other shape keeps the one-tile kernel."""
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.attn_sparse import (
         sparse_layout,
     )
@@ -290,7 +290,8 @@ def test_sparse_layout_policy():
     for batch in range(1, 9):
         wide = (2, True) if batch >= 7 else (1, False)
         assert sparse_layout(batch, HEADS, (DCP16_OWNERS, DCP16)) == wide
-        assert sparse_layout(batch, HEADS, (12, 8)) == (1, False)
+        dcp8 = (2, True) if batch >= 5 else (1, False)
+        assert sparse_layout(batch, HEADS, (12, 8)) == dcp8
         assert sparse_layout(batch, HEADS, None) == (1, False)
     assert sparse_layout(8, 80, (5, DCP16)) == (1, True)  # 80 % 32: one tile
 
@@ -377,7 +378,8 @@ def test_sparse_layouts_match_one_tile_latent(batch):
 
 def test_dcp_value_rows_policy():
     """DcpValue `pushed` merges with one CTA per (head, 2 rows) only for DCP16 at
-    7-8 rows; every other shape keeps one CTA per (head, 16 rows)."""
+    7-8 rows and DCP8 at 5-15 rows; every other shape keeps one CTA per (head, 16
+    rows)."""
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.dcp import DcpValue
 
     def value(size, batch, pushed=True, **kw):
@@ -389,7 +391,7 @@ def test_dcp_value_rows_policy():
         dcp16 = value(DCP16, batch)
         assert dcp16.rows_per_cta == rows
         assert dcp16.grid == ((6, -(-batch // 2), 1) if rows else (6, 1, 1))
-        assert value(8, batch).rows_per_cta == 0
+        assert value(8, batch).rows_per_cta == (2 if batch >= 5 else 0)
         assert value(DCP16, batch, pushed=False).rows_per_cta == 0
     assert value(DCP16, 8, rows_per_cta=1).grid == (6, 8, 1)
 

@@ -89,7 +89,9 @@ PARTIALS_DEFAULT = {"mla": "1-64:bf16,65-320:proj", "dsa": "1-159:bf16,160-320:p
 # flushed) from the start of the sparse decode (two head tiles per CTA) to the end
 # of a kernel of o_proj's launch shape after DcpValue: R = 2 ahead of R = 1, both
 # ahead of the 16-row CTAs.
-VALUE_ROWS = {16: "7-8:2"}
+# DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
+# decode-step A/B there.
+VALUE_ROWS = {16: "7-8:2", 8: "5-15:2"}
 
 
 def resolve_partials(spec, kind):

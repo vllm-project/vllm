@@ -105,7 +105,9 @@ WIDE_MODES = ("serial", "fork")
 # again). Only the launch order changes, not what any kernel computes. Chosen by an
 # end-to-end A/B at c = 1 (TP16 + DCP16, DSpark k = 7), together with the local
 # top-k cluster policy (indexer.LOCAL_CLUSTER); other DCP sizes were not measured.
-QUERY_AFTER_FRONT = {16: "6-8:1"}
+# DCP8 entries (TP8 + DCP8, DSpark k = 4, 1-3 requests = 5-15 rows): set by a
+# decode-step A/B there.
+QUERY_AFTER_FRONT = {16: "6-8:1", 8: "5-15:1"}
 
 
 def query_after_front(batch, dcp):
