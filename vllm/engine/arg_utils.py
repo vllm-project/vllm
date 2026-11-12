@@ -2687,6 +2687,14 @@ class EngineArgs:
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
         )
+        if (
+            envs.VLLM_PP_LAYER_PARTITION is not None
+            and parallel_config.pipeline_parallel_size == 1
+        ):
+            logger.warning(
+                "VLLM_PP_LAYER_PARTITION is ignored because pipeline "
+                "parallelism is disabled."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
