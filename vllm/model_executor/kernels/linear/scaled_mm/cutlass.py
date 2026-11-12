@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -155,6 +156,17 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> None:
         self.logical_output_size = c.weight_shape[0]
         super().__init__(c, layer_param_names)
+        key = c.activation_quant_key
+        quantizes_with_cuda_op = (
+            getattr(self.quant_fp8._forward_method, "__func__", None)
+            is type(self.quant_fp8).forward_cuda
+        )
+        self._accepted_input_quant_key = (
+            key
+            if key == kFp8StaticTensorSym
+            or (key == kFp8DynamicTokenSym and quantizes_with_cuda_op)
+            else None
+        )
 
     @classmethod
     def is_supported(
@@ -169,11 +181,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        """Only static per-tensor activation quantization is supported for external
-        quantization."""
-        if self.config.activation_quant_key == kFp8StaticTensorSym:
-            return kFp8StaticTensorSym
-        return None
+        """Accept tensor scales, or per-token scales when the CUDA op quantizes."""
+        return self._accepted_input_quant_key
 
     @staticmethod
     def _pad_to_alignment(
