@@ -139,6 +139,9 @@ class ResidentPool(Generic[_T]):
     def referenced(self) -> list[str]:
         return [key for key, entry in self._entries.items() if entry.pinned]
 
+    def keys(self) -> list[str]:
+        return list(self._entries)
+
     def get(self, key: str) -> _T | None:
         entry = self._entries.get(key)
         return entry.value if entry is not None else None
@@ -202,6 +205,22 @@ class ResidentPool(Generic[_T]):
         entry.pinned = False
         if entry.leases == 0:
             self._evictable[key] = None
+
+    def evict_unleased(self, key: str, evict: Callable[[str, _T], bool]) -> bool:
+        """Remove one resident that has no active leases.
+
+        Unlike ``retire``, this drops the entry so later lookups miss.
+        Entries with leases stay in the pool. ``evict`` decides whether
+        to accept the value and is responsible for releasing it.
+        """
+        entry = self._entries.get(key)
+        if entry is None or entry.leases > 0:
+            return False
+        if not evict(key, entry.value):
+            return False
+        self._evictable.pop(key, None)
+        del self._entries[key]
+        return True
 
     def evict_lru(self, evict: Callable[[str, _T], bool]) -> str | None:
         for key in list(self._evictable):
@@ -464,6 +483,32 @@ class ConsumerMemoryPool:
                 event = self._record_release_event()
             self._defer_or_free(displaced, event)
             return allocation
+
+    def invalidate_published(self) -> None:
+        """Evict published residents that have no in-flight leases.
+
+        After the local Encoder Cache is cleared, leftover residents
+        must not stay discoverable via ``acquire_cached`` /
+        ``take_resident``, and must not strand allocator capacity.
+        Entries with active leases are left in place. This is a no-op
+        before the receive slab is prepared.
+        """
+        if self.tensor is None:
+            return
+        with self.lock:
+
+            def evict(mm_hash: str, allocation: MemoryAllocation) -> bool:
+                event = self._retire_events.pop(mm_hash, None)
+                if event is None:
+                    event = self._record_release_event()
+                self._defer_or_free(allocation, event)
+                self._reclaimed.add(mm_hash)
+                return True
+
+            published = self._residents.keys()
+            for mm_hash in published:
+                self._residents.evict_unleased(mm_hash, evict)
+            self._poll_frees_locked()
 
     def retire_stale(
         self,

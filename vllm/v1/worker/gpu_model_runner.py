@@ -981,6 +981,8 @@ class GPUModelRunner(
         """
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
+        if has_ec_transfer():
+            get_ec_transfer().reset()
 
     def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
         self.late_interaction_runner.release_queries(query_keys)

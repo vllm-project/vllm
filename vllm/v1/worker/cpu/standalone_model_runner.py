@@ -592,6 +592,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.reset_encoder_cache()
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
+        self.ec_connector.reset()
 
     def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
         if self.pooling_runner is not None:

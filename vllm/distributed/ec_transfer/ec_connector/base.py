@@ -114,9 +114,11 @@ class ECConnectorBase(ABC):
         """Invalidate connector-side encoder cache bookkeeping.
 
         Called from `Scheduler.reset_encoder_cache` after the
-        EncoderCacheManager is cleared. The default is a no-op; connectors
-        that mirror local cache residency must drop that state so a later
-        request cannot skip a necessary Load or Encode.
+        EncoderCacheManager is cleared, and from the worker
+        `reset_encoder_cache` path after the local encoder cache is
+        cleared. The default is a no-op; connectors that mirror local
+        cache residency must drop that state so a later request cannot
+        skip a necessary Load or Encode.
         """
         return
 

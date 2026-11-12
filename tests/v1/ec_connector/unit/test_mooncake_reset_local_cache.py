@@ -10,7 +10,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import MemoryAllocation
+from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
+    ConsumerMemoryPool,
+    MemoryAllocation,
+)
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakeLoadSpec,
 )
@@ -26,10 +29,21 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.state import (
     SchedulerTransferState,
     SchedulerTransferTable,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import ECMooncakeWorker
+from vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector import (
+    ECMooncakeConnector,
+)
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.worker.gpu.ec_connector import ActiveECConnector, ECConnector
+
+pytestmark = pytest.mark.cpu_test
 
 _TRANSFER_ID = "xfer-a"
+_SHAPE = (8, 4)
+_DTYPE = torch.float16
+_NBYTES = 64
+_POOL_CAPACITY = 256
 _MM_HASH = "hashA"
 
 
@@ -281,3 +295,127 @@ def test_reset_does_not_reschedule_consumed_reservation():
     _assert_expired_and_no_load(conn, _MM_HASH)
     with pytest.raises(RuntimeError, match="Pushed EC tensor is not ready"):
         reservations.take(_TRANSFER_ID, _MM_HASH)
+
+
+def _one_tensor_pool() -> ConsumerMemoryPool:
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+    transfer.unregister_memory.return_value = True
+    pool = ConsumerMemoryPool(_POOL_CAPACITY, transfer)
+    pool.prepare(torch.device("cpu"))
+    assert pool.tensor is not None
+    return pool
+
+
+def _reservation_manager(
+    pool: ConsumerMemoryPool,
+) -> ConsumerReservationManager:
+    return ConsumerReservationManager(pool, lease_ttl=300, tombstone_limit=8)
+
+
+def _worker_with_pool(pool: ConsumerMemoryPool) -> ECMooncakeWorker:
+    worker = ECMooncakeWorker.__new__(ECMooncakeWorker)
+    worker._consumer_memory = pool
+    return worker
+
+
+def _load_and_publish(
+    manager: ConsumerReservationManager,
+    transfer_id: str,
+    mm_hash: str,
+) -> MemoryAllocation:
+    record, write = manager.reserve(
+        transfer_id, mm_hash, _NBYTES, _SHAPE, "float16", _DTYPE
+    )
+    assert record is not None
+    assert write is True
+    accepted, published = manager.complete(transfer_id, record.reservation_id)
+    assert accepted is True
+    assert published is True
+    return manager.take(transfer_id, mm_hash)
+
+
+def test_invalidate_published_is_noop_before_prepare():
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+    pool = ConsumerMemoryPool(_POOL_CAPACITY, transfer)
+    pool.invalidate_published()
+    assert pool.tensor is None
+
+
+def test_reset_evicts_published_resident_and_allows_reserve_b():
+    """After Load A and an idle reset, a one-tensor pool can reserve B."""
+    pool = _one_tensor_pool()
+    manager = _reservation_manager(pool)
+    allocation_a = _load_and_publish(manager, "xfer-a", "hashA")
+    assert pool.take_resident("hashA", _SHAPE, "float16") is allocation_a.tensor
+
+    _worker_with_pool(pool).reset()
+
+    assert pool.acquire_cached("hashA", _SHAPE, _DTYPE) is None
+    assert pool.take_resident("hashA", _SHAPE, "float16") is None
+
+    record_b, write_b = manager.reserve(
+        "xfer-b", "hashB", _NBYTES, _SHAPE, "float16", _DTYPE
+    )
+    assert record_b is not None
+    assert write_b is True
+    assert record_b.state is ConsumerReservationState.WRITING
+    assert record_b.allocation is not None
+    assert record_b.allocation is not allocation_a
+
+
+def test_reset_does_not_reuse_published_resident_as_ready():
+    """After reset, reserving A under a new transfer_id must allocate again."""
+    pool = _one_tensor_pool()
+    manager = _reservation_manager(pool)
+    allocation_a = _load_and_publish(manager, "xfer-a", "hashA")
+
+    _worker_with_pool(pool).reset()
+
+    record_a2, write_a2 = manager.reserve(
+        "xfer-a2", "hashA", _NBYTES, _SHAPE, "float16", _DTYPE
+    )
+    assert record_a2 is not None
+    assert write_a2 is True
+    assert record_a2.state is ConsumerReservationState.WRITING
+    assert record_a2.allocation is not None
+    assert record_a2.allocation is not allocation_a
+    assert record_a2.lease is None
+
+
+def test_reset_leaves_in_flight_writing_allocation():
+    pool = _one_tensor_pool()
+    manager = _reservation_manager(pool)
+    record, write = manager.reserve(
+        "xfer-a", "hashA", _NBYTES, _SHAPE, "float16", _DTYPE
+    )
+    assert record is not None
+    assert write is True
+    allocation = record.allocation
+
+    _worker_with_pool(pool).reset()
+
+    assert record.state is ConsumerReservationState.WRITING
+    assert record.allocation is allocation
+    accepted, published = manager.complete("xfer-a", record.reservation_id)
+    assert accepted is True
+    assert published is True
+    taken = manager.take("xfer-a", "hashA")
+    assert taken is allocation
+
+
+def test_connector_reset_forwards_to_worker():
+    connector = ECMooncakeConnector.__new__(ECMooncakeConnector)
+    connector._scheduler = None
+    connector._worker = MagicMock()
+    ECMooncakeConnector.reset(connector)
+    connector._worker.reset.assert_called_once_with()
+
+
+def test_active_ec_connector_reset_forwards_to_transfer_connector():
+    wrapper = ActiveECConnector.__new__(ActiveECConnector)
+    wrapper.ec_connector = MagicMock()
+    ActiveECConnector.reset(wrapper)
+    wrapper.ec_connector.reset.assert_called_once_with()
+    ECConnector().reset()
