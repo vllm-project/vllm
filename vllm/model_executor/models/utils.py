@@ -260,7 +260,6 @@ class AutoWeightsLoader:
         ignore_unexpected_prefixes: list[str] | None = None,
         ignore_unexpected_suffixes: list[str] | None = None,
         ignore_unexpected_patterns: Iterable[str] | None = None,
-        ignore_unexpected_names_mapper: WeightsMapper | None = None,
     ) -> None:
         """Args:
         module: The module to load weights into.
@@ -268,11 +267,9 @@ class AutoWeightsLoader:
             starts with any of these.
         ignore_unexpected_suffixes: Skip unexpected weights whose qualname
             ends with any of these.
-        ignore_unexpected_patterns: Skip unexpected weights whose checkpoint
-            name, mapped by `ignore_unexpected_names_mapper`, matches any of
+        ignore_unexpected_patterns: Skip unexpected weights whose name, as
+            passed to `load_weights` (before its `mapper`), matches any of
             these regexes. Expected weights still load.
-        ignore_unexpected_names_mapper: Maps checkpoint names to the names
-            `ignore_unexpected_patterns` are matched against.
 
         """
         super().__init__()
@@ -283,9 +280,6 @@ class AutoWeightsLoader:
         self.ignore_unexpected_patterns = [
             re.compile(p) for p in ignore_unexpected_patterns or []
         ]
-        self.ignore_unexpected_names_mapper = (
-            ignore_unexpected_names_mapper or WeightsMapper()
-        )
         self.ignore_unexpected_names: set[str] = set()
         """Qualnames of weights matching `ignore_unexpected_patterns`."""
 
@@ -337,8 +331,7 @@ class AutoWeightsLoader:
         """Record the qualnames of weights matching `ignore_unexpected_patterns`."""
         patterns = self.ignore_unexpected_patterns
         for name, weight in weights:
-            key = self.ignore_unexpected_names_mapper.map_name(name)
-            matches = key is not None and any(p.search(key) for p in patterns)
+            matches = any(p.search(name) for p in patterns)
             if matches and (qualname := mapper.map_name(name)) is not None:
                 self.ignore_unexpected_names.add(qualname)
             yield name, weight

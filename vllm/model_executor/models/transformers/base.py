@@ -19,6 +19,7 @@
 import os
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
@@ -380,10 +381,6 @@ class Base(
         self.hf_to_vllm_mapper = WeightsMapper(
             orig_to_new_renaming=orig_to_new_renaming,
             orig_to_new_regex=orig_to_new_regex,
-        )
-        # The names Transformers matches `_keys_to_ignore_on_load_unexpected` against
-        self.hf_renaming_mapper = WeightsMapper(
-            orig_to_new_renaming=orig_to_new_renaming
         )
 
         # Apply mapping to quantization config if needed
@@ -920,14 +917,18 @@ class Base(
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Rename first, as Transformers matches `_keys_to_ignore_on_load_unexpected`
+        # against renamed checkpoint keys
+        renamings = self.hf_to_vllm_mapper.orig_to_new_renaming
+        weights = WeightsMapper(orig_to_new_renaming=renamings).apply(weights)
+        mapper = replace(self.hf_to_vllm_mapper, orig_to_new_renaming=[])
         loader = AutoWeightsLoader(
             self,
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
             ignore_unexpected_patterns=self.ignore_unexpected_patterns,
-            ignore_unexpected_names_mapper=self.hf_renaming_mapper,
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
     @staticmethod
     def check_version(min_version: str, feature: str):
