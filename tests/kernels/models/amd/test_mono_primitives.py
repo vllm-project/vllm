@@ -9,8 +9,8 @@ closed form for each, so a tolerance would only hide a wrong one.
 
 Each model carries its own copy of these helpers, so each has to be checked
 separately. This starts with DeepSeek-V4.1; a model is added by naming its
-package in `_PKG`, its modules in `_LIBS`, and pointing one more `-k` command
-at it from the step that already builds it."""
+package in `_PKG`, its modules in `_LIBS`, and pointing one more command at it
+from the step that already builds it."""
 
 import hashlib
 import importlib
@@ -84,12 +84,13 @@ def _gfx942(lib):
     return lib in _ON_942 and _find("dsv41", "GFX942")
 
 
-def _libs(*names, gfx950_only=False):
+def _libs(*names):
     """The libraries defining every helper of `names`."""
     out = []
     for lib in _LIBS:
-        skip = on_gfx942() and (gfx950_only or lib not in _ON_942)
-        marks = pytest.mark.skipif(skip, reason="gfx950 only")
+        marks = pytest.mark.skipif(
+            on_gfx942() and lib not in _ON_942, reason="gfx950 only"
+        )
         out.append(pytest.param(lib, marks=marks, id=lib))
     return [p for p in out if all(_has(p.values[0], n) for n in names)]
 
