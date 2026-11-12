@@ -13,10 +13,10 @@ steps:
   - vllm/plugins/
   - tests/plugins/
   - tests/plugins_tests/test_endpoint_plugins.py
+  - tests/entrypoints/launchers/test_shutdown.py
   - vllm/entrypoints/launchers/launcher.py
   - vllm/entrypoints/launchers/utils/server_utils.py
   - vllm/entrypoints/serve/instrumentator/health.py
-  - vllm/entrypoints/serve/sagemaker/api_router.py
   - vllm/entrypoints/launchers/render/entry.py
   - tests/utils.py
   commands:
@@ -46,10 +46,10 @@ steps:
       - vllm/plugins/
       - tests/plugins/
       - tests/plugins_tests/test_endpoint_plugins.py
+      - tests/entrypoints/launchers/test_shutdown.py
       - vllm/entrypoints/launchers/launcher.py
       - vllm/entrypoints/launchers/utils/server_utils.py
       - vllm/entrypoints/serve/instrumentator/health.py
-      - vllm/entrypoints/serve/sagemaker/api_router.py
       - vllm/entrypoints/launchers/render/entry.py
       - tests/utils.py
       - vllm/platforms/rocm.py

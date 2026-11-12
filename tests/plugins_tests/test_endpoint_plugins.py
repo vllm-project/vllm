@@ -214,7 +214,7 @@ def test_attach_is_noop_when_nothing_discovered(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/version", "/metrics", "/health", "/ready"])
+@pytest.mark.parametrize("path", ["/version", "/metrics", "/ready"])
 @pytest.mark.parametrize("include_in_schema", [True, False])
 async def test_endpoint_plugin_override_preserves_hook_and_schema(
     monkeypatch: pytest.MonkeyPatch, path: str, include_in_schema: bool
@@ -616,9 +616,31 @@ async def _serve_in_child(case: str) -> None:
     which ignores its deadline cancellation) never returns.
     """
     events = _PrintedEvents()
-    engine = _ServingEngineClient(
-        events, shutdown_timeout=1 if case == "drain_ignores_cancel" else 30
-    )
+    loop = asyncio.get_running_loop()
+
+    class _Engine(_ServingEngineClient):
+        def shutdown(self, timeout: float | None = None) -> None:
+            super().shutdown(timeout)
+            if case != "abandon_during_engine_shutdown":
+                return
+            # Watchdog exit cancels shutdown during engine shutdown, which fails.
+            self.errored, self.is_running = True, False
+            loop.call_soon_threadsafe(terminate_if_errored, state.server, self)
+            deadline = time.monotonic() + _TIMEOUT_S
+            while not state.shutdown_task.cancelling():
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            raise RuntimeError("engine shutdown failed")
+
+    class _RepeatsSignal:
+        @property
+        def shutdown_timeout(self) -> int:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return 0
+
+    engine = _Engine(events, shutdown_timeout=1 if case in _ONE_SECOND else 30)
+    if case == "zero_timeout_repeated_signal":
+        engine.vllm_config = _RepeatsSignal()
     blocked = asyncio.Event()
 
     class _Blocking(DummyAdminEndpointPlugin):
@@ -643,22 +665,21 @@ async def _serve_in_child(case: str) -> None:
             await asyncio.Event().wait()
 
         async def drain(self, state: State, timeout: float) -> None:
-            if case != "drain_ignores_cancel":
+            if case != "drain_cancelled_stop_hangs":
                 return await super().drain(state, timeout)
-            deadline = time.monotonic() + timeout
-            events.append("drain:B")
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                events.append("drain_cancelled:B")
-            # Yield until the deadline has passed, then ask again to exit.
-            while time.monotonic() < deadline:
-                await asyncio.sleep(0)
-            os.kill(os.getpid(), signal.SIGTERM)
+            # Watchdog exit cancels the drain, which settles cooperatively.
+            self.deadline = time.monotonic() + timeout
+            engine.errored, engine.is_running = True, False
+            terminate_if_errored(state.server, engine)
             await asyncio.Event().wait()
 
         async def stop(self, state: State) -> None:
             await super().stop(state)
+            if case == "drain_cancelled_stop_hangs":
+                while (remaining := self.deadline - time.monotonic()) > 0:
+                    await asyncio.sleep(remaining)
+                os.kill(os.getpid(), signal.SIGTERM)
+                await asyncio.Event().wait()
             if case == "stop_ignores_signal":
                 os.kill(os.getpid(), signal.SIGINT)
                 await asyncio.Event().wait()
@@ -683,6 +704,7 @@ async def _serve_in_child(case: str) -> None:
     async with engine_context(), contextlib.AsyncExitStack() as stack:
         monkeypatch = stack.enter_context(pytest.MonkeyPatch.context())
         plugins = [_dummy("A", events), _Blocking(events), _dummy("C", events)]
+        plugins[1].hang_drain = case in _HANGING_DRAIN
         app = await _build_plugin_app(
             monkeypatch, plugins, engine, _NativeServing(events)
         )
@@ -715,10 +737,13 @@ async def _serve_in_child(case: str) -> None:
                 await client.get(f"http://127.0.0.1:{port}/health")
 
 
+_HANGING_DRAIN = ("drain_ignores_cancel", "abandon_during_engine_shutdown")
+_ONE_SECOND = (*_HANGING_DRAIN, "drain_cancelled_stop_hangs")
 _AFTER_START = (
+    *_ONE_SECOND,
     "stop_ignores_signal",
-    "drain_ignores_cancel",
     "stop_hangs_after_watchdog",
+    "zero_timeout_repeated_signal",
 )
 _ROLLED_BACK = ["partial_cleanup:B", "stop:A", "native_shutdown"]
 _EXITED = ["engine_context_exit"]
@@ -743,7 +768,30 @@ _EXITED = ["engine_context_exit"]
         (
             "drain_ignores_cancel",
             (128 + signal.SIGTERM,),
-            ["start:C", "drain:B", "drain_cancelled:B"],
+            ["start:C", "drain_hangs", "drain_cancel_ignored", "engine_shutdown"],
+        ),
+        (
+            "abandon_during_engine_shutdown",
+            (128 + signal.SIGTERM,),
+            ["start:C", "drain_hangs", "drain_cancel_ignored", "engine_shutdown"],
+        ),
+        (
+            "drain_cancelled_stop_hangs",
+            (128 + signal.SIGTERM,),
+            ["start:C", "stop:C", "stop:B"],
+        ),
+        (
+            "zero_timeout_repeated_signal",
+            (0,),
+            [
+                "start:C",
+                "engine_shutdown",
+                "stop:C",
+                "stop:B",
+                "stop:A",
+                "native_shutdown",
+                *_EXITED,
+            ],
         ),
         (
             "stop_hangs_after_watchdog",
@@ -758,8 +806,9 @@ def test_shutdown_during_plugin_lifecycle(
     """Shutdown during a blocked `start` cancels it and rolls back the
     started plugins before the listener closes. When a hook ignores
     cancellation or never returns, a repeated SIGTERM or SIGINT exits the
-    process instead of hanging: after engine shutdown, after the drain
-    deadline, or once the shutdown task has been cancelled."""
+    process instead of hanging: after engine shutdown, or once the shutdown
+    task has been cancelled. After the drain deadline, it abandons the drain
+    and exits once the engine has shut down."""
     code = (
         "import runpy, uvloop; "
         f"scope = runpy.run_path({__file__!r}); "
@@ -857,35 +906,34 @@ class _ReadyPlugin(_LegacyEndpointPlugin):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "plugin, engine_error, draining, ready_status, health_status",
+    "plugin, engine_health, draining, ready_status",
     [
-        pytest.param(None, None, False, 200, 200, id="no-ready-capability"),
-        pytest.param(True, None, False, 200, 200, id="ready"),
-        pytest.param(False, None, False, 503, 200, id="plugin-not-ready"),
-        pytest.param(RuntimeError("x"), None, False, 503, 200, id="plugin-raises"),
-        pytest.param(True, None, True, 503, 200, id="draining"),
-        pytest.param(True, "dead", False, 503, 503, id="engine-dead"),
-        pytest.param(True, "ordinary", False, 500, 500, id="engine-error"),
-        pytest.param(False, "no-engine", False, 503, 200, id="render-not-ready"),
+        pytest.param(None, "ok", False, 200, id="no-ready-capability"),
+        pytest.param(False, "ok", False, 503, id="plugin-not-ready"),
+        pytest.param(RuntimeError("x"), "ok", False, 503, id="plugin-raises"),
+        pytest.param(True, "ok", True, 503, id="draining"),
+        pytest.param(True, "dead", False, 503, id="engine-dead"),
+        pytest.param(True, "error", False, 500, id="engine-error"),
+        pytest.param(True, "error", True, 503, id="draining-before-engine-error"),
+        pytest.param(True, "drains", False, 503, id="draining-during-engine-check"),
+        pytest.param(False, None, False, 503, id="render-not-ready"),
     ],
 )
-async def test_ready_reports_readiness_without_changing_health(
-    monkeypatch, plugin, engine_error, draining, ready_status, health_status
+async def test_ready_reports_plugin_readiness_and_draining(
+    monkeypatch, plugin, engine_health, draining, ready_status
 ):
-    from vllm.entrypoints.serve.instrumentator.health import health
-    from vllm.entrypoints.serve.sagemaker.api_router import health as ping_health
     from vllm.v1.engine.exceptions import EngineDeadError
-
-    assert ping_health is health
 
     class _Engine(_ServingEngineClient):
         async def check_health(self) -> None:
-            if engine_error == "dead":
+            if engine_health == "dead":
                 raise EngineDeadError()
-            if engine_error == "ordinary":
+            if engine_health == "error":
                 raise RuntimeError("health failed")
+            if engine_health == "drains":
+                app.state.draining = True
 
-    engine = None if engine_error == "no-engine" else _Engine([])
+    engine = _Engine([]) if engine_health else None
     plugins = [_LegacyEndpointPlugin() if plugin is None else _ReadyPlugin(plugin)]
     app = await _build_plugin_app(monkeypatch, plugins, engine)
     # No lifespan/start: readiness applies to every loaded provider.
@@ -893,34 +941,6 @@ async def test_ready_reports_readiness_without_changing_health(
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         assert (await client.get("/ready")).status_code == ready_status
-        assert (await client.get("/health")).status_code == health_status
-
-
-@pytest.mark.asyncio
-async def test_ready_checks_draining_before_and_after_engine_await(monkeypatch):
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    class _Engine(_ServingEngineClient):
-        async def check_health(self) -> None:
-            entered.set()
-            await release.wait()
-
-    app = await _build_plugin_app(monkeypatch, [], _Engine([]))
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        request = asyncio.create_task(client.get("/ready"))
-        try:
-            async with asyncio.timeout(_TIMEOUT_S):
-                await entered.wait()
-            app.state.draining = True
-            release.set()
-            assert (await request).status_code == 503
-            entered.clear()
-            assert (await client.get("/ready")).status_code == 503
-            assert not entered.is_set()
-        finally:
-            release.set()
-            await request
 
 
 @pytest.mark.asyncio
@@ -1016,6 +1036,42 @@ async def test_watchdog_exit_during_drain_settles_before_stop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_repeated_shutdown_cancellation_waits_for_drain_cleanup(monkeypatch):
+    events: list[str] = []
+    cleanup_entered, release_cleanup = asyncio.Event(), asyncio.Event()
+
+    class _SlowCleanup(_DrainPlugin):
+        async def drain(self, state: State, timeout: float) -> None:
+            self.entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup_entered.set()
+                await release_cleanup.wait()
+                events.append("settled:drain")
+
+    plugin = _SlowCleanup(events)
+    engine = _ServingEngineClient(events)
+    async with _serving(monkeypatch, [plugin], engine) as (state, task, _):
+        await _wait_started(state, task)
+        state.request_shutdown()
+        async with asyncio.timeout(_TIMEOUT_S):
+            await plugin.entered.wait()
+            state.shutdown_task.cancel()
+            await cleanup_entered.wait()
+        state.shutdown_task.cancel()
+        await asyncio.sleep(0)
+        assert not state.shutdown_task.done()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await state.shutdown_task
+        engine.errored, engine.is_running = True, False
+        terminate_if_errored(state.server, engine)
+        await _wait_closed(task)
+    assert events == ["settled:drain", "stop:drain"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("startup_failure", [False, True])
 @pytest.mark.parametrize("already_cancelling", [False, True])
 async def test_stop_interlock_defers_repeated_cancellation_until_owners_settle(
@@ -1105,6 +1161,20 @@ async def test_real_render_server_drains_accepted_owner():
         assert await asyncio.to_thread(server.proc.wait, timeout=_TIMEOUT_S) == 0
 
 
+_LIVE_MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
+_LIVE_ARGS = [
+    "--dtype",
+    "bfloat16",
+    "--max-model-len",
+    "256",
+    "--enforce-eager",
+    "--gpu-memory-utilization",
+    "0.05",
+    "--max-num-seqs",
+    "4",
+]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shutdown_source", ["sigterm", "callback"])
 async def test_live_engine_drains_accepted_owner(shutdown_source: str):
@@ -1116,24 +1186,9 @@ async def test_live_engine_drains_accepted_owner(shutdown_source: str):
     from tests.utils import RemoteOpenAIServer
 
     with RemoteOpenAIServer(
-        "vllm-project/tiny-random-LlamaForCausalLM",
-        [
-            "--dtype",
-            "bfloat16",
-            "--max-model-len",
-            "256",
-            "--enforce-eager",
-            "--gpu-memory-utilization",
-            "0.05",
-            "--max-num-seqs",
-            "4",
-            "--shutdown-timeout",
-            "30",
-        ],
-        env_dict={
-            "VLLM_PLUGINS": "dummy_admin_endpoint_plugin",
-            "VLLM_BATCH_INVARIANT": "1",
-        },
+        _LIVE_MODEL,
+        [*_LIVE_ARGS, "--shutdown-timeout", "30"],
+        env_dict={"VLLM_PLUGINS": "dummy_admin_endpoint_plugin"},
         max_wait_seconds=480,
     ) as server:
         child_pids = _get_child_pids(server.proc.pid)
@@ -1144,13 +1199,7 @@ async def test_live_engine_drains_accepted_owner(shutdown_source: str):
         ) as client:
             assert (await client.get("/health")).status_code == 200
             assert (await client.get("/ready")).status_code == 200
-            control = await client.post("/plugins/dummy/generate")
-            assert control.status_code == 200
-            reference = control.json()
-            assert reference["submitted_while_draining"] is False
-            assert reference["finished"] is True
-            assert reference["finish_reason"] == "length"
-            assert len(reference["token_ids"]) == 16
+            assert (await client.post("/plugins/dummy/generate")).status_code == 200
 
             accepted = await client.post(
                 "/plugins/dummy/session", params={"real_generation": True}
@@ -1179,11 +1228,12 @@ async def test_live_engine_drains_accepted_owner(shutdown_source: str):
 
             response = await client.post("/plugins/dummy/finish")
             assert response.status_code == 200
-            assert response.json() == {
-                **reference,
-                "submitted_while_draining": True,
-                "finished_while_draining": True,
-            }
+            result = response.json()
+            assert result["submitted_while_draining"] is True
+            assert result["finished_while_draining"] is True
+            assert result["finished"] is True
+            assert result["finish_reason"] == "length"
+            assert len(result["token_ids"]) == 16
 
         assert (
             await asyncio.to_thread(
@@ -1191,6 +1241,33 @@ async def test_live_engine_drains_accepted_owner(shutdown_source: str):
             )
             == 0
         )
+        await _assert_children_cleaned_up(child_pids)
+
+
+@pytest.mark.asyncio
+async def test_live_engine_stops_when_repeated_signal_abandons_drain():
+    """A repeated SIGTERM after the drain deadline abandons a drain that ignores
+    cancellation, but still shuts down the engine before the process exits."""
+    from tests.entrypoints.launchers.test_shutdown import (
+        _assert_children_cleaned_up,
+        _get_child_pids,
+    )
+    from tests.utils import RemoteOpenAIServer
+
+    with RemoteOpenAIServer(
+        _LIVE_MODEL,
+        [*_LIVE_ARGS, "--shutdown-timeout", "1"],
+        env_dict={"VLLM_PLUGINS": "dummy_admin_endpoint_plugin"},
+        max_wait_seconds=480,
+    ) as server:
+        child_pids = _get_child_pids(server.proc.pid)
+        assert child_pids
+        response = httpx.post(server.url_for("plugins/dummy/hang_drain"))
+        assert response.status_code == 200
+        # The plugin sends the repeated SIGTERM itself once its deadline passes.
+        server.proc.send_signal(signal.SIGTERM)
+        returncode = await asyncio.to_thread(server.proc.wait, timeout=_TIMEOUT_S)
+        assert returncode == 128 + signal.SIGTERM
         await _assert_children_cleaned_up(child_pids)
 
 

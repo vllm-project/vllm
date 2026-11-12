@@ -136,7 +136,7 @@ Plugin authors can assign an instance to `SupportsReady` or `SupportsDrain` in a
 
 ### Readiness probes
 
-The Python HTTP API server exposes `/ready` for engine health, plugin readiness and drain state. It returns 503 if `state.draining` is true, the engine raises `EngineDeadError`, or any loaded plugin's synchronous `ready(state)` returns false or raises an ordinary exception. Other engine health errors propagate as 500, matching `/health`. A plugin without `ready` is ready by default. Render servers check draining and plugins without an engine health check. The server checks draining both before and after awaiting engine health.
+The Python HTTP API server exposes `/ready` for engine health, plugin readiness and drain state. It returns 503 if `state.draining` is true, the engine raises `EngineDeadError`, or any loaded plugin's synchronous `ready(state)` returns false or raises an ordinary exception. Other engine health errors propagate as 500, matching `/health`. A plugin without `ready` is ready by default. Render servers check draining and plugins without an engine health check.
 
 Use `/ready` for Kubernetes readiness and retain `/health` for liveness. `/health`, including SageMaker `/ping`, retains its existing engine-health behavior; plugin unreadiness and draining do not change it. Existing deployments keep their behavior until their readiness probes are reconfigured. See [Kubernetes deployment](../deployment/k8s.md).
 
@@ -150,7 +150,7 @@ The server runs eligible plugins' `drain(state, timeout)` hooks concurrently bef
 
 The engine receives the deadline's remaining allowance, which may be zero if plugin drains consume it. There is no reserved engine allowance. With `--shutdown-timeout 0` (the default), the server sets draining, skips drain hooks and proceeds with immediate engine shutdown and plugin cleanup. The CPU-only render server uses the same configured timeout for plugin drains.
 
-Before any `stop` hook, the server cancels and awaits a live shutdown task, including its drain cancellation cleanup. This also applies to watchdog exit and startup rollback. Cancellation of the lifespan task is deferred until plugin and native serving cleanup finish. Cancellation cleanup and `stop` remain cooperative; the drain deadline is **not a hard process-exit bound**. A drain that ignores cancellation holds shutdown until a repeated SIGINT or SIGTERM after the deadline exits the process, as described for stop hooks above.
+`stop` hooks run only after drains settle, including after watchdog exit and startup rollback. Cancellation cleanup remains cooperative, so the drain deadline is **not a hard process-exit bound**. If a drain ignores cancellation, a repeated SIGINT or SIGTERM after the deadline abandons it: the server stops the engine with no remaining allowance, then exits with status 128 plus the signal number without running `stop` hooks.
 
 ## Registering the entry point
 
