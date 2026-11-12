@@ -19,8 +19,27 @@ import torch.distributed as dist
 
 from vllm.platforms import current_platform
 
-if not current_platform.is_cuda_alike():
-    pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip("Requires CUDA, ROCm or XPU", allow_module_level=True)
+
+DEVICE = current_platform.device_type
+
+
+@pytest.fixture(autouse=True)
+def _xpu_torch_cuda_aliases():
+    """The XPU model runner aliases torch.cuda stream APIs to torch.xpu."""
+    if not current_platform.is_xpu():
+        yield
+        return
+    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+
+    saved = dict(vars(torch.cuda))
+    with _torch_cuda_wrapper():
+        yield
+    for name in set(vars(torch.cuda)) - set(saved):
+        delattr(torch.cuda, name)
+    vars(torch.cuda).update(saved)
+
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
@@ -89,7 +108,7 @@ def _make_worker(
 
 
 def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
-    gpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cuda")}
+    gpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device=DEVICE)}
     cpu = {
         "k": torch.zeros(
             (NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu", pin_memory=True
@@ -260,6 +279,9 @@ def _drive_store(
     return corrupt
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="needs torch.cuda._sleep"
+)
 def test_store_orders_after_compute_write():
     """The store must wait for the compute event; without it, it races.
 
@@ -327,9 +349,12 @@ def test_transfer_hooks_pass_wait_event_for_store_only():
     assert load_calls[0]["wait_event"] is None
 
 
+@pytest.mark.skipif(
+    current_platform.is_xpu(), reason="srcAccessOrder is a CUDA/HIP batch-memcpy attr"
+)
 def test_build_params_src_access_order():
     """build_params defaults to ANY and honors an explicit STREAM override."""
-    gpu = {"k": torch.zeros((4, 64), dtype=torch.int8, device="cuda")}
+    gpu = {"k": torch.zeros((4, 64), dtype=torch.int8, device=DEVICE)}
     cpu = {"k": torch.zeros((4, 64), dtype=torch.int8, device="cpu")}
     stream = torch.cuda.Stream()
 
@@ -355,7 +380,7 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     raw = torch.zeros(
         num_blocks * num_layers * spec.page_size_bytes,
         dtype=torch.int8,
-        device="cuda",
+        device=DEVICE,
     )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
     layer_names = [f"layer.{i}" for i in range(num_layers)]
@@ -400,7 +425,7 @@ def test_explicit_cpu_blocks_bound_live_worker_allocation(monkeypatch, num_layer
     num_blocks = 4
     names = [f"layer.{i}" for i in range(num_layers)]
     raw = torch.zeros(
-        num_layers * num_blocks * BLOCK_BYTES, dtype=torch.int8, device="cuda"
+        num_layers * num_blocks * BLOCK_BYTES, dtype=torch.int8, device=DEVICE
     )
     config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -442,7 +467,7 @@ def test_explicit_cpu_blocks_reject_heavier_worker_before_allocation(
 ):
     """A count that fits the scheduler's stage must fail on a smaller worker."""
     names = ["layer.0", "layer.1"]
-    raw = torch.zeros(2 * 4 * BLOCK_BYTES, dtype=torch.int8, device="cuda")
+    raw = torch.zeros(2 * 4 * BLOCK_BYTES, dtype=torch.int8, device=DEVICE)
     config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
@@ -466,7 +491,7 @@ def test_register_kv_cache_storage_with_trailing_padding(monkeypatch):
     num_blocks = 4
     block_bytes = 32
     cache_bytes = num_blocks * block_bytes
-    raw = torch.zeros(4096, dtype=torch.int8, device="cuda")
+    raw = torch.zeros(4096, dtype=torch.int8, device=DEVICE)
     cache = raw[:cache_bytes].view(num_blocks, block_bytes)
     worker = _make_worker(
         kv_cache_config=MagicMock(
@@ -509,7 +534,7 @@ def test_register_separate_kv_head_groups(monkeypatch):
     raw = torch.zeros(
         num_blocks * num_layers * spec.page_size_bytes,
         dtype=torch.int8,
-        device="cuda",
+        device=DEVICE,
     )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
     layer_names = [f"layer.{i}" for i in range(num_layers)]
@@ -660,7 +685,7 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     assert kv_cache_config.num_blocks == num_blocks
     assert len(set(pages)) > 1, "the mixed page sizes are what this test covers"
 
-    kv_caches = allocate_kv_cache(kv_cache_config, torch.device("cuda"), layout)
+    kv_caches = allocate_kv_cache(kv_cache_config, torch.device(DEVICE), layout)
     worker = _make_worker(
         kv_cache_config=kv_cache_config,
         cpu_capacity_bytes=sum(pages) * num_blocks,
@@ -714,7 +739,7 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     )
     assert kv_cache_config.num_blocks == rank_blocks
 
-    kv_caches = allocate_kv_cache(kv_cache_config, torch.device("cuda"), layout)
+    kv_caches = allocate_kv_cache(kv_cache_config, torch.device(DEVICE), layout)
     worker = _make_worker(
         kv_cache_config=kv_cache_config,
         cpu_capacity_bytes=sum(pages) * rank_blocks,
@@ -797,7 +822,7 @@ def test_disk_backend_alignment_only_required_for_direct_io(
         raising=False,  # harmless on branches without teardown-side unpins
     )
     num_blocks = 4
-    gpu = {"k": torch.zeros((num_blocks, block_bytes), dtype=torch.int8, device="cuda")}
+    gpu = {"k": torch.zeros((num_blocks, block_bytes), dtype=torch.int8, device=DEVICE)}
     backend = DiskBackend()
     disk_path = tmp_path / "kv-offload.bin"
 
@@ -830,7 +855,7 @@ def test_cpu_caches_round_trip_on_pinned_host_buffer(hugepages, hugepage_with_fr
     """Store then load returns the same bytes on ordinary or HugeTLB pages."""
     num_layers, num_blocks = 2, 4
     names = [f"layer.{i}" for i in range(num_layers)]
-    raw = (torch.arange(num_layers * num_blocks * BLOCK_BYTES, device="cuda") % 127).to(
+    raw = (torch.arange(num_layers * num_blocks * BLOCK_BYTES, device=DEVICE) % 127).to(
         torch.int8
     )
     config = KVCacheConfig(

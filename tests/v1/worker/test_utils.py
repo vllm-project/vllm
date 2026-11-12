@@ -13,6 +13,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
+import vllm.v1.kv_offload.cpu.host_register as host_register_module
 from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
@@ -405,16 +406,17 @@ def test_shared_host_pool_tracks_successful_registrations(
         lambda *args: ((0, page), (page, 3 * page)),
     )
     cudart = MagicMock()
-    cudart.cudaHostRegister.side_effect = [
-        SimpleNamespace(value=int(fail_registration == i)) for i in (1, 2)
-    ]
-    cudart.cudaHostUnregister.return_value = SimpleNamespace(value=0)
-    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
+    cudart.cudaHostRegister.side_effect = [int(fail_registration == i) for i in (1, 2)]
+    cudart.cudaHostUnregister.return_value = 0
+    monkeypatch.setattr(host_register_module, "_get_cudart", lambda: cudart)
+    monkeypatch.setattr(
+        host_register_module.current_platform, "is_cuda_alike", lambda: True
+    )
     config = SimpleNamespace(
         instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
     )
     context = (
-        pytest.raises(RuntimeError, match="cudaHostRegister failed")
+        pytest.raises(RuntimeError, match="host registration failed")
         if fail_registration
         else nullcontext()
     )
@@ -429,8 +431,8 @@ def test_shared_host_pool_tracks_successful_registrations(
     assert (
         cudart.cudaHostRegister.call_args_list
         == [
-            call(backing.data_ptr(), page, 0),
-            call(backing.data_ptr() + page, 2 * page, 0),
+            call(backing.data_ptr(), page),
+            call(backing.data_ptr() + page, 2 * page),
         ][:attempts]
     )
     assert region.pinned_addresses == []

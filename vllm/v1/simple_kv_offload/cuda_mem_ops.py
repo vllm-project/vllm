@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-level CUDA/HIP batch DMA transfers."""
+"""Low-level CUDA/HIP/XPU batch DMA transfers."""
 
 import ctypes
 from typing import Any, NamedTuple
@@ -85,13 +85,34 @@ def _resolve_max_batch_descriptors() -> int:
     return _max_batch_descriptors
 
 
+def _xpu_batch_memcpy(
+    dsts, srcs, sizes, count, attrs, attrs_idx, num_attrs, fail_idx, stream
+) -> int:
+    """`swap_blocks_batch` behind the `cuMemcpyBatchAsync` call signature.
+
+    `stream` is the torch XPU stream (XPU has no raw stream handle to pass).
+    """
+    from vllm import _custom_ops as ops
+
+    def as_tensor(addr: int) -> torch.Tensor:
+        ptr = ctypes.cast(addr, ctypes.POINTER(ctypes.c_uint64))
+        return torch.from_numpy(np.ctypeslib.as_array(ptr, shape=(count,)))
+
+    with torch.xpu.stream(stream):
+        ops.swap_blocks_batch(as_tensor(srcs), as_tensor(dsts), as_tensor(sizes))
+    return 0
+
+
 def _resolve_batch_memcpy() -> tuple[Any, int]:
     """Resolve the batch-memcpy entry point and its `numAttrs` (one-time).
 
-    CUDA uses `cuMemcpyBatchAsync`; ROCm uses `hipMemcpyBatchAsync`.
-    Raises `RuntimeError` if the symbol is unavailable (old CUDA driver,
-    ROCm < 7.1, unusual install).
+    CUDA uses `cuMemcpyBatchAsync`; ROCm uses `hipMemcpyBatchAsync`; XPU uses
+    `swap_blocks_batch`. Raises `RuntimeError` if the symbol is unavailable
+    (old CUDA driver, ROCm < 7.1, unusual install).
     """
+    if current_platform.is_xpu():
+        return _xpu_batch_memcpy, 0
+
     if current_platform.is_rocm():
         try:
             lib = _load_hip_runtime()
@@ -193,7 +214,7 @@ class BatchMemcpyParams(NamedTuple):
     # NOTE: cuMemcpyBatchAsync_v2() removed fail_idx field, but we use
     # cuMemcpyBatchAsync() with fail_idx for backward compatibility
     fail_idx: ctypes.c_size_t
-    stream_handle: int  # raw cudaStream_t / CUstream
+    stream_handle: Any  # raw cudaStream_t / CUstream; the torch stream on XPU
 
 
 def build_params(
@@ -232,7 +253,7 @@ def build_params(
         attrs_idx=ctypes.c_size_t(0),
         num_attrs=num_attrs,
         fail_idx=ctypes.c_size_t(0),
-        stream_handle=stream.cuda_stream,
+        stream_handle=stream if current_platform.is_xpu() else stream.cuda_stream,
     )
 
 
