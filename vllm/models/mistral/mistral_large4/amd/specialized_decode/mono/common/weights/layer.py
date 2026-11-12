@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E501
 # Copyright (c) 2026 FlyDSL Project Contributors
 
 """Shared host-side weight container for model-specific MonoKernels."""

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: UP042
 # Copyright (c) 2026 FlyDSL Project Contributors
 
 """The vocabulary a mono kernel is built and fed with: how a weight is stored

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: B007, B023, E501, SIM102
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """ML4 indexed decode MonoKernel: one persistent launch per TP rank.
