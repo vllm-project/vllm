@@ -10,8 +10,11 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import os
 import threading
+import uuid
 from collections.abc import Iterable
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -41,7 +44,9 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
+from vllm.v1.kv_offload.tiering import spec as tiering_spec_module
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
@@ -660,7 +665,7 @@ class TestTieringOffloadingManager:
     def _promote_with_deferred_release(
         self, monkeypatch, chunks, successful_indices=(), preset=False
     ) -> list[threading.Event]:
-        """Promote ``chunks`` from tier1 into a failure with a deferred release.
+        """Promote `chunks` from tier1 into a failure with a deferred release.
 
         Returns the events the tier reported; setting one releases its job.
         """
@@ -1991,3 +1996,44 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+def test_tiering_spec_segments_region_and_skips_scheduler_prefault(monkeypatch):
+    """The scheduler maps the workers' segments without pre-faulting or pinning
+    them, and releasing its mapping leaves the workers' files in place."""
+    page = region_module.mmap.PAGESIZE
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", page)
+    populated: list[int] = []
+    monkeypatch.setattr(
+        region_module,
+        "_get_populate_write_fn",
+        lambda _: lambda mmap_obj, offset, length: populated.append(offset),
+    )
+    monkeypatch.setattr(
+        tiering_spec_module, "CPUOffloadingWorker", lambda **kw: kw["mmap_region"]
+    )
+    config = make_offloading_config(
+        spec_name="TieringOffloadingSpec",
+        engine_id=f"test-tiering-{uuid.uuid4()}",
+        cpu_bytes_to_use=8 * 2 * page,
+        worker_kv_bytes_per_block=page,
+        world_size=2,
+    )
+    worker = cast(
+        region_module.SharedOffloadRegion,
+        TieringOffloadingSpec(config).create_worker(MagicMock()),
+    )
+    spec = TieringOffloadingSpec(config)
+    try:
+        worker_populated = len(populated)
+        manager = spec.get_manager()
+        scheduler = spec._scheduler_mmap
+        assert scheduler is not None
+        assert worker_populated > 0 and len(populated) == worker_populated
+        assert len(scheduler._segments) > 1
+        assert scheduler._segments == worker._segments
+        assert not scheduler.is_pinned
+        manager.shutdown()
+        assert all(os.path.exists(path) for path, _, _ in worker._segments)
+    finally:
+        worker.cleanup()

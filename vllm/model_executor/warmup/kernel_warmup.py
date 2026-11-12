@@ -5,9 +5,12 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import gc
 import json
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -57,6 +60,35 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
+
+
+@contextmanager
+def _outside_kv_cache_transient_window(worker: "Worker") -> Iterator[None]:
+    """Keep a one-off tuning step out of the extensible KV cache's reserve.
+
+    An extensible KV cache keeps free the allocator peak its warmup steps reach
+    (`reserved_headroom_bytes`). Autotuning profiles every candidate tactic
+    over all token buckets on scratch buffers that serving never allocates
+    again, so its peak is not a serving transient. Record the transient reached
+    before tuning, then restart peak tracking afterwards; the warmup steps that
+    follow run with the tuned tactics and measure their own transients.
+    """
+    cache_config = getattr(worker, "cache_config", None)
+    if not getattr(cache_config, "enable_extensible_kv_cache", False):
+        yield
+        return
+    stats = torch.accelerator.memory_stats(worker.device)
+    worker.kv_cache_transient_bytes_before_tuning = max(
+        getattr(worker, "kv_cache_transient_bytes_before_tuning", 0),
+        stats.get("allocated_bytes.all.peak", 0)
+        - stats.get("allocated_bytes.all.current", 0),
+    )
+    try:
+        yield
+    finally:
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.reset_peak_memory_stats(worker.device)
 
 
 def _warmup_flashinfer_attention(worker: "Worker") -> None:
@@ -217,7 +249,7 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
 
 
 def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
-    """One token count per AITER tuned-GEMM bucket up to ``max_m``.
+    """One token count per AITER tuned-GEMM bucket up to `max_m`.
 
     AITER pads M to 1, 2, 4 or 8 below 16, then to multiples of 16 / 32 / 64 /
     128 up to 256 / 1024 / 4096 / beyond, and builds each bucket's kernel on
@@ -362,7 +394,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if enable_flashinfer_autotune is False:
         logger.info_once("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
-        flashinfer_autotune(worker.model_runner)
+        with _outside_kv_cache_transient_window(worker):
+            flashinfer_autotune(worker.model_runner)
 
     _warmup_flashinfer_attention(worker)
 
@@ -474,7 +507,7 @@ def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
 
 
 def _all_ranks_have_matching_cache(path: Path, group) -> bool:
-    """True iff every rank in ``group`` has its own, mutually consistent file."""
+    """True iff every rank in `group` has its own, mutually consistent file."""
     fingerprint = _autotune_cache_fingerprint(path)
     if group.world_size == 1:
         return fingerprint is not None
@@ -523,7 +556,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     averaged over the tuning group so all its ranks select the same tactic.
 
     Legacy results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
-    (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
+    (`MoERunner.get_cache_key_extras`), so one rank's file only hits on that
     rank. A rank with a cache hit skips the per-tactic reduce the others block
     in, so ranks keep loaded configs only if every rank in the tuning group
     has a matching file and successfully loads it.

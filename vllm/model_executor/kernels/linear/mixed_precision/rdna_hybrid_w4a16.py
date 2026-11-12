@@ -6,14 +6,14 @@ Routes based on the activation shape:
   M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
       HIP skinny GEMM (wvSplitK_int4_g)
   M >= MIN_DENSE_M:  dense GEMM on a cached dequantized copy, when
-      ``KernelConfig.rdna_hybrid_w4a16_prefill_dequant`` is "enable"
+      `KernelConfig.rdna_hybrid_w4a16_prefill_dequant` is "enable"
   otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
 paths read this single buffer: the HIP skinny kernel uses it directly, and
 the triton kernel reinterprets it as int32 [N, K//8] via a view (and
 transposes tiles in-register). No dual weight storage unless
-``rdna_hybrid_w4a16_prefill_dequant`` caches the dense prefill copy.
+`rdna_hybrid_w4a16_prefill_dequant` caches the dense prefill copy.
 """
 
 from contextlib import AbstractContextManager, nullcontext
@@ -131,8 +131,8 @@ MIN_DENSE_M = 256
 @triton.jit
 def _int4_pair_to_fp16x2(x):
     """Unpack two packed int4 nibbles into a uint32 holding two fp16 lanes,
-    each equal to 1024 + nibble, with one ``v_and_or_b32``
-    (``(x & 0x000F000F) | 0x64006400``).
+    each equal to 1024 + nibble, with one `v_and_or_b32`
+    (`(x & 0x000F000F) | 0x64006400`).
 
     OR-ing a 4-bit nibble into the low mantissa of fp16 1024.0 (0x6400)
     bitcasts to exactly 1024+n. Doing it on a full 32-bit lane dequants two
@@ -190,7 +190,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     (nibble - zp_raw) * scale.
     When HAS_ZP=False, only the constant ZP_BIAS is subtracted (symmetric).
 
-    With PACKED_DEQUANT the nibble arrives as ``b_raw`` = 1024 + nibble (the
+    With PACKED_DEQUANT the nibble arrives as `b_raw` = 1024 + nibble (the
     magic-constant unpack), so the subtrahend absorbs the 1024: the arithmetic
     is unchanged and every intermediate stays exact, since fp16 represents every
     integer below 2048.
@@ -560,7 +560,7 @@ _STRIDE_PAD_BYTES = 128  # one cache line
 def _weight_pad_bytes(row_bytes: int) -> int:
     """Bytes to add to a packed weight row stride to move it off the cliff.
 
-    Only strides that are a multiple of ``_WEIGHT_CLIFF_BYTES`` are moved, and
+    Only strides that are a multiple of `_WEIGHT_CLIFF_BYTES` are moved, and
     only by one cache line; padding a stride that is already off the cliff
     costs memory and measures slower.
     """
@@ -580,7 +580,7 @@ def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
     """Pack [N, K] uint4 into the skinny weight layout the kernels consume.
 
     ExLlama shuffle to [N, K//8] int32, viewed as int8 [N, K//2]. On gfx1151
-    the row stride is nudged off the cliff (see ``_weight_pad_bytes``).
+    the row stride is nudged off the cliff (see `_weight_pad_bytes`).
     """
     shuffled = pack_int4_exllama_shuffle(unpacked)
     n_rows, k8 = shuffled.shape
@@ -606,8 +606,8 @@ def dequantize_w4a16(
 ) -> torch.Tensor:
     """Dequantize [N, K] int32 uint4 values (natural K order) to [N, K] dtype.
 
-    ``scales`` and ``zp`` are [N, K//G]; without ``zp`` the constant
-    ``zp_bias`` is subtracted.
+    `scales` and `zp` are [N, K//G]; without `zp` the constant
+    `zp_bias` is subtracted.
     """
     N_dim, K_dim = unpacked.shape
     w = unpacked.view(N_dim, K_dim // group_size, group_size).to(dtype)
@@ -623,7 +623,7 @@ def dequantize_w4a16(
 
 
 def _pad_activation_rows(x_2d: torch.Tensor) -> torch.Tensor:
-    """Copy ``x_2d`` into a row-padded buffer when its row stride is on the cliff.
+    """Copy `x_2d` into a row-padded buffer when its row stride is on the cliff.
 
     The packed weight is padded once at load time, but activations are produced
     fresh every step, so this materialises a padded copy.
@@ -654,8 +654,8 @@ def _rdna_hybrid_w4a16_apply_impl(
 ) -> torch.Tensor:
     """Dispatch between skinny GEMM and Triton based on batch size M.
 
-    ``w_zp`` is [N//8, K//G] int32 for asymmetric layers, None for symmetric.
-    ``w_dequant`` is the optional dense [N, K] copy used for prefill.
+    `w_zp` is [N//8, K//G] int32 for asymmetric layers, None for symmetric.
+    `w_dequant` is the optional dense [N, K] copy used for prefill.
     """
     import vllm._custom_ops as ops
 
@@ -715,7 +715,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
     Stores the weights once as int8 [N, K//2] (ExLlama shuffle packed). The
     HIP skinny kernel reads it directly; the triton kernel reinterprets the
     same buffer as int32 [N, K//8] via a view, so there is no dual weight
-    storage unless ``rdna_hybrid_w4a16_prefill_dequant`` caches a dense prefill
+    storage unless `rdna_hybrid_w4a16_prefill_dequant` caches a dense prefill
     copy.
     """
 
