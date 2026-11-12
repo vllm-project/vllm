@@ -41,6 +41,9 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
+from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
+    AiterFlashAttnPrefillBackend,
+)
 from vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8 import (
     AiterFlyDSLFP8PrefillBackend,
 )
@@ -3584,7 +3587,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         cu_seqlens_k = attn_metadata.fused_prefill_cu_seqlens_k
         cu_seqlens_q = prefill_metadata.query_start_loc[: cu_seqlens_k.numel()]
-        self.flash_attn_varlen_func(
+        prefill_backend = prefill_metadata.prefill_backend
+        assert isinstance(prefill_backend, AiterFlashAttnPrefillBackend)
+        prefill_backend.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
