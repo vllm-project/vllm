@@ -86,24 +86,31 @@ def gpu_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
 
     Ground truth: builds a TP=1 engine with dummy weights (uniproc executor,
     worker in-process) and reads the allocated cache tensors from the model
-    runner directly. Needs a GPU. vLLM logging is disabled.
+    runner directly. Needs a GPU. Engine logs go to a file, not the terminal.
     """
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     from vllm import LLM
 
-    llm = LLM(
-        model=MODEL,
-        tensor_parallel_size=1,
-        load_format="dummy",
-        max_model_len=8192,
-        disable_log_stats=True,
-        numa_bind=False,
-        block_size=block_size,
-    )
-    runner = (
-        llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.model_runner
-    )
-    total = sum(t.numel() * t.element_size() for t in runner.kv_caches)
+    log = Path("block_bytes_calibration.log")
+    print(f"Calibration log: {log}")
+    with (
+        log.open("w") as f,
+        contextlib.redirect_stdout(f),
+        contextlib.redirect_stderr(f),
+    ):
+        llm = LLM(
+            model=MODEL,
+            tensor_parallel_size=1,
+            load_format="dummy",
+            max_model_len=8192,
+            disable_log_stats=True,
+            numa_bind=False,
+            enforce_eager=True,
+            block_size=block_size,
+        )
+        worker = llm.llm_engine.engine_core.engine_core.model_executor.driver_worker
+        runner = worker.model_runner
+        total = sum(t.numel() * t.element_size() for t in runner.kv_caches)
     return total // runner.kv_cache_config.num_blocks
 
 
