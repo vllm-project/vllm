@@ -2647,6 +2647,8 @@ def test_ds41_mega_attn_bi_decode_rows_match_prefill(
     attention.swa_cache_layer = swa
     attention.window_size = window
     attention.max_num_batched_tokens = length
+    # Batch invariance keeps the mega kernel at every decode step size.
+    attention._use_swapab = False
     attention.topk_indices_buffer = torch.full(
         (length, 512), -1, device=device, dtype=torch.int32
     )
