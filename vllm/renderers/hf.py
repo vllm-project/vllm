@@ -49,7 +49,10 @@ from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
-from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
+from vllm.transformers_utils.chat_templates import (
+    get_chat_template_fallback_path,
+    get_chat_template_override_path,
+)
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
@@ -322,6 +325,14 @@ def resolve_chat_template(
         # Resolve template names (e.g. "tool_use") to actual Jinja content
         # so that downstream kwargs detection can parse template variables.
         return tokenizer.get_chat_template(chat_template, tools=tools)
+
+    # Predefined templates that replace the ones shipped on HF Hub
+    path = get_chat_template_override_path(
+        model_type=model_config.hf_config.model_type,
+        tokenizer_name_or_path=tokenizer.name_or_path,
+    )
+    if path is not None:
+        return load_chat_template(path)
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
