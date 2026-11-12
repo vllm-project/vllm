@@ -44,8 +44,9 @@ def moe_server():
 def test_moe_no_false_positive(moe_server):
     """Probes on an idle rank inside a wave, and probes racing with wave
     starts, do not flap."""
-    with moe_server.busy(dp_ranks=(0,)):
+    with moe_server.busy(dp_ranks=(0,)) as statuses:
         assert moe_server.stays_ready(PROBE_TIMEOUT_S + 3)
+    assert statuses and set(statuses) == {200}
     for i in range(10):
         moe_server.generate_in_background(8, dp_rank=i % 2)
         assert moe_server.status() == 200

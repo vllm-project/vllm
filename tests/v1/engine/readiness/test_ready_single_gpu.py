@@ -26,8 +26,9 @@ def server():
 def test_no_false_positive(server):
     """A healthy engine stays ready when idle and under sustained load."""
     assert server.stays_ready(PROBE_TIMEOUT_S + 3)
-    with server.busy():
+    with server.busy() as statuses:
         assert server.stays_ready(PROBE_TIMEOUT_S + 3)
+    assert statuses and set(statuses) == {200}
 
 
 @pytest.mark.parametrize("fault", ["fault_ima_now", "fault_ima_on_next_forward"])

@@ -90,12 +90,20 @@ class ReadyProbeServer:
 
     @contextmanager
     def busy(self, dp_ranks: tuple[int | None, ...] = (None,)):
-        """Keep the given DP ranks continuously busy with requests."""
+        """Keep the given DP ranks continuously busy with requests.
+
+        Yields the status codes of the requests sent (0 for a request that
+        raised), so the caller can check that the load was served.
+        """
         stop = threading.Event()
+        statuses: list[int] = []
 
         def loop(dp_rank):
             while not stop.is_set():
-                self._generate_quietly(64, dp_rank)
+                try:
+                    statuses.append(self.generate(64, dp_rank))
+                except requests.RequestException:
+                    statuses.append(0)
 
         threads = [
             threading.Thread(target=loop, args=(rank,), daemon=True)
@@ -105,7 +113,7 @@ class ReadyProbeServer:
         for t in threads:
             t.start()
         try:
-            yield
+            yield statuses
         finally:
             stop.set()
             for t in threads:
