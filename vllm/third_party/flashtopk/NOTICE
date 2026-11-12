@@ -1,0 +1,19 @@
+FlashTopK
+Copyright 2026 the FlashTopK authors
+
+This product includes software derived from the following projects, each licensed under the Apache License,
+Version 2.0:
+
+* FlashInfer (https://github.com/flashinfer-ai/flashinfer), Copyright (c) 2025 by FlashInfer team.
+  flashtopk/kernels/scan_sm100.py, and through it the pipelines of flashtopk/kernels/prune_sm100.py and
+  flashtopk/kernels/refine_sm100.py, are derived from FlashInfer's selective-logits candidate kernel
+  (flashinfer/attn_scores/kernels/fp8_paged_mqa_logits.py), itself adapted from TensorRT-LLM.
+
+* TensorRT-LLM (https://github.com/NVIDIA/TensorRT-LLM), Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+  Its CuTe DSL FP8 paged MQA logits kernel (fp8_paged_mqa_logits.py under tensorrt_llm/_torch/cute_dsl_kernels/),
+  by way of FlashInfer.
+
+* LiteTopK (https://github.com/Heisenberg-Yin/LiteTopK). The gate calibration (flashtopk/kernels/seed_prep.py) and the
+  candidate selection (flashtopk/kernels/selection.py) follow LiteTopK's seed-prep and compact top-k kernels.
+
+The score upper bound of key pruning (flashtopk/plan.py) follows DoSA (arXiv 2610.13990, sections 2.2-2.5).
