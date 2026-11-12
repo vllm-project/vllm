@@ -623,8 +623,7 @@ class SpeculativeConfig:
     with include_output_tokens, and they are rarely accepted. If set to True,
     num_speculative_tokens_per_batch_size is set to 0 speculative tokens for
     all batch sizes, so the two cannot be combined. Requires
-    method='extract_hidden_states' and Model Runner V2, and does not support
-    data parallelism."""
+    method='extract_hidden_states' and does not support data parallelism."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
