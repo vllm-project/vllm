@@ -130,10 +130,10 @@ sequenceDiagram
 thread per worker (i.e. per TP rank), named ``nixl-push-writer``.
 Each owns the new push-specific NIXL operations on its rank:
 
-* ``nixl_wrapper.get_new_notifs()`` — receive notifications.
-* ``nixl_wrapper.send_notif(...)`` for the ``PUSH_REG:<msgpack>`` (D
+- ``nixl_wrapper.get_new_notifs()`` — receive notifications.
+- ``nixl_wrapper.send_notif(...)`` for the ``PUSH_REG:<msgpack>`` (D
   side) and for the per-WRITE completion notif (P side).
-* ``nixl_wrapper.make_prepped_xfer(...) / transfer(...)`` — submit the
+- ``nixl_wrapper.make_prepped_xfer(...) / transfer(...)`` — submit the
   WRITE itself.
 
 Heartbeats continue to go out from the engine main thread via the
@@ -162,9 +162,9 @@ event:
    writer; their done-callbacks re-enqueue the deferred op and set the
    wake, since neither ``send_notif`` nor the NIXL WRITE may run off the
    writer thread:
-    * the **D→P** handshake (before sending ``PUSH_REG``) re-enqueues the
+    - the **D→P** handshake (before sending ``PUSH_REG``) re-enqueues the
       registration onto ``_reg_send_inbox``;
-    * the **P→D** handshake (before a WRITE) re-enqueues the matched
+    - the **P→D** handshake (before a WRITE) re-enqueues the matched
       ``(req_id, blocks, reg_data)`` onto ``_deferred_push_inbox``.
 
    On this second pass ``_ensure_handshake`` returns ``None`` (the agent
@@ -243,10 +243,10 @@ accounting code is unchanged.
 A peer's KV regions do not line up with the local ones by index under
 pipeline parallelism (PP) or a hybrid (HMA) KV layout:
 
-* a PP-sharded prefiller (**P**) holds only a slice of the model's
+- a PP-sharded prefiller (**P**) holds only a slice of the model's
   layers while the `PP=1` decoder (**D**) holds them all, so region
   counts differ;
-* with HMA, layers of several cache groups can share one region, and
+- with HMA, layers of several cache groups can share one region, and
   which layers share a region can differ between P and D.
 
 Both connectors therefore pair regions **by layer**, for every peer. Each
@@ -294,15 +294,15 @@ backend names during the handshake.
 
 Invariants enforced when pairing:
 
-* the remote must hold every local layer; a missing layer fails the
+- the remote must hold every local layer; a missing layer fails the
   handshake rather than silently leaving that layer's KV stale. Layers
   only the remote holds are skipped on a PP stage (other stages own
   them) and fail the handshake otherwise;
-* a remote that does not advertise its layers fails the handshake
+- a remote that does not advertise its layers fails the handshake
   instead of falling back to pairing by index;
-* a layer must span the same number of regions on both sides;
-* every TP rank of one remote engine must pair the same way;
-* a layer in different cache groups on P and D is refused by push. Each
+- a layer must span the same number of regions on both sides;
+- every TP rank of one remote engine must pair the same way;
+- a layer in different cache groups on P and D is refused by push. Each
   worker advertises every layer's cache group
   (`NixlAgentMetadata.layer_group_ids`), so this is caught even when the
   layer's region is shared by several groups.
@@ -316,29 +316,29 @@ across TP ranks, so producer TP1 to consumer TP2 is supported.
 
 `NixlPushConnectorScheduler` extends the base scheduler with:
 
-* **D side** — `update_state_after_alloc` stashes registration data in
+- **D side** — `update_state_after_alloc` stashes registration data in
   `_push_pending_registrations` and arms a soft watchdog
   (`_push_registration_deadlines`). `build_connector_meta` drains the
   stash into `meta.push_registrations` and any expired entries are
   dropped with a warning.
-* **P side** — `request_finished` stashes block IDs in
+- **P side** — `request_finished` stashes block IDs in
   `_finished_request_blocks` (for the lease and for
   `has_pending_push_work`) and `_newly_finished_push_blocks` (for the
   next worker step via `meta.push_finished_blocks`).
-* **Both sides** — `has_pending_push_work` keeps the engine main loop
+- **Both sides** — `has_pending_push_work` keeps the engine main loop
   stepping while there is in-flight push state, so the writer always
   gets at least one wake per step.
 
 `update_connector_output`:
 
-* `finished_sending` (P side) clears the lease entry.
-* `finished_recving` (D side) clears the watchdog deadline.
+- `finished_sending` (P side) clears the lease entry.
+- `finished_recving` (D side) clears the watchdog deadline.
 
 ## Timeouts and watchdogs
 
 Two per-request timers are armed on the scheduler:
 
-* **D-side registration watchdog** — ``_push_registration_deadlines``.
+- **D-side registration watchdog** — ``_push_registration_deadlines``.
   If a registered request does not see a push completion within
   ``push_registration_timeout`` seconds (defaults to
   ``decoder_kv_blocks_ttl``), ``build_connector_meta`` drops the stale
@@ -347,7 +347,7 @@ Two per-request timers are armed on the scheduler:
   in ``_reqs_need_recv``; it is the engine's request-level abort path
   (or the user / proxy timing out the HTTP call) that ultimately fails
   the request.
-* **P-side block lease** — same ``_kv_lease_duration`` used by pull
+- **P-side block lease** — same ``_kv_lease_duration`` used by pull
   mode. ``request_finished`` sets the expiration in ``_reqs_need_send``
   and ``update_connector_output(finished_sending=...)`` clears it on
   successful WRITE. Stale leases are reaped by ``get_finished`` in the
@@ -356,22 +356,22 @@ Two per-request timers are armed on the scheduler:
 
 ## Failure handling
 
-* **D-side handshake failure (P→D handshake before sending PUSH_REG)** —
+- **D-side handshake failure (P→D handshake before sending PUSH_REG)** —
   the future's done-callback calls ``_handle_failed_transfer(rid, None)``,
   which marks D's pre-allocated blocks invalid and enqueues onto
   ``_failed_recv_reqs`` so the next ``get_finished`` reports the
   request as a failed recv. Same recv-side accounting as pull mode.
-* **D-side ``send_notif`` failure when shipping the PUSH_REG to P** —
+- **D-side ``send_notif`` failure when shipping the PUSH_REG to P** —
   identical handling: ``_handle_failed_transfer`` marks the recv as
   failed.
-* **P-side handshake failure (P→D handshake before a WRITE)** — the
+- **P-side handshake failure (P→D handshake before a WRITE)** — the
   future's done-callback logs ``push_handshake_failed`` and drops the
   request without re-queuing. It deliberately does *not* call
   ``_handle_failed_transfer`` (there is no ``_recving_metadata`` entry to
   invalidate on the producer side, same reasoning as the WRITE-submission
   failure below). P's blocks are reclaimed by the ``_kv_lease_duration``
   lease and D's stale registration by its watchdog.
-* **P-side WRITE submission failure** — the WRITE handle (if any) is
+- **P-side WRITE submission failure** — the WRITE handle (if any) is
   released and ``xfer_stats.record_failed_transfer()`` bumps the
   failure counter. We deliberately do not call
   ``_handle_failed_transfer`` here: ``req_id`` on the P side has no
@@ -386,16 +386,16 @@ Two per-request timers are armed on the scheduler:
 The push design is a small, well-contained extension on top of the
 existing NIXL connector:
 
-* one new connector class, one new scheduler class, one new worker
+- one new connector class, one new scheduler class, one new worker
   class — all subclasses of the existing base classes;
-* one dedicated background thread per worker;
-* a few cross-thread queues, each with a single consumer (the writer);
+- one dedicated background thread per worker;
+- a few cross-thread queues, each with a single consumer (the writer);
   most have one producer, except the two replay queues fed by both the
   engine main thread and a handshake-completion callback:
   ``_reg_send_inbox`` (registrations replayed after their D→P handshake)
   and ``_deferred_push_inbox`` (matched pushes replayed after their P→D
   handshake);
-* one new notification type (`PUSH_REG:<msgpack>`).
+- one new notification type (`PUSH_REG:<msgpack>`).
 
 Behavior on the engine main thread is otherwise unchanged. The writer
 thread is event-driven and idle when there is no push work.
