@@ -163,6 +163,16 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
             ]
+        elif device_capability.major == 12:
+            # Consumer Blackwell (sm_120): FlashInfer JIT works out of the box,
+            # while precompiled FlashAttention may fail PTX loading.
+            return [
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
+            ]
         else:
             return [
                 *(
