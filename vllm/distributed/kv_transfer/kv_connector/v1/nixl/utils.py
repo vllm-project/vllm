@@ -3,7 +3,7 @@
 """Shared constants, lazy imports and helpers for the NIXL connector."""
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import regex as re
@@ -11,7 +11,13 @@ import zmq
 
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
-from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
+)
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -57,6 +63,20 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
     return type(spec)
 
 
+def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroupSpec]) -> set[int]:
+    """MLA groups held whole on every DCP rank, e.g. a draft running at DCP=1
+    under a DCP target."""
+    return {
+        i
+        for i, group in enumerate(groups)
+        if issubclass(
+            get_representative_spec_type(group.kv_cache_spec),
+            (MLAAttentionSpec, SlidingWindowMLASpec),
+        )
+        and not group.kv_cache_spec.dcp_sharded
+    }
+
+
 # Trailing 8-hex randomization suffix appended by
 # ``input_processor.assign_request_id`` as ``-{random_uuid():.8}``.
 _RANDOM_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
@@ -73,5 +93,5 @@ def kv_lease_extension(kv_lease_duration: int) -> int:
 
 
 def get_base_request_id(request_id: str) -> str:
-    """Strip the per-request ``-<8 hex>`` randomization suffix, if present."""
+    """Strip the per-request `-<8 hex>` randomization suffix, if present."""
     return _RANDOM_SUFFIX_RE.sub("", request_id)

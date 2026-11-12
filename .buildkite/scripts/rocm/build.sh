@@ -13,19 +13,26 @@
 #   ci       Build and push this build's per-commit test image.
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
-#   prebuild Only the stack, from main with the stack inputs of an approved PR merged into main
-#            (ROCM_PREBUILD_PR/SHA). ci-infra runs it on the trusted queue; main reuses it if Ks matches.
+#   promote  Copy the stack images a PR's CI built into the trusted repo (/ci rocm cache), so
+#            main reuses them after the merge instead of rebuilding the stack.
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
 #
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
-#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
-#   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags and caches: nightlies, branch builds)
+#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it,
+#                                          except promote: images a maintainer vouched for)
+#   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags: nightlies, branch builds; they
+#                                          push these but never read them back, reuse only
+#                                          rocm/vllm-ci images and cache, and write no cache)
 #   Release pipeline:    its ECR repo     (never reads rocm/vllm-ci or its cache: it builds the
 #                                          stack and runtime from source, with only its own ECR cache;
 #                                          csrc objects come from the shared S3 sccache, as in CUDA)
+# Every untrusted build has the same rocm/vllm-dev credentials, so the prefixes keep names apart but
+# isolate nothing: any PR can overwrite another PR's tags and caches. Isolating PRs from each other
+# would take per-namespace credentials (ci-infra). The per-commit test image ($REPO:build-<id>) is
+# still pulled by tag, so a nightly's is PR-writable too until ci-infra pulls it by digest.
 # ROCM_CI_TRUSTED_REPO / ROCM_CI_CACHE_REPO only point a local run at a sandbox registry.
 set -euo pipefail
 
@@ -45,17 +52,17 @@ export BUILDKIT_PROGRESS=${BUILDKIT_PROGRESS:-plain}  # TTY progress redraws blo
 # PR builds write to a per-PR cache and prefix their image tags. The release pipeline's agents
 # cannot write rocm/vllm-ci or its cache: release writes its images and its own cache to $REPO,
 # so the next release reuses this one's all-arch compile.
-PFX=""
+PFX="" OWN=true
 if [[ $MODE == release* ]]; then
   CACHE="" CACHE_TO=$REPO:cache-   # and reads only that cache: CI agents also run PR code
 elif [[ $REPO != "$TRUSTED" ]]; then
   if [[ ${BUILDKITE_PULL_REQUEST:-false} != false ]]; then
-    PFX="pr$BUILDKITE_PULL_REQUEST-"
+    PFX="pr$BUILDKITE_PULL_REQUEST-" CACHE_TO=$REPO:cache-$PFX
   else   # not a PR (AITER nightly, branch or manual builds): one namespace per branch
     br=${BUILDKITE_BRANCH:-local}   # the hash keeps e.g. feat/x and feat-x apart
     PFX="br-$(printf %s "$br" | tr -c 'A-Za-z0-9.-' - | cut -c1-40)-$(printf %s "$br" | sha256sum | cut -c1-8)-"
+    CACHE_TO="" OWN=false   # any PR can write rocm/vllm-dev: never read back from it
   fi
-  CACHE_TO=$REPO:cache-$PFX
   # Only the compile stages' cache: everything else is cheap or in the trusted cache.
   export CACHE_CI=false
 fi
@@ -65,29 +72,6 @@ case $STACK in
   rocm) SDF=docker/Dockerfile.rocm_base ;;
   *) echo "Unknown stack: $STACK" >&2; exit 2 ;;
 esac
-
-# prebuild: everything but the two stack inputs stays main's, this script and the bake file included.
-if [[ $MODE == prebuild ]]; then
-  [[ $REPO == "$TRUSTED" ]] || { echo "prebuild only pushes to $TRUSTED" >&2; exit 2; }
-  git fetch -q origin +refs/heads/main:refs/rocm-prebuild/main \
-    "+refs/pull/${ROCM_PREBUILD_PR:?}/head:refs/rocm-prebuild/pr"
-  [[ $(git rev-parse refs/rocm-prebuild/pr) == "${ROCM_PREBUILD_SHA:?}" ]] \
-    || { echo "#$ROCM_PREBUILD_PR moved past the approved $ROCM_PREBUILD_SHA" >&2; exit 1; }
-  [[ $(git rev-parse --is-shallow-repository) == false ]] || git fetch -q --unshallow origin
-  mb=$(git merge-base refs/rocm-prebuild/main "$ROCM_PREBUILD_SHA")
-  for f in "$SDF" tools/vllm-rocm/therock_wheels.py; do   # each as merged into current main
-    git show "$mb:$f" > "$f.base" 2>/dev/null || : > "$f.base"   # not there yet: empty
-    git show "$ROCM_PREBUILD_SHA:$f" > "$f.pr" 2>/dev/null || : > "$f.pr"
-    git show "refs/rocm-prebuild/main:$f" > "$f"
-    git merge-file "$f" "$f.base" "$f.pr" \
-      || { echo "$f of #$ROCM_PREBUILD_PR does not merge cleanly into main" >&2; exit 1; }
-    rm "$f.base" "$f.pr"
-  done
-  git add -- "$SDF" tools/vllm-rocm/therock_wheels.py
-  git -c user.name=vllm-ci -c user.email=noreply@vllm.ai commit -q --allow-empty \
-    -m "ROCm stack pre-build for #$ROCM_PREBUILD_PR"
-  BUILDKITE_COMMIT=$(git rev-parse HEAD)
-fi
 
 # ---------------------------------------------------------------------------
 # BuildKit builder
@@ -236,6 +220,7 @@ echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 #   1. Trusted registry (rocm/vllm-ci:<tag>) — safe for any CI build to reuse. Not for release:
 #      CI agents also run PR code, so release never ships an image it did not build itself.
 #   2. This repo's own tag ($REPO:$PFX<tag>) — PR builds and the release pipeline write here.
+#      Not for other untrusted builds (OWN=false): a PR could have pushed it.
 #   3. Main's key (MAIN_TAGS, untrusted base builds): wait for main's build of it, within a deadline.
 #   4. Otherwise: build via bake and push.
 # A <sibling-suffix> means the image only counts as present when the sibling
@@ -243,8 +228,9 @@ echo "build.sh $STACK $MODE: repo=$REPO trusted=$TRUSTED Ks=$Ks Kr=$Kr"
 # both pinned refs are printed, space-separated.
 ensure() {
   local target=$1 tag=$2 sibling=${3:-} ref d ds refs rc mf hb=""
-  refs=("$REPO:$PFX$tag")
-  [[ $MODE == release* || $REPO == "$TRUSTED" ]] || refs=("$TRUSTED:$tag" "${refs[@]}")
+  refs=()
+  [[ $MODE == release* || $REPO == "$TRUSTED" ]] || refs=("$TRUSTED:$tag")
+  [[ $OWN == false ]] || refs+=("$REPO:$PFX$tag")
 
   for ref in "${refs[@]}"; do
     if d=$(digest "$ref") && { [[ -z $sibling ]] || ds=$(digest "$ref$sibling"); }; then
@@ -291,6 +277,10 @@ ensure() {
     rm -f "$mf"; echo "bake recorded no digest for $ref" >&2; return 1
   fi
   rm -f "$mf"
+  # /ci rocm cache copies only a stack this build pushed, never one it reused: other PRs' CI
+  # can push to this PR's tags first.
+  [[ $MODE != base || $target != base ]] \
+    || meta set "rocm-$STACK-stack-built" "$ref@$d $ref$sibling@$ds" || return 75
   echo "$ref@$d${sibling:+ $ref$sibling@$ds}"
 }
 
@@ -407,8 +397,24 @@ case $MODE in
     fi
     ;;
 
-  prebuild)
-    ensure base "stack-$STACK-$Ks" -wheels
+  promote)
+    # /ci rocm cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
+    # ROCM_PROMOTE_SHA pushed. Copy the stack pair here under the key main's keys_at gives that
+    # commit, if it was built with main's recipe; main reuses it once it gets that key.
+    [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
+    git fetch -q origin "${ROCM_PROMOTE_SHA:?}"
+    git diff --quiet HEAD "$ROCM_PROMOTE_SHA" -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
+      || { echo "$ROCM_PROMOTE_SHA builds with another build.sh or bake file than main" >&2; exit 1; }
+    keys=$(keys_at "$ROCM_PROMOTE_SHA") || { echo "cannot compute the keys of $ROCM_PROMOTE_SHA" >&2; exit 1; }
+    read -r pKs _ <<<"$keys"
+    for tag in "stack-$STACK-$pKs-wheels" "stack-$STACK-$pKs"; do   # the stack tag completes the pair
+      if digest "$TRUSTED:$tag" >/dev/null; then echo "$TRUSTED:$tag already exists" >&2; continue; fi
+      ref=$(tr ' ' '\n' <<<"${ROCM_PROMOTE_IMAGES:-}" \
+        | grep -xE "rocm/vllm-dev:pr${ROCM_PROMOTE_PR:?}-$tag@sha256:[0-9a-f]{64}") \
+        || { echo "#$ROCM_PROMOTE_PR's CI recorded no $tag" >&2; exit 1; }
+      echo "--- :docker: Copying $ref to $TRUSTED:$tag" >&2
+      docker buildx imagetools create -t "$TRUSTED:$tag" "$ref" || exit 75
+    done
     ;;
 
   release|release-base)

@@ -260,6 +260,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CircularBufferSpec(
             block_size=self.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.state_dim,
             head_size_v=0,
             dtype=self.dtype,
@@ -274,7 +275,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4.1 KV/score compressor.
 
-    Pools ``compress_ratio`` consecutive tokens into one KV latent with a
+    Pools `compress_ratio` consecutive tokens into one KV latent with a
     learned softmax gate (ratio 1 has no gate and no pooling). Owns the
     linear, norm and state cache. State saving, compression and RMSNorm share
     one Triton kernel. The emitted latent feeds independent main-cache and

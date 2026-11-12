@@ -18,6 +18,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -38,8 +39,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
+    get_block_table_width,
 )
-from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
 
@@ -106,7 +107,7 @@ class KVBlockZeroer:
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
     Construct once after KV caches are allocated to precompute segment
-    addresses, then call :meth:`zero_block_ids` each step to zero
+    addresses, then call `zero_block_ids` each step to zero
     newly-allocated blocks.
     """
 
@@ -124,7 +125,7 @@ class KVBlockZeroer:
         Each entry is the absolute byte address of a segment start on the
         GPU, so segments in different CUDA allocations work correctly.
 
-        Per-layer views are standardized ``[B, H, N, C]`` with blocks at dim 0; dims
+        Per-layer views are standardized `[B, H, N, C]` with blocks at dim 0; dims
         physically outside B (separate head groups under LHBNC) each get their own
         segment. A segment's page spans everything inside its block, so under BHLNC it
         also covers the block's other layers -- safe, since block IDs are global pool
@@ -358,13 +359,6 @@ class AttentionGroup:
             self._with_kernel_block_table(common_attn_metadata, ubatch_idx)
         )
 
-    def build_metadata_for_drafting(
-        self, common_attn_metadata: CommonAttentionMetadata, draft_index: int
-    ) -> Any:
-        return self.get_metadata_builder().build_for_drafting(
-            self._with_kernel_block_table(common_attn_metadata), draft_index
-        )
-
     def _with_kernel_block_table(
         self, common_attn_metadata: CommonAttentionMetadata, ubatch_idx: int = 0
     ) -> CommonAttentionMetadata:
@@ -401,13 +395,21 @@ class AttentionGroup:
         kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
+        # A padded page spreads its kernel blocks evenly.
+        row_bytes = spec.num_heads * spec.state_content_size_bytes
+        page_stride = (
+            kernel_rows
+            * kv_cache.stride(-2)
+            * spec.page_size_bytes
+            // (spec.num_states * row_bytes)
+        )
         # Token and pooled caches are written through manager-block slot
-        # mappings, so only compressed caches (written from their block table)
-        # can be mapped.
+        # mappings unless self-addressed, so only those and compressed caches
+        # (written from their block table) can be mapped.
         if (
-            spec.tokens_per_state <= 1
+            (spec.tokens_per_state <= 1 and spec.uses_slot_mapping)
             or kv_cache.shape[1] != 1
-            or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))
+            or kv_cache.stride(0) % page_stride
         ):
             raise ValueError(
                 f"{self.backend.get_name()} needs {self.kernel_block_size}-token "
@@ -419,7 +421,6 @@ class AttentionGroup:
         # Kernel block j of block b is b * kernel_block_stride + j. The view
         # spans the other layers' pages between blocks (never addressing them),
         # which ``view`` cannot express.
-        page_stride = kernel_rows * kv_cache.stride(-2)
         self.kernel_block_stride = kv_cache.stride(0) // page_stride
         num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
             kv_cache.shape[-2] // kernel_rows
@@ -435,7 +436,9 @@ class AttentionGroup:
         """Views a packed cache in kernel blocks as manager blocks."""
         assert self.kernel_block_stride
         spec = self.kv_cache_spec
-        rows = spec.get_num_kernel_states(spec.block_size)
+        rows = cdiv(
+            spec.page_size_bytes, spec.num_heads * spec.state_content_size_bytes
+        )
         return kv_cache.as_strided(
             (num_blocks, *kv_cache.shape[1:-2], rows, kv_cache.shape[-1]),
             (kv_cache.stride(0) * self.kernel_block_stride, *kv_cache.stride()[1:]),
@@ -460,7 +463,7 @@ class AttentionGroup:
 def map_kv_caches_to_kernel_blocks(
     kv_caches: dict[str, torch.Tensor], attn_groups: Iterable[AttentionGroup]
 ) -> dict[str, torch.Tensor]:
-    """The views to bind to layers. The manager views in ``kv_caches`` stay for
+    """The views to bind to layers. The manager views in `kv_caches` stay for
     KV connectors."""
     mapped = dict(kv_caches)
     for group in attn_groups:
@@ -493,7 +496,7 @@ def _block_size_is_supported(
 ) -> bool:
     """Check if the block size is supported by all backends.
 
-    An exact ``int`` declaration must match exactly; a ``MultipleOf``
+    An exact `int` declaration must match exactly; a `MultipleOf`
     declaration accepts any multiple of its base.
     """
     for backend, spec in zip(backends, specs, strict=True):
@@ -568,10 +571,10 @@ def allocate_kv_cache(
     kernel_block_sizes: list[int] | None = None,
     allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
+    """Allocate the KV cache and view it as `[B, H, N, C]` per layer.
 
-    Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
-    block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
+    Every KVCacheTensor places its layers in the same backing allocation: layer `l` of
+    block `b` starts at `offset + l * layer_stride + b * block_stride`. Cache
     groups overlay each other, so tensors may address the same bytes.
 
     allocate replaces the default zeroed backing allocation: it takes the
@@ -634,8 +637,9 @@ def layer_kernel_block_size(
 
 
 def _allocate_kv_cache_buffer(raw_size: int, device: torch.device) -> torch.Tensor:
-    # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
-    # are created lazily on the first qualifying GEMM. Force that now, before
+    # wvSplitKrc's process-lifetime static workspaces
+    # (csrc/rocm/skinny_gemms_wvsplitkrc.cu) are created lazily on the first
+    # qualifying GEMM. Force that now, before
     # the giant backing allocation below: if one landed in this segment's
     # rounding tail it would pin the whole segment at engine shutdown.
     if current_platform.is_rocm():
@@ -992,7 +996,7 @@ def copy_kv_cache_blocks_inplace(
 def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:
     """Whether every request in the batch has the same query length.
 
-    Shape test only; use ``get_uniform_decode_token_count`` to classify a
+    Shape test only; use `get_uniform_decode_token_count` to classify a
     scheduled batch, since a prompt chunk can have a decode batch's shape.
     """
     return num_reqs > 0 and num_tokens == max_query_len * num_reqs

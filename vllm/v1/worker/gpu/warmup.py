@@ -112,6 +112,36 @@ def _warmup_block_counter(
     return block_count
 
 
+def _cap_num_warmup_reqs(
+    model_runner: GPUModelRunner, num_reqs: int, num_tokens_per_req: int
+) -> int:
+    """Limit synthetic requests to the scheduler's token budget."""
+    spec_config = model_runner.speculative_config
+    num_draft_slots = (
+        spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
+    )
+    return min(
+        num_reqs, model_runner.max_num_tokens // (num_tokens_per_req + num_draft_slots)
+    )
+
+
+def _run_step(
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any] | None,
+    scheduler_output: SchedulerOutput,
+) -> None:
+    """Run one synthetic step and wait for the GPU to finish it.
+
+    UvaBufferPool reuses a staging slot two writes later, which is safe in
+    serving because the engine waits on each step's output. Warmup discards
+    the outputs, so without this a slow GPU reads slots already overwritten.
+    """
+    worker_execute_model(scheduler_output)
+    if worker_sample_tokens is not None:
+        worker_sample_tokens(None)
+    torch.accelerator.synchronize()
+
+
 def run_mixed_prefill_decode_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -121,37 +151,86 @@ def run_mixed_prefill_decode_warmup(
     mixed_step_context: AbstractContextManager[object] | None = None,
     req_id_prefix: str = "_v2_mixed_warmup",
     prompt_logprobs: int | None = None,
+    prefill_only_fallback: bool = False,
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs,
-    requesting prompt_logprobs on the prefill request."""
-    if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
+    requesting prompt_logprobs on the prefill requests.
+
+    Prefill tokens beyond what one request can hold (max_model_len - 1) are
+    split across further prefill requests, up to max_num_reqs. If
+    prefill_only_fallback, the prefills run alone when request slots rather
+    than tokens limit them, including on a runner limited to one request.
+    """
+    with_decode = model_runner.max_num_reqs >= 2
+    if model_runner.is_pooling_model or not (with_decode or prefill_only_fallback):
+        return False
+
+    max_prefill_len = model_runner.max_model_len - 1
+    if with_decode and prefill_only_fallback:
+        # The decode request takes a slot a further prefill could fill.
+        with_decode = cdiv(num_tokens - 1, max_prefill_len) < model_runner.max_num_reqs
+    num_decode_reqs = int(with_decode)
+    # A decode request schedules one token.
+    decode_scheduled_tokens = num_decode_reqs
+    num_prefill_reqs = min(
+        cdiv(num_tokens - decode_scheduled_tokens, max_prefill_len),
+        model_runner.max_num_reqs - num_decode_reqs,
+    )
+    num_warmup_reqs = num_decode_reqs + num_prefill_reqs
+    num_tokens = min(
+        num_tokens, decode_scheduled_tokens + num_prefill_reqs * max_prefill_len
+    )
+    # This synthetic batch bypasses the scheduler's correction-slot reservation.
+    spec_config = model_runner.speculative_config
+    if spec_config is not None:
+        # Keep room for the draft slots of every request.
+        num_tokens = min(
+            num_tokens,
+            model_runner.max_num_tokens
+            - num_warmup_reqs * spec_config.max_num_new_slots_for_drafting,
+        )
+    if num_tokens < 3:
         return False
 
     decode_req_id = f"{req_id_prefix}_decode_"
-    prefill_req_id = f"{req_id_prefix}_prefill_"
+    decode_req_ids = [decode_req_id] if with_decode else []
     decode_prompt_len = 2
-    decode_scheduled_tokens = 1
-    prefill_len = num_tokens - decode_scheduled_tokens
+    total_prefill_len = num_tokens - decode_scheduled_tokens
+    # Full-length prompts first, then the remainder.
+    prefill_lens = [
+        min(max_prefill_len, total_prefill_len - i)
+        for i in range(0, total_prefill_len, max_prefill_len)
+    ]
     decode_token_ids = _warmup_token_ids(model_runner, decode_prompt_len)
-    prefill_token_ids = _warmup_token_ids(model_runner, prefill_len)
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
     block_count = _warmup_block_counter(model_runner)
     kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
     decode_prefill_block_counts = [
-        block_count(decode_prompt_len, s) for s in kv_cache_specs
+        block_count(decode_prompt_len, s) * num_decode_reqs for s in kv_cache_specs
     ]
     decode_block_counts = [
-        block_count(decode_prompt_len + decode_scheduled_tokens, s)
+        block_count(decode_prompt_len + decode_scheduled_tokens, s) * num_decode_reqs
         for s in kv_cache_specs
     ]
     decode_block_deltas = [
         decode - prefill
         for decode, prefill in zip(decode_block_counts, decode_prefill_block_counts)
     ]
-    prefill_block_counts = [block_count(prefill_len, s) for s in kv_cache_specs]
-    required_blocks = sum(decode_block_counts) + sum(prefill_block_counts)
+    prefill_block_counts = [
+        [block_count(prefill_len, s) for s in kv_cache_specs]
+        for prefill_len in prefill_lens
+    ]
+    required_blocks = sum(decode_block_counts) + sum(map(sum, prefill_block_counts))
     num_blocks = num_committable_kv_blocks(model_runner)
+    # Drop extra prefill requests the committable blocks cannot hold.
+    while num_blocks <= required_blocks and len(prefill_lens) > 1:
+        prefill_lens.pop()
+        required_blocks -= sum(prefill_block_counts.pop())
+    num_tokens = decode_scheduled_tokens + sum(prefill_lens)
+    prefill_req_ids = [
+        f"{req_id_prefix}_prefill_{i}_" for i in range(len(prefill_lens))
+    ]
     if num_blocks <= required_blocks:
         logger.warning(
             "Skipping V2 mixed prefill+decode warmup because only %d KV blocks "
@@ -178,7 +257,7 @@ def run_mixed_prefill_decode_warmup(
 
     decode_prefill_output = SchedulerOutput.make_empty()
     decode_prefill_output.num_spec_tokens_to_schedule = (
-        model_runner.num_speculative_steps
+        model_runner.vllm_config.num_scheduled_spec_tokens
     )
     decode_prefill_output.scheduled_new_reqs = [
         NewRequestData(
@@ -208,44 +287,52 @@ def run_mixed_prefill_decode_warmup(
     ]
 
     mixed_output = SchedulerOutput.make_empty()
-    mixed_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps
-    mixed_output.scheduled_cached_reqs = cached_decode_req
-    mixed_output.scheduled_new_reqs = [
-        NewRequestData(
-            req_id=prefill_req_id,
-            prompt_token_ids=prefill_token_ids,
-            mm_features=[],
-            sampling_params=SamplingParams(
-                max_tokens=2,
-                temperature=0.0,
-                watermarking=False,
-                prompt_logprobs=prompt_logprobs,
-            ),
-            pooling_params=None,
-            block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
-            num_computed_tokens=0,
-            lora_request=None,
-            prefill_token_ids=prefill_token_ids,
-        ),
-    ]
-    mixed_output.num_scheduled_tokens = {
-        decode_req_id: decode_scheduled_tokens,
-        prefill_req_id: prefill_len,
-    }
+    mixed_output.num_spec_tokens_to_schedule = (
+        model_runner.vllm_config.num_scheduled_spec_tokens
+    )
+    if with_decode:
+        mixed_output.scheduled_cached_reqs = cached_decode_req
+    prefill_sampling_params = SamplingParams(
+        max_tokens=2,
+        temperature=0.0,
+        watermarking=False,
+        prompt_logprobs=prompt_logprobs,
+    )
+    mixed_output.scheduled_new_reqs = []
+    mixed_output.num_scheduled_tokens = dict.fromkeys(
+        decode_req_ids, decode_scheduled_tokens
+    )
+    for req_id, prefill_len, block_counts in zip(
+        prefill_req_ids, prefill_lens, prefill_block_counts
+    ):
+        prefill_token_ids = _warmup_token_ids(model_runner, prefill_len)
+        mixed_output.scheduled_new_reqs.append(
+            NewRequestData(
+                req_id=req_id,
+                prompt_token_ids=prefill_token_ids,
+                mm_features=[],
+                sampling_params=prefill_sampling_params,
+                pooling_params=None,
+                block_ids=tuple(_alloc_blocks(n) for n in block_counts),
+                num_computed_tokens=0,
+                lora_request=None,
+                prefill_token_ids=prefill_token_ids,
+            )
+        )
+        mixed_output.num_scheduled_tokens[req_id] = prefill_len
     mixed_output.total_num_scheduled_tokens = num_tokens
 
     cleanup_output = SchedulerOutput.make_empty()
-    cleanup_output.finished_req_ids = {decode_req_id, prefill_req_id}
+    cleanup_output.finished_req_ids = {*decode_req_ids, *prefill_req_ids}
 
     context = mixed_step_context or nullcontext()
     model_runner.kv_connector.set_disabled(True)
     try:
-        worker_execute_model(decode_prefill_output)
-        worker_sample_tokens(None)
+        if with_decode:
+            _run_step(worker_execute_model, worker_sample_tokens, decode_prefill_output)
         with context:
-            worker_execute_model(mixed_output)
-            worker_sample_tokens(None)
-        worker_execute_model(cleanup_output)
+            _run_step(worker_execute_model, worker_sample_tokens, mixed_output)
+        _run_step(worker_execute_model, None, cleanup_output)
     finally:
         model_runner.kv_connector.set_disabled(False)
     return True
@@ -278,8 +365,7 @@ def run_context_prefill_warmup(
     blocks_per_req = max(sum(block_counts), 1)
     num_reqs = min(
         cdiv(num_context_tokens, context_len),
-        model_runner.max_num_reqs,
-        model_runner.scheduler_config.max_num_batched_tokens // query_len,
+        _cap_num_warmup_reqs(model_runner, model_runner.max_num_reqs, query_len),
         (num_committable_kv_blocks(model_runner) - 1) // blocks_per_req,
     )
     if num_reqs < 1:
@@ -296,7 +382,9 @@ def run_context_prefill_warmup(
     token_ids = _warmup_token_ids(model_runner, context_len + query_len)
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
     prefill_output = SchedulerOutput.make_empty()
-    prefill_output.num_spec_tokens_to_schedule = model_runner.num_speculative_steps
+    prefill_output.num_spec_tokens_to_schedule = (
+        model_runner.vllm_config.num_scheduled_spec_tokens
+    )
     prefill_output.scheduled_new_reqs = [
         NewRequestData(
             req_id=req_id,
@@ -319,9 +407,8 @@ def run_context_prefill_warmup(
 
     model_runner.kv_connector.set_disabled(True)
     try:
-        worker_execute_model(prefill_output)
-        worker_sample_tokens(None)
-        worker_execute_model(cleanup_output)
+        _run_step(worker_execute_model, worker_sample_tokens, prefill_output)
+        _run_step(worker_execute_model, None, cleanup_output)
     finally:
         model_runner.kv_connector.set_disabled(False)
     return True
@@ -338,16 +425,37 @@ def run_kv_cache_sizing_warmup(
     """
     if model_runner.is_encoder_decoder:
         return
-    # Profiling skipped attention; measure it on the largest possible prefill.
-    # Its prompt logprobs materialize full-vocab logits a chunk at a time.
-    scheduler_config = model_runner.scheduler_config
+    # Profiling skipped attention; measure it on the largest possible step,
+    # split across requests when max_model_len < max_num_batched_tokens.
     max_logprobs = model_runner.model_config.max_logprobs
+    prompt_logprobs = max_logprobs if max_logprobs != 0 else None
+    max_num_tokens = model_runner.scheduler_config.max_num_batched_tokens
+    max_prompt_len = min(max_num_tokens, model_runner.max_model_len)
+    # Prompt logprobs are computed for every token of a step that requests
+    # them, so request them on a single-prompt step: on the full budget,
+    # max_logprobs=-1 would reserve full-vocab logprobs for every token.
+    # Without room for a second prefill request the steps would be the same.
+    if (
+        prompt_logprobs is not None
+        and max_prompt_len < max_num_tokens
+        and model_runner.max_num_reqs > 1
+    ):
+        run_mixed_prefill_decode_warmup(
+            model_runner,
+            worker_execute_model,
+            worker_sample_tokens,
+            max_prompt_len,
+            prompt_logprobs=prompt_logprobs,
+            prefill_only_fallback=True,
+        )
+        prompt_logprobs = None
     run_mixed_prefill_decode_warmup(
         model_runner,
         worker_execute_model,
         worker_sample_tokens,
-        min(scheduler_config.max_num_batched_tokens, model_runner.max_model_len),
-        prompt_logprobs=max_logprobs if max_logprobs != 0 else None,
+        max_num_tokens,
+        prompt_logprobs=prompt_logprobs,
+        prefill_only_fallback=True,
     )
     if model_runner.model_config.use_mla:
         from vllm.model_executor.layers.attention.mla_attention import (
@@ -420,7 +528,7 @@ def _warmup_kernels(
     if model_runner.vllm_config.is_mm_encoder_only:
         return
 
-    num_spec_steps = model_runner.num_speculative_steps
+    num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
     # length exceeds decode_query_len, preventing it from being misclassified as
@@ -460,10 +568,10 @@ def _warmup_kernels(
     decode_block_counts = [block_count(decode_len, s) for s in kv_cache_specs]
     max_blocks_per_req = sum(decode_block_counts)
 
-    num_reqs = min(
+    num_reqs = _cap_num_warmup_reqs(
+        model_runner,
         model_runner.scheduler_config.max_num_seqs,
-        model_runner.scheduler_config.max_num_batched_tokens
-        // max(prompt_len, decode_query_len),
+        max(prompt_len, decode_query_len),
     )
     block_tables = getattr(model_runner, "block_tables", None)
     null_blocks = block_tables is not None and (

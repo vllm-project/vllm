@@ -133,6 +133,7 @@ impl InferenceServiceImpl {
 
         let result = async {
             let media = std::mem::take(&mut proto_request.media);
+            let media_io_kwargs = proto_request.media_io_kwargs.take();
             let mut text_request =
                 convert::to_text_request(proto_request, stream, &self.state.base_model_names())?;
             text_request.arrival_time = Some(arrival_time);
@@ -150,7 +151,7 @@ impl InferenceServiceImpl {
                 })?);
             }
 
-            let media = super::media::from_proto(media)?;
+            let media = super::media::from_proto(media, media_io_kwargs.as_ref())?;
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(
@@ -261,6 +262,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             sampling_mask: collected.sampling_mask,
             spec_decode_metrics: collected.spec_decode_metrics,
             weight_versions: collected.weight_versions,
+            routed_experts: collected.routed_experts.map(Box::new),
             timestamps: collected.timestamps,
         };
 

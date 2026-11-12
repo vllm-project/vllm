@@ -44,7 +44,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
-from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import (
     PREFILL_CONV_BLOCK_M,
     KimiK3ROCmKDABackend,
@@ -74,7 +74,7 @@ logger = init_logger(__name__)
 
 
 class _PaddedKimiGDNMergedColumnParallelLinear(_KimiGDNMergedColumnParallelLinear):
-    """Merged projection with ``padding_size`` zero rows appended per rank."""
+    """Merged projection with `padding_size` zero rows appended per rank."""
 
     def __init__(self, *args, padding_size: int = 0, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -238,7 +238,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.use_aiter_decode = recurrent_state_dtype == torch.float32 and bool(
             rocm_aiter_ops.is_kda_gluon_decode_available()
         )
-        use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
+        self.aiter_supports_strided_state = False
+        if self.use_aiter_decode:
+            from aiter.ops.triton.attention.kda import fused_recurrent_kda as aiter_kda
+
+            self.aiter_supports_strided_state = bool(
+                getattr(aiter_kda, "supports_unaligned_state_stride", False)
+            )
+        # Without the strided-state flag AITER cannot read the packed DSA
+        # cache's recurrent states; the HIP kernel honours the slot stride.
+        use_hip_decode = (
+            not self.use_aiter_decode or not self.aiter_supports_strided_state
+        ) and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
             self.conv_size,
@@ -344,12 +355,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def process_weights_after_loading(self) -> None:
-        if not is_weights_pre_processed():
-            self.refresh_derived_weights()
-
     @torch.no_grad()
-    def refresh_derived_weights(self) -> None:
+    def process_weights_after_loading(self) -> None:
         if self.decode_conv1d_weight is not None:
             self.decode_conv1d_weight.copy_(
                 self.conv1d.weight.view(
@@ -455,8 +462,23 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
 
+        # The packed DSA block row gives state slots a fractional-row pitch.
+        # Older AITER versions address states by whole rows and cannot take
+        # that, so only fuse when the installed kernel declares support.
+        use_aiter_decode = self.use_aiter_decode and (
+            self.aiter_supports_strided_state
+            or recurrent_state.stride(0) % recurrent_state.shape[-1] == 0
+        )
+        if self.use_aiter_decode and not use_aiter_decode:
+            logger.info_once(
+                "KDA recurrent state is strided and AITER lacks "
+                "supports_unaligned_state_stride: fused AITER decode skipped "
+                "(HIP fused decode %s).",
+                "on" if self.decode_norm_weight is not None else "off",
+            )
+
         if (
-            self.use_aiter_decode
+            use_aiter_decode
             and spec_sequence_masks is None
             and m.num_prefills == 0
             and m.num_decodes > 0
@@ -480,11 +502,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
             return
 
-        if (
-            self.use_aiter_decode
-            and spec_sequence_masks is not None
-            and m.num_prefills == 0
-        ):
+        if use_aiter_decode and spec_sequence_masks is not None and m.num_prefills == 0:
             # Spec-only batch (gdn_attn never mixes spec and plain decodes).
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
