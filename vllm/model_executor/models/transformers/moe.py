@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     MoERunner,
     RoutedExperts,
+    RoutedScaleMode,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
@@ -259,10 +260,14 @@ class MoEMixin(MixtureOfExperts, Base):
         # Routed scaling factor kwargs
         routed_scaling_factor = getattr(text_config, "routed_scaling_factor", 1.0)
         # aiter applies routed_scaling_factor internally
-        apply_routed_scale_to_output = not rocm_aiter_ops.is_fused_moe_enabled()
+        routed_scale_mode = (
+            RoutedScaleMode.ROUTER
+            if rocm_aiter_ops.is_fused_moe_enabled()
+            else RoutedScaleMode.OUTPUT
+        )
         routed_scaling_factor_kwargs = dict(
             routed_scaling_factor=routed_scaling_factor,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
+            routed_scale_mode=routed_scale_mode,
         )
 
         # Dtype the router computes in, if it is not the activation dtype.
@@ -372,11 +377,12 @@ class MoEMixin(MixtureOfExperts, Base):
                         is_fused_checkpoint_transposed=is_transposed,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
-                    # _maybe_apply_routed_scale_to_output edge case. Transformers
-                    # decoder layers do not compensate for dividing by scaling factor.
+                    # Transformers decoder layers do not compensate for dividing
+                    # the shared output by the scaling factor, which only
+                    # RoutedScaleMode.OUTPUT_FP16_GUARD does (in FP16).
                     divides_shared_output = (
                         routed_scaling_factor != 1.0
-                        and apply_routed_scale_to_output
+                        and routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
                         and self.model_config.dtype == torch.float16
                     )
                     fuser = MoEBlockFuser.match(
