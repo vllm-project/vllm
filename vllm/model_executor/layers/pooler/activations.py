@@ -55,6 +55,15 @@ def get_act_fn(
                 "torch.nn.modules for security reasons"
             )
         fn = resolve_obj_by_qualname(function_name)()
+        if isinstance(fn, nn.Softmax) and num_labels is not None and num_labels < 2:
+            logger.warning_once(
+                "The model declares %s as its activation function, but it "
+                "has num_labels=%d, where softmax is constant 1. Sigmoid will "
+                "be applied instead. To choose the activation explicitly, "
+                "set `problem_type` (e.g. via --hf-overrides).",
+                function_name,
+                num_labels,
+            )
         return PoolerActivation.wraps(fn)
 
     return PoolerClassify(num_labels=num_labels)

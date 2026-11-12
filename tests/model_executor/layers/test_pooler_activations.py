@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from vllm.model_executor.layers.pooler import activations
 from vllm.model_executor.layers.pooler.activations import (
     LambdaPoolerActivation,
     PoolerClassify,
@@ -190,6 +191,32 @@ class TestGetActFn:
         )
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerClassify)
+
+    @pytest.mark.parametrize(
+        ("fn_name", "num_labels", "expect_warning"),
+        [
+            ("torch.nn.modules.activation.Softmax", 1, True),
+            ("torch.nn.modules.activation.Softmax", 3, False),
+            ("torch.nn.modules.activation.Sigmoid", 1, False),
+            ("torch.nn.modules.activation.Sigmoid", 3, False),
+        ],
+    )
+    def test_warns_when_declared_softmax_falls_back_to_sigmoid(
+        self, monkeypatch, fn_name, num_labels, expect_warning
+    ):
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            activations.logger,
+            "warning_once",
+            lambda msg, *args: warnings.append(msg % args),
+        )
+        cfg = self._make_config(
+            problem_type="",
+            num_labels=num_labels,
+            sentence_transformers={"activation_fn": fn_name},
+        )
+        get_act_fn(cfg)
+        assert bool(warnings) == expect_warning
 
     def test_default_fallback(self):
         cfg = self._make_config(problem_type="")
