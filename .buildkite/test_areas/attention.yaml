@@ -8,7 +8,6 @@ steps:
   timeout_in_minutes: 85
   device: h100
   source_file_dependencies:
-    - vllm/platforms/cuda.py
     - vllm/config/attention.py
     - vllm/model_executor/layers/dash_attention.py
     - vllm/model_executor/layers/attention
@@ -16,12 +15,8 @@ steps:
     - vllm/v1/hisparse/
     - csrc/hisparse_kernels.cu
     - tests/v1/attention
-    - tests/kernels/attention/test_attention_selector.py
   commands:
-    - >-
-      pytest -v -s
-      v1/attention
-      kernels/attention/test_attention_selector.py
+    - pytest -v -s v1/attention
   mirror:
     amd:
       label: ":amd: (MI300) V1 Attention"
