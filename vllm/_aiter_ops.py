@@ -234,13 +234,16 @@ def is_aiter_found_and_supported_on_rdna() -> bool:
     return False
 
 
-def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
+def _triton_gemm_config_is_tuned(
+    config_name: str, N: int, K: int, B: int | None = None
+) -> bool:
     from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
 
     # any M shape under 1024 should be tuned
     M_TUNE_PROBE = 128
 
-    return get_gemm_config(config_name, M_TUNE_PROBE, N, K)[1]
+    batch = {} if B is None else {"B": B}
+    return get_gemm_config(config_name, M_TUNE_PROBE, N, K, **batch)[1]
 
 
 def _ck_gemm_shape_is_tuned(
@@ -532,22 +535,25 @@ def _rocm_aiter_topk_gating_impl(
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
     score_func: str = "softmax",
+    correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     # Callers pick this op only for launches AITER's topk_gating supports (see
-    # dispatch_topk_softmax_func/dispatch_topk_sigmoid_func); everything else
-    # goes to topk_softmax (softmax) or vllm_topk_sigmoid (sigmoid).
+    # dispatch_topk_softmax_func/dispatch_topk_sigmoid_func and fused_topk_bias);
+    # everything else goes to topk_softmax (softmax) or vllm_topk_sigmoid (sigmoid).
     from aiter.ops.topk import topk_gating
 
     # AITER renormalizes the selected softmax/sigmoid mass inside this launch,
     # preserving vLLM's `renormalize=True` semantics without a second
-    # pointwise kernel, and sigmoids the trailing shared-expert columns.
+    # pointwise kernel, scales it by `routed_scaling_factor`, and sigmoids the
+    # trailing shared-expert columns.
     topk_gating(
         topk_weights,
         topk_indices,
         gating_output,
-        correction_bias=None,
+        correction_bias=correction_bias,
         need_renorm=renormalize,
-        routed_scaling_factor=1.0,
+        routed_scaling_factor=routed_scaling_factor,
         score_func=score_func,
         num_shared_experts=num_shared_experts,
     )
@@ -562,6 +568,8 @@ def _rocm_aiter_topk_gating_fake(
     num_shared_experts: int = 0,
     shared_expert_scoring_func: str = "",
     score_func: str = "softmax",
+    correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     pass
 
@@ -3801,6 +3809,8 @@ class rocm_aiter_ops:
         num_shared_experts: int = 0,
         shared_expert_scoring_func: str = "",
         score_func: str = "softmax",
+        correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float = 1.0,
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_gating(
             topk_weights,
@@ -3811,6 +3821,8 @@ class rocm_aiter_ops:
             num_shared_experts,
             shared_expert_scoring_func,
             score_func,
+            correction_bias,
+            routed_scaling_factor,
         )
         return topk_weights, topk_indices
 
@@ -3927,6 +3939,7 @@ class rocm_aiter_ops:
         inv_rope_positions: torch.Tensor | None = None,
         inv_rope_cos_sin_cache: torch.Tensor | None = None,
         out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+        dot_precision: str | None = None,
     ) -> None:
         """Sparse MLA read straight from the KV cache, for prefill and decode.
 
@@ -3939,12 +3952,15 @@ class rocm_aiter_ops:
         is DeepSeek V4's second cache: SWA window in kv_buffer, top-k
         compressed tokens here. inv_rope_positions and inv_rope_cos_sin_cache
         make the store apply the inverse RoPE; out_mxfp8 = (data, scale)
-        replaces o with MXFP8 rows.
+        replaces o with MXFP8 rows. dot_precision overrides the default
+        selected from q's dtype.
         """
         from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
 
         assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
+        if dot_precision is None:
+            dot_precision = "fp8" if fp8_q else "bf16"
         sparse_mla_fwd(
             q,
             kv_buffer,
@@ -3955,7 +3971,7 @@ class rocm_aiter_ops:
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
             has_invalid=has_invalid,
-            dot_precision="fp8" if fp8_q else "bf16",
+            dot_precision=dot_precision,
             q_scale=q_scale if fp8_q else None,
             out=o,
             attn_sink=attn_sink,
@@ -4506,6 +4522,58 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def fused_bf16_bmm_cat_quant_pad_mla(
+        q_nope: torch.Tensor,
+        w_uk_t: torch.Tensor,
+        q_pe: torch.Tensor,
+        q_scale: torch.Tensor,
+        num_padded_heads: int,
+    ) -> torch.Tensor:
+        """MLA decode query in one launch: q_nope (N, B, P) @ w_uk_t (N, P, L),
+        concat with the roped q_pe (B, N, R), static per-tensor FP8 quant, and
+        each head repeated num_padded_heads // N times. Returns the
+        (B, num_padded_heads, L + R) query the padded asm MLA decode reads.
+        """
+        from aiter.ops.triton.fusions.fused_bf16_bmm_cat_quant_pad_mla import (
+            fused_bf16_bmm_cat_quant_pad_mla,
+        )
+
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            get_fp8_min_max,
+        )
+
+        out = torch.empty(
+            (q_pe.shape[0], num_padded_heads, w_uk_t.shape[-1] + q_pe.shape[-1]),
+            dtype=current_platform.fp8_dtype(),
+            device=q_pe.device,
+        )
+        return fused_bf16_bmm_cat_quant_pad_mla(
+            q_nope,
+            w_uk_t,
+            q_pe,
+            q_scale,
+            num_padded_heads,
+            out=out,
+            fp8_max=get_fp8_min_max()[1],
+        )
+
+    @staticmethod
+    @functools.cache
+    def is_fused_bf16_bmm_cat_quant_pad_mla_tuned(B: int, N: int, K: int) -> bool:
+        """Whether AITER ships the fused MLA decode query kernel with a tuned
+        config for B heads, kv_lora_rank N and qk_nope_head_dim K on this GPU."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            import aiter.ops.triton.fusions.fused_bf16_bmm_cat_quant_pad_mla  # noqa: F401
+
+            return _triton_gemm_config_is_tuned(
+                "FUSED-BF16-BMM-CAT-QUANT-PAD-MLA", N, K, B=B
+            )
+        except (AssertionError, ImportError, KeyError, OSError, TypeError):
+            return False
+
+    @staticmethod
     def triton_fp8_bmm(
         X: torch.Tensor,
         WQ: torch.Tensor,
@@ -4581,6 +4649,29 @@ class rocm_aiter_ops:
                 "GEMM-AFP4WFP4_PRESHUFFLED", n, 2 * k_bytes
             )
         except (AssertionError, ImportError):
+            return False
+
+    @staticmethod
+    @functools.cache
+    def is_mxfp8_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
+        """Whether gemm_a8w8_blockscale_bpreshuffle has tuned 1x32 E8M0 rows
+        for (N, K) on the current arch."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            from aiter.ops.gemm_op_a8w8 import get_mxscale_bpreshuffle_config
+
+            return all(
+                get_mxscale_bpreshuffle_config(m, n, k, "1x32") is not None
+                for m in (1, 8192)
+            )
+        except ImportError:
+            return False
+        except Exception as e:
+            # A broken or overridden tuned table: run the next MXFP8 kernel.
+            logger.warning_once(
+                "AITER MXFP8 tuned-config lookup failed for N=%d, K=%d: %s", n, k, e
+            )
             return False
 
     @staticmethod
