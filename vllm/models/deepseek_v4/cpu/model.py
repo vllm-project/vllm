@@ -21,9 +21,6 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -58,6 +55,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.cpu.cpu_sparse import DeepseekV4CPUAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -145,7 +143,9 @@ class DeepseekV4MoE(nn.Module):
 
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        is_hash_moe = extract_layer_index(prefix) < config.mlp_layer_types.count(
+            "hash_moe"
+        )
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -214,14 +214,6 @@ class DeepseekV4MoE(nn.Module):
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
         )
-        if is_hash_moe:
-            # apply_monolithic() never sees hash_indices_table via the
-            # router path (modular-only) -- stash it on RoutedExperts
-            # directly. object.__setattr__ avoids nn.Module re-registering
-            # (and duplicating in the state_dict) this alias.
-            object.__setattr__(
-                self.experts.routed_experts, "hash_indices_table", self.gate.tid2eid
-            )
 
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
@@ -498,11 +490,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
-            DeepseekV4MoE,
-            "ffn",
-        )
+        self.is_fused_shared_expert_enabled = False
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, self.rms_norm_eps)
@@ -530,10 +518,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         self.hc_head_op = HCHeadOp()
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -663,14 +648,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 return inv_name
             return name
 
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
-
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
@@ -754,14 +731,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                             name = name_mapped
                             break
                     loaded_params.add(name_mapped)
-                    continue
-                elif "attn_sink" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):

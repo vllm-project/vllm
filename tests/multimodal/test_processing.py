@@ -1281,7 +1281,7 @@ def test_get_supported_mm_processor_kwargs_uses_supported_modalities(
     processor: SimpleNamespace,
     expected: dict[str, set[str]],
 ) -> None:
-    info = BaseProcessingInfo(SimpleNamespace())  # type: ignore[arg-type]
+    info = BaseProcessingInfo(SimpleNamespace())
     info.__dict__["supported_mm_limits"] = supported_mm_limits
     monkeypatch.setattr(info, "get_hf_processor", lambda **_: processor)
 
@@ -1291,7 +1291,7 @@ def test_get_supported_mm_processor_kwargs_uses_supported_modalities(
 def test_supported_mm_processor_kwargs_is_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = BaseProcessingInfo(SimpleNamespace())  # type: ignore[arg-type]
+    info = BaseProcessingInfo(SimpleNamespace())
     expected = {"images_kwargs": {"size"}}
     calls = 0
 
@@ -1442,7 +1442,7 @@ def test_get_merged_mm_kwargs_treats_empty_scopes_as_absent_before_routing(
         mm_device_do_normalize=False,
     )
     model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
-    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+    ctx = InputProcessingContext(model_config, tokenizer=None)
 
     merged = ctx.get_merged_mm_kwargs(
         inference_kwargs,
@@ -1482,7 +1482,7 @@ def test_get_merged_mm_kwargs_merges_before_routing():
         mm_device_do_normalize=False,
     )
     model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
-    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+    ctx = InputProcessingContext(model_config, tokenizer=None)
 
     merged = ctx.get_merged_mm_kwargs(
         {
@@ -1604,7 +1604,7 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
 def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
     """Distinct processor kwargs must not share a multi-modal hash.
 
-    ``hf_processor_mm_kwargs`` is per-request input, so both the keys and the
+    `hf_processor_mm_kwargs` is per-request input, so both the keys and the
     values here are caller-controlled. The hash is the identity of the
     processor cache entry and is mixed into the prefix-cache block key, so two
     requests sharing one is a cross-request cache hit.

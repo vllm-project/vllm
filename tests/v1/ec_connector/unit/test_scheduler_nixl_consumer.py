@@ -25,6 +25,9 @@ class _Pos:
     def __init__(self, offset, length):
         self.offset, self.length = offset, length
 
+    def get_num_embeds(self):
+        return self.length
+
 
 class _Feature:
     def __init__(self, mm_hash, length=1, data=None):
@@ -85,6 +88,9 @@ class _FakeTransport:
         pass
 
 
+_MISSING = object()
+
+
 def _consumer_sched(monkeypatch):
     def _region(cfg):
         return ECSharedRegion(
@@ -95,16 +101,15 @@ def _consumer_sched(monkeypatch):
 
     # ec_enable_nixl defaults to False, so this builds gate-off; the fields
     # below flip on the NIXL consumer state directly.
-    s = ECCPUScheduler(create_ec_vllm_config(ec_role="ec_consumer"))
+    # No measured widths: a consumer takes each shape from the announcement.
+    s = ECCPUScheduler(
+        create_ec_vllm_config(ec_role="ec_consumer", encoder_output_widths={})
+    )
     # Turn on NIXL consumer state without constructing real transports.
     s._nixl_enabled = True
     s._transport = _FakeTransport()
     s._data = None
     s._compat_hash = "c"
-    # _setup_nixl normally computes these from model_config; set them
-    # directly since this helper builds gate-off then flips fields on.
-    s._hidden_dim = _HID
-    s._element_size = _ES
     s._metadata_resolver._cache["image"] = {"image_grid_thw"}
     return s
 
@@ -115,24 +120,32 @@ def _params(mm_hash, length):
             "peer_host": "h",
             "peer_port": 1,
             "size_bytes": length * _HID * _ES,
+            "shape": [length, _HID],
         }
     }
 
 
 def test_new_remote_read_defers_then_completes(monkeypatch):
+    """The read is sized from the announced shape, not a local width."""
+    width = 4 * _HID
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
 
     # Route _start_xfer to our fake session instead of real ZMQ/NIXL, but
     # still reserve a real not-ready cache entry so mark_ready works.
-    def _fake_start(mm_hash, info, size):
-        entry = s._cache.alloc(mm_hash, 1)
+    def _fake_start(mm_hash, info, size, shape):
+        assert size == width * _ES
+        assert shape == (1, width)
+        entry = s._cache.alloc(mm_hash, size // _BS, shape)
         assert entry is not None
         fake.started.append(mm_hash)
         return True
 
     monkeypatch.setattr(s, "_start_xfer", _fake_start)
-    req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
+    params = _params("h1", 1)
+    params["h1"]["size_bytes"] = width * _ES
+    params["h1"]["shape"] = [1, width]
+    req = _Request([_Feature("h1", 1)], params=params)
 
     # Step 1: unseen remote item -> read started, request deferred.
     assert s.ensure_cache_available(req, 0) is False
@@ -155,6 +168,7 @@ def test_new_remote_read_defers_then_completes(monkeypatch):
     s.update_state_after_alloc(req, 0)
     meta = s.build_connector_meta(scheduler_output=None)
     assert "h1" in meta.loads
+    assert meta.loads["h1"][2] == (1, width)
     assert "h1" not in s._step_completed  # cleared by promote
 
     # Step 3: still cached -> admitted directly, no new transfer.
@@ -176,8 +190,8 @@ def test_failed_read_falls_back_only_with_local_input(monkeypatch, payload):
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
 
-    def _fake_start(mm_hash, info, size):
-        entry = s._cache.alloc(mm_hash, 1)
+    def _fake_start(mm_hash, info, size, shape):
+        entry = s._cache.alloc(mm_hash, 1, shape)
         assert entry is not None
         fake.started.append(mm_hash)
         return True
@@ -230,8 +244,8 @@ def test_remote_wait_budget_survives_retries_and_long_steps(monkeypatch, retry):
     fake = _FakeSession()
     s._sessions[("h", 1)] = fake
 
-    def start(mm_hash, info, size):
-        assert s._cache.alloc(mm_hash, 1) is not None
+    def start(mm_hash, info, size, shape):
+        assert s._cache.alloc(mm_hash, 1, shape) is not None
         fake.started.append(mm_hash)
         return True
 
@@ -261,8 +275,8 @@ def test_retryable_read_re_requests_without_admitting(monkeypatch):
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
 
-    def _fake_start(mm_hash, info, size):
-        entry = s._cache.alloc(mm_hash, 1)
+    def _fake_start(mm_hash, info, size, shape):
+        entry = s._cache.alloc(mm_hash, 1, shape)
         assert entry is not None
         fake.started.append(mm_hash)
         return True
@@ -287,14 +301,29 @@ def test_retryable_read_re_requests_without_admitting(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "size_fields",
-    [{"size_bytes": 999}, {"size_bytes": None}, {"size_bytes": "big"}, {}],
-    ids=["mismatch", "null-size", "text-size", "no-size"],
+    "fields",
+    [
+        {"size_bytes": 999},
+        {"size_bytes": None},
+        {"size_bytes": "big"},
+        {"size_bytes": _MISSING},
+        {"shape": _MISSING},
+        {"shape": [2, _HID]},
+    ],
+    ids=[
+        "size-mismatch",
+        "null-size",
+        "text-size",
+        "no-size",
+        "no-shape",
+        "wrong-rows",
+    ],
 )
-def test_invalid_remote_size_fails_the_request(monkeypatch, size_fields):
-    """Invalid remote sizes fail the request without raising in the scheduler."""
+def test_invalid_announcement_fails_the_request(monkeypatch, fields):
+    """An unusable announced size or shape fails the request, not the engine."""
     s = _consumer_sched(monkeypatch)
-    announced = {"peer_host": "h", "peer_port": 1, **size_fields}
+    announced = {**_params("h1", 1)["h1"], **fields}
+    announced = {k: v for k, v in announced.items() if v is not _MISSING}
     req = _Request([_Feature("h1", 1)], params={"h1": announced})
     assert s.ensure_cache_available(req, 0) is False
     assert s.take_unavailable_requests() == {"r1"}
@@ -306,7 +335,7 @@ def test_invalid_remote_size_fails_the_request(monkeypatch, size_fields):
 def test_deferral_budget_is_per_request(monkeypatch):
     """Shared hashes have independent wait budgets and cancellation cleanup."""
     s = _consumer_sched(monkeypatch)
-    monkeypatch.setattr(s._cache, "alloc", lambda key, n: None)
+    monkeypatch.setattr(s._cache, "alloc", lambda key, n, shape=None: None)
     params = _params("h1", 1)
     old = _Request([_Feature("h1", 1)], params=params, req_id="old")
     new = _Request([_Feature("h1", 1)], params=params, req_id="new")
@@ -419,7 +448,7 @@ def test_in_flight_hash_defers_without_second_transfer(monkeypatch):
     s = _consumer_sched(monkeypatch)
     started: list[str] = []
 
-    def _spy_start_xfer(mm_hash, info, size):
+    def _spy_start_xfer(mm_hash, info, size, shape):
         started.append(mm_hash)
         return True
 

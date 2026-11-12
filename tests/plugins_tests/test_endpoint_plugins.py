@@ -14,11 +14,11 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
+from vllm.entrypoints.common.cli_args import make_arg_parser
 from vllm.entrypoints.launchers.app import build_app
-from vllm.entrypoints.launchers.cli_args import make_arg_parser
 from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,
@@ -36,6 +36,34 @@ class _RaisingEndpointPlugin:
 
     def __init__(self):
         raise RuntimeError("boom")
+
+
+class _ShadowEndpointPlugin:
+    name = "shadow_endpoint_plugin"
+    required_tasks = None
+
+    def __init__(self, path: str, include_in_schema: bool):
+        self.path = path
+        self.include_in_schema = include_in_schema
+
+    def attach_router(self, app: FastAPI) -> None:
+        assert str(app.url_path_for("show_version")) == "/version"
+        app.openapi()
+
+        @app.get(self.path, status_code=209, include_in_schema=self.include_in_schema)
+        async def plugin_version(plugin_arg: str) -> dict[str, str]:
+            return {"served_by": plugin_arg}
+
+    async def init_state(self, engine_client, state, args) -> None:
+        pass
+
+
+class _RouterEndpointPlugin(DummyAdminEndpointPlugin):
+    def __init__(self, router: APIRouter):
+        self.router = router
+
+    def attach_router(self, app: FastAPI) -> None:
+        app.include_router(self.router)
 
 
 class _FakeEngineClient:
@@ -163,6 +191,136 @@ def test_attach_is_noop_when_nothing_discovered(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/version", "/metrics"])
+@pytest.mark.parametrize("include_in_schema", [True, False])
+async def test_endpoint_plugin_override_preserves_hook_and_schema(
+    monkeypatch: pytest.MonkeyPatch, path: str, include_in_schema: bool
+):
+    """Hooks see core routes; overrides win over both HTTP routes and mounts."""
+    args = _build_args()
+    monkeypatch.setenv("VLLM_PLUGINS", "shadow_endpoint_plugin")
+    monkeypatch.setattr(
+        "vllm.plugins.load_plugins_by_group",
+        _fake_loader(
+            {
+                "shadow_endpoint_plugin": lambda: _ShadowEndpointPlugin(
+                    path, include_in_schema
+                )
+            }
+        ),
+    )
+    app = build_app(args, supported_tasks=())
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, params={"plugin_arg": "plugin"})
+        schema = (await client.get("/openapi.json")).json()
+
+    assert response.status_code == 209
+    assert response.json() == {"served_by": "plugin"}
+    if include_in_schema:
+        operation = schema["paths"][path]["get"]
+        assert "209" in operation["responses"]
+        assert "200" not in operation["responses"]
+        assert operation["parameters"][0]["name"] == "plugin_arg"
+        assert operation["parameters"][0]["required"] is True
+        response_schema = operation["responses"]["209"]["content"]["application/json"][
+            "schema"
+        ]
+        assert response_schema["additionalProperties"] == {"type": "string"}
+    else:
+        assert path not in schema["paths"]
+
+
+@pytest.mark.asyncio
+async def test_endpoint_plugin_override_preserves_other_methods(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Overriding GET preserves POST's validation and the shared core route."""
+    core = APIRouter()
+
+    @core.api_route("/shared", methods=["GET", "POST"], status_code=201)
+    async def original(value: int) -> dict[str, int]:
+        return {"value": value}
+
+    plugin = APIRouter()
+
+    @plugin.get("/shared", status_code=202)
+    async def replacement():
+        return {"served_by": "plugin"}
+
+    app = FastAPI()
+    app.include_router(core)
+    original_route = app.routes[-1]
+    monkeypatch.setattr(
+        "vllm.plugins.load_endpoint_plugins",
+        lambda supported_tasks: [_RouterEndpointPlugin(plugin)],
+    )
+    attach_endpoint_plugins(app, ())
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/shared")
+        post_response = await client.post("/shared", params={"value": 7})
+        invalid_response = await client.post("/shared", params={"value": "invalid"})
+
+    assert response.status_code == 202
+    assert response.json() == {"served_by": "plugin"}
+    assert post_response.status_code == 201
+    assert post_response.json() == {"value": 7}
+    assert invalid_response.status_code == 422
+    assert original_route.methods == {"GET", "POST"}
+    assert core.routes[0].methods == {"GET", "POST"}
+    operations = app.openapi()["paths"]["/shared"]
+    assert "202" in operations["get"]["responses"]
+    assert "201" in operations["post"]["responses"]
+
+
+@pytest.mark.asyncio
+async def test_later_endpoint_plugin_overrides_same_operation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The last registered override wins while unrelated plugin routes survive."""
+    first = APIRouter()
+
+    @first.get("/shared", status_code=201)
+    @first.get("/plugins/first")
+    async def first_handler():
+        return {"served_by": "first"}
+
+    second = APIRouter()
+
+    @second.get("/shared", status_code=202)
+    async def second_handler():
+        return {"served_by": "second"}
+
+    monkeypatch.setattr(
+        "vllm.plugins.load_endpoint_plugins",
+        lambda supported_tasks: [
+            _RouterEndpointPlugin(first),
+            _RouterEndpointPlugin(second),
+        ],
+    )
+    app = FastAPI()
+    attach_endpoint_plugins(app, ())
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/shared")
+        unrelated = await client.get("/plugins/first")
+        unsupported = await client.delete("/shared")
+
+    assert response.status_code == 202
+    assert response.json() == {"served_by": "second"}
+    assert unrelated.status_code == 200
+    assert unrelated.json() == {"served_by": "first"}
+    assert unsupported.status_code == 405
+    responses = app.openapi()["paths"]["/shared"]["get"]["responses"]
+    assert "202" in responses
+    assert "201" not in responses
+
+
+@pytest.mark.asyncio
 async def test_init_state_is_noop_without_phase_a(monkeypatch: pytest.MonkeyPatch):
     """`init_app_state` callers that never ran `build_app` (e.g.
     `run_batch.py`, which builds a bare `State()`) must not crash just
@@ -172,7 +330,7 @@ async def test_init_state_is_noop_without_phase_a(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("VLLM_PLUGINS", "dummy_admin_endpoint_plugin")
 
     state = State()
-    await init_endpoint_plugins_state(_FakeEngineClient(), state, _build_args())  # type: ignore[arg-type]
+    await init_endpoint_plugins_state(_FakeEngineClient(), state, _build_args())
 
     assert not hasattr(state, "dummy_engine_client")
 
@@ -223,7 +381,7 @@ async def test_endpoint_plugin_end_to_end(monkeypatch: pytest.MonkeyPatch):
     )
 
     fake_engine_client = _FakeEngineClient(rpc_result=["cfg-a", "cfg-b"])
-    await init_endpoint_plugins_state(fake_engine_client, app.state, args)  # type: ignore[arg-type]
+    await init_endpoint_plugins_state(fake_engine_client, app.state, args)
 
     assert app.state.dummy_engine_client is fake_engine_client
 

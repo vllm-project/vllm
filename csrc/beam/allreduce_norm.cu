@@ -1,0 +1,472 @@
+// Beam's TP all-reduce fused with its FP32 norm-residual-norm epilogue and,
+// optionally, the TRTLLM-Gen MoE top-k finalize. Built on the MNNVL Lamport
+// primitives in mnnvl_lamport.cuh; launch geometry follows FlashInfer's MNNVL
+// all-reduce.
+
+#include "../torch_utils.h"
+#include "../mnnvl_lamport.cuh"
+
+#include <torch/headeronly/core/ScalarType.h>
+
+namespace vllm {
+namespace beam {
+
+namespace ar = vllm::mnnvl;
+namespace cg = cooperative_groups;
+using T = __nv_bfloat16;
+using Vec = ar::utils::PackedVec<float4, T>;
+
+struct Params {
+  ar::AllReduceKernelParams<T> ar;
+  T const* nextWeight;
+  float nextEps;
+  float xScale;
+  float rScale;
+  bool postNorm;
+  bool nextNorm;
+  bool scaled;
+  T const* experts;
+  void const* expertWeights;
+  int const* permutation;
+  int topK;
+  bool floatWeights;
+  float routedScale;
+};
+
+template <bool Finalize>
+__device__ Vec loadInput(Params const& p, int token, int packedIdx) {
+  Vec value;
+  if constexpr (!Finalize) {
+    value.packed = ar::utils::loadPacked<float4>(
+        p.ar.shardPtr + int64_t(token) * p.ar.tokenDim + packedIdx * 8);
+    return value;
+  }
+  float sum[8]{};
+  for (int base = 0; base < p.topK; base += 8) {
+    int rows[8];
+    float weights[8];
+#pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      int index = token * p.topK + base + k;
+      rows[k] = base + k < p.topK ? p.permutation[index] : -1;
+      weights[k] = rows[k] < 0 ? 0.f
+                   : p.floatWeights
+                       ? static_cast<float const*>(p.expertWeights)[index]
+                       : ar::utils::toFloat<T>(
+                             static_cast<T const*>(p.expertWeights)[index]);
+    }
+#pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      Vec expert{};
+      if (rows[k] >= 0)
+        expert.packed = ar::utils::loadPacked<float4>(
+            p.experts + int64_t(rows[k]) * p.ar.tokenDim + packedIdx * 8);
+#pragma unroll
+      for (int i = 0; i < 8; ++i)
+        sum[i] = __fadd_rn(
+            sum[i],
+            __fmul_rn(ar::utils::toFloat<T>(expert.elements[i]), weights[k]));
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    T rounded = ar::utils::fromFloat<T>(sum[i]);
+    value.elements[i] = ar::utils::fromFloat<T>(
+        __fmul_rn(ar::utils::toFloat<T>(rounded), p.routedScale));
+  }
+  return value;
+}
+
+template <bool UseCGA, int Stage>
+__device__ float invRms(Vec const& value, int dim, float eps) {
+  float sum = 0.f;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    float v = ar::utils::toFloat<T>(value.elements[i]);
+    sum = __fadd_rn(sum, __fmul_rn(v, v));
+  }
+  sum = ar::utils::blockReduceSum<float, true>(sum);
+  if constexpr (UseCGA) {
+    auto cluster = cg::this_cluster();
+    __shared__ float partial[8];
+    if (threadIdx.x < cluster.num_blocks()) {
+      cluster.map_shared_rank(partial, threadIdx.x)[cluster.block_rank()] = sum;
+    }
+    cluster.sync();
+    sum = 0.f;
+    for (int i = 0; i < cluster.num_blocks(); ++i)
+      sum = __fadd_rn(sum, partial[i]);
+  }
+  __syncthreads();
+  return rsqrtf(sum / dim + eps);
+}
+
+template <bool UseCGA, bool Preloaded = false>
+__device__ void epilogue(Params const& p, Vec value, int packedIdx, int offset,
+                         Vec postWeight = {}, Vec residual = {},
+                         Vec nextWeight = {}) {
+  if (p.postNorm) {
+    float rstd = invRms<UseCGA, 0>(value, p.ar.tokenDim, p.ar.epsilon);
+    Vec weight = postWeight;
+    if constexpr (!Preloaded) {
+      if (p.ar.gammaPtr)
+        weight.packed =
+            ar::utils::loadPacked<float4>(p.ar.gammaPtr + packedIdx * 8);
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      float v = __fmul_rn(ar::utils::toFloat<T>(value.elements[i]), rstd);
+      if (p.ar.gammaPtr)
+        v = __fmul_rn(v, ar::utils::toFloat<T>(weight.elements[i]));
+      value.elements[i] = ar::utils::fromFloat<T>(v);
+    }
+  }
+  if constexpr (!Preloaded)
+    residual.packed =
+        ar::utils::loadPacked<float4>(p.ar.residualInPtr + offset);
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    T x = value.elements[i], r = residual.elements[i];
+    if (p.scaled) {
+      x = ar::utils::fromFloat<T>(
+          __fmul_rn(ar::utils::toFloat<T>(x), p.xScale));
+      r = ar::utils::fromFloat<T>(
+          __fmul_rn(ar::utils::toFloat<T>(r), p.rScale));
+    }
+    value.elements[i] = ar::utils::fromFloat<T>(
+        __fadd_rn(ar::utils::toFloat<T>(x), ar::utils::toFloat<T>(r)));
+  }
+  *reinterpret_cast<float4*>(p.ar.prenormedPtr + offset) = value.packed;
+  if (p.nextNorm) {
+    float rstd = invRms<UseCGA, 1>(value, p.ar.tokenDim, p.nextEps);
+    Vec weight = nextWeight;
+    if constexpr (!Preloaded) {
+      if (p.nextWeight)
+        weight.packed =
+            ar::utils::loadPacked<float4>(p.nextWeight + packedIdx * 8);
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      float v = __fmul_rn(ar::utils::toFloat<T>(value.elements[i]), rstd);
+      if (p.nextWeight)
+        v = __fmul_rn(v, ar::utils::toFloat<T>(weight.elements[i]));
+      value.elements[i] = ar::utils::fromFloat<T>(v);
+    }
+    *reinterpret_cast<float4*>(p.ar.outputPtr + offset) = value.packed;
+  }
+}
+
+template <int World, int Rank>
+__device__ Vec reduceLocal(Vec value, T* buffer, int token, int dim,
+                           int packedIdx) {
+  Vec remote[World];
+  ar::utils::waitOneshotRemoteRanks<World, Rank, T, float4, 8>(
+      remote, buffer, token, dim, packedIdx);
+  return ar::utils::reduceOneshotDeterministic<World, Rank, T, float4, 8>(
+      remote, value);
+}
+
+template <int World, bool Finalize = false, bool SmallBatch = false>
+__global__ void __launch_bounds__(1024) oneshot(Params p) {
+  int packedIdx = threadIdx.x;
+  if constexpr (!SmallBatch) packedIdx = cg::this_cluster().thread_rank();
+  int token = blockIdx.x;
+  int offset = token * p.ar.tokenDim + packedIdx * 8;
+  cudaGridDependencySynchronize();
+  ar::utils::LamportFlags<float4, !SmallBatch> flag(p.ar.bufferFlags, 1);
+  auto multicast = static_cast<T*>(flag.getCurLamportBuf(p.ar.mcastPtr, 0));
+  auto local =
+      static_cast<T*>(flag.getCurLamportBuf(p.ar.inputPtrs[p.ar.rank], 0));
+  Vec value = loadInput<Finalize>(p, token, packedIdx);
+  ar::utils::sanitizeLamportPayload<float4, T>(value);
+  reinterpret_cast<float4*>(multicast + token * p.ar.tokenDim * World +
+                            p.ar.rank * p.ar.tokenDim)[packedIdx] =
+      value.packed;
+  Vec postWeight{}, residual{}, nextWeight{};
+  if constexpr (SmallBatch) {
+    // Overlap epilogue inputs with the peer payloads in flight.
+    if (p.postNorm && p.ar.gammaPtr)
+      postWeight.packed =
+          ar::utils::loadPackedVolatile<float4>(p.ar.gammaPtr + packedIdx * 8)
+              .packed;
+    residual.packed =
+        ar::utils::loadPackedVolatile<float4>(p.ar.residualInPtr + offset)
+            .packed;
+    if (p.nextNorm && p.nextWeight)
+      nextWeight.packed =
+          ar::utils::loadPackedVolatile<float4>(p.nextWeight + packedIdx * 8)
+              .packed;
+  }
+  flag.ctaArrive();
+  if constexpr (SmallBatch) {
+    // This workspace uses at most two stages. Constant indices avoid a
+    // dynamically indexed array spilling the Lamport state to local memory.
+    flag.clearDirtyLamportBuf(p.ar.inputPtrs[p.ar.rank], 0);
+    flag.clearDirtyLamportBuf(p.ar.inputPtrs[p.ar.rank], 1);
+  } else {
+    flag.clearDirtyLamportBuf(p.ar.inputPtrs[p.ar.rank], -1);
+  }
+#define REDUCE(R)                                                       \
+  case R:                                                               \
+    if constexpr (World > R)                                            \
+      value = reduceLocal<World, R>(value, local, token, p.ar.tokenDim, \
+                                    packedIdx);                         \
+    break
+  switch (p.ar.rank) {
+    REDUCE(0);
+    REDUCE(1);
+    REDUCE(2);
+    REDUCE(3);
+    REDUCE(4);
+    REDUCE(5);
+    REDUCE(6);
+    REDUCE(7);
+  }
+#undef REDUCE
+  cudaTriggerProgrammaticLaunchCompletion();
+  epilogue<!SmallBatch, SmallBatch>(p, value, packedIdx, offset, postWeight,
+                                    residual, nextWeight);
+  flag.waitAndUpdate({static_cast<uint32_t>(p.ar.numTokens * p.ar.tokenDim *
+                                            World * sizeof(T)),
+                      0, 0, 0});
+}
+
+template <int World>
+__global__ void __launch_bounds__(128) finalizeScatter(Params p) {
+  int packedIdx = blockIdx.y * blockDim.x + threadIdx.x;
+  int token = blockIdx.x;
+  int destRank = token % World;
+  int localToken = token / World;
+  cudaGridDependencySynchronize();
+  ar::utils::LamportFlags<float4> flag(p.ar.bufferFlags, 2);
+  auto local =
+      static_cast<T*>(flag.getCurLamportBuf(p.ar.inputPtrs[p.ar.rank], 0));
+  auto dest =
+      static_cast<T*>(flag.getCurLamportBuf(p.ar.inputPtrs[destRank], 0));
+  auto broadcast = static_cast<T*>(flag.getCurLamportBuf(p.ar.mcastPtr, 1));
+  if (packedIdx * 8 < p.ar.tokenDim) {
+    Vec value = loadInput<true>(p, token, packedIdx);
+    ar::utils::sanitizeLamportPayload<float4, T>(value);
+    reinterpret_cast<float4*>(dest + localToken * p.ar.tokenDim * World +
+                              p.ar.rank * p.ar.tokenDim)[packedIdx] =
+        value.packed;
+  }
+  cudaTriggerProgrammaticLaunchCompletion();
+  flag.clearDirtyLamportBuf(p.ar.inputPtrs[p.ar.rank], 0);
+  if (packedIdx * 8 < p.ar.tokenDim && destRank == p.ar.rank) {
+    Vec value =
+        ar::utils::reduceLamportRanksChunked<World, World, T, float4, 8>(
+            local, localToken, p.ar.tokenDim, packedIdx * 8);
+    ar::utils::sanitizeLamportPayload<float4, T>(value);
+    reinterpret_cast<float4*>(broadcast + token * p.ar.tokenDim)[packedIdx] =
+        value.packed;
+  }
+  flag.clearDirtyLamportBuf(p.ar.inputPtrs[p.ar.rank], 1);
+}
+
+template <bool UseCGA>
+__global__ void __launch_bounds__(1024) finishTwoshot(Params p) {
+  int packedIdx = threadIdx.x;
+  if constexpr (UseCGA) packedIdx = cg::this_cluster().thread_rank();
+  int offset = blockIdx.x * p.ar.tokenDim + packedIdx * 8;
+  cudaTriggerProgrammaticLaunchCompletion();
+  ar::utils::LamportFlags<float4, UseCGA> flag(p.ar.bufferFlags, 2);
+  auto input = static_cast<T*>(flag.getCurLamportBuf(p.ar.localBufferPtr, 1));
+  flag.ctaArrive();
+  auto loaded = ar::utils::loadPackedVolatile<float4>(input + offset);
+  while (ar::utils::isLamportDirty(loaded)) {
+    loaded = ar::utils::loadPackedVolatile<float4>(input + offset);
+  }
+  Vec value{.packed = loaded.packed};
+  epilogue<UseCGA>(p, value, packedIdx, offset);
+  cudaGridDependencySynchronize();
+  flag.waitAndUpdate(
+      {static_cast<uint32_t>(ar::round_up(p.ar.numTokens, p.ar.nRanks) *
+                             p.ar.tokenDim * sizeof(T)),
+       static_cast<uint32_t>(p.ar.numTokens * p.ar.tokenDim * sizeof(T)), 0,
+       0});
+}
+
+void checkCuda(cudaError_t status) {
+  STD_TORCH_CHECK(status == cudaSuccess, cudaGetErrorString(status));
+}
+
+ar::AllReduceKernelParams<T> workspaceParams(torch::stable::Tensor const& input,
+                                             int64_t buffer_ptrs,
+                                             torch::stable::Tensor& flags,
+                                             int64_t multicast_ptr,
+                                             int64_t world, int64_t rank) {
+  STD_TORCH_CHECK(
+      input.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Beam all-reduce requires BF16 input");
+  STD_TORCH_CHECK(
+      input.dim() == 2 && input.is_contiguous() && input.size(1) % 8 == 0,
+      "Beam all-reduce requires a contiguous [tokens, 8k] input");
+  STD_TORCH_CHECK(world == 2 || world == 4 || world == 8,
+                  "Beam all-reduce supports TP2/4/8");
+  ar::AllReduceKernelParams<T> p{};
+  p.shardPtr = static_cast<T const*>(input.data_ptr());
+  p.inputPtrs = reinterpret_cast<T**>(buffer_ptrs);
+  p.mcastPtr = reinterpret_cast<T*>(multicast_ptr);
+  p.bufferFlags = static_cast<uint32_t*>(flags.data_ptr());
+  p.nRanks = world;
+  p.rank = rank;
+  p.numTokens = input.size(0);
+  p.tokenDim = input.size(1);
+  return p;
+}
+
+}  // namespace beam
+}  // namespace vllm
+
+void beam_allreduce_norm(
+    torch::stable::Tensor const& input, torch::stable::Tensor const& residual,
+    std::optional<torch::stable::Tensor> post_weight,
+    std::optional<torch::stable::Tensor> next_weight,
+    torch::stable::Tensor& hidden,
+    std::optional<torch::stable::Tensor> normalized, int64_t buffer_ptrs,
+    torch::stable::Tensor& flags, int64_t multicast_ptr, int64_t local_ptr,
+    int64_t world, int64_t rank, double post_eps, double next_eps,
+    double x_scale, double r_scale, bool post_norm, bool next_norm, bool scaled,
+    bool one_shot, bool small_batch,
+    std::optional<torch::stable::Tensor> experts,
+    std::optional<torch::stable::Tensor> expert_weights,
+    std::optional<torch::stable::Tensor> permutation, double routed_scale) {
+  using namespace vllm::beam;
+  int const device = input.get_device_index();
+  torch::stable::accelerator::DeviceGuard const device_guard(device);
+  cudaStream_t stream = get_current_cuda_stream(device);
+  Params p{};
+  p.ar = workspaceParams(input, buffer_ptrs, flags, multicast_ptr, world, rank);
+  p.ar.localBufferPtr = reinterpret_cast<T*>(local_ptr);
+  p.ar.outputPtr = normalized.has_value()
+                       ? static_cast<T*>(normalized->data_ptr())
+                       : nullptr;
+  p.ar.prenormedPtr = static_cast<T*>(hidden.data_ptr());
+  p.ar.residualInPtr = static_cast<T const*>(residual.data_ptr());
+  p.ar.gammaPtr = post_weight.has_value()
+                      ? static_cast<T const*>(post_weight->data_ptr())
+                      : nullptr;
+  p.ar.epsilon = post_eps;
+  p.nextWeight = next_weight.has_value()
+                     ? static_cast<T const*>(next_weight->data_ptr())
+                     : nullptr;
+  p.nextEps = next_eps;
+  p.xScale = x_scale;
+  p.rScale = r_scale;
+  p.postNorm = post_norm;
+  p.nextNorm = next_norm;
+  p.scaled = scaled;
+  if (experts.has_value()) {
+    STD_TORCH_CHECK(expert_weights.has_value() && permutation.has_value());
+    p.experts = static_cast<T const*>(experts->data_ptr());
+    p.expertWeights = expert_weights->data_ptr();
+    p.permutation = static_cast<int const*>(permutation->data_ptr());
+    p.topK = permutation->size(1);
+    p.floatWeights =
+        expert_weights->scalar_type() == torch::headeronly::ScalarType::Float;
+    p.routedScale = routed_scale;
+  }
+  if (p.ar.numTokens == 0) return;
+  auto [threads, clusters, loads] =
+      ar::utils::adjustGridConfig(p.ar.numTokens, p.ar.tokenDim, 8, true,
+                                  get_device_prop()->multiProcessorCount);
+  STD_TORCH_CHECK(!small_batch || (one_shot && !p.experts));
+  if (small_batch) {
+    clusters = 1;
+    threads = p.ar.tokenDim / 8;
+  }
+  STD_TORCH_CHECK(loads == 1);
+  STD_TORCH_CHECK(threads * clusters * 8 == p.ar.tokenDim);
+  cudaLaunchAttribute attrs[2]{};
+  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attrs[0].val.programmaticStreamSerializationAllowed = 1;
+  attrs[1].id = cudaLaunchAttributeClusterDimension;
+  attrs[1].val.clusterDim = {1, static_cast<unsigned>(clusters), 1};
+  cudaLaunchConfig_t config{};
+  config.gridDim = dim3(p.ar.numTokens, clusters);
+  config.blockDim = dim3(threads);
+  config.stream = stream;
+  config.attrs = attrs;
+  config.numAttrs = small_batch ? 1 : 2;
+  if (one_shot) {
+#define LAUNCH(W)                                                          \
+  case W:                                                                  \
+    if (small_batch)                                                       \
+      checkCuda(cudaLaunchKernelEx(&config, &oneshot<W, false, true>, p)); \
+    else if (p.experts)                                                    \
+      checkCuda(cudaLaunchKernelEx(&config, &oneshot<W, true>, p));        \
+    else                                                                   \
+      checkCuda(cudaLaunchKernelEx(&config, &oneshot<W>, p));              \
+    break
+    switch (world) {
+      LAUNCH(2);
+      LAUNCH(4);
+      LAUNCH(8);
+    }
+#undef LAUNCH
+  } else {
+    cudaLaunchConfig_t scatter{};
+    scatter.gridDim = dim3(p.ar.numTokens, ar::ceil_div(p.ar.tokenDim, 1024));
+    scatter.blockDim = dim3(128);
+    scatter.stream = stream;
+    scatter.attrs = attrs;
+    scatter.numAttrs = 1;
+#define LAUNCH(W)                                                      \
+  case W:                                                              \
+    if (p.experts)                                                     \
+      checkCuda(cudaLaunchKernelEx(&scatter, &finalizeScatter<W>, p)); \
+    else                                                               \
+      checkCuda(cudaLaunchKernelEx(                                    \
+          &scatter, &ar::twoshotAllreduceKernel<W, T, false>, p.ar));  \
+    break
+    switch (world) {
+      LAUNCH(2);
+      LAUNCH(4);
+      LAUNCH(8);
+    }
+#undef LAUNCH
+    if (clusters > 1) {
+      checkCuda(cudaLaunchKernelEx(&config, &finishTwoshot<true>, p));
+    } else {
+      config.numAttrs = 1;
+      checkCuda(cudaLaunchKernelEx(&config, &finishTwoshot<false>, p));
+    }
+  }
+}
+
+void beam_allreduce(torch::stable::Tensor const& input,
+                    torch::stable::Tensor& output, int64_t buffer_ptrs,
+                    torch::stable::Tensor& flags, int64_t multicast_ptr,
+                    int64_t world, int64_t rank) {
+  using namespace vllm::beam;
+  int const device = input.get_device_index();
+  torch::stable::accelerator::DeviceGuard const device_guard(device);
+  auto p =
+      workspaceParams(input, buffer_ptrs, flags, multicast_ptr, world, rank);
+  p.outputPtr = static_cast<T*>(output.data_ptr());
+  if (p.numTokens == 0) return;
+  cudaLaunchAttribute attrs[1]{};
+  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attrs[0].val.programmaticStreamSerializationAllowed = 1;
+  cudaLaunchConfig_t config{};
+  config.gridDim = dim3(p.numTokens, ar::ceil_div(p.tokenDim / 8, 128));
+  config.blockDim = dim3(128);
+  config.stream = get_current_cuda_stream(device);
+  config.attrs = attrs;
+  config.numAttrs = 1;
+  switch (world) {
+    case 2:
+      checkCuda(cudaLaunchKernelEx(&config,
+                                   &ar::twoshotAllreduceKernel<2, T, true>, p));
+      break;
+    case 4:
+      checkCuda(cudaLaunchKernelEx(&config,
+                                   &ar::twoshotAllreduceKernel<4, T, true>, p));
+      break;
+    case 8:
+      checkCuda(cudaLaunchKernelEx(&config,
+                                   &ar::twoshotAllreduceKernel<8, T, true>, p));
+      break;
+  }
+}

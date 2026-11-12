@@ -120,26 +120,19 @@ def interleaved_to_split(x):
     return x.reshape(*x.shape[:-1], -1, 2).transpose(-1, -2).reshape(*x.shape[:-1], -1)
 
 
-def is_rope_weights_folding_supported(
-    qk_proj: nn.Module,
-    dual_chunk_attention_config: dict[str, Any] | None,
-) -> bool:
+def is_rope_weights_folding_supported(qk_proj: nn.Module) -> bool:
     """Whether the partial-RoPE weight-fold path is safe for this attention.
 
     Folding permutes the q/k projection's output channels at load time, which
-    only produces correct numerics when:
+    only produces correct numerics when the q/k projection is dense/unquantized.
 
-    * the q/k projection is dense/unquantized and
-    * dual-chunk attention is disabled -- the P.RoPE equivalence has not been
-      validated with dual-chunk attention.
-
-    When either condition fails we fall back to the runtime channel-permutation
+    Otherwise we fall back to the runtime channel-permutation
     RoPE path instead of folding.
     """
     is_dense_qk_proj = isinstance(
         getattr(qk_proj, "quant_method", None), UnquantizedLinearMethod
     )
-    return is_dense_qk_proj and dual_chunk_attention_config is None
+    return is_dense_qk_proj
 
 
 def apply_partial_rope(
@@ -190,8 +183,8 @@ def _rope_weight_perm(head_dim: int, rope_head_dim: int) -> torch.Tensor:
     The K2Horizon checkpoint stores each head's channels in a GPT-J-interleaved
     convention with rope/nope channels interleaved. Applying this fixed
     (position-independent) permutation to the q/k weight rows lets the runtime
-    use vLLM's *native* NeoX partial-RoPE path (``head_size = head_dim``,
-    ``rotary_dim = rope_head_dim``) with no per-forward permutes/all-gather.
+    use vLLM's *native* NeoX partial-RoPE path (`head_size = head_dim`,
+    `rotary_dim = rope_head_dim`) with no per-forward permutes/all-gather.
     """
     D, R = head_dim, rope_head_dim
     assert R % 2 == 0 and R <= D, (
@@ -502,6 +495,7 @@ class K2HorizonSparseMoeBlock(nn.Module):
             self.gate.bias = nn.Parameter(self.gate.bias.float(), requires_grad=False)
 
         self.num_shared_experts = config.num_shared_experts
+        self.shared_experts: K2HorizonMLP | None
         if config.num_shared_experts > 0:
             self.shared_experts = K2HorizonMLP(
                 hidden_size=config.hidden_size,
@@ -575,7 +569,6 @@ class K2HorizonAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         gate_func: str | None = None,
     ) -> None:
         super().__init__()
@@ -599,7 +592,6 @@ class K2HorizonAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -621,12 +613,10 @@ class K2HorizonAttention(nn.Module):
 
         self.rope_head_dim = rope_head_dim or self.head_dim
         # Fold the partial-RoPE channel permutation into the q/k weights only
-        # when supported (dense projections + no dual-chunk attention);
+        # when supported (dense projections);
         # otherwise keep the runtime channel-permutation path
         # (see ``is_rope_weights_folding_supported``).
-        self.fold_rope_weights = is_rope_weights_folding_supported(
-            self.qkv_proj, dual_chunk_attention_config
-        )
+        self.fold_rope_weights = is_rope_weights_folding_supported(self.qkv_proj)
         if self.fold_rope_weights:
             rope_parameters = dict(rope_parameters)
             rope_parameters["rope_dim"] = self.rope_head_dim
@@ -635,14 +625,12 @@ class K2HorizonAttention(nn.Module):
                 max_position=max_position_embeddings,
                 is_neox_style=True,
                 rope_parameters=rope_parameters,
-                dual_chunk_attention_config=dual_chunk_attention_config,
             )
         else:
             self.rotary_emb = get_rope(
                 self.rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=rope_parameters,
-                dual_chunk_attention_config=dual_chunk_attention_config,
             )
         self.attn = Attention(
             self.num_heads,
@@ -652,12 +640,6 @@ class K2HorizonAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
         )
 
         self.query_key_norm = query_key_norm
@@ -743,7 +725,6 @@ class K2HorizonMoVAAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         gate_func: str | None = None,
     ) -> None:
         super().__init__()
@@ -768,7 +749,6 @@ class K2HorizonMoVAAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -819,12 +799,10 @@ class K2HorizonMoVAAttention(nn.Module):
 
         self.rope_head_dim = rope_head_dim or self.head_dim
         # Fold the partial-RoPE channel permutation into the q/k weights only
-        # when supported (dense projections + no dual-chunk attention);
+        # when supported (dense projections);
         # otherwise keep the runtime channel-permutation path
         # (see ``is_rope_weights_folding_supported``).
-        self.fold_rope_weights = is_rope_weights_folding_supported(
-            self.qk_proj, dual_chunk_attention_config
-        )
+        self.fold_rope_weights = is_rope_weights_folding_supported(self.qk_proj)
         if self.fold_rope_weights:
             rope_parameters = dict(rope_parameters)
             rope_parameters["rope_dim"] = self.rope_head_dim
@@ -833,14 +811,12 @@ class K2HorizonMoVAAttention(nn.Module):
                 max_position=max_position_embeddings,
                 is_neox_style=True,
                 rope_parameters=rope_parameters,
-                dual_chunk_attention_config=dual_chunk_attention_config,
             )
         else:
             self.rotary_emb = get_rope(
                 self.rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=rope_parameters,
-                dual_chunk_attention_config=dual_chunk_attention_config,
             )
         self.attn = Attention(
             self.num_heads,
@@ -850,12 +826,6 @@ class K2HorizonMoVAAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
         )
 
         self.query_key_norm = query_key_norm
@@ -980,9 +950,6 @@ class K2HorizonDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
 
         # `mlp_only_layers` in the config.
         layer_idx = extract_layer_index(prefix)
@@ -1010,7 +977,6 @@ class K2HorizonDecoderLayer(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
-                dual_chunk_attention_config=dual_chunk_attention_config,
                 num_experts=config.mova_num_experts,
                 num_experts_per_tok=config.mova_num_experts_per_tok,
                 moe_gate_bias=config.moe_gate_bias,
@@ -1033,7 +999,6 @@ class K2HorizonDecoderLayer(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
-                dual_chunk_attention_config=dual_chunk_attention_config,
             )
 
         if is_sparse_layer:
@@ -1228,9 +1193,10 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             if "scale" in name or "zero_point" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
 
             # QK norm weights
             if name.endswith(".self_attn.q_norm.weight") or name.endswith(
@@ -1267,7 +1233,9 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                                 kv_rank
                             ]
 
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader: Callable[..., Any] = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
                 continue
@@ -1380,9 +1348,10 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     continue
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
                 if name not in params_dict:
                     continue
 

@@ -12,15 +12,23 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_MXFP8_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
 )
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.pytorch import TorchMxFp8LinearKernel
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
 )
@@ -59,6 +67,7 @@ from vllm.platforms import current_platform
 SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
+    FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
@@ -66,7 +75,11 @@ SUPPORTING = {
     AiterPerTokenFp8ScaledMMLinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
+    RocmDotScaledMxfp8LinearKernel,
+    AiterFlyDSLMxfp8LinearKernel,
 }
+if current_platform.is_cuda():
+    SUPPORTING.add(TorchMxFp8LinearKernel)
 
 
 def _all_kernel_classes() -> list[type]:

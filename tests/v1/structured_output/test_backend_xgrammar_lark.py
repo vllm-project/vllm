@@ -48,9 +48,9 @@ def _validate(
 ) -> StructuredOutputsParams:
     params = SamplingParams(structured_outputs=StructuredOutputsParams(grammar=grammar))
     params._validate_structured_outputs(
-        _StubModelConfig(),  # type: ignore[arg-type]
+        _StubModelConfig(),
         StructuredOutputsConfig(backend=backend),
-        tokenizer=tokenizer or object(),  # type: ignore[arg-type]
+        tokenizer=tokenizer or object(),
     )
     assert params.structured_outputs is not None
     return params.structured_outputs
@@ -95,6 +95,7 @@ def test_auto_backend_selects_guidance_for_mistral_lark(mode: ToolChoiceEnum):
         json_schema=None,
         parallel_tool_calls=True,
         json_only=False,
+        force_tool_names=False,
     )
     assert _validate(grammar, "auto", tokenizer)._backend == "guidance"
 
