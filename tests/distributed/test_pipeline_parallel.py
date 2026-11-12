@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
 import pytest
+import torch
 
 from vllm.config.model import _FLOAT16_NOT_SUPPORTED_MODELS, RunnerOption
 from vllm.logger import init_logger
@@ -552,4 +553,40 @@ def test_pp_tied_word_embeddings(
         outputs_1_lst=outputs[2],
         name_0="pp1",
         name_1="pp2",
+    )
+
+
+@multi_gpu_only(num_gpus=3)
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        pytest.param("Qwen/Qwen3-Reranker-0.6B", id="qwen3"),
+        pytest.param("Qwen/Qwen3.5-0.8B", id="qwen3_5"),
+    ],
+)
+@create_new_process_for_each_test()
+def test_pp_classifier_from_tied_lm_head(vllm_runner, example_prompts, model_id: str):
+    """A classifier converted from a tied `lm_head` is built and derived only on
+    the last PP stage; the middle stage has no input embedding to derive it from."""
+    scores = {}
+    for pp_size in (1, 3):
+        with vllm_runner(
+            model_id,
+            runner="pooling",
+            convert="classify",
+            hf_overrides={
+                "classifier_from_token": ["no", "yes"],
+                "method": "from_2_way_softmax",
+            },
+            max_model_len=512,
+            max_num_seqs=1,
+            enable_chunked_prefill=True,
+            enforce_eager=True,
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+        ) as vllm_model:
+            scores[pp_size] = vllm_model.classify(example_prompts)
+
+    torch.testing.assert_close(
+        torch.tensor(scores[3]), torch.tensor(scores[1]), rtol=0, atol=1e-2
     )

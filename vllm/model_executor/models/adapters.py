@@ -348,7 +348,7 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
     from vllm.model_executor.layers.pooler import DispatchPooler
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 
-    from .utils import maybe_prefix
+    from .utils import StageMissingLayer, maybe_prefix, pp_last_stage
 
     class ModelForSequenceClassification(
         _create_pooling_model_cls(cls),  # type: ignore[misc]
@@ -385,15 +385,16 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
                 else vllm_config.quant_config
             )
 
-            self.score = ReplicatedLinear(
-                model_config.get_hidden_size(),
-                _resolve_num_labels(hf_config, text_config),
-                bias=False,
-                params_dtype=model_config.head_dtype,
-                quant_config=quant_config,
-                return_bias=False,
-                prefix=maybe_prefix(prefix, "score"),
-            )
+            with pp_last_stage(self):
+                self.score = ReplicatedLinear(
+                    model_config.get_hidden_size(),
+                    _resolve_num_labels(hf_config, text_config),
+                    bias=False,
+                    params_dtype=model_config.head_dtype,
+                    quant_config=quant_config,
+                    return_bias=False,
+                    prefix=maybe_prefix(prefix, "score"),
+                )
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
@@ -412,7 +413,9 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
 
             def auto_set_score_bias(weights):
                 for name, weight in weights:
-                    if name == "score.bias":
+                    if name == "score.bias" and not isinstance(
+                        self.score, StageMissingLayer
+                    ):
                         device = self.score.weight.device
                         dtype = self.score.weight.dtype
                         bias = weight.to(device).to(dtype)
@@ -700,4 +703,18 @@ def seq_cls_model_loader(model, weights: Iterable[tuple[str, torch.Tensor]]):
     text_config = hf_config.get_text_config()
     method = getattr(hf_config, "method", getattr(text_config, "method", None))
     assert method in SEQ_CLS_LOAD_METHODS, f"method {method} not supported"
+
+    from .utils import StageMissingLayer
+
+    language_model = _get_language_model_for_seq_cls(model)
+    is_vlm = language_model is not model
+    score = (
+        language_model.score
+        if is_vlm and hasattr(language_model, "score")
+        else model.score
+    )
+    if isinstance(score, StageMissingLayer):
+        # There is no classifier to derive on this stage.
+        with _disable_seq_cls_loading_on_inner_model(language_model, is_vlm):
+            return model._load_pooling_model_weights(weights)
     return SEQ_CLS_LOAD_METHODS[method](model, weights)
