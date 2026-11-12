@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from argparse import Namespace
+from typing import cast
 
 from starlette.datastructures import State
 
@@ -58,6 +59,16 @@ async def init_render_app_state(
     # a VllmConfig without that merge still honor an explicit flag.
     reasoning_parser = (
         args.reasoning_parser or vllm_config.structured_outputs_config.reasoning_parser
+    )
+
+    from vllm.parser.metrics import init_parser_metrics
+
+    init_parser_metrics(
+        model_name=cast(str, vllm_config.model_config.served_model_name),
+        reasoning_parser=reasoning_parser,
+        tool_parser=args.tool_call_parser,
+        enable_auto_tool_choice=args.enable_auto_tool_choice,
+        log_request_ids=args.enable_log_requests,
     )
 
     state.online_renderer = OnlineRenderer(

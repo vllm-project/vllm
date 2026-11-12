@@ -39,8 +39,13 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:e2e_request_latency_seconds` (Histogram) - End-to-end request latency.
 - `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
 - `vllm:request_decode_time_seconds` (Histogram) - Request decode time.
+- `vllm:parser_duration_seconds` (Histogram) - Time per parser invocation.
+- `vllm:request_parser_duration_seconds` (Histogram) - Parser time per request (per conversation on the batch endpoint).
+- `vllm:tool_call_parser_invocations_total` (Counter) - Delegated tool parser invocations, by outcome.
 
-These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
+These metrics are documented under
+[Inferencing and Serving -> Production Metrics](../usage/metrics.md); parser
+metric design decisions are described below.
 
 ### Grafana Dashboard
 
@@ -79,6 +84,30 @@ its TPOT statistics. Therefore, the Prometheus histogram and benchmark TPOT
 statistics can differ. Use `vllm:request_time_per_output_token_seconds` for
 request-level TPOT and `vllm:inter_token_latency_seconds` when you specifically
 want the inter-output latency distribution.
+
+### Parser Metrics
+
+Parsing (reasoning extraction and tool-call parsing) runs in the API server
+after the engine produces a token, so parser time is not part of any engine
+latency metric and is recorded separately. The design departs from the engine
+metrics in a few ways:
+
+- Replay is excluded from the per-request histogram. The stateless scale-out
+  derender path rebuilds parser state by re-parsing the token history once per
+  HTTP chunk, so its samples repeat work and have no request to attribute the
+  cost to.
+- The `vllm:tool_call_parser_invocations_total` counter keeps its
+  `request_type` label, which predates the histogram `endpoint` label, so
+  existing queries keep working.
+- The histograms bind label combinations on first use instead of exporting
+  zero series, and are not re-registered after a runtime stat-logger rebuild
+  such as an elastic-EP scale-up; their series reappear after a restart.
+
+The Rust frontend has its own parser implementation and does not export these
+metrics yet.
+
+See [Production Metrics -> Parser Metrics](../usage/metrics.md#parser-metrics)
+for the metrics, labels, example queries, and slow-parse warnings.
 
 ### Prometheus Client Library
 

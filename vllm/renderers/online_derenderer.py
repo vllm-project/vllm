@@ -57,6 +57,11 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
+from vllm.parser.metrics import (
+    Endpoint,
+    ParserMetrics,
+    ParserMode,
+)
 from vllm.renderers import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
@@ -349,6 +354,11 @@ class OnlineDerenderer:
         return_tokens_as_token_ids = self._return_tokens_as_token_ids(chat_request)
         role = self._response_role(chat_request)
 
+        parser_metrics = ParserMetrics(
+            ParserMode.NON_STREAMING,
+            Endpoint.OTHER,
+            request_id=generate_response.request_id,
+        )
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
@@ -381,6 +391,7 @@ class OnlineDerenderer:
 
             if has_parser:
                 assert chat_request is not None
+                parser_metrics.finish_reason = choice.finish_reason
                 message, choice_reasoning_tokens = self._parse_and_assemble(
                     tokenizer,
                     decoded_text,
@@ -391,6 +402,7 @@ class OnlineDerenderer:
                     # be a suffix.
                     generate_response.prompt_token_ids or prompt_token_ids,
                     role,
+                    parser_metrics=parser_metrics,
                 )
                 reasoning_tokens += choice_reasoning_tokens
             else:
@@ -408,6 +420,8 @@ class OnlineDerenderer:
                     token_ids=choice.token_ids if return_token_ids else None,
                 )
             )
+
+        parser_metrics.observe()
 
         prompt_logprobs = _resolve_prompt_logprobs(
             generate_response.prompt_logprobs, tokenizer
@@ -431,6 +445,8 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
         prompt_token_ids: list[int] | None,
+        *,
+        request_id: str | None = None,
     ) -> list[tuple[ChatMessage, str]]:
         """Parse the engine's decoded output text into assistant messages.
 
@@ -440,13 +456,18 @@ class OnlineDerenderer:
                 or no parser on this server, the message content is the text.
             history_tool_call_cnt: Tool calls already in the conversation.
             prompt_token_ids: Prompt token IDs, if known.
+            request_id: Request ID for slow-parse warnings.
 
         Returns:
             One message and chat `finish_reason` per output in order.
 
         """
         return await self._derender_text_choices_async(
-            outputs, chat_request, history_tool_call_cnt, prompt_token_ids
+            outputs,
+            chat_request,
+            history_tool_call_cnt,
+            prompt_token_ids,
+            request_id=request_id,
         )
 
     def _derender_text_choices(
@@ -455,14 +476,22 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
         prompt_token_ids: list[int] | None,
+        *,
+        request_id: str | None = None,
     ) -> list[tuple[ChatMessage, str]]:
         tokenizer = self.renderer.get_tokenizer()
         results: list[tuple[ChatMessage, str]] = []
         role = self._response_role(chat_request)
+        parser_metrics = ParserMetrics(
+            ParserMode.NON_STREAMING,
+            Endpoint.OTHER,
+            request_id=request_id,
+        )
         for output in outputs:
             if self.parser is None or chat_request is None:
                 message = ChatMessage(role=role, content=output.text)
             else:
+                parser_metrics.finish_reason = output.finish_reason
                 message, _ = self._parse_and_assemble(
                     tokenizer,
                     output.text,
@@ -471,18 +500,22 @@ class OnlineDerenderer:
                     chat_request.chat_template_kwargs or {},
                     prompt_token_ids,
                     role,
+                    parser_metrics=parser_metrics,
                     history_tool_call_count=history_tool_call_cnt,
                 )
             finish_reason = resolve_finish_reason(
                 output.finish_reason, chat_request, bool(message.tool_calls)
             )
             results.append((message, finish_reason))
+        parser_metrics.observe()
         return results
 
     def make_stream_processor(
         self,
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
+        *,
+        request_id: str | None = None,
     ) -> ChatStreamProcessor:
         """Build the request-scoped processor for one streamed choice.
 
@@ -491,6 +524,7 @@ class OnlineDerenderer:
                 when the server has no parser.
             history_tool_call_cnt: Tool calls already in the conversation, for
                 deterministic tool call IDs.
+            request_id: Request ID for slow-parse warnings.
 
         Returns:
             A processor holding its own parser, so call this once per choice.
@@ -506,6 +540,8 @@ class OnlineDerenderer:
                 None,
                 enable_auto_tools=self.enable_auto_tools,
                 parser_cls=None,
+                endpoint=Endpoint.OTHER,
+                request_id=request_id,
             )
         parser = self.parser(
             self.renderer.get_tokenizer(),
@@ -519,6 +555,8 @@ class OnlineDerenderer:
             parser,
             enable_auto_tools=self.enable_auto_tools,
             parser_cls=self.parser,
+            endpoint=Endpoint.OTHER,
+            request_id=request_id,
         )
 
     def _resolve_chat_template_kwargs(
@@ -545,6 +583,8 @@ class OnlineDerenderer:
         chat_template_kwargs: dict[str, Any],
         prompt_token_ids: list[int] | None,
         role: str,
+        *,
+        parser_metrics: ParserMetrics,
         history_tool_call_count: int | None = None,
     ) -> tuple[ChatMessage, int]:
         """Parse decoded output text into an assistant `ChatMessage`.
@@ -558,6 +598,8 @@ class OnlineDerenderer:
             chat_template_kwargs: Already resolved template kwargs.
             prompt_token_ids: Prompt token IDs, if known.
             role: Role of the returned message.
+            parser_metrics: Request accumulator shared by the request's
+                choices. The caller calls `observe()` once it finishes.
             history_tool_call_count: Tool calls in the conversation, for
                 requests that carry no messages. None derives it from
                 `chat_request`.
@@ -579,12 +621,13 @@ class OnlineDerenderer:
             parser.set_prompt_token_ids(prompt_token_ids)
         if history_tool_call_count is not None:
             parser.set_history_tool_call_count(history_tool_call_count)
-        reasoning, content, tool_calls = parser.parse(
-            text,
-            chat_request,
-            enable_auto_tools=self.enable_auto_tools,
-            model_output_token_ids=token_ids,
-        )
+        with parser_metrics.time_call(tokens=len(token_ids)):
+            reasoning, content, tool_calls = parser.parse(
+                text,
+                chat_request,
+                enable_auto_tools=self.enable_auto_tools,
+                model_output_token_ids=token_ids,
+            )
 
         fields = assemble_chat_message_fields(
             chat_request,
@@ -896,6 +939,9 @@ class OnlineDerenderer:
             parser,
             enable_auto_tools=self.enable_auto_tools,
             parser_cls=parser_cls,
+            mode=ParserMode.STREAMING_REPLAY,
+            endpoint=Endpoint.OTHER,
+            request_id=generate_chunk.request_id,
         )
 
         # Ephemeral incremental detok window, local to this call. Threaded

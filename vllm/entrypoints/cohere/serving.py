@@ -90,6 +90,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.metrics import Endpoint
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.cohere import (
     MESSAGES_CITATIONS_KEY,
@@ -236,6 +237,8 @@ class CohereServingChatV2(OpenAIServingChat):
     the subclass by overriding `_create_chat_message`; streaming
     deltas are emitted directly by the Cohere reasoning parser.
     """
+
+    parser_endpoint = Endpoint.COHERE_CHAT
 
     def __init__(
         self,

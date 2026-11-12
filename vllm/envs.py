@@ -327,6 +327,9 @@ if TYPE_CHECKING:
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_PARSER_SLOW_LOG: bool = False
+    VLLM_PARSER_SLOW_CALL_SECONDS: float = 0.25
+    VLLM_PARSER_SLOW_REQUEST_SECONDS: float = 5.0
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_RELOAD_MODE: Literal["layerwise", "direct"] = "layerwise"
@@ -2303,6 +2306,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
+    ),
+    # Log a warning when parsing is slow enough to stall the API-server event
+    # loop or to accumulate pathological time over one request. Off by default.
+    "VLLM_PARSER_SLOW_LOG": lambda: bool(int(os.getenv("VLLM_PARSER_SLOW_LOG", "0"))),
+    # Seconds one parser call may take before VLLM_PARSER_SLOW_LOG emits a
+    # per-call warning. 0 disables the per-call warning.
+    "VLLM_PARSER_SLOW_CALL_SECONDS": lambda: float(
+        os.getenv("VLLM_PARSER_SLOW_CALL_SECONDS", "0.25")
+    ),
+    # Seconds a request's summed parser time may reach before
+    # VLLM_PARSER_SLOW_LOG emits a per-request summary. Only requests with at
+    # least two parser calls are summarized. 0 disables the summary.
+    "VLLM_PARSER_SLOW_REQUEST_SECONDS": lambda: float(
+        os.getenv("VLLM_PARSER_SLOW_REQUEST_SECONDS", "5")
     ),
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
