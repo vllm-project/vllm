@@ -185,13 +185,6 @@ Note, it is recommended to manually reserve 1 CPU for vLLM front-end process whe
 
 For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](../../models/hardware_supported_models/cpu.md)
 
-The reference CPU MLA backend disables chunked prefill and prefix caching.
-For hybrid MLA/Mamba models, automatically selected Mamba cache settings follow
-this fallback: the cache mode is `none` and the Mamba block size is the maximum
-model length. An explicitly configured incompatible `--mamba-block-size` still
-raises a configuration error. This fallback does not establish CPU inference
-support for models outside the supported-model list.
-
 ### How to find benchmark configuration examples for supported CPU models?
 
 For any model listed under [Supported Models on CPU](../../models/hardware_supported_models/cpu.md), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in cpu test cases as serving-tests-cpu.json. Full test cases for Text-only models, Multi-Modal models and Embedded models are in cpu Text-Only test cases as serving-tests-cpu-text.json, cpu Multi-Modal test cases as serving-tests-cpu-multimodal.json and cpu Embedded test cases as serving-tests-cpu-embed.json.  
