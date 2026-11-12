@@ -8333,8 +8333,8 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
     assert!(text.contains("\"logprobs\":{\"content\":"), "{text}");
 }
 
-/// Like OpenAI and Python, `tools: []` renders like an omitted field, whatever
-/// `tool_choice` says; a named choice still reports the missing function.
+/// Like Python, omitted and empty `tools` render the same: `auto` falls back to
+/// `none`, while `required` and a named choice have no tool to call.
 #[tokio::test]
 async fn chat_render_treats_empty_tools_as_omitted() {
     let mut app = test_render_app();
@@ -8347,21 +8347,34 @@ async fn chat_render_treats_empty_tools_as_omitted() {
     assert_eq!(status, StatusCode::OK, "{without_tools}");
     without_tools["request_id"].take();
 
-    let cases = [
-        json!({}),
-        json!({"tool_choice": "none"}),
-        json!({"tool_choice": "auto"}),
-        json!({"tool_choice": "required"}),
-    ];
-    for extra in cases {
+    for tools in [json!(null), json!([])] {
+        for tool_choice in [json!(null), json!("none"), json!("auto")] {
+            let mut body = base.clone();
+            body["tools"] = tools.clone();
+            body["tool_choice"] = tool_choice;
+            let (status, mut rendered) =
+                post_json(&mut app, "/v1/chat/completions/render", body.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{body}: {rendered}");
+            rendered["request_id"].take();
+            assert_eq!(rendered, without_tools, "{body}");
+        }
+
         let mut body = base.clone();
-        body["tools"] = json!([]);
-        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        let (status, mut rendered) =
+        body["tools"] = tools;
+        body["tool_choice"] = json!("required");
+        let (status, error) =
             post_json(&mut app, "/v1/chat/completions/render", body.clone()).await;
-        assert_eq!(status, StatusCode::OK, "{body}: {rendered}");
-        rendered["request_id"].take();
-        assert_eq!(rendered, without_tools, "{body}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        expect_test::expect![[r#"
+            {
+              "error": {
+                "message": "tool_choice requires at least one available tool",
+                "type": "BadRequestError",
+                "param": null,
+                "code": 400
+              }
+            }"#]]
+        .assert_eq(&serde_json::to_string_pretty(&error).unwrap());
     }
 
     let mut body = base;

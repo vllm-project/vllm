@@ -187,7 +187,6 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_num_seqs=128,
         max_model_len=8192,
         dtype="auto",  # not everything is supported
-        gpu_memory_utilization=0.9,
         attention_config={
             "backend": backend,
             "flex_attn_block_m": block_m,
@@ -467,7 +466,6 @@ def test_simple_generation(backend):
         model=model,
         max_num_seqs=1,
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-        gpu_memory_utilization=0.9,
         max_model_len=2048,
         dtype="auto",
         enable_prefix_caching=False,
