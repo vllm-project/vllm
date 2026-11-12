@@ -260,16 +260,17 @@ class FreeKVCacheBlockQueue:
     manipulating the linked list. Instead, this class manipulates the
     prev_free_block and next_free_block attributes of the given blocks.
 
-    The queue is ordered by block ID in the beginning. When a block is allocated
-    and then freed, it will be appended back with the eviction order:
-    1. The least recent used block is at the front (LRU).
+    The queue is ordered by block ID in the beginning. When a cached block is
+    allocated and then freed, it will be appended back with the eviction order:
+    1. The least recent used cached block is evicted first (LRU).
     2. If two blocks have the same last accessed time (allocated by the
        same sequence), the one with more hash tokens (the tail of a block
-       chain) is at the front.
-    Note that we maintain this order by reversing the block order when free
-    blocks of a request. Blocks to reuse first, such as those without a hash,
-    are prepended instead. Both operations are outside of this class, in
-    `BlockPool.free_blocks`.
+       chain) is evicted first.
+    Blocks to reuse first, such as those without a hash, are prepended
+    instead, so the head of the queue is not always the LRU cached block.
+    Note that this order is maintained outside of this class:
+    `BlockPool.free_blocks` chooses the end of the queue, and its callers
+    reverse the block order when freeing the blocks of a request.
 
     Args:
         blocks: A list of KVCacheBlock objects.
