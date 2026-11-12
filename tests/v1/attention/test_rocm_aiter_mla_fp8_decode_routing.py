@@ -155,7 +155,7 @@ def test_decode_and_verify_are_disjoint(kv_cache_dtype, num_heads):
 def test_oversized_kv_cache_refuses_gluon(gluon_available, kv_cache_dtype):
     """Past 2 GiB per layer Gluon drops its KV bounds mask and reads out of range.
 
-    ``None`` is the profiling case, before the cache is sized: nothing to
+    `None` is the profiling case, before the cache is sized: nothing to
     refuse yet, so the usual route stands.
     """
     bound = rocm_aiter_mla._GLUON_MAX_KV_CACHE_BYTES

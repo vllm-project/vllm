@@ -16,11 +16,12 @@ QuantizationMethods = Literal[
     "awq",
     "auto_awq",
     "fp8",
+    "w4afp8",
     "fbgemm_fp8",
-    "fp_quant",
     "modelopt",
     "modelopt_fp4",
     "modelopt_mxfp8",
+    "modelopt_int8",
     "modelopt_mixed",
     "auto_gptq",
     "gptq",
@@ -46,12 +47,13 @@ QuantizationMethods = Literal[
     "int8_per_channel_weight_only",
     "nvfp4_per_token",
     "mxfp8",
+    "lut_b_moe",
+    "mxfp4_hadamard32",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
     "fbgemm_fp8",
-    "fp_quant",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -139,11 +141,11 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
-    from .fp_quant import FPQuantConfig
     from .humming import HummingConfig
     from .inc import INCConfig
     from .modelopt import (
         ModelOptFp8Config,
+        ModelOptInt8Config,
         ModelOptMixedPrecisionConfig,
         ModelOptMxFp8Config,
         ModelOptNvFp4Config,
@@ -152,17 +154,19 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
     from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
+    from .w4afp8 import W4AFP8Config
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AutoAWQConfig,
         "awq_marlin": AutoAWQConfig,
         "auto_awq": AutoAWQConfig,
         "fp8": Fp8Config,
+        "w4afp8": W4AFP8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
-        "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
         "modelopt_mxfp8": ModelOptMxFp8Config,
+        "modelopt_int8": ModelOptInt8Config,
         "modelopt_mixed": ModelOptMixedPrecisionConfig,
         "auto_gptq": AutoGPTQConfig,
         "gptq": AutoGPTQConfig,

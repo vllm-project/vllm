@@ -9,8 +9,8 @@ from vllm.plugins.lora_resolvers.filesystem_resolver import FilesystemResolver
 from vllm.transformers_utils.repo_utils import hf_api
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-LORA_NAME = "charent/self_cognition_Alice"
-PA_NAME = "swapnilbp/llama_tweet_ptune"
+LORA_NAME = "vllm-project/self_cognition_Alice"
+PA_NAME = "vllm-project/llama_tweet_ptune"
 
 
 @pytest.fixture(scope="module")

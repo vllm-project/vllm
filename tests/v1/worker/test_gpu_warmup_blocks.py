@@ -41,7 +41,8 @@ NUM_SPEC_STEPS = 3
 
 # `warmup_kernels` ends on `torch.accelerator.synchronize()`.
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="warmup synchronizes on the accelerator"
+    not current_platform.is_cuda_alike(),
+    reason="warmup synchronizes on the accelerator",
 )
 
 
@@ -91,7 +92,11 @@ def _make_runner(
     """Stub model runner exposing only what the warmup entry points read."""
     return SimpleNamespace(
         num_speculative_steps=num_spec_steps,
-        speculative_config=SimpleNamespace() if num_spec_steps else None,
+        speculative_config=(
+            SimpleNamespace(max_num_new_slots_for_drafting=0)
+            if num_spec_steps
+            else None
+        ),
         adaptive_verification=None,
         speculator=None,
         rejection_sampler=None,
@@ -100,6 +105,7 @@ def _make_runner(
         is_encoder_decoder=False,
         is_last_pp_rank=True,
         max_num_reqs=4,
+        max_num_tokens=2048,
         max_model_len=MAX_MODEL_LEN,
         model_config=SimpleNamespace(get_vocab_size=lambda: 64),
         model_state=SimpleNamespace(max_encoder_len=0),
@@ -109,7 +115,9 @@ def _make_runner(
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=num_lookahead_tokens,
+            num_scheduled_spec_tokens=num_spec_steps,
             is_mm_encoder_only=False,
+            cache_config=SimpleNamespace(mamba_cache_mode="none"),
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         kv_block_zeroer=None,
@@ -204,6 +212,22 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     assert set(recorder.num_spec_tokens_to_schedule) == {NUM_SPEC_STEPS}
 
 
+def test_warmup_kernels_reserves_drafting_slots(monkeypatch):
+    runner = _make_runner([_attention_group()], NUM_SPEC_STEPS)
+    runner.speculative_config.max_num_new_slots_for_drafting = 1
+    runner.scheduler_config.max_num_seqs = 1000
+    runner.kv_cache_config.num_blocks = 100_000
+    outputs: list[SchedulerOutput] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+
+    warmup._warmup_kernels(runner, outputs.append, lambda grammar_output: None)
+
+    prefill_output = outputs[0]
+    num_reqs = len(prefill_output.scheduled_new_reqs)
+    assert num_reqs == 2048 // (runner.decode_query_len + 1 + 1)
+    assert prefill_output.total_num_scheduled_tokens + num_reqs <= runner.max_num_tokens
+
+
 class _StubExtensibleCache:
     def __init__(self, warmup_committable_blocks: int) -> None:
         self.warmup_committable_blocks = warmup_committable_blocks
@@ -291,6 +315,24 @@ def test_context_prefill_warmup_stays_within_the_context_and_vocabulary():
     assert max(request.prompt_token_ids) < vocab_size < len(request.prompt_token_ids)
 
 
+def test_context_prefill_warmup_reserves_drafting_slots():
+    runner = _make_runner([_attention_group()], NUM_SPEC_STEPS)
+    runner.speculative_config.max_num_new_slots_for_drafting = 1
+    runner.max_num_reqs = 1000
+    runner.max_model_len = 16
+    runner.kv_cache_config.num_blocks = 1024
+    outputs: list[SchedulerOutput] = []
+
+    assert run_context_prefill_warmup(
+        runner, outputs.append, lambda grammar_output: None, num_context_tokens=10_000
+    )
+
+    prefill_output = outputs[0]
+    num_reqs = len(prefill_output.scheduled_new_reqs)
+    assert num_reqs == runner.max_num_tokens // (runner.decode_query_len + 2)
+    assert prefill_output.total_num_scheduled_tokens + num_reqs <= runner.max_num_tokens
+
+
 def test_context_prefill_warmup_is_capped_by_the_committable_blocks():
     runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
     blocks_per_req = cdiv(MAX_MODEL_LEN, BLOCK_SIZE)
@@ -355,6 +397,15 @@ def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
     )
 
 
+def _row_length_config(dcp_world_size: int = 1) -> SimpleNamespace:
+    """What `max_num_blocks_per_req` reads; align-mode Mamba specs return
+    before the row clamp."""
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size),
+    )
+
+
 def test_reserved_block_count_matches_real_kv_cache_manager():
     """`_reserved_block_count` must predict exactly what the real
     `KVCacheManager.allocate_slots` consumes, for every group, at every step
@@ -405,6 +456,7 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
             expected = _reserved_block_count(
                 num_tokens,
                 spec,
+                vllm_config=_row_length_config(),
                 num_lookahead_tokens=num_lookahead_tokens,
                 max_model_len=MAX_MODEL_LEN,
                 max_encoder_len=0,
@@ -457,6 +509,7 @@ def test_reserved_block_count_scales_dcp_sharded_blocks():
     assert len(held) == _reserved_block_count(
         num_tokens,
         spec,
+        vllm_config=_row_length_config(dcp_world_size),
         num_lookahead_tokens=0,
         max_model_len=MAX_MODEL_LEN,
         max_encoder_len=0,
@@ -528,27 +581,107 @@ def test_num_lookahead_tokens_without_speculation():
     assert config.num_lookahead_tokens == 0
 
 
+@pytest.mark.parametrize("max_num_reqs", [4, 2, 1])
 @pytest.mark.parametrize("max_logprobs", [0, 5, -1])
-def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
+def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(
+    max_logprobs, max_num_reqs
+):
     """Prompt logprobs materialize full-vocab logits a chunk at a time, which
     no other step reaches. The sizing step requests them on its real prefill,
-    so the runtime path computes them from the model's own hidden states."""
+    so the runtime path computes them from the model's own hidden states.
+
+    They are computed for every token of a step that requests them, so with a
+    budget beyond max_model_len they are measured on a single-prompt step and
+    the full-budget step runs without them. A runner without room for a second
+    prefill request runs one step."""
     runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
     runner.model_config = SimpleNamespace(
         get_vocab_size=lambda: 64, max_logprobs=max_logprobs, use_mla=False
     )
+    runner.max_num_reqs = max_num_reqs
     recorder = _StepRecorder()
-    requested: dict[str, int | None] = {}
+    # (scheduled tokens, prompt_logprobs of each prefill request) per step
+    steps: list[tuple[int, list[int | None]]] = []
 
     def execute_model(scheduler_output) -> None:
-        for new_req in scheduler_output.scheduled_new_reqs:
-            requested[new_req.req_id] = new_req.sampling_params.prompt_logprobs
+        prefill = [
+            r.sampling_params.prompt_logprobs
+            for r in scheduler_output.scheduled_new_reqs
+            if "_prefill_" in r.req_id
+        ]
+        if prefill:
+            steps.append((scheduler_output.total_num_scheduled_tokens, prefill))
         recorder.execute_model(scheduler_output)
 
     warmup.run_kv_cache_sizing_warmup(runner, execute_model, recorder.sample_tokens)
 
     expected = None if max_logprobs == 0 else max_logprobs
-    assert {
-        "prefill" if "_prefill_" in req_id else "decode": value
-        for req_id, value in requested.items()
-    } == {"prefill": expected, "decode": None}
+    if max_num_reqs == 1:
+        assert steps == [(MAX_MODEL_LEN - 1, [expected])]
+        return
+    logprob_steps = [step for step in steps if step[1] != [None] * len(step[1])]
+    if expected is None:
+        assert logprob_steps == []
+    else:
+        assert logprob_steps == [(MAX_MODEL_LEN, [expected])]
+    budget = runner.scheduler_config.max_num_batched_tokens
+    assert max(n for n, _ in steps) == min(budget, max_num_reqs * (MAX_MODEL_LEN - 1))
+
+
+def test_sizing_warmup_waits_for_each_step(monkeypatch):
+    """UvaBufferPool reuses a staging slot two writes later. Warmup discards
+    step outputs, so it must wait for each step before running the next."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
+    )
+    events: list[str] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: events.append("sync"))
+
+    warmup.run_kv_cache_sizing_warmup(
+        runner, lambda output: events.append("step"), lambda grammar_output: None
+    )
+
+    assert events
+    assert events == ["step", "sync"] * (len(events) // 2)
+
+
+@pytest.mark.parametrize(
+    "max_num_reqs, committable_blocks, expected_prefill_lens",
+    [
+        # Two full-length prompts plus the remainder fill the 2048-token budget.
+        (4, None, [MAX_MODEL_LEN - 1, MAX_MODEL_LEN - 1, 1]),
+        # Two request slots go to prefills rather than to a decode request.
+        (2, None, [MAX_MODEL_LEN - 1, MAX_MODEL_LEN - 1]),
+        # 1 decode + 64 prefill blocks fit; a second 64-block prompt does not.
+        (4, 100, [MAX_MODEL_LEN - 1]),
+        # A single-request runner measures the prefill alone.
+        (1, None, [MAX_MODEL_LEN - 1]),
+    ],
+)
+def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
+    max_num_reqs, committable_blocks, expected_prefill_lens
+):
+    """max_num_batched_tokens can exceed max_model_len, so the scheduler can
+    pack several prompts into one step. The sizing step must reach that
+    budget, splitting it across requests the runner and KV cache can hold."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
+    )
+    runner.max_num_reqs = max_num_reqs
+    if committable_blocks is not None:
+        runner.extensible_kv_cache = _StubExtensibleCache(committable_blocks)
+    outputs: list[SchedulerOutput] = []
+
+    warmup.run_kv_cache_sizing_warmup(
+        runner, outputs.append, lambda grammar_output: None
+    )
+
+    step = max(outputs, key=lambda o: o.total_num_scheduled_tokens)
+    prefill_lens = [len(r.prompt_token_ids) for r in step.scheduled_new_reqs]
+    assert prefill_lens == expected_prefill_lens
+    num_decode_reqs = len(step.scheduled_cached_reqs.req_ids)
+    assert num_decode_reqs == (1 if max_num_reqs > 2 else 0)
+    assert step.total_num_scheduled_tokens == num_decode_reqs + sum(prefill_lens)
+    assert step.total_num_scheduled_tokens == sum(step.num_scheduled_tokens.values())

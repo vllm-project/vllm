@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     MoERunner,
     RoutedExperts,
+    RoutedScaleMode,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
@@ -214,6 +215,8 @@ class MoEMixin(MixtureOfExperts, Base):
     num_local_physical_experts: int
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        if vllm_config.model_config.hf_config.model_type == "aria":
+            self.check_version("5.18.0", "Aria")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -257,10 +260,14 @@ class MoEMixin(MixtureOfExperts, Base):
         # Routed scaling factor kwargs
         routed_scaling_factor = getattr(text_config, "routed_scaling_factor", 1.0)
         # aiter applies routed_scaling_factor internally
-        apply_routed_scale_to_output = not rocm_aiter_ops.is_fused_moe_enabled()
+        routed_scale_mode = (
+            RoutedScaleMode.ROUTER
+            if rocm_aiter_ops.is_fused_moe_enabled()
+            else RoutedScaleMode.OUTPUT
+        )
         routed_scaling_factor_kwargs = dict(
             routed_scaling_factor=routed_scaling_factor,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
+            routed_scale_mode=routed_scale_mode,
         )
 
         # Dtype the router computes in, if it is not the activation dtype.
@@ -306,6 +313,9 @@ class MoEMixin(MixtureOfExperts, Base):
 
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
+            # Decoder layers are fused later, in `_pre_decoder_layer_replace`
+            if module is self._decoder_layers:
+                return
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
                 # Naive implementations will have experts as ModuleList
@@ -367,11 +377,12 @@ class MoEMixin(MixtureOfExperts, Base):
                         is_fused_checkpoint_transposed=is_transposed,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
-                    # _maybe_apply_routed_scale_to_output edge case. Transformers
-                    # decoder layers do not compensate for dividing by scaling factor.
+                    # Transformers decoder layers do not compensate for dividing
+                    # the shared output by the scaling factor, which only
+                    # RoutedScaleMode.OUTPUT_FP16_GUARD does (in FP16).
                     divides_shared_output = (
                         routed_scaling_factor != 1.0
-                        and apply_routed_scale_to_output
+                        and routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
                         and self.model_config.dtype == torch.float16
                     )
                     fuser = MoEBlockFuser.match(
@@ -465,9 +476,10 @@ class MoEMixin(MixtureOfExperts, Base):
                     _recursive_replace(child_module, prefix=qual_name)
 
         _recursive_replace(self.model, prefix="model")
-        self.num_moe_layers = len(self.moe_layers)
+        self._pre_decoder_layer_replace = _recursive_replace
         # Continue with the replacement of layers in Base
         super().recursive_replace()
+        self.num_moe_layers = len(self.moe_layers)
         # GLUFuser likely fused shared_experts. The down projection after the GLU
         # normally immediately reduces but we want FusedMoE to handle the reduction.
         for hf_shared, down_name in shared_down_projs:
