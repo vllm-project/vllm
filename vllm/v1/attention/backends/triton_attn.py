@@ -220,6 +220,24 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 device=device,
             )
 
+    def splitk_max_num_reqs(self, max_query_len: int) -> int | None:
+        """Most requests the split-KV gate admits at this query width.
+
+        The gate counts Q blocks, `num_seqs * cdiv(max_query_len, BLOCK_Q)`,
+        against the captured `seq_threshold_3D`. Batch-dependent conditions
+        (non-causal, per-sequence causal, mm-prefix, tuned large head, batch
+        invariance) only make this bound optimistic: those groups then stay on
+        the 2D kernel.
+        """
+        if max_query_len < 1 or max_query_len > MAX_3D_QUERY_LEN:
+            return None
+        num_queries_per_kv = self.num_heads_q // self.num_heads_kv
+        block_m = (
+            16 if num_queries_per_kv <= 16 else next_power_of_2(num_queries_per_kv)
+        )
+        block_q = block_m // num_queries_per_kv
+        return self.seq_threshold_3D // cdiv(max_query_len, block_q)
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
