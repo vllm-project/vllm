@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
+from functools import cached_property
 
 from vllm.config import VllmConfig
+from vllm.inputs import MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal.cache import (
     BaseMultiModalProcessorCache,
@@ -138,16 +140,7 @@ class MultiModalBudget:
         self.mm_max_toks_per_item = tower_mm_max_toks_per_item
         self.mm_max_items_per_prompt: Mapping[str, int] = mm_max_items_per_prompt
         self.mm_max_items_per_batch: Mapping[str, int] = mm_max_items_per_batch
-
-        self.encoder_profile_tokens = encoder_compute_budget
-        if tower_mm_max_toks_per_item and not (
-            mm_config is not None and mm_config.skip_mm_profiling
-        ):
-            modality = self.get_modality_with_max_tokens()
-            self.encoder_profile_tokens = min(
-                encoder_compute_budget,
-                mm_max_items_per_batch[modality] * tower_mm_max_toks_per_item[modality],
-            )
+        self.skip_mm_profiling = mm_config is not None and mm_config.skip_mm_profiling
 
     def _get_max_items(
         self,
@@ -200,6 +193,30 @@ class MultiModalBudget:
     def get_encoder_budget(self) -> int:
         return min(self.encoder_compute_budget, self.encoder_cache_size)
 
+    def _get_num_profile_items(
+        self, modality: str, dummy_mm_inputs: MultiModalInput
+    ) -> tuple[int, int]:
+        num_embeds = sum(
+            p.get_num_embeds() for p in dummy_mm_inputs["mm_placeholders"][modality]
+        )
+        if num_embeds == 0:
+            return self.mm_max_items_per_batch[modality], 0
+        return self._get_max_items(modality, num_embeds)[1], num_embeds
+
+    @cached_property
+    def encoder_profile_tokens(self) -> int:
+        if (
+            self.skip_mm_profiling
+            or not self.mm_max_toks_per_item
+            or self.get_encoder_budget() <= 0
+        ):
+            return self.encoder_compute_budget
+
+        modality = self.get_modality_with_max_tokens()
+        dummy_mm_inputs = self.processor.get_dummy_mm_inputs(mm_counts={modality: 1})
+        num_items, num_embeds = self._get_num_profile_items(modality, dummy_mm_inputs)
+        return min(self.encoder_compute_budget, num_items * num_embeds)
+
     def get_dummy_encoder_profile_inputs(
         self,
         modality: str | None = None,
@@ -210,8 +227,6 @@ class MultiModalBudget:
 
         if modality is None:
             modality = self.get_modality_with_max_tokens()
-        if max_items_per_batch is None:
-            max_items_per_batch = self.mm_max_items_per_batch[modality]
 
         # Don't use `max_items_per_batch` here to avoid redundant computation
         dummy_mm_inputs = self.processor.get_dummy_mm_inputs(
@@ -219,6 +234,10 @@ class MultiModalBudget:
             cache=self.cache,
         )
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+        if max_items_per_batch is None:
+            max_items_per_batch, _ = self._get_num_profile_items(
+                modality, dummy_mm_inputs
+            )
 
         # We use the cache so that the item is saved to the cache,
         # but not read from the cache
