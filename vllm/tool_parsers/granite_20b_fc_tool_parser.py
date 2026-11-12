@@ -131,7 +131,12 @@ class Granite20bFCToolParser(ToolParser):
                         delta = current_text[self.streamed_content_len:safe_len]
                         self.streamed_content_len = safe_len
                         return DeltaMessage(content=delta)
-                    return None
+                    # Held-back prefix turned out to be plain text (marker
+                    # never completed). Stream the newly arrived text so nothing
+                    # held back is lost.
+                    delta = current_text[len(previous_text):]
+                    self.streamed_content_len = len(current_text)
+                    return DeltaMessage(content=delta)
             delta = current_text[self.streamed_content_len:]
             self.streamed_content_len = len(current_text)
             return DeltaMessage(content=delta)
