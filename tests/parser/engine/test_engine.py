@@ -1141,6 +1141,54 @@ class TestFinishHeldPrefixByRegion:
         assert args == args_text
 
 
+class TestFinishRawArgsLookalikeTail:
+    """Known data-loss bound, made explicit.  For grammars with
+    tool_args_json=False the brace and string guards never update,
+    so the drop criterion is state == TOOL_ARGS alone.  A value tail
+    that merely resembles a terminal prefix is indistinguishable
+    from a truncated marker at end of stream and is dropped.  This
+    test documents that bound so changing it stays a conscious
+    decision: if raw grammars gain a completion signal, tighten the
+    criterion and update this test.
+    """
+
+    def test_value_tail_resembling_terminal_dropped(self):
+        cfg = ParserEngineConfig(
+            name="raw_args_test",
+            terminals={
+                "TOOL_START": "[TOOL_BEGIN]",
+                "TOOL_END": "[TOOL_END]",
+            },
+            transitions={
+                (ParserState.CONTENT, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS,
+                    (EventType.TOOL_CALL_START,),
+                ),
+                (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.TOOL_CALL_END,),
+                ),
+            },
+            content_events={
+                ParserState.CONTENT: EventType.TEXT_CHUNK,
+            },
+            tool_args_json=False,
+        )
+        engine = StreamingParserEngine(cfg, tokenizer=None)
+        value = "hello world "
+        fragment = cfg.terminals["TOOL_END"][:7]
+        events = engine.feed(cfg.terminals["TOOL_START"] + value, [])
+        events += engine.feed(fragment, [])
+        events += engine.finish()
+
+        # Known limitation: raw-args grammars have no brace or string
+        # signal, so the engine cannot tell the lookalike tail from a
+        # truncated terminal and drops it at end of stream.
+        assert any(e.type == EventType.TOOL_CALL_END for e in events)
+        args = "".join(e.value for e in events if e.type == EventType.ARG_VALUE_CHUNK)
+        assert args == value
+
+
 class TestFinishPreFlushReleasesDisprovedPrefix:
     """A marker arriving as a token id disproves held text the lawful
     way: finish()'s pre-flush releases it per state -- no drop on that

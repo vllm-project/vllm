@@ -2341,9 +2341,7 @@ class TestKimiK2FinishFlushNonStreaming:
         )
 
         assert result.content == PREFIX
-        assert norm_calls(result.tool_calls) == [
-            ("get_weather", '{"city": "Paris"}')
-        ]
+        assert norm_calls(result.tool_calls) == [("get_weather", '{"city": "Paris"}')]
         assert result.tools_called is True
 
     def test_cut_inside_call_start_marker_stays_clean(self, k2_parser, mock_request):
@@ -2368,18 +2366,65 @@ class TestKimiK2FinishFlushNonStreaming:
         )
 
         assert result.content == PREFIX
-        assert norm_calls(result.tool_calls) == [
-            ("get_weather", '{"city": "Paris"}')
-        ]
+        assert norm_calls(result.tool_calls) == [("get_weather", '{"city": "Paris"}')]
 
     def test_full_control(self, k2_parser, mock_request):
         result = k2_parser.extract_tool_calls(FULL_CALL, mock_request)
 
         assert result.content == PREFIX
-        assert norm_calls(result.tool_calls) == [
-            ("get_weather", '{"city": "Paris"}')
-        ]
+        assert norm_calls(result.tool_calls) == [("get_weather", '{"city": "Paris"}')]
         assert result.tools_called is True
+
+
+class TestKimiK2FinishMalformedArgsLookalike:
+    """Both outcomes of a lookalike tail under malformed arguments,
+    made explicit.  The brace and string guards are completion
+    proxies, not proof.  Bare-text arguments leave both vacuously
+    true, so the tail drops as in raw-args grammars.  Arguments
+    truncated inside a string fail the string guard, so the tail
+    flushes into the arguments as before this PR.  These tests
+    document the bound; if the guards ever get a real completion
+    signal, tighten the criterion and update them together.
+    """
+
+    def test_bare_args_tail_resembling_terminal_dropped(self, k2_parser, mock_request):
+        text = (
+            PREFIX
+            + TOOL_SECTION_START
+            + TOOL_CALL_START
+            + "functions.get_weather:0"
+            + TOOL_ARG_START
+            + "city Paris"
+            + TOOL_CALL_END[:12]
+        )
+        result = k2_parser.extract_tool_calls(text, mock_request)
+
+        # The lookalike tail is dropped: bare-text arguments leave the
+        # brace and string guards vacuously true, so the kimi_k2 drop
+        # criterion sees a completed argument region.
+        assert result.content == PREFIX
+        assert result.tools_called is True
+        assert norm_calls(result.tool_calls) == [("get_weather", "city Paris")]
+
+    def test_in_string_tail_resembling_terminal_kept(self, k2_parser, mock_request):
+        text = (
+            PREFIX
+            + TOOL_SECTION_START
+            + TOOL_CALL_START
+            + "functions.get_weather:0"
+            + TOOL_ARG_START
+            + '{"city": "Par'
+            + TOOL_CALL_END[:12]
+        )
+        result = k2_parser.extract_tool_calls(text, mock_request)
+
+        # The string guard fails at end of stream, so the withheld
+        # fragment flushes into the arguments exactly as before.
+        assert result.content == PREFIX
+        assert result.tools_called is True
+        assert norm_calls(result.tool_calls) == [
+            ("get_weather", '{"city": "Par' + TOOL_CALL_END[:12])
+        ]
 
 
 class TestKimiK2FinishSkipsNeverStartedCalls:
