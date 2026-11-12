@@ -483,6 +483,8 @@ def test_failed_read_reports_blocks_only_for_one_group(
 
 _COMPLETION_ERROR = "transport retry counter exceeded"
 _POST_ERROR = "ibv_post_send failed with 12: Cannot allocate memory (posted 3/8 WRs)"
+_XGMI_COMPLETION_ERROR = "XGMI: hipEventSynchronize failed: unspecified launch failure"
+_XGMI_LAUNCH_ERROR = "XGMI: memcpy failed: invalid argument"
 
 
 @pytest.mark.parametrize(
@@ -491,12 +493,15 @@ _POST_ERROR = "ibv_post_send failed with 12: Cannot allocate memory (posted 3/8 
         (True, False, "rdma", 1, _COMPLETION_ERROR, False),
         (True, True, "rdma", 1, _COMPLETION_ERROR, False),
         (False, False, "rdma", 1, _COMPLETION_ERROR, False),
-        (True, False, "xgmi", 4, _COMPLETION_ERROR, False),
+        (True, False, "xgmi", 4, _XGMI_COMPLETION_ERROR, False),
+        (True, False, "xgmi", 1, _XGMI_LAUNCH_ERROR, True),
         (True, False, "rdma", 4, _COMPLETION_ERROR, True),
         (False, False, "rdma", 4, _COMPLETION_ERROR, True),
         (False, True, "rdma", 4, _COMPLETION_ERROR, False),
         (True, False, "rdma", 1, _POST_ERROR, True),
         (True, False, "rdma", 1, "SQ full (read): ep=0", True),
+        (True, False, "rdma", 1, "EP is degraded, rejecting new submissions", True),
+        (True, False, "rdma", 1, "verbs async event IBV_EVENT_CQ_ERR: cq error", True),
         (False, True, "rdma", 1, _POST_ERROR, False),
     ],
 )

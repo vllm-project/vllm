@@ -546,6 +546,19 @@ def _can_route_read_release(request_id: str, params: dict[str, Any]) -> bool:
     return bool(params.get("remote_host"))
 
 
+# MoRI-IO failure messages reported before a transfer's work requests have all
+# completed, so DMA may still be in flight. MoRI-IO has no distinct status code
+# for them, so match its messages, as _is_sq_full_status does.
+_MORI_PRE_COMPLETION_FAILURES = (
+    "SQ full",
+    "SQ request exceeds capacity",
+    "ibv_post_send",
+    "rejecting new submissions",
+    "submission rejected",
+    "verbs async event",
+)
+
+
 def _split_kv_cache_group_kinds(
     kv_cache_config: "KVCacheConfig",
 ) -> tuple[list[int], list[int]]:
@@ -3214,14 +3227,26 @@ class MoRIIOConnectorWorker:
         writing, so request-level recovery may release their blocks.
 
         MoRI-IO reports a transfer failed at its first error completion. On a
-        single QP, later work requests are flushed without DMA; an xGMI status
-        completes with its copy. With several QPs per transfer, the others may
-        still be writing. A failure while posting is reported at once, while
-        work requests posted before it may still be writing on a healthy QP.
+        single QP, later work requests are flushed without DMA; with several QPs
+        per transfer, the others may still be writing. A failure reported before
+        completion (while posting, or an endpoint or port failure) leaves work
+        requests posted before it free to keep writing. On xGMI only a failure
+        reported at completion means every queued copy has finished.
         """
-        if any(self._is_post_failure_status(status) for status in statuses):
+        failed = [status.Message() or "" for status in statuses if status.Failed()]
+        if self.moriio_config.backend == "xgmi":
+            return all(
+                "hipEventSynchronize failed" in message
+                or "hipEventQuery failed" in message
+                for message in failed
+            )
+        if any(
+            marker in message
+            for message in failed
+            for marker in _MORI_PRE_COMPLETION_FAILURES
+        ):
             return False
-        return self.moriio_config.backend == "xgmi" or self._qp_per_transfer == 1
+        return self._qp_per_transfer == 1
 
     @property
     def _qp_per_transfer(self) -> int:
@@ -3231,18 +3256,6 @@ class MoRIIOConnectorWorker:
         if re.fullmatch(r"\s*[+-]?\d+", raw) and int(raw) > 0:
             return int(raw)
         return self.moriio_config.qp_per_transfer
-
-    @staticmethod
-    def _is_post_failure_status(status) -> bool:
-        """True if a transfer failed while its work requests were being posted.
-
-        MoRI-IO has no distinct code for it, so match its messages, as
-        _is_sq_full_status does.
-        """
-        message = status.Message() or ""
-        return bool(status.Failed()) and (
-            "SQ full" in message or "ibv_post_send" in message
-        )
 
     @property
     def _block_load_errors_supported(self) -> bool:
