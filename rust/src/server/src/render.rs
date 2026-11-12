@@ -7,9 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use tonic::server::NamedService;
 use tonic::transport::Server as TonicServer;
-use tonic_health::ServingStatus;
 use tonic_health::server::health_reporter;
 use tracing::info;
 use vllm_chat::multimodal::MmLimitPerPrompt;
@@ -297,33 +295,22 @@ pub(crate) async fn serve_render_grpc(
     listener: MaybeTlsListener,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let (mut health_reporter, health_service) = health_reporter();
-    health_reporter.set_serving::<grpc::RenderGrpcService<RenderState>>().await;
+    let (health_reporter, health_service) = health_reporter();
+    let health_monitor =
+        grpc::HealthMonitor::register(health_reporter, grpc::HealthSource::EngineFree).await;
     let render_service = grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state))
         .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
-    // Publish NOT_SERVING before the listener stops, then remove the
-    // services, including the overall server status `""` that tonic
-    // registers, so open health watches end and the drain can finish.
-    let stop = async move {
-        let services = [
-            <grpc::RenderGrpcService<RenderState> as NamedService>::NAME,
-            "",
-        ];
-        shutdown.cancelled().await;
-        for service in services {
-            health_reporter.set_service_status(service, ServingStatus::NotServing).await;
-        }
-        for service in services {
-            health_reporter.clear_service_status(service).await;
-        }
-    };
-    TonicServer::builder()
+    let server = TonicServer::builder()
         .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
         .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
         .add_service(health_service)
-        .add_service(render_service)
-        .serve_with_incoming_shutdown(listener, stop)
+        .add_service(render_service);
+    health_monitor
+        .serve(shutdown, std::future::pending(), |stop| {
+            server.serve_with_incoming_shutdown(listener, stop)
+        })
         .await
+        .expect("never forced to abort")
         .context("render gRPC server failed")
 }
 

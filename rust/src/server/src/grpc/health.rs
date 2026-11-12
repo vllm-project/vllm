@@ -39,11 +39,41 @@ impl EngineHealth {
     }
 }
 
-/// Publishes the gRPC health services from [`EngineHealth`].
+/// The name of `vllm.Render`, the same for either server state.
+const RENDER_SERVICE: &str = RenderGrpcService::<AppState>::NAME;
+
+/// What a server's gRPC health services follow.
+pub(crate) enum HealthSource {
+    /// The engines behind the main server.
+    Engines(EngineHealth),
+    /// None: the engine-free render server, whose services, including
+    /// `liveness` and `readiness`, serve until shutdown.
+    EngineFree,
+}
+
+impl HealthSource {
+    /// Services that serve until shutdown.
+    fn services(&self) -> &'static [&'static str] {
+        match self {
+            Self::Engines(_) => &[ControlGrpcService::NAME, RENDER_SERVICE],
+            Self::EngineFree => &[RENDER_SERVICE],
+        }
+    }
+
+    /// Services that follow the engines' readiness until shutdown.
+    fn readiness_services(&self) -> &'static [&'static str] {
+        match self {
+            Self::Engines(_) => &[READINESS_SERVICE, InferenceGrpcService::NAME],
+            Self::EngineFree => &[READINESS_SERVICE],
+        }
+    }
+}
+
+/// Publishes the gRPC health services from a [`HealthSource`].
 pub(crate) struct HealthMonitor {
     reporter: HealthReporter,
-    engine: EngineHealth,
-    /// Readiness as last published to `readiness` and `vllm.Inference`.
+    source: HealthSource,
+    /// Readiness as last published to the readiness services.
     ready: bool,
 }
 
@@ -51,15 +81,19 @@ impl HealthMonitor {
     /// Register every named health service with the engines' current
     /// readiness. Call before the listener accepts connections so clients
     /// never see an unregistered service.
-    pub async fn register(reporter: HealthReporter, mut engine: EngineHealth) -> Self {
-        let ready = *engine.readiness.borrow_and_update();
-        reporter.set_serving::<ControlGrpcService>().await;
-        reporter.set_serving::<RenderGrpcService<AppState>>().await;
+    pub async fn register(reporter: HealthReporter, mut source: HealthSource) -> Self {
+        let ready = match &mut source {
+            HealthSource::Engines(engine) => *engine.readiness.borrow_and_update(),
+            HealthSource::EngineFree => true,
+        };
+        for service in source.services() {
+            reporter.set_service_status(service, ServingStatus::Serving).await;
+        }
         reporter.set_service_status(LIVENESS_SERVICE, ServingStatus::Serving).await;
-        set_readiness(&reporter, ready).await;
+        set_readiness(&reporter, source.readiness_services(), ready).await;
         Self {
             reporter,
-            engine,
+            source,
             ready,
         }
     }
@@ -101,18 +135,28 @@ impl HealthMonitor {
     /// shutdown, every service except `liveness` reports `NOT_SERVING`; on
     /// engine failure, `liveness` does too.
     async fn run(mut self, shutdown: CancellationToken, withdrawn: &CancellationToken) {
-        let inference_service = InferenceGrpcService::NAME;
-        let control_service = ControlGrpcService::NAME;
-        let render_service = RenderGrpcService::<AppState>::NAME;
         let status = ServingStatus::NotServing;
+        let readiness_services = self.source.readiness_services();
         let mut readiness_open = true;
+        let engine = match &mut self.source {
+            HealthSource::Engines(engine) => engine,
+            HealthSource::EngineFree => {
+                shutdown.cancelled().await;
+                info!(
+                    status = ?status,
+                    reason = "server_shutdown",
+                    "server shutting down; marking gRPC health services except liveness as not serving"
+                );
+                return self.withdraw(shutdown, withdrawn, false).await;
+            }
+        };
         let engine_failed = loop {
             let ready = tokio::select! {
                 // A failure can arrive with the shutdown it causes; `liveness`
                 // must still report it.
                 biased;
 
-                result = self.engine.liveness.wait_for(|healthy| !*healthy) => {
+                result = engine.liveness.wait_for(|healthy| !*healthy) => {
                     match result {
                         Ok(_) => warn!(
                             status = ?status,
@@ -136,23 +180,37 @@ impl HealthMonitor {
                     );
                     break false;
                 }
-                changed = self.engine.readiness.changed(), if readiness_open => {
+                changed = engine.readiness.changed(), if readiness_open => {
                     readiness_open = changed.is_ok();
-                    *self.engine.readiness.borrow_and_update()
+                    *engine.readiness.borrow_and_update()
                 }
             };
             // Changes can coalesce back to the published value.
             if ready != self.ready {
                 self.ready = ready;
                 debug!(ready, "engine readiness changed");
-                set_readiness(&self.reporter, ready).await;
+                set_readiness(&self.reporter, readiness_services, ready).await;
             }
         };
+        self.withdraw(shutdown, withdrawn, engine_failed).await;
+    }
 
+    /// Publish `NOT_SERVING`, cancel `withdrawn` once the server may stop, then
+    /// remove the services, which ends their watches.
+    async fn withdraw(
+        mut self,
+        shutdown: CancellationToken,
+        withdrawn: &CancellationToken,
+        engine_failed: bool,
+    ) {
+        let status = ServingStatus::NotServing;
+        let services = self.source.services();
+        let readiness_services = self.source.readiness_services();
         let reporter = &mut self.reporter;
-        set_readiness(reporter, false).await;
-        reporter.set_not_serving::<ControlGrpcService>().await;
-        reporter.set_not_serving::<RenderGrpcService<AppState>>().await;
+        set_readiness(reporter, readiness_services, false).await;
+        for service in services {
+            reporter.set_service_status(service, status).await;
+        }
         // The gRPC services are served alongside the same engine client, so overall
         // server health mirrors its engine health.
         reporter.set_service_status("", status).await;
@@ -168,22 +226,21 @@ impl HealthMonitor {
         // Published, so the server may stop.
         withdrawn.cancel();
 
-        reporter.clear_service_status(inference_service).await;
-        reporter.clear_service_status(control_service).await;
-        reporter.clear_service_status(render_service).await;
+        for service in readiness_services.iter().chain(services) {
+            reporter.clear_service_status(service).await;
+        }
         reporter.clear_service_status("").await;
         reporter.clear_service_status(LIVENESS_SERVICE).await;
-        reporter.clear_service_status(READINESS_SERVICE).await;
     }
 }
 
-async fn set_readiness(reporter: &HealthReporter, ready: bool) {
+async fn set_readiness(reporter: &HealthReporter, services: &[&str], ready: bool) {
     let status = if ready {
         ServingStatus::Serving
     } else {
         ServingStatus::NotServing
     };
-    for service in [READINESS_SERVICE, InferenceGrpcService::NAME] {
+    for service in services {
         reporter.set_service_status(service, status).await;
     }
 }
@@ -212,18 +269,56 @@ mod tests {
             liveness,
             readiness,
         };
-        let monitor = HealthMonitor::register(reporter, engine).await;
+        let monitor = HealthMonitor::register(reporter, HealthSource::Engines(engine)).await;
         (monitor, health, [liveness_tx, readiness_tx])
     }
 
     /// Whether `readiness` reports `SERVING`, read without yielding. By the
     /// time the listener stops, the service is `NOT_SERVING` or removed.
     fn serving(health: &HealthService) -> bool {
+        status(health, READINESS_SERVICE) == Some(ServingStatus::Serving as i32)
+    }
+
+    /// The status of `service`, read without yielding; `None` if unregistered.
+    fn status(health: &HealthService, service: &str) -> Option<i32> {
         let request = Request::new(HealthCheckRequest {
-            service: READINESS_SERVICE.to_string(),
+            service: service.to_string(),
         });
         let response = health.check(request).now_or_never().expect("uncontended read");
-        response.is_ok_and(|response| response.get_ref().status == ServingStatus::Serving as i32)
+        response.ok().map(|response| response.get_ref().status)
+    }
+
+    /// The render server registers only its own service besides the probes,
+    /// serving until shutdown withdraws them before the listener stops.
+    #[tokio::test]
+    async fn engine_free_services_serve_until_shutdown() {
+        let (reporter, _) = tonic_health::server::health_reporter();
+        let health = HealthService::from_health_reporter(reporter.clone());
+        let monitor = HealthMonitor::register(reporter, HealthSource::EngineFree).await;
+        for service in [RENDER_SERVICE, LIVENESS_SERVICE, READINESS_SERVICE, ""] {
+            assert_eq!(
+                status(&health, service),
+                Some(ServingStatus::Serving as i32),
+                "{service}"
+            );
+        }
+        for service in [InferenceGrpcService::NAME, ControlGrpcService::NAME] {
+            assert_eq!(status(&health, service), None, "{service}");
+        }
+
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let at_stop = monitor
+            .serve(shutdown, std::future::pending(), |stop| async move {
+                stop.await;
+                [RENDER_SERVICE, READINESS_SERVICE, ""].map(|service| status(&health, service))
+            })
+            .await
+            .expect("not aborted");
+        // `NOT_SERVING`, or already removed.
+        for status in at_stop {
+            assert_ne!(status, Some(ServingStatus::Serving as i32));
+        }
     }
 
     #[tokio::test]
