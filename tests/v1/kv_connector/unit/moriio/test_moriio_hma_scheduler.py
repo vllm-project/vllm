@@ -1231,6 +1231,7 @@ def test_write_producer_queues_grouped_attention_blocks():
         transfer_id_to_request_id={},
         _reqs_need_save={},
         _req_kv_params={},
+        _unfinished_write_sends=set(),
     )
     request = SimpleNamespace(
         request_id="req",

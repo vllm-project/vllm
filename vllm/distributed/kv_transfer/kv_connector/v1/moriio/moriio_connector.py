@@ -801,6 +801,7 @@ class MoRIIOConnectorScheduler:
         )
         # Buffer for early ACKs that arrive before request_finished.
         self._pending_sent_acks: dict[ReqId, float] = {}
+        self._unfinished_write_sends: set[ReqId] = set()
         self.paths: dict[str, zmq.Socket] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
@@ -1090,6 +1091,7 @@ class MoRIIOConnectorScheduler:
         if params.get("do_remote_decode") and self.mode == MoRIIOMode.WRITE:
             local_block_ids: BlockIds = blocks.get_block_ids()
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
+            self._unfinished_write_sends.add(request_id)
             # Snapshot params now so chunked-prefill build_connector_meta
             # can recover them on the final chunk even if the live
             # request.kv_transfer_params has been mutated/cleared.
@@ -1630,6 +1632,8 @@ class MoRIIOConnectorScheduler:
         if not self.is_producer:
             transfer_id = params.get("transfer_id") if params else None
             self.unmap_request_id(request_id, transfer_id=transfer_id)
+        else:
+            self._unfinished_write_sends.discard(request_id)
         logger.debug(
             "MoriioConnector request_finished, request_status=%s, "
             "kv_transfer_params=%s",
@@ -1749,11 +1753,13 @@ class MoRIIOConnectorScheduler:
           scheduler is holding its blocks) is surfaced -> freed now.
         * An ACK that arrives BEFORE its request finished is parked in
           `_pending_sent_acks` and released on a later step once the
-          request enters `_deferred_send_deadlines`.
+          request enters `_deferred_send_deadlines`. In WRITE mode it is
+          kept while its request is unfinished, because decode can release a
+          transfer before prefill finishes computing it.
         * In READ mode, a deferred send whose ACK never arrives is reaped
           after `_defer_timeout`. WRITE-mode timeouts are owned by the worker,
           which marks the transfer terminal before ACKing the block release.
-        * A parked ACK that never matches a deferral before its own
+        * Any other parked ACK that never matches a deferral before its own
           deadline is a stale duplicate (e.g. a real ACK landing after the
           send was already reaped) and is dropped.
 
@@ -1809,7 +1815,7 @@ class MoRIIOConnectorScheduler:
         stale = [
             req_id
             for req_id, deadline in self._pending_sent_acks.items()
-            if now >= deadline
+            if now >= deadline and req_id not in self._unfinished_write_sends
         ]
         for req_id in stale:
             self._pending_sent_acks.pop(req_id, None)
@@ -1921,6 +1927,7 @@ class MoRIIOConnectorWorker:
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
         self._consumer_notification_counts: dict[TransferId, int] = {}
         self._completed_consumer_notifications: set[TransferId] = set()
+        self._completed_notification_owners: dict[TransferId, ReqId] = {}
 
         role = "producer" if self.is_producer else "consumer"
         engine_suffix = (
@@ -2980,6 +2987,9 @@ class MoRIIOConnectorWorker:
                 )
                 if resolved_transfer_id is not None:
                     resolved_transfer_ids.add(resolved_transfer_id)
+                    self._completed_notification_owners[resolved_transfer_id] = (
+                        self.transfer_id_to_request_id[resolved_transfer_id]
+                    )
             done_sending = {
                 self.transfer_id_to_request_id[xfer_id]
                 for xfer_id in resolved_transfer_ids
@@ -3407,8 +3417,14 @@ class MoRIIOConnectorWorker:
                 for transfer_id, count in self._consumer_notification_counts.items()
                 if transfer_id in live_transfer_ids
             }
+            # A request that reuses a transfer id must not see its ack as a duplicate.
+            self._completed_notification_owners = {
+                transfer_id: req_id
+                for transfer_id, req_id in self._completed_notification_owners.items()
+                if self.transfer_id_to_request_id.get(transfer_id) == req_id
+            }
             self._completed_consumer_notifications.intersection_update(
-                live_transfer_ids
+                self._completed_notification_owners
             )
             self.moriio_wrapper.async_wait_reqid()
             return
@@ -3487,6 +3503,9 @@ class MoRIIOConnectorWorker:
         if self.mode == MoRIIOMode.WRITE and self.is_producer:
             for layer_name, kv_layer in self.kv_caches.items():
                 self.save_kv_layer(metadata, layer_name, kv_layer, None)
+            self._writer.ack_refused_transfers(
+                meta.transfer_id for meta in metadata.reqs_to_save.values()
+            )
             self._writer.seal_pending_transfers()
 
     def _next_flex_tp_rank(self, remote_tp_size: int) -> int:

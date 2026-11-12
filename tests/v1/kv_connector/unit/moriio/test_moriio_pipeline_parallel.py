@@ -129,6 +129,7 @@ def _prefill_scheduler(pp_size: int, tp_size: int, host: str, notify_port: int):
     """The prefill-side state request_finished reads."""
     scheduler = SimpleNamespace(
         is_producer=True,
+        _unfinished_write_sends=set(),
         _is_hma_required=False,
         _has_mamba=False,
         blocks_per_sw=[0],

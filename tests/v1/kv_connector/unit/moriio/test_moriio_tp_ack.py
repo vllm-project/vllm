@@ -262,6 +262,7 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     worker.transfer_id_to_request_id = {"tx-fanin": "req-fanin"}
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
+    worker._completed_notification_owners = {}
     worker._pending_unmapped_acks = []
 
     assert worker.get_finished() == (set(), set())
@@ -747,6 +748,7 @@ def test_producer_start_load_kv_posts_no_read():
     worker._reads_issued_this_step = []
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
+    worker._completed_notification_owners = {}
     worker.moriio_wrapper = RecordingWrapper()
 
     worker.start_load_kv(SimpleNamespace(transfer_id_to_request_id={}))
