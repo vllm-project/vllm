@@ -52,8 +52,6 @@ hardware_overrides:
     extra_args:
       - "--attention-backend"
       - "ROCM_AITER_UNIFIED_ATTN"
-      - "--gpu-memory-utilization"
-      - "0.9"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
       NCCL_MIN_NCHANNELS: "112"
@@ -109,7 +107,6 @@ guide: |
     --chat-template-content-format string \
     --dtype bfloat16 \
     --max-model-len 131072 \
-    --gpu-memory-utilization 0.9 \
     --attention-backend ROCM_AITER_UNIFIED_ATTN \
     --generation-config auto \
     --reasoning-parser k2_horizon \

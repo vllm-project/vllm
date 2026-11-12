@@ -35,11 +35,18 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="DeepSeek V4 MegaMoE requires CUDA",
 )
+requires_mega_moe_gpu = pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(100)
+    ),
+    reason="DeepSeek V4 MegaMoE requires SM90 or SM100",
+)
 
 
 @pytest.fixture(autouse=True)
-def sm100_mega_moe_layout(monkeypatch):
-    """Build the SM100 kernel layout on any GPU; kernels are gated per test."""
+def skip_mega_moe_support_check(monkeypatch):
+    """Skip the MegaMoE support check; kernels are gated per test."""
     monkeypatch.setattr(
         "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
         "check_deep_gemm_mega_moe_supported",
@@ -82,6 +89,7 @@ def v41_moe_config(dist_init):
     )
 
 
+@requires_mega_moe_gpu
 @pytest.mark.parametrize("use_cudagraph", [False, True])
 @pytest.mark.parametrize("above_threshold", [False, True])
 @pytest.mark.parametrize("vision", [False, True])
@@ -97,9 +105,6 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     use_cudagraph,
 ):
     """Main and draft layers select experts by score and preserve image routing."""
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("DeepGEMM Mega Gate requires SM100")
-
     config = v41_moe_config.model_config.hf_config
     config.hidden_size = 256
     config.n_routed_experts = 384
@@ -233,13 +238,11 @@ def test_deepseek_v4_moe_preserves_configured_hash_layers(v41_moe_config):
         moe(torch.zeros(1, 128))
 
 
+@requires_mega_moe_gpu
 @pytest.mark.parametrize("num_tokens", [16, 17])
 def test_deepseek_v4_mega_gate_hash_routing_correctness(
     v41_moe_config, monkeypatch, num_tokens
 ):
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("DeepGEMM Mega Gate requires SM100")
-
     config = v41_moe_config.model_config.hf_config
     config.hidden_size = 256
     config.num_hash_layers = 1
@@ -450,10 +453,14 @@ def dspark_draft_config(request, dist_init):
     )
 
 
+@requires_mega_moe_gpu
 def test_dspark_draft_registers_mixture_of_experts(dspark_draft_config, monkeypatch):
     """DSpark MoE drafts expose their expert topology for EPLB registration."""
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("DeepGEMM MegaMoE requires SM100")
+    if (
+        dspark_draft_config.draft_class is DSparkDeepseekV41ForCausalLM
+        and not current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("DeepSeek V4.1 MegaMoE requires SM100")
 
     vllm_config = dspark_draft_config.vllm_config
     monkeypatch.setattr(
