@@ -968,8 +968,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         self.deepstack_num_tokens = 0
         if not self.deepstack_num_levels:
             return
-        if self.start_layer < self.deepstack_num_levels and not (
-            self.pp_group.is_first_rank and self.end_layer >= self.deepstack_num_levels
+        if (
+            not self.pp_group.is_first_rank
+            and self.start_layer < self.deepstack_num_levels
         ):
             raise ValueError(
                 f"The first {self.deepstack_num_levels} decoder layers receive "
