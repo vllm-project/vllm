@@ -14,6 +14,8 @@ use crate::utils::{ResolvedRequestContext, merge_ec_transfer_params, merge_kv_tr
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PreparedRequest {
     pub request_id: String,
+    /// The `model` reported in non-streaming responses.
+    pub response_model: String,
     pub text_request: TextRequest,
     pub stream: bool,
     /// Public response rendering options for route-layer helpers.
@@ -91,6 +93,7 @@ pub(super) fn prepare_generate_request(
 
     Ok(PreparedRequest {
         request_id: ctx.request_id,
+        response_model: lora_resolution.response_model(),
         text_request,
         stream,
         options: ResponseOptions {
@@ -110,12 +113,13 @@ mod tests {
 
     use super::prepare_generate_request;
     use crate::lora::LoraModelResolution;
+    use crate::model_names::ServedModelNames;
     use crate::routes::inference::generate::types::GenerateRequest;
     use crate::utils::ResolvedRequestContext;
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: names.iter().map(|s| s.to_string()).collect(),
+            model_names: ServedModelNames::new(names.iter().map(|s| s.to_string()).collect()),
             lora_request: None,
         }
     }

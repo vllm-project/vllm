@@ -58,11 +58,50 @@ DEEPEP_BACKENDS = [
 )
 def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     """Test DBO with DP+EP using GSM8K evaluation."""
+    _run_dbo_gsm8k(all2all_backend, num_gpus_available)
+
+
+# Features combined with DBO. ngram verifies multi-token queries without a
+# draft model; DCP shards the KV cache across each DP rank's TP group.
+V2_FEATURES = {
+    "spec_decode": (
+        [
+            "--speculative-config",
+            (
+                '{"method": "ngram", "num_speculative_tokens": 2, '
+                '"prompt_lookup_max": 4, "prompt_lookup_min": 2}'
+            ),
+        ],
+        1,
+    ),
+    "dcp": (["--tensor-parallel-size", "2", "--decode-context-parallel-size", "2"], 2),
+}
+
+
+@pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
+@pytest.mark.parametrize("feature", list(V2_FEATURES))
+def test_dbo_v2_features_gsm8k(feature: str, num_gpus_available):
+    """Test DBO combined with spec decode or DCP."""
+    extra_args, tp_size = V2_FEATURES[feature]
+    _run_dbo_gsm8k(
+        "deepep_low_latency",
+        num_gpus_available,
+        extra_args=extra_args,
+        tp_size=tp_size,
+    )
+
+
+def _run_dbo_gsm8k(
+    all2all_backend: str,
+    num_gpus_available: int,
+    extra_args: list[str] | None = None,
+    tp_size: int = 1,
+):
     lm_eval = pytest.importorskip("lm_eval")
-    required_gpus = DP_SIZE
+    required_gpus = DP_SIZE * tp_size
 
     if num_gpus_available < required_gpus:
-        pytest.skip(f"Need at least {required_gpus} GPUs (DP={DP_SIZE})")
+        pytest.skip(f"Need at least {required_gpus} GPUs (DP={DP_SIZE}, TP={tp_size})")
 
     # Server arguments for DBO + DP + EP
     server_args = [
@@ -83,6 +122,7 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
         "32",
         "--all2all-backend",
         all2all_backend,
+        *(extra_args or []),
     ]
 
     with RemoteOpenAIServer(
