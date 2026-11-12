@@ -78,7 +78,7 @@ steps:
     'export VLLM_USE_RUST_FRONTEND=1 &&
     export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     cd tests &&
-    PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py &&
+    PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py &&
     pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load" &&
     pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow" &&
     pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist" &&
@@ -87,16 +87,11 @@ steps:
 - label: ":intel: (BMG) Rust Frontend Core Correctness"
   key: rust-frontend-core-correctness-intel
   timeout_in_minutes: 30
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 24+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - rust/
@@ -104,26 +99,19 @@ steps:
   - tests/utils.py
   - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'export VLLM_USE_RUST_FRONTEND=1 &&
-    export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-    cd tests &&
-    pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine'
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - cd tests
+  - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: ":intel: (BMG) Rust Frontend Tool Use"
   key: rust-frontend-tool-use-intel
   timeout_in_minutes: 30
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 24+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - rust/
@@ -132,12 +120,12 @@ steps:
   - tests/utils.py
   - tests/tool_use/
   commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - cd tests
   - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'export VLLM_USE_RUST_FRONTEND=1 &&
-    export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-    cd tests &&
-    pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k not "test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"'
+    pytest -v -s tool_use
+    --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
 - label: ":intel: (BMG) Rust Frontend Distributed"
   key: rust-frontend-distributed-intel
