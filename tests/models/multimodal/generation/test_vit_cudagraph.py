@@ -814,6 +814,7 @@ def _check_k3_replay_and_threshold(worker, grids, hits, misses):
     return manager.token_budgets
 
 
+@pytest.mark.core_model
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="AMD Kimi-K3 encoder graphs")
 @pytest.mark.parametrize(
     ("grids", "hits", "misses"),

@@ -1801,6 +1801,36 @@ class KimiK3ForConditionalGeneration(
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        mm_cfg = self.model_config.multimodal_config
+        if (
+            mm_cfg is not None
+            and mm_cfg.mm_encoder_attn_dtype == "fp8"
+            and mm_cfg.mm_encoder_fp8_scale_path is None
+        ):
+            raise ValueError(
+                "cudagraph_mm_encoder is incompatible with dynamic FP8 "
+                "scaling for the vision encoder (the amax history is "
+                "host-side state that cannot be captured). Provide a static "
+                "scale file via --mm-encoder-fp8-scale-path or disable "
+                "cudagraph_mm_encoder."
+            )
+
+        backend = self.vision_tower.encoder.blocks[0].attn.attn_backend
+        # FlashInfer reads max_seqlen on the host and TORCH_SDPA calls
+        # .tolist() on CUDA cu_seqlens; neither can be captured.
+        if backend in (
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.TORCH_SDPA,
+        ):
+            raise ValueError(
+                f"cudagraph_mm_encoder is not supported with the {backend.name} "
+                "ViT attention backend for Kimi-K3. Set "
+                "--mm-encoder-attn-backend FLASH_ATTN or ROCM_AITER_FA "
+                "(ROCm), or disable cudagraph_mm_encoder."
+            )
+
         return EncoderCudaGraphConfig(
             modalities=["image"],
             buffer_keys=[
