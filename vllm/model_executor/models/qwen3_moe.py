@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -94,14 +95,18 @@ class Qwen3MoeMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         expert_gate: torch.nn.Linear | None = None,
+        is_sequence_parallel: bool = False,
+        disable_tp: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        disable_tp = disable_tp or is_sequence_parallel
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -110,6 +115,7 @@ class Qwen3MoeMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -121,7 +127,7 @@ class Qwen3MoeMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
+        out = maybe_fused_act_quant(self.act_fn, gate_up, self.down_proj)
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
