@@ -4,6 +4,9 @@ min_acceptance_length: 4.8
 num_questions: 1319
 num_fewshot: 5
 startup_max_wait_seconds: 1800
+# --gpu-memory-utilization 0.90: at the default of 1.0, allocator
+# fragmentation runs AITER MLA decode out of memory mid-eval.
+# Stopgap until https://github.com/vllm-project/vllm/issues/65456 is fixed.
 server_args: >-
   --trust-remote-code
   --gpu-memory-utilization 0.90
