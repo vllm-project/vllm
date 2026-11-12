@@ -181,7 +181,6 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         reasoning_parser_kwargs: None,
         reasoning_ended: None,
         lora_request: None,
-        include_prefill_progress: false,
     }
 }
 
@@ -255,7 +254,7 @@ async fn generate_streams_outputs() {
                             EngineCoreOutput {
                                 prefill_progress: Some(Box::new(PrefillProgress {
                                     request_id: request.request_id.clone(),
-                                    remaining_compute_tokens: 1,
+                                    remaining_prefill_tokens: 1,
                                 })),
                                 ..request_output(&request.request_id, vec![], None)
                             },
@@ -286,7 +285,6 @@ async fn generate_streams_outputs() {
 
     let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc).await;
     let mut request = sample_generate_request("req-delta", 3);
-    request.include_prefill_progress = true;
     let mut stream = llm.generate(request).await.unwrap();
     let internal_id = stream.request_id().to_string();
 

@@ -2636,14 +2636,18 @@ class Scheduler(SchedulerInterface):
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
 
-        # Requests that left the running batch without being scheduled this
-        # step (aborted, preempted, or finished) release their progress slot.
+        # A finished or aborted request reports its final zero and releases the
+        # slot. A preempted one keeps work to redo, so it only releases the slot
+        # and reports again when it runs.
         if self._prefill_progress:
             running_req_ids = {request.request_id for request in self.running}
+            stopped_req_ids = {request.request_id for request in stopped_running_reqs}
             for request_id, state in list(self._prefill_progress.items()):
                 if request_id in running_req_ids:
                     continue
                 del self._prefill_progress[request_id]
+                if request_id not in stopped_req_ids:
+                    continue
                 prefill_progress.setdefault(state.client_index, []).append(
                     PrefillProgress(request_id=request_id, remaining_prefill_tokens=0)
                 )

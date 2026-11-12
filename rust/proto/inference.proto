@@ -69,7 +69,7 @@ message GenerateRequest {
   // request field. Only `video.fps` (frames sampled per second) is supported.
   google.protobuf.Struct media_io_kwargs = 19;
 
-  bool include_prefill_progress = 20;
+  reserved 20;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output

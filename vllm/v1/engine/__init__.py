@@ -328,6 +328,7 @@ class EngineCoreOutput(
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
+
     # Remaining prefill work for this request, while it is prefilling.
     prefill_progress: PrefillProgress | None = None
 

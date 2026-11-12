@@ -226,11 +226,6 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
     ) -> Result<Response<pb::GenerateResponse>, Status> {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
-        if proto_req.include_prefill_progress {
-            return Err(Status::failed_precondition(
-                "prefill progress is only available on GenerateStream",
-            ));
-        }
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,

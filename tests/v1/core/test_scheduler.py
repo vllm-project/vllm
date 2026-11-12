@@ -1904,9 +1904,13 @@ def test_prefill_progress_reports_chunks_and_ends_with_zero():
             ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
         )
         return [
-            (progress.request_id, progress.remaining_prefill_tokens)
-            for outputs in outputs.values()
-            for progress in outputs.prefill_progress
+            (
+                entry.prefill_progress.request_id,
+                entry.prefill_progress.remaining_prefill_tokens,
+            )
+            for batch in outputs.values()
+            for entry in batch.outputs
+            if entry.prefill_progress is not None
         ]
 
     assert step() == [(request.request_id, 48)]

@@ -1657,7 +1657,6 @@ async fn streaming_prefill_progress_preserves_frontend_block_hashes() {
         prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
             ids: vec![1, 2, 3, 4, 5],
         })),
-        include_prefill_progress: true,
         ..Default::default()
     };
     let mut stream = client.generate_stream(request).await.expect("stream request").into_inner();
