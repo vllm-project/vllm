@@ -25,6 +25,7 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
+from safetensors import SafetensorError
 from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -618,7 +619,13 @@ def _safetensors_tensor_names(path: str) -> list[str] | None:
     try:
         with safe_open(path, framework="pt") as f:
             return list(f.keys())
-    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        json.JSONDecodeError,
+        SafetensorError,
+    ):
         return None
 
 

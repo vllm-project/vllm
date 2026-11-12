@@ -197,6 +197,24 @@ def test_warns_when_index_coexists_with_undeclared_single_file(tmp_path, caplog)
     assert [os.path.basename(f) for f in kept] == ["model-00001-of-00001.safetensors"]
 
 
+def test_corrupt_undeclared_file_only_warns(tmp_path, caplog):
+    _shard(tmp_path / "model-00001-of-00001.safetensors", ["layer.0.weight"])
+    (tmp_path / "model.safetensors").write_bytes(b"not a safetensors file")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"layer.0.weight": "model-00001-of-00001.safetensors"}}
+        )
+    )
+    files = sorted(str(f) for f in tmp_path.glob("*.safetensors"))
+
+    with caplog.at_level("WARNING"):
+        check_local_safetensors_layout(
+            str(tmp_path), files, "model.safetensors.index.json", strict=False
+        )
+
+    assert "model.safetensors" in caplog.text
+
+
 def test_strict_layout_errors_on_undeclared_single_file(tmp_path):
     _shard(tmp_path / "model-00001-of-00001.safetensors", ["layer.0.weight"])
     _shard(tmp_path / "model.safetensors", ["layer.0.weight"])
