@@ -9,7 +9,8 @@ runs the whole layer on the layer's own weights:
 * router logits and pooler, then one prep kernel: router split-K reduce, sigmoid
   top-k routing and the pre-expert RMSNorm, one row per token;
 * the experts on the `[T, top_k]` routes: moe_sorting, the stage-1 MXFP4 quant of
-  the T rows into sorted layout, AITER's FlyDSL stages with a per-slot stage 2;
+  the T rows into sorted layout (both in one Triton launch up to
+  `SORT_QUANT_MAX_TOKENS` tokens), AITER's FlyDSL stages with a per-slot stage 2;
 * the fused post-expert finalize, masking the routes of other ranks' experts;
 * the layer's reduction (all-reduce, or reduce-scatter on a token-sharded step)
   and the unpooler.
@@ -35,7 +36,12 @@ from vllm.models.muse_spark.common.ops.fused_finalize import (
 )
 
 from .muse_moe_runner import MuseSparkAiterExperts, MuseSparkQuarkOCPMXFusedMoE
-from .ops.decode_moe import decode_moe_prep, supports_decode_moe_prep
+from .ops.decode_moe import (
+    decode_moe_prep,
+    sort_quant,
+    supports_decode_moe_prep,
+    supports_sort_quant,
+)
 
 if TYPE_CHECKING:
     from .model import MuseSparkMoE, TokenShard
@@ -307,6 +313,7 @@ def native_routes_moe(
         quant_config.w1_scale,
         quant_config.w2_scale,
         expert_mask,
+        local_index,
         kernels,
     )
     norm = post_expert_norm
@@ -335,6 +342,7 @@ def _native_routes_experts(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     expert_mask: torch.Tensor,
+    local_index: torch.Tensor,
     kernels: StageKernels,
 ) -> torch.Tensor:
     """Unweighted per-(token, slot) MXFP4 expert outputs `[T, top_k, H]` of the T
@@ -344,7 +352,9 @@ def _native_routes_experts(
     repeated rows, on the `[T, top_k]` routes: one moe_sorting; the stage-1 quant
     writes each token's row once per local route in sorted layout; stage 1 writes
     rows only for the local routes; stage 2 writes per-slot rows
-    (`return_per_slot`). Rows of other ranks' routes are left unwritten.
+    (`return_per_slot`). Rows of other ranks' routes are left unwritten. Up to
+    `SORT_QUANT_MAX_TOKENS` tokens, `sort_quant` does the sorting and that quant
+    in one launch.
     """
     from aiter.fused_moe import _flydsl_stage1_wrapper, moe_sorting
     from aiter.ops.flydsl import moe_kernels as fly
@@ -361,33 +371,43 @@ def _native_routes_experts(
         rows = (sorted_ids.shape[0] + 31) // 32 * 32
         return torch.empty((rows, (cols // 32 + 7) // 8 * 8), dtype=e8m0, device=device)
 
-    unused_weights = torch.empty(
-        (num_tokens, top_k), dtype=torch.float32, device=device
-    )
-    sorted_ids, _, sorted_eids, num_valid, _ = moe_sorting(
-        topk_ids,
-        unused_weights,
-        expert_mask.numel(),
-        hidden,
-        torch.bfloat16,
-        block_m,
-        expert_mask,
-        None,
-        rocm_aiter_ops.get_moe_dispatch_policy(),
-        accumulate=False,
-    )[:5]
-    a1 = torch.empty((num_tokens, hidden // 2), dtype=fp4x2, device=device)
-    a1_scale = _sorted_scales(sorted_ids, hidden)
-    fused_dynamic_mx_quant_moe_sort_hip(
-        a1,
-        a1_scale,
-        hidden_states,
-        sorted_ids,
-        num_valid,
-        num_tokens,
-        block_m,
-        num_tokens * top_k,
-    )
+    if supports_sort_quant(num_tokens, hidden, top_k, block_m):
+        a1, a1_scale, sorted_ids, sorted_eids, num_valid = sort_quant(
+            hidden_states,
+            topk_ids,
+            local_index,
+            w1.shape[0],
+            expert_mask.numel(),
+            block_m,
+        )
+    else:
+        unused_weights = torch.empty(
+            (num_tokens, top_k), dtype=torch.float32, device=device
+        )
+        sorted_ids, _, sorted_eids, num_valid, _ = moe_sorting(
+            topk_ids,
+            unused_weights,
+            expert_mask.numel(),
+            hidden,
+            torch.bfloat16,
+            block_m,
+            expert_mask,
+            None,
+            rocm_aiter_ops.get_moe_dispatch_policy(),
+            accumulate=False,
+        )[:5]
+        a1 = torch.empty((num_tokens, hidden // 2), dtype=fp4x2, device=device)
+        a1_scale = _sorted_scales(sorted_ids, hidden)
+        fused_dynamic_mx_quant_moe_sort_hip(
+            a1,
+            a1_scale,
+            hidden_states,
+            sorted_ids,
+            num_valid,
+            num_tokens,
+            block_m,
+            num_tokens * top_k,
+        )
     a2_bf16 = _flydsl_stage1_wrapper(
         a1,
         w1,

@@ -305,3 +305,251 @@ def test_native_routes_with_repeated_experts_and_nan_rows(
     compared = ~repeats & pooled.isfinite().all(dim=1)
     assert compared[0]
     torch.testing.assert_close(native[compared], per_route[compared])
+
+
+LOCAL_EXPERTS = 64
+SORT_BLOCK_M = 32
+SORT_QUANT_TOKENS = [*range(1, 65), 96, 127, 128, 129, 200, 256, 257, 384, 511, 512]
+# AITER's HIP quant floors a 32-value block's amax at 1e-10 (scale 2^-35),
+# `sort_quant` (AITER's Triton quant) at the smallest normal scale, so blocks
+# below 1e-10 get other scales; both dequantize within 6 * 2^-35 of each other.
+SCALE_FLOOR = 1e-10
+SCALE_FLOOR_ATOL = 6 * 2**-35
+E2M1 = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _ep_maps(
+    placement: str, rank: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One EP4 rank's `[E]` global-to-local expert map and AITER's `[E + 1]`
+    expert mask."""
+    _, expert_map, expert_mask = determine_expert_map(
+        ep_size=4,
+        ep_rank=rank,
+        global_num_experts=NUM_EXPERTS,
+        expert_placement_strategy=placement,
+        return_expert_mask=True,
+    )
+    assert expert_map is not None and expert_mask is not None
+    return expert_map.to(device), expert_mask.to(device)
+
+
+def _route_ids(
+    num_tokens: int, kind: str, mask: torch.Tensor, g: torch.Generator
+) -> torch.Tensor:
+    """`[T, TOP_K]` routes; "repeat": tokens selecting an expert in several slots,
+    as rows with non-finite router logits (CUDA-graph padding) do."""
+    device = mask.device
+    pool = NUM_EXPERTS
+    if kind == "local":
+        pool_ids = torch.nonzero(mask[:-1]).flatten()
+        pool = pool_ids.numel()
+    elif kind == "skewed":
+        pool_ids = torch.randperm(NUM_EXPERTS, device=device, generator=g)[: TOP_K + 4]
+        pool = pool_ids.numel()
+    ids = torch.stack(
+        [
+            torch.randperm(pool, device=device, generator=g)[:TOP_K]
+            for _ in range(num_tokens)
+        ]
+    )
+    if kind in ("local", "skewed"):
+        ids = pool_ids[ids]
+    u = torch.rand(num_tokens, device=device, generator=g)
+    if kind == "padding":
+        ids[u < 0.3] = -1
+    elif kind == "repeat":
+        ids[u < 0.2] = ids[u < 0.2][:, :1]
+        pair = (u >= 0.2) & (u < 0.5)
+        ids[pair, 3] = ids[pair, 1]
+        ids[pair, 7] = ids[pair, 1]
+        ids[u >= 0.8] = 0
+    return ids.to(torch.int32).contiguous()
+
+
+def _rows(num_tokens: int, g: torch.Generator, device: torch.device) -> torch.Tensor:
+    """bf16 rows over the exponent range, with zero, huge, tiny and NaN rows."""
+    x = torch.randn(num_tokens, HIDDEN, device=device, generator=g)
+    kind = num_tokens % 4
+    if kind == 1:
+        scale = torch.randint(-130, 125, (num_tokens, 1), device=device, generator=g)
+        x = x * torch.exp2(scale.float())
+    elif kind == 2:
+        x[: num_tokens // 2] = 0
+        if num_tokens > 2:
+            x[num_tokens // 2] = 3.0e38 * torch.sign(x[num_tokens // 2])
+            x[-1] = x[-1] * 1e-38
+    elif kind == 3:
+        x[torch.rand(num_tokens, HIDDEN, device=device, generator=g) < 0.05] = float(
+            "nan"
+        )
+        x[: max(1, num_tokens // 4)] = float("nan")
+    return x.to(torch.bfloat16).contiguous()
+
+
+def _aiter_sort_quant(
+    x: torch.Tensor, ids: torch.Tensor, mask: torch.Tensor
+) -> tuple[torch.Tensor, ...]:
+    from aiter.fused_moe import moe_sorting
+    from aiter.ops.quant import fused_dynamic_mx_quant_moe_sort_hip
+
+    num_tokens = x.shape[0]
+    unused_weights = torch.empty(ids.shape, dtype=torch.float32, device=x.device)
+    sorted_ids, _, sorted_eids, num_valid, _ = moe_sorting(
+        ids,
+        unused_weights,
+        mask.numel(),
+        HIDDEN,
+        torch.bfloat16,
+        SORT_BLOCK_M,
+        mask,
+        None,
+        0,
+        accumulate=False,
+    )[:5]
+    a1 = torch.empty(
+        (num_tokens, HIDDEN // 2), dtype=torch.float4_e2m1fn_x2, device=x.device
+    )
+    scale = torch.empty(
+        ((sorted_ids.shape[0] + 31) // 32 * 32, HIDDEN // 32),
+        dtype=torch.float8_e8m0fnu,
+        device=x.device,
+    )
+    fused_dynamic_mx_quant_moe_sort_hip(
+        a1,
+        scale,
+        x,
+        sorted_ids,
+        num_valid,
+        num_tokens,
+        SORT_BLOCK_M,
+        num_tokens * TOP_K,
+    )
+    return a1, scale, sorted_ids, sorted_eids, num_valid
+
+
+def _sorted_row_scales(scale: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
+    """Scale bytes `[rows, HIDDEN // 32]` from AITER's swizzled e8m0 layout."""
+    r = rows[:, None]
+    k = torch.arange(HIDDEN // 32, device=rows.device)[None, :]
+    n_pad = HIDDEN // 32
+    offset = (
+        (r // 32 * n_pad) * 32
+        + (k // 8) * 256
+        + (k % 4) * 64
+        + (r % 16) * 4
+        + (k % 8) // 4 * 2
+        + (r % 32) // 16
+    )
+    return scale.view(torch.uint8).view(-1)[offset]
+
+
+def _dequantize(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """`[N, HIDDEN // 2]` packed E2M1 bytes and `[N, HIDDEN // 32]` e8m0 bytes ->
+    `[N, HIDDEN]` fp32."""
+    nibbles = torch.stack([codes & 0xF, codes >> 4], dim=-1).flatten(1).long()
+    lut = torch.tensor(E2M1, device=codes.device)
+    values = lut[nibbles & 7] * torch.where(nibbles >= 8, -1.0, 1.0)
+    scale = torch.exp2(scales.float() - 127).repeat_interleave(32, dim=1)
+    return values * scale
+
+
+def _assert_sort_quant_matches_aiter(
+    x: torch.Tensor, ids: torch.Tensor, expert_map: torch.Tensor, mask: torch.Tensor
+) -> None:
+    """Every entry the stage kernels read: num_valid, sorted ids / expert ids up to
+    num_valid, the a1 rows of tokens with a local route and the scales of every
+    valid sorted row. For a token repeating an expert only one slot is kept and
+    which one is unspecified in AITER, so those entries compare the token only.
+    Blocks under the scale floors compare their dequantized values."""
+    num_tokens = x.shape[0]
+    ref = _aiter_sort_quant(x, ids, mask)
+    new = dmoe.sort_quant(x, ids, expert_map, LOCAL_EXPERTS, mask.numel(), 32)
+    for r, n in zip(ref, new):
+        assert r.shape == n.shape and r.dtype == n.dtype
+    assert torch.equal(ref[4], new[4])
+    num_valid = int(ref[4][0])
+    ref_ids, new_ids = ref[2][:num_valid], new[2][:num_valid]
+    token = ref_ids & 0xFFFFFF
+    slots = torch.arange(TOP_K, device=ids.device)
+    repeats = (
+        (ids[:, None, :] == ids[:, :, None]) & (slots[None, :] != slots[:, None])
+    ).any(dim=(1, 2))
+    valid = token < num_tokens
+    token_only = valid & repeats[token.clamp(max=num_tokens - 1).long()]
+    assert torch.equal(
+        torch.where(token_only, token, ref_ids),
+        torch.where(token_only, new_ids & 0xFFFFFF, new_ids),
+    )
+    assert torch.equal(
+        ref[3][: num_valid // SORT_BLOCK_M], new[3][: num_valid // SORT_BLOCK_M]
+    )
+    rows = torch.nonzero(valid).flatten()
+    if rows.numel() == 0:
+        return
+    # NaN does not raise a block's amax in either quant.
+    amax = x.float().nan_to_num(nan=0.0).abs().view(num_tokens, HIDDEN // 32, 32)
+    amax = amax.amax(dim=-1)
+    floor = amax < SCALE_FLOOR
+    row_floor = floor[token[rows].long()]
+    ref_scales = _sorted_row_scales(ref[1], rows)
+    new_scales = _sorted_row_scales(new[1], rows)
+    assert torch.equal(ref_scales[~row_floor], new_scales[~row_floor])
+    tokens = torch.unique(token[rows].long())
+    first = torch.zeros(num_tokens, dtype=torch.long, device=x.device)
+    first[token[rows].long()] = torch.arange(rows.numel(), device=x.device)
+    ref_a1, new_a1 = (a.view(torch.uint8)[tokens] for a in (ref[0], new[0]))
+    byte_floor = floor[tokens].repeat_interleave(16, dim=1)
+    assert torch.equal(ref_a1[~byte_floor], new_a1[~byte_floor])
+    torch.testing.assert_close(
+        _dequantize(new_a1, new_scales[first[tokens]]),
+        _dequantize(ref_a1, ref_scales[first[tokens]]),
+        atol=SCALE_FLOOR_ATOL,
+        rtol=0,
+        equal_nan=True,
+    )
+
+
+@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
+@pytest.mark.parametrize(
+    "placement, rank", [("linear", 0), ("linear", 3), ("round_robin", 1)]
+)
+@pytest.mark.parametrize(
+    "route_kind", ["random", "skewed", "local", "padding", "repeat"]
+)
+@torch.inference_mode()
+def test_sort_quant_matches_the_aiter_sort_and_quant(
+    placement: str, rank: int, route_kind: str
+) -> None:
+    """One `sort_quant` launch writes the buffers of AITER's moe_sorting +
+    `fused_dynamic_mx_quant_moe_sort_hip` for T = 1..512: bit for bit, except
+    blocks under the quant's scale floor."""
+    device = torch.device("cuda")
+    g = torch.Generator(device=device).manual_seed(0)
+    expert_map, mask = _ep_maps(placement, rank, device)
+    for num_tokens in SORT_QUANT_TOKENS:
+        ids = _route_ids(num_tokens, route_kind, mask, g)
+        _assert_sort_quant_matches_aiter(
+            _rows(num_tokens, g, device), ids, expert_map, mask
+        )
+
+
+@pytest.mark.skipif(not ROCM_GFX950_AITER, reason="requires gfx950 and AITER")
+@torch.inference_mode()
+def test_sort_quant_quantizes_every_finite_bf16_like_aiter() -> None:
+    """Every finite bf16 value, in 32-value groups of similar magnitude (every
+    reachable scale) and shuffled (flush to zero, saturation)."""
+    device = torch.device("cuda")
+    g = torch.Generator(device=device).manual_seed(1)
+    bits = torch.arange(-(2**15), 2**15, dtype=torch.int32, device=device)
+    values = bits.to(torch.int16).view(torch.bfloat16)
+    values = values[torch.isfinite(values)]
+    pad = -values.numel() % HIDDEN
+    values = torch.cat([values, values[:pad]])
+    by_magnitude = values[torch.argsort(values.float().abs(), stable=True)]
+    shuffled = values[torch.randperm(values.numel(), device=device, generator=g)]
+    expert_map, mask = _ep_maps("linear", 0, device)
+    for x in (by_magnitude, shuffled):
+        x = x.view(-1, HIDDEN).contiguous()
+        ids = _route_ids(x.shape[0], "local", mask, g)
+        _assert_sort_quant_matches_aiter(x, ids, expert_map, mask)
