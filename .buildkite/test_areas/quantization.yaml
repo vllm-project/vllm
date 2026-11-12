@@ -128,7 +128,7 @@ steps:
       tests/model_executor/model_loader/test_reload_moe_kernels.py
       tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_synthetic_routing
     # Keep NF12 coverage until the H200 quantization job above is re-enabled.
-    - uv pip install --system nf12==1.0.1
+    - uv pip install --system nf12==1.1.0
     - pytest -v -s tests/quantization/test_online.py -k nf12
   mirror:
     amd:
