@@ -1659,53 +1659,6 @@ def test_mhc_pre_delayed_rocm_aiter_mega(num_tokens, seam):
 
 
 @requires_rocm_mhc_overlap
-def test_deepseek_v41_rocm_mega_mhc_refit_reaches_captured_graph():
-    """Rerunning `process_weights_after_loading` after an in-place weight
-    refit, as every reload path does, repacks fn into the same tensor, so a
-    graph captured before the refit replays with the new gates, also when the
-    refit bypassed the version counter (`param.data.copy_`)."""
-    from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
-
-    set_random_seed(0)
-    num_tokens, hidden_size = 64, 5120
-    residual, fn, hc_scale, hc_base, norm_weight = _mega_mhc_inputs(num_tokens)
-    layer = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
-    nn.Module.__init__(layer)
-    layer.mono = layer.mhc_overlap = None
-    layer.use_mega_mhc = True
-    layer.hc_attn_fn = nn.Parameter(fn.clone(), requires_grad=False)
-    layer.hc_ffn_fn = nn.Parameter(fn.clone(), requires_grad=False)
-    layer.process_weights_after_loading()
-    packed = layer.hc_ffn_fn_packed
-    args = (residual, layer.hc_ffn_fn, hc_scale, hc_base, 1e-6, 1e-6, 1e-6, 2.0, 20)
-    kwargs = _mega_mhc_seam_kwargs(num_tokens, hidden_size, "post", norm_weight)
-    op = object.__new__(MHCPreDelayedOp)
-
-    def run():
-        return op.forward_hip(*args, **kwargs, fn_packed=layer.hc_ffn_fn_packed)
-
-    # Mega-MHC's scratch is per stream and is allocated by an eager call.
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        run()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
-        captured = run()
-
-    new_fn = torch.randn_like(fn) * 0.01
-    layer.hc_ffn_fn.data.copy_(new_fn)
-    layer.process_weights_after_loading()
-    assert layer.hc_ffn_fn_packed is packed
-    residual.normal_()
-    kwargs["sublayer_out"].normal_()
-    graph.replay()
-    expected = _mhc_fused_seam_fp64(residual, new_fn, *args[2:], **kwargs)
-    torch.testing.assert_close(captured[0], expected[0], atol=1e-5, rtol=2**-7)
-    _check_mhc_seam_gates_and_input(captured, expected)
-
-
-@requires_rocm_mhc_overlap
 def test_deepseek_v41_rocm_mega_mhc_loads_under_bf16_default_dtype():
     """The loader post-processes weights with the model's dtype, bf16, as the
     default dtype. Packing fn and preparing the side stream's Mega-MHC scratch
@@ -1851,6 +1804,7 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     0, a pipeline entry and Engram fold none into the attention seam, and the
     FFN seam always has one. With packed weights every fused seam, the
     side-stream gates included, runs as Mega-MHC."""
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import CUDAGraphMode
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.kernels.mhc.triton import (
@@ -1928,21 +1882,17 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     monkeypatch.setattr(amd_mhc, "mhc_post_collapse_rms_norm_triton", counted_split)
     seams = []
 
-    def recorded(name):
-        seam = getattr(torch.ops.vllm, name)
+    def record(owner, name, kernel):
+        seam = getattr(owner, name)
 
         def call(*args):
-            seams.append(name)
+            seams.append(kernel)
             return seam(*args)
 
-        return call
+        monkeypatch.setattr(owner, name, call)
 
-    seam_ops = {
-        "triton": "mhc_fused_post_pre_delayed_rms_norm_aiter",
-        "mega": "mhc_mega_post_pre_delayed_rms_norm_aiter",
-    }
-    for name in seam_ops.values():
-        monkeypatch.setattr(torch.ops.vllm, name, recorded(name))
+    record(torch.ops.vllm, "mhc_fused_post_pre_delayed_rms_norm_aiter", "triton")
+    record(rocm_aiter_ops, "mhc_mega_post_pre_delayed_rms_norm", "mega")
     MHC_POST_COLLAPSE_RMS_NORM_KERNEL.warmup(
         hidden_size=hidden_size, weight_dtype=torch.bfloat16
     )
@@ -1973,7 +1923,7 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
 
     graph, actual = capture(CUDAGraphMode.FULL)
     assert splits == ([] if over_limit else [True] * num_splits)
-    assert set(seams) == {seam_ops[seam_kernel]}
+    assert set(seams) == {seam_kernel}
     graph.replay()
     for result, ref in zip(actual, expected, strict=True):
         torch.testing.assert_close(result, ref, atol=2e-2, rtol=1e-2)

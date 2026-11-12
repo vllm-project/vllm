@@ -417,8 +417,10 @@ class MHCPreDelayedOp(CustomOp):
                 torch.empty_like(residual) if sublayer_out is not None else None
             )
             if fn_packed is not None and norm_weight.dtype == torch.bfloat16:
+                from vllm._aiter_ops import rocm_aiter_ops
+
                 seam, weight = (
-                    torch.ops.vllm.mhc_mega_post_pre_delayed_rms_norm_aiter,
+                    rocm_aiter_ops.mhc_mega_post_pre_delayed_rms_norm,
                     fn_packed,
                 )
             else:
