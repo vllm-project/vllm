@@ -3703,11 +3703,13 @@ class VllmConfig:
                 "--sketchssm already applies ReplaySSM-style buffered state "
                 "updates; pass only --sketchssm (drop --use-replayssm)"
             )
-        if not current_platform.is_cuda() or not (
-            current_platform.has_device_capability(80)
+        if not current_platform.is_cuda_alike() or (
+            current_platform.is_cuda()
+            and not current_platform.has_device_capability(80)
         ):
             raise ValueError(
-                "--sketchssm requires a CUDA GPU with compute capability 8.0 or newer"
+                "--sketchssm requires a CUDA GPU with compute capability 8.0 or "
+                "newer, or a ROCm GPU"
             )
         if self.model_config is not None and not self.model_config.supports_sketchssm:
             raise ValueError(

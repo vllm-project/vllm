@@ -26,14 +26,16 @@ from dataclasses import dataclass
 import torch
 
 from vllm.model_executor.layers.mamba.ops.sketchssm_config import get_sketchssm_config
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 SKETCH_PIVOTS = 4
 SKETCH_RIDGE = 0.003
 SKETCH_DTYPES = (torch.bfloat16, torch.bfloat16, torch.float32)
-# FP32 dots of the rotations and the flush (3xTF32).
-SKETCH_DOT_PRECISION = "tf32x3"
+# FP32 dots of the rotations and the flush (3xTF32). AMD Triton does not
+# support tf32x3, so ROCm uses its backend default.
+SKETCH_DOT_PRECISION = None if current_platform.is_rocm() else "tf32x3"
 
 _PIVOTS = tl.constexpr(SKETCH_PIVOTS)
 _RIDGE = tl.constexpr(SKETCH_RIDGE)

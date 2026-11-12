@@ -484,8 +484,9 @@ def _sketchssm_config(**overrides):
     return config
 
 
-def _sketchssm_gpu(monkeypatch, capability: int = 80):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+def _sketchssm_gpu(monkeypatch, capability: int = 80, rocm: bool = False):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: not rocm)
     monkeypatch.setattr(
         current_platform, "has_device_capability", lambda c: capability >= c
     )
@@ -522,6 +523,12 @@ def test_sketchssm_requires_sm80(monkeypatch):
     _sketchssm_gpu(monkeypatch, capability=75)
     with pytest.raises(ValueError, match="compute capability 8.0"):
         VllmConfig._validate_sketchssm(_sketchssm_config())
+
+
+def test_sketchssm_allows_rocm(monkeypatch):
+    # The compute capability requirement is for CUDA GPUs only.
+    _sketchssm_gpu(monkeypatch, capability=0, rocm=True)
+    VllmConfig._validate_sketchssm(_sketchssm_config())
 
 
 def test_sketchssm_mean_rank_requires_sketchssm():

@@ -14,7 +14,9 @@ from vllm.model_executor.layers.mamba.ops import sketchssm_mamba2_build as sk
 from vllm.model_executor.layers.mamba.ops import sketchssm_mamba2_decode as skd
 from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
 
 H, P, G, N, NULL = 32, 32, 8, 128, 0
 RANKS = ([0, 1, 2, 3, 4, 5, 9, 20, 38, 64] * H)[:H]  # dense, maps, pivots

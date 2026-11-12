@@ -20,7 +20,7 @@ vllm serve <model> --sketchssm /path/to/calibration.pt
 
 ## Constraints
 
-SketchSSM currently supports NemotronH (`NemotronHForCausalLM`) models. It requires a CUDA GPU with compute capability 8.0 or newer, `--mamba-backend triton` and `--mamba-ssm-cache-dtype float32`. It replaces `--use-replayssm`; do not pass both.
+SketchSSM currently supports NemotronH (`NemotronHForCausalLM`) models. It requires a CUDA GPU with compute capability 8.0 or newer or a ROCm GPU, `--mamba-backend triton` and `--mamba-ssm-cache-dtype float32`. It replaces `--use-replayssm`; do not pass both.
 
 Mamba prefix caching works in align mode (`--mamba-cache-mode align`), as with the default decode. Tensor parallelism splits the heads, their ranks and the group frames across ranks (the tensor-parallel size must divide the heads, and the groups unless there is a single group). Speculative decoding, stochastic rounding of the SSM state and KV connectors are not supported yet.
 
