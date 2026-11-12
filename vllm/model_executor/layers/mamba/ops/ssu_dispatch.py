@@ -79,15 +79,15 @@ def plan_replayssm_decode(
 ) -> None:
     """Plan one Triton ReplaySSM standard-decode step on the GPU.
 
-    ``ring_pos[slot]`` counts the tokens buffered since the slot's last
+    `ring_pos[slot]` counts the tokens buffered since the slot's last
     full-state write. For each decode row this writes the step's
-    ``write_pos``/``is_flush`` (read by every layer of the cache group) and
+    `write_pos`/`is_flush` (read by every layer of the cache group) and
     advances the slot's counter, so the runner supplies no ring metadata.
     Prefill resets the counters in the same layer.
 
-    With ``align_block_size`` > 0 (mamba ``align`` prefix caching), the ring
+    With `align_block_size` > 0 (mamba `align` prefix caching), the ring
     restarts at each block's first step and flushes on the step completing a
-    block; ``seq_lens`` must then hold each row's sequence length.
+    block; `seq_lens` must then hold each row's sequence length.
     """
     if state_batch_indices.dim() > 1:
         state_batch_indices = state_batch_indices[:, 0]
@@ -284,7 +284,7 @@ class CPUSSUBackend(MambaSSUBackend):
     """CPU SSU backend using the compiled C++ VSX/scalar kernel.
 
     On CPU-only platforms (PowerPC, x86 without CUDA) this dispatches to
-    the vectorized C++ kernel registered as ``torch.ops._C.selective_state_update_cpu``.
+    the vectorized C++ kernel registered as `torch.ops._C.selective_state_update_cpu`.
     That kernel uses vec_op SIMD intrinsics (VSX on ppc64le, AVX2 on x86,
     scalar fallback elsewhere) and is parallelised with OpenMP across heads.
 
@@ -390,11 +390,16 @@ def selective_state_update_replayssm_flashinfer(
     scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     enable_stochastic_rounding: bool = False,
     stochastic_rounding_philox_rounds: int = 0,
+    rand_seed: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
     enable_pdl: bool = False,
 ) -> torch.Tensor:
-    """Run FlashInfer checkpointing SSU with model-owned tracker metadata."""
+    """Run FlashInfer checkpointing SSU with model-owned tracker metadata.
+
+    With stochastic rounding, `rand_seed` is a one-element int64 CUDA tensor
+    refreshed by the caller each step; without one, a seed is drawn here.
+    """
     if _flashinfer_replayssm_kernel is None:
         raise RuntimeError(
             "FlashInfer ReplaySSM has not been initialized. "
@@ -417,11 +422,12 @@ def selective_state_update_replayssm_flashinfer(
     if scratch is not None:
         cb_scaled, cumAdt_vec, cb_old = scratch
 
-    rand_seed = (
-        torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
-        if enable_stochastic_rounding
-        else None
-    )
+    if not enable_stochastic_rounding:
+        rand_seed = None
+    elif rand_seed is None:
+        rand_seed = torch.randint(
+            0, 2**32, (1,), device=state.device, dtype=torch.int64
+        )
     return _flashinfer_replayssm_kernel(
         state,
         x_cache,

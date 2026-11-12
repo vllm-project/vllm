@@ -8,7 +8,11 @@ import torch.nn as nn
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
-from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    STR_DTYPE_TO_TORCH_DTYPE,
+    async_tensor_h2d,
+)
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionType,
@@ -29,8 +33,8 @@ class EncoderOnlyModelState(DefaultModelState):
 
     Encoder attention needs no KV cache: it runs full, bidirectional
     self-attention over each request's tokens in a single forward. Such layers
-    return no ``get_kv_cache_spec`` and therefore never enter
-    ``kv_cache_config.kv_cache_groups``, so the KV-backed attention path never
+    return no `get_kv_cache_spec` and therefore never enter
+    `kv_cache_config.kv_cache_groups`, so the KV-backed attention path never
     builds their metadata. We build their (non-causal) metadata here, keeping
     the normal KV-backed path untouched.
     """
@@ -142,8 +146,8 @@ class EncoderOnlyModelState(DefaultModelState):
                     request_token_type_ids[start : start + num_tokens]
                 )
             offset += num_tokens
-        model_inputs["token_type_ids"] = token_type_ids_cpu.to(
-            self.device, non_blocking=True
+        model_inputs["token_type_ids"] = async_tensor_h2d(
+            token_type_ids_cpu, device=self.device
         )
         return model_inputs
 

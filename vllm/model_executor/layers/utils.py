@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
+    is_flashinfer_bf16_gemm_supported,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
@@ -49,17 +50,20 @@ def apply_penalties(
     frequency_penalties: torch.Tensor,
     repetition_penalties: torch.Tensor,
 ) -> torch.Tensor:
-    """Applies penalties in place to the logits tensor
-    logits : The input logits tensor of shape [num_seqs, vocab_size]
-    prompt_tokens_tensor: A tensor containing the prompt tokens. The prompts
-        are padded to the maximum prompt length within the batch using
-        `vocab_size` as the padding value. The value `vocab_size` is used
-        for padding because it does not correspond to any valid token ID
-        in the vocabulary.
-    output_tokens_tensor: The output tokens tensor.
-    presence_penalties: The presence penalties of shape (num_seqs, )
-    frequency_penalties: The frequency penalties of shape (num_seqs, )
-    repetition_penalties: The repetition penalties of shape (num_seqs, )
+    """Applies penalties in place to the logits tensor.
+
+    Args:
+        logits: The input logits tensor of shape [num_seqs, vocab_size].
+        prompt_tokens_tensor: A tensor containing the prompt tokens. The prompts
+            are padded to the maximum prompt length within the batch using
+            `vocab_size` as the padding value. The value `vocab_size` is used
+            for padding because it does not correspond to any valid token ID
+            in the vocabulary.
+        output_tokens_tensor: The output tokens tensor.
+        presence_penalties: The presence penalties of shape (num_seqs, ).
+        frequency_penalties: The frequency penalties of shape (num_seqs, ).
+        repetition_penalties: The repetition penalties of shape (num_seqs, ).
+
     """
     num_seqs, vocab_size = logits.shape
     _, prompt_mask = get_token_bin_counts_and_mask(
@@ -102,15 +106,12 @@ class _FlashInferBf16Backend:
     can_implement: _FlashInferBf16RuntimeCheck
 
 
-def _can_use_flashinfer_cutedsl_bf16(
+def _bf16_mm_shape_supported(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> bool:
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ):
-        return False
+    """Shape and layout constraints shared by every FlashInfer BF16 mm backend."""
     if x.ndim < 1 or weight.ndim != 2:
         return False
     if (
@@ -146,11 +147,50 @@ def _can_use_flashinfer_cutedsl_bf16(
     )
 
 
+def _can_use_flashinfer_cutedsl_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        return False
+    return _bf16_mm_shape_supported(x, weight, bias)
+
+
+# Output width below which flashinfer beats cuBLAS (swept on GB10, K=5120);
+# by N=512 flashinfer is 2-4x slower.
+_FLASHINFER_BF16_MAX_N = 128
+
+
+def _can_use_flashinfer_cudnn_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    # sm_10x showed no benefit in the same regime (measured 0.90-1.13x).
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ):
+        return False
+    if weight.shape[0] > _FLASHINFER_BF16_MAX_N:
+        return False
+    return _bf16_mm_shape_supported(x, weight, bias)
+
+
 _FLASHINFER_BF16_BACKENDS = {
     "flashinfer_cutedsl": _FlashInferBf16Backend(
         flashinfer_backend="cute-dsl",
         is_supported=is_flashinfer_cutedsl_bf16_gemm_supported,
         can_implement=_can_use_flashinfer_cutedsl_bf16,
+    ),
+    # cute-dsl is sm_10x only, but the cudnn backend also covers sm_12x, where
+    # cuBLAS drops to a 16x16-tiled kernel for narrow N at 2-4 tokens.
+    "flashinfer_cudnn": _FlashInferBf16Backend(
+        flashinfer_backend="cudnn",
+        is_supported=lambda: is_flashinfer_bf16_gemm_supported("cudnn"),
+        can_implement=_can_use_flashinfer_cudnn_bf16,
     ),
 }
 
@@ -298,7 +338,7 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
 # loads of a GEMM collide on the L2/MALL channel hash. Offsetting the stride by one
 # 128 B cache line dodges the collision and keeps each row cache-line aligned.
 def cache_aliasing_pad_elems(k: int, element_size: int) -> int:
-    """Row-stride pad, in elements, that stops an ``[n, k]`` weight aliasing on gfx11,
+    """Row-stride pad, in elements, that stops an `[n, k]` weight aliasing on gfx11,
     or 0 when the stride does not alias.
 
     Args:
@@ -318,7 +358,7 @@ def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
     """Offset a dense weight's row stride so it stops aliasing.
 
     Returns a view with the original shape whose row stride is one cache line
-    wider, or ``weight`` unchanged when the pad does not apply.
+    wider, or `weight` unchanged when the pad does not apply.
     """
     from vllm.platforms.rocm import on_gfx11
 
@@ -601,7 +641,7 @@ direct_register_custom_op(
 
 
 def maybe_use_skinny_gemm(layer: torch.nn.Module) -> None:
-    """Mark ``layer`` for the skinny GEMM if its weight shape has a plan."""
+    """Mark `layer` for the skinny GEMM if its weight shape has a plan."""
     from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
         get_skinny_gemm_plan,
     )
@@ -641,7 +681,7 @@ def cuda_unquantized_gemm(
 def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
     """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
 
-    wvSplitKrc partitions one per-device allocation into ``kWvSlots`` slots
+    wvSplitKrc partitions one per-device allocation into `kWvSlots` slots
     (csrc/rocm/skinny_gemms_wvsplitkrc.cu) and hands each stream one on first
     use, so that two streams never share the split-K partials and counters.
 

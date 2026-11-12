@@ -104,9 +104,9 @@ def _fma_f32_bf16_portable(
 ) -> Float32:
     """BF16 multiply with FP32 accumulation for pre-SM100 GPUs.
 
-    PTX ``fma.f32.bf16`` requires SM100 or newer. Converting the operands to
+    PTX `fma.f32.bf16` requires SM100 or newer. Converting the operands to
     FP32 first keeps this kernel available on Hopper, where an unconditional
-    mixed-precision FMA fails libNVVM compilation for ``sm_90a``.
+    mixed-precision FMA fails libNVVM compilation for `sm_90a`.
     """
     a_bits = llvm.bitcast(T.i16(), a.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
     b_bits = llvm.bitcast(T.i16(), b.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
@@ -130,7 +130,7 @@ def _fma_f32_bf16_portable(
 
 
 def _has_mixed_precision_bf16_fma() -> bool:
-    """Whether PTX ``fma.f32.bf16`` is supported by the current GPU."""
+    """Whether PTX `fma.f32.bf16` is supported by the current GPU."""
     return current_platform.has_device_capability(100)
 
 
