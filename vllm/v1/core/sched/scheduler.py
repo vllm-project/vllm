@@ -2275,7 +2275,8 @@ class Scheduler(SchedulerInterface):
         `PREFILL_PROGRESS_UPDATES_PER_REQUEST` times, evenly spaced over the
         work it had left when it first reported.
         """
-        remaining = max(0, request.num_tokens - request.num_computed_tokens)
+        computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
+        remaining = max(0, request.num_tokens - computed)
         state = self._prefill_progress.get(request.request_id)
         if remaining <= 0:
             if state is None:
@@ -2345,17 +2346,6 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         prefill_progress: dict[int, list[PrefillProgress]] = defaultdict(list)
 
-        # A prefill-only step samples nothing, so report from the schedule
-        # itself rather than from the outputs.
-        for scheduled_id in scheduler_output.num_scheduled_tokens:
-            scheduled = self.requests.get(scheduled_id)
-            if scheduled is None:
-                logger.debug("PP skip missing %s", scheduled_id)
-                continue
-            if scheduled.num_output_tokens:
-                logger.debug("PP skip decode %s", scheduled_id)
-                continue
-            self._report_prefill_progress(scheduled, prefill_progress)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2395,6 +2385,10 @@ class Scheduler(SchedulerInterface):
                     output_is_stale = True
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
+                # In-flight is settled above, so this step's tokens count as
+                # done while other chunks in flight stay counted as work left.
+                if request.num_output_tokens == 0:
+                    self._report_prefill_progress(request, prefill_progress)
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
