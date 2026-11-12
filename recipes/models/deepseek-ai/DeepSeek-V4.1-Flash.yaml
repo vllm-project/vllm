@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-11-05
+  date_updated: 2026-11-13
   tasks:
     - text
     - multimodal
@@ -26,6 +26,7 @@ meta:
     mi350x: verified
     mi355x: verified
     dgx_station_gb300: verified
+    rtx_pro_6000_4x: verified
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4.1-Flash"
@@ -72,7 +73,7 @@ features:
       - "--reasoning-parser"
       - "deepseek_v41"
   spec_decoding:
-    description: "DSpark multi-token drafting, 5 tokens per round (the trained block size). On NVIDIA, adaptive verification scores each (request, position) slot and only high-scoring slots are verified, up to a startup-profiled compute budget. On AMD, vLLM currently refuses that flag, so the generated command sets enable_adaptive_verification:false and verifies the full 5-token block. Remove the AMD override only after a serve with the true flag actually starts on ROCm."
+    description: "DSpark multi-token drafting, 5 tokens per round (the trained block size). On NVIDIA SM90 and SM10x, adaptive verification scores each (request, position) slot and only high-scoring slots are verified, up to a startup-profiled compute budget. On AMD and on RTX PRO 6000 (SM120), vLLM currently refuses that flag, so the generated command sets enable_adaptive_verification:false and verifies the full 5-token block. Remove those overrides only after a serve with the true flag actually starts there."
     args:
       - "--speculative-config"
       - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
@@ -97,6 +98,19 @@ features:
         args:
           - "--speculative-config"
           - '{"method":"dspark","num_speculative_tokens":5,"num_speculative_tokens_per_batch_size":[[1,4,5],[5,24,1]]}'
+      # SM120 refuses adaptive verification too: the indexer's
+      # supports_device_cpu_query_lens_mismatch() is False there (it needs
+      # SM10x varlen logits or SM90 flattening). Remove the false once a
+      # serve with enable_adaptive_verification:true starts on SM120
+      # (vllm-project/vllm#65527). The drafter's weights, activations and CUDA
+      # graphs leave no KV blocks at 128 or 64 seqs on 96 GB; 32 leaves 1.15M
+      # tokens.
+      rtx_pro_6000_4x:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
+          - "--max-num-seqs"
+          - "32"
   text_only:
     description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
     args:
@@ -182,6 +196,19 @@ variants:
           - "6144"
           - "--compilation-config"
           - '{"cudagraph_capture_sizes":[1,2,4,6,8,12,16,18,24,32,40,48,64,96,128]}'
+      # 4x RTX PRO 6000 (96 GB, SM120, PCIe): at TP4 with the Engram tables in
+      # host memory, each GPU holds 86.3 GiB before the KV cache (82.4 weights
+      # and non-torch, 2.1 activations, 1.7 CUDA graphs); vram_minimum_gb is
+      # that measured footprint across four cards. 0.33.0 declares 128-token
+      # kernel blocks for the sparse MLA and indexer backends on SM120, whose
+      # kernels take only 64; vllm-project/vllm#60762 (after 0.33.0) declares
+      # 64. Only the nightly image was validated; drop the image pin and the
+      # pip opt-out once a release carries #60762.
+      rtx_pro_6000_4x:
+        vram_minimum_gb: 370
+        docker_image: "vllm/vllm-openai:nightly"
+        install:
+          pip: false
   fp8:
     # The 2026-09-09 launch checkpoint. No model_id override: it serves the
     # recipe's own repo. Labeled with its date so the pill doesn't read as
@@ -206,11 +233,19 @@ kv_offload_support:
   offloading_fs: verified
 
 strategy_hardware:
-  # Single GPU; only TP1 is measured.
+  # DGX Station GB300: single GPU; only TP1 is measured.
+  # RTX PRO 6000 4x: only TP4 with the row's single_node_tp override is
+  # measured. TEP gets neither the Engram offload nor the SM120 attention
+  # config, DEP carries the SM10x-only mxfp4 indexer, and PD needs a
+  # second node this non-scalable profile does not have.
   single_node_tep:
     dgx_station_gb300: unsupported
+    rtx_pro_6000_4x: unsupported
   single_node_dep:
     dgx_station_gb300: unsupported
+    rtx_pro_6000_4x: unsupported
+  pd_cluster:
+    rtx_pro_6000_4x: unsupported
 
 hardware_overrides:
   amd:
@@ -346,6 +381,16 @@ strategy_overrides:
           - "fp8_ds_mla"
           - "--max-num-seqs"
           - "24"
+      # Exact-GPU override, after the shared Blackwell block. The mxfp4
+      # indexer cache is SM10x only (vLLM refuses indexer_kv_dtype mxfp4 on
+      # SM120 at startup), so keep the sparse MLA backend without the indexer
+      # settings. The Engram tables go to pinned host memory.
+      rtx_pro_6000_4x:
+        extra_args:
+          - "--attention-config"
+          - '{"backend":"FLASHINFER_MLA_SPARSE_DSV41"}'
+          - "--engram-config"
+          - '{"cpu_offload":true}'
       b300:
         extra_args:
           - "--engram-config"
@@ -1507,6 +1552,9 @@ presets:
       rejection for ordinary serving and accuracy evaluation.
 
 hardware_notes:
+  rtx_pro_6000_4x:
+    title: "Engram tables in host memory; nightly image"
+    body: "4x RTX PRO 6000 Blackwell (96 GB, PCIe, no NVLink) at TP4, measured on the 1017 checkpoint, with the Engram tables in pinned host memory: the host needs about 300 GiB of RAM (system-wide use peaked at 308 GiB). vLLM 0.33.0 does not start on SM120 (it declares 128-token kernel blocks where the SM120 kernels take 64), so this row runs the nightly image. With speculative decoding on, the command lowers --max-num-seqs to 32: at 128 or 64 the drafter leaves no memory for KV cache blocks and vLLM does not start. Without speculative decoding, setting VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1 (FlashInfer's PCIe IPC all-reduce) raises one stream from 111 to 124 tok/s with the same MATH-500 score. It needs CUDA peer access between all four GPUs (`nvidia-smi topo -p2p r` shows OK everywhere; otherwise vLLM aborts at startup). Leave it unset with DSpark: its buffers are sized after the KV cache and leave too little KV memory for a 1M-token request, so vLLM does not start."
   dgx_station_gb300:
     title: "Weights in Grace memory (UVA offload)"
     body: "Single GB300 with both Engram tables and 60 GiB of routed experts in pinned Grace memory (UVA offload). Measured on a nightly image; vLLM 0.31.0 carries every flag this row uses. The first boot on a new flag set runs a 75-90 min FlashInfer autotune; keep /root/.cache/vllm on a persistent volume."
@@ -1566,6 +1614,7 @@ guide: |
   The verified hardware badges and the measured numbers in the sections below
   (benchmarks, KV offloading validation) were taken on the 0909 launch checkpoint; the
   1017 weights share its config and footprint but have not been separately re-run.
+  The RTX PRO 6000 4x row is the exception: it was measured on 1017 only.
 
   ## Context length
 
@@ -1634,7 +1683,11 @@ guide: |
 
   DSpark is the only speculative method for this checkpoint. V4.1 dropped the MTP module
   that V3 and V4 trained alongside the backbone. **Speculative decoding** enables a 5-token
-  block. On NVIDIA it also turns on adaptive verification (see the feature description).
+  block. On NVIDIA SM90 and SM10x it also turns on adaptive verification (see the feature
+  description). On RTX PRO 6000 (SM120) the indexer helper
+  `supports_device_cpu_query_lens_mismatch()` is False, so the generated command turns it
+  off there and also lowers `--max-num-seqs` to 32: with the drafter loaded, 128 or 64
+  sequences leave no memory for KV cache blocks on 96 GB cards.
   On AMD, vLLM currently refuses adaptive verification. The generated command sets
   `enable_adaptive_verification:false` and verifies the full block. Two checks in
   `maybe_create_adaptive_verification_manager` fail on ROCm: the indexer helper
@@ -1721,6 +1774,10 @@ guide: |
     commands pass `--monokernel`, and MI355X also passes the ROCm MXFP4 indexer.
     Both are on `main` but not in 0.31.0, so the Install block offers only Docker
     on those two SKUs. MI300X and MI350X also run from the ROCm pip wheel.
+  - On RTX PRO 6000 (SM120) the Docker tab uses `vllm/vllm-openai:nightly`: 0.33.0 and
+    earlier do not start there (they declare 128-token kernel blocks for the sparse MLA
+    and indexer backends on SM120, whose kernels take only 64). [vllm-project/vllm#60762](https://github.com/vllm-project/vllm/pull/60762)
+    fixed this after 0.33.0, so the pip tab is hidden on that row until a release carries it.
   - The Rust OpenAI frontend is selected by default in the command builder. Switch
     to Python if you encounter unsupported features or compatibility issues.
   - Expect a long first load: `VLLM_ENGINE_READY_TIMEOUT_S=3600` is set for that reason.
