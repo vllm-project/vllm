@@ -99,6 +99,8 @@ steps:
   - vllm/model_executor/layers/quantization/base_config.py
   - vllm/model_executor/layers/quantization/utils/quant_utils.py
   - requirements/cuda.txt
+  - setup.py
+  - vllm/utils/import_utils.py
   - tests/model_executor/model_loader/test_reload_moe_kernels.py
   - tests/benchmarks/test_forward_cli.py
   - vllm/benchmarks/forward/
@@ -125,6 +127,8 @@ steps:
       tests/quantization/test_keep_param_objects.py
       tests/model_executor/model_loader/test_reload_moe_kernels.py
       tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_synthetic_routing
+    # Keep NF12 coverage until the H200 quantization job above is re-enabled.
+    - uv pip install --system nf12==1.0.0
     - pytest -v -s tests/quantization/test_online.py -k nf12
   mirror:
     amd:
