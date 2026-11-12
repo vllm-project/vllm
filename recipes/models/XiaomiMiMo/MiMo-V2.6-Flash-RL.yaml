@@ -74,8 +74,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "4"
-      - "--gpu-memory-utilization"
-      - "0.95"
     hardware_overrides:
       mi300x:
         extra_args:
@@ -97,8 +95,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "4"
-      - "--gpu-memory-utilization"
-      - "0.95"
     hardware_overrides:
       mi300x:
         extra_args:
@@ -202,7 +198,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Flash-MOPD \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --reasoning-parser mimo \
     --tool-call-parser mimo \
@@ -272,7 +267,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Flash-MOPD \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --speculative-config "{\"method\":\"dflash\",\"model\":\"$DFLASH_DIR\",\"num_speculative_tokens\":7}" \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
