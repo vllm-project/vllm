@@ -64,6 +64,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.inputs import MultiModalHashes
 from vllm.model_executor.layers.dash_attention import DASHAttention
+from vllm.model_executor.layers.fused_moe import RoutedScaleMode
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -325,7 +326,9 @@ class UnlimitedOCR2DecoderLayer(DeepseekV2DecoderLayer):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
+                routed_scale_mode=RoutedScaleMode.ROUTER
+                if rocm_aiter_ops.is_fused_moe_enabled()
+                else RoutedScaleMode.OUTPUT,
             )
         else:
             self.mlp = DeepseekV2MLP(
