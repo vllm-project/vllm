@@ -1069,76 +1069,76 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-#define VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, _ALIGNED)                    \
-  swmmacGemmRegular<fptype, _N, _HAS_BIAS, load_group, _ALIGNED, tile_columns, \
-                    m_tiles_per_wave, k_per_instruction,                       \
-                    regular_waves_per_block, threads_per_wave>                 \
-      <<<grid, block, 0, stream>>>(K, A_stride, M, Bx, By, A, B, BIAS, C)
+  #define VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, _ALIGNED)            \
+    swmmacGemmRegular<fptype, _N, _HAS_BIAS, load_group, _ALIGNED,       \
+                      tile_columns, m_tiles_per_wave, k_per_instruction, \
+                      regular_waves_per_block, threads_per_wave>         \
+        <<<grid, block, 0, stream>>>(K, A_stride, M, Bx, By, A, B, BIAS, C)
 
-#define VLLM_DISPATCH_SWMMAC_REGULAR(_N, _HAS_BIAS)     \
-  do {                                                  \
-    if (aligned_regular) {                              \
-      VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, true);  \
-    } else {                                            \
-      VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, false); \
-    }                                                   \
-  } while (0)
+  #define VLLM_DISPATCH_SWMMAC_REGULAR(_N, _HAS_BIAS)     \
+    do {                                                  \
+      if (aligned_regular) {                              \
+        VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, true);  \
+      } else {                                            \
+        VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, false); \
+      }                                                   \
+    } while (0)
 
-#define VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(_HAS_BIAS) \
-  do {                                               \
-    switch (N) {                                     \
-      case 5:                                        \
-        VLLM_DISPATCH_SWMMAC_REGULAR(5, _HAS_BIAS);  \
-        break;                                       \
-      case 6:                                        \
-        VLLM_DISPATCH_SWMMAC_REGULAR(6, _HAS_BIAS);  \
-        break;                                       \
-      case 7:                                        \
-        VLLM_DISPATCH_SWMMAC_REGULAR(7, _HAS_BIAS);  \
-        break;                                       \
-      case 8:                                        \
-        VLLM_DISPATCH_SWMMAC_REGULAR(8, _HAS_BIAS);  \
-        break;                                       \
-      default:                                       \
-        TORCH_CHECK(false, "unsupported N: ", N);    \
-    }                                                \
-  } while (0)
+  #define VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(_HAS_BIAS) \
+    do {                                               \
+      switch (N) {                                     \
+        case 5:                                        \
+          VLLM_DISPATCH_SWMMAC_REGULAR(5, _HAS_BIAS);  \
+          break;                                       \
+        case 6:                                        \
+          VLLM_DISPATCH_SWMMAC_REGULAR(6, _HAS_BIAS);  \
+          break;                                       \
+        case 7:                                        \
+          VLLM_DISPATCH_SWMMAC_REGULAR(7, _HAS_BIAS);  \
+          break;                                       \
+        case 8:                                        \
+          VLLM_DISPATCH_SWMMAC_REGULAR(8, _HAS_BIAS);  \
+          break;                                       \
+        default:                                       \
+          TORCH_CHECK(false, "unsupported N: ", N);    \
+      }                                                \
+    } while (0)
 
-#define VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, _ALIGNED)                     \
-  swmmacGemmSplitK<fptype, _N, _HAS_BIAS, split_k, load_group, _ALIGNED,       \
-                   tile_columns, m_tiles_per_wave, k_per_instruction, split_k, \
-                   threads_per_wave>                                           \
-      <<<fused_splitk_grid, fused_splitk_block, 0, stream>>>(                  \
-          K, A_stride, M, Bx, By, A, B, BIAS, C)
+  #define VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, _ALIGNED)               \
+    swmmacGemmSplitK<fptype, _N, _HAS_BIAS, split_k, load_group, _ALIGNED, \
+                     tile_columns, m_tiles_per_wave, k_per_instruction,    \
+                     split_k, threads_per_wave>                            \
+        <<<fused_splitk_grid, fused_splitk_block, 0, stream>>>(            \
+            K, A_stride, M, Bx, By, A, B, BIAS, C)
 
-#define VLLM_DISPATCH_SWMMAC_SPLITK(_N, _HAS_BIAS)     \
-  do {                                                 \
-    if (aligned_splitk) {                              \
-      VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, true);  \
-    } else {                                           \
-      VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, false); \
-    }                                                  \
-  } while (0)
+  #define VLLM_DISPATCH_SWMMAC_SPLITK(_N, _HAS_BIAS)     \
+    do {                                                 \
+      if (aligned_splitk) {                              \
+        VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, true);  \
+      } else {                                           \
+        VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, false); \
+      }                                                  \
+    } while (0)
 
-#define VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(_HAS_BIAS) \
-  do {                                              \
-    switch (N) {                                    \
-      case 5:                                       \
-        VLLM_DISPATCH_SWMMAC_SPLITK(5, _HAS_BIAS);  \
-        break;                                      \
-      case 6:                                       \
-        VLLM_DISPATCH_SWMMAC_SPLITK(6, _HAS_BIAS);  \
-        break;                                      \
-      case 7:                                       \
-        VLLM_DISPATCH_SWMMAC_SPLITK(7, _HAS_BIAS);  \
-        break;                                      \
-      case 8:                                       \
-        VLLM_DISPATCH_SWMMAC_SPLITK(8, _HAS_BIAS);  \
-        break;                                      \
-      default:                                      \
-        TORCH_CHECK(false, "unsupported N: ", N);   \
-    }                                               \
-  } while (0)
+  #define VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(_HAS_BIAS) \
+    do {                                              \
+      switch (N) {                                    \
+        case 5:                                       \
+          VLLM_DISPATCH_SWMMAC_SPLITK(5, _HAS_BIAS);  \
+          break;                                      \
+        case 6:                                       \
+          VLLM_DISPATCH_SWMMAC_SPLITK(6, _HAS_BIAS);  \
+          break;                                      \
+        case 7:                                       \
+          VLLM_DISPATCH_SWMMAC_SPLITK(7, _HAS_BIAS);  \
+          break;                                      \
+        case 8:                                       \
+          VLLM_DISPATCH_SWMMAC_SPLITK(8, _HAS_BIAS);  \
+          break;                                      \
+        default:                                      \
+          TORCH_CHECK(false, "unsupported N: ", N);   \
+      }                                               \
+    } while (0)
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "swmmacGEMM", [&] {
     using fptype = typename scalar<scalar_t>::type;
@@ -1188,12 +1188,12 @@ torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
     }
   });
 
-#undef VLLM_LAUNCH_SWMMAC_REGULAR
-#undef VLLM_DISPATCH_SWMMAC_REGULAR
-#undef VLLM_DISPATCH_SWMMAC_REGULAR_BY_N
-#undef VLLM_LAUNCH_SWMMAC_SPLITK
-#undef VLLM_DISPATCH_SWMMAC_SPLITK
-#undef VLLM_DISPATCH_SWMMAC_SPLITK_BY_N
+  #undef VLLM_LAUNCH_SWMMAC_REGULAR
+  #undef VLLM_DISPATCH_SWMMAC_REGULAR
+  #undef VLLM_DISPATCH_SWMMAC_REGULAR_BY_N
+  #undef VLLM_LAUNCH_SWMMAC_SPLITK
+  #undef VLLM_DISPATCH_SWMMAC_SPLITK
+  #undef VLLM_DISPATCH_SWMMAC_SPLITK_BY_N
 
   return out_c;
 }
