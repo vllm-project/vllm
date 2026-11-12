@@ -429,8 +429,10 @@ class TestKvCacheScaleMapper:
     ("index", "calls"),
     [
         (
-            '{"weight_map": {"a": "tensors/nested.safetensors", '
-            '"b": "tensors/missing.safetensors"}}',
+            (
+                '{"weight_map": {"a": "tensors/nested.safetensors", '
+                '"b": "tensors/missing.safetensors"}}'
+            ),
             2,
         ),
         ("{", 1),
