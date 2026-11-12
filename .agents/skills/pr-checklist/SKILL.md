@@ -58,9 +58,11 @@ Consult the affected area's agent instructions and contribution guides for its r
 
 #### 1.3: Complexity
 
-Changes which increase the complexity of the codebase should be carefully scrutinized. Specifically those which add new abstractions, dependencies, or branching cases to existing components should be evaluated for their necessity and potential impact on maintainability.
+Changes which increase the complexity of the codebase should be carefully scrutinized. Specifically those which add new abstractions, dependencies, or branching cases to existing components should be evaluated for their necessity and potential impact on maintainability. Keep the diff focused and small, including tests.
 
 Consider whether the added complexity could be mitigated through refactoring, modularization, or other design improvements. Aim to keep the codebase as simple and understandable as possible while still achieving the desired functionality.
+
+Prefer defaults or automatic selection based on existing hardware, model, and workload information. Before adding an environment variable, config field, or CLI flag, explain why existing controls or automatic selection are insufficient. Validate correctness, compatibility, and performance across affected configurations before choosing the default; an opt-in switch does not replace this assessment.
 
 As a rule of thumb, the complexity of a change can be estimated by the number of new lines of code added to the main codebase:
 
@@ -176,12 +178,13 @@ Ensure the PR makes clear, concise claims about the accomplishment:
 
 For the stated claims, ensure the PR provides sufficient evidence, examples, or references to support them, making it easy for reviewers to verify the correctness and impact of the changes.
 
-Summarize model evaluations and benchmarks in compact tables with the configuration, baseline, changed result, and reproduction commands. For repeated benchmarks, report the run count and variability. For kernel performance changes, include before/after profile visualizations/timelines when they help explain the measured gains. Link relevant CI failures or regressing PRs when they motivate the change.
+Present main and PR results with full commands (including server startup), commit IDs, and model/hardware configuration. Paste or attach raw reproducer, accuracy, and benchmark output; AI-generated summary tables are not a substitute. For repeated benchmarks, report run count and variability. For kernel performance changes, include before/after profile visualizations/timelines when they help explain the measured gains. Link relevant CI failures or regressing PRs when they motivate the change.
 
-- For bug fixes, ensure the reproducer is clearly provided and was validated to confirm the issue and the resolution.
+- For bug fixes, show the same command failing on main and passing on the PR, with raw error and success logs.
 - For new features, ensure that usage examples are included and validated to confirm that the feature works as intended.
 - For refactoring, ensure that changes are sufficiently validated at appropriate test levels (unit is sufficient for minor refactors, E2E serving is required for significant refactoring).
-- For performance optimizations, ensure that benchmarks or tests are included to validate the claimed performance improvements. Ideally, an end-to-end evaluation should demonstrate speedup on a concrete serving example. Microbenchmark-only validation is often insufficient: make a note if end-to-end evaluation is not included (e.g. due to lack of access to sufficient hardware to fully validate).
+- For model-affecting changes, include before/after accuracy evaluation commands and raw output (e.g. `lm_eval`) on relevant tasks.
+- For performance optimizations, include benchmarks or tests that validate the claimed gains. Demonstrate an end-to-end speedup on a concrete serving workload (e.g. `vllm bench serve`), microbenchmarks alone is insufficient.
 
 #### 4.3: Root-Cause Analysis
 
