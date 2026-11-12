@@ -62,9 +62,9 @@ def test_quantize_format_and_fit() -> None:
     assert packed.shape == (3, 2, 2, LUT_B_PACKED_TILE_BYTES)
     assert codebooks.shape == (3, 2, 2, 8)
     assert codebooks.dtype == torch.float8_e4m3fn
-    assert scales.shape == (3, 2, 2) and scales.dtype == torch.uint8
+    assert scales.shape == (3, 16, 4) and scales.dtype == torch.uint8
     bits = (packed.numel() + codebooks.numel() + scales.numel()) * 8
-    assert bits / weight.numel() == pytest.approx(3.14, abs=0.01)
+    assert bits / weight.numel() == pytest.approx(3.375)
 
     again = quantize_lut_b(weight)
     assert all(torch.equal(x, y) for x, y in zip((packed, codebooks, scales), again))
@@ -74,6 +74,24 @@ def test_quantize_format_and_fit() -> None:
     # 8-level Lloyd fits of Gaussian data keep ~4% of the energy as error,
     # independent of the tile magnitude.
     assert torch.all(error / weight.square().sum((1, 2)) < 0.06)
+
+
+def test_quantize_block_scales_follow_rows() -> None:
+    torch.manual_seed(0)
+    # One tile whose eight rows span three decades; the second K32 block of
+    # each row is a further 4x smaller. A single tile scale would leave the
+    # small rows with only one or two usable codebook levels.
+    row_scale = torch.logspace(-3, 0, 8)[:, None]
+    block_scale = torch.tensor([1.0] * 32 + [0.25] * 32)
+    weight = torch.randn(8, 64) * row_scale * block_scale
+
+    packed, codebooks, scales = quantize_lut_b(weight)
+    assert scales.shape == (8, 2)
+    assert len(scales.unique()) > 1
+    assert torch.all(scales[:, 0] > scales[:, 1])
+    reconstructed = dequantize_lut_b(packed, codebooks, scales, torch.float32)
+    error = (reconstructed - weight).square().sum(1) / weight.square().sum(1)
+    assert torch.all(error < 0.1), error
 
 
 def test_quantize_preserves_zeros() -> None:
