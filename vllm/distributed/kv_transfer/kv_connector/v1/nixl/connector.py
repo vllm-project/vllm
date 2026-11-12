@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
     SupportsHMA,
+    WorkerRanks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -249,6 +250,29 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         """
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
+
+    def set_worker_handshake_metadata(
+        self, metadata: dict[WorkerRanks, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """Key each worker's metadata by `(pp_rank, transfer rank)`, which
+        decoders ask the side channel for. TP1 PCP+DCP exposes its DCP shards
+        as transfer ranks; replicated PCP serves PCP rank zero's metadata."""
+        assert self.connector_scheduler is not None
+        parallel_config = self._vllm_config.parallel_config
+        pcp_dcp_sharded = (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        )
+        self.connector_scheduler.set_xfer_handshake_metadata(
+            {
+                (
+                    ranks.pp_rank,
+                    ranks.pcp_rank if pcp_dcp_sharded else ranks.tp_rank,
+                ): rank_metadata
+                for ranks, rank_metadata in metadata.items()
+                if pcp_dcp_sharded or ranks.pcp_rank == 0
+            }
+        )
 
     ############################################################
     # Worker Side Methods

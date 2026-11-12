@@ -33,6 +33,7 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import WorkerRanks
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -984,14 +985,25 @@ class EngineCore:
             )
 
             if xfer_handshake_metadata:
-                # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {(pp_rank, tp_rank): metadata}
-                # Merge all worker dicts into a single dict
-                content: dict[tuple[int, int], Any] = {}
-                for worker_dict in xfer_handshake_metadata:
-                    if worker_dict is not None:
-                        content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+                reports = [r for r in xfer_handshake_metadata if r is not None]
+                if not all(isinstance(key, WorkerRanks) for r in reports for key in r):
+                    # Workers that key their metadata by other tuples, such as
+                    # out-of-tree platform workers, keep the plain merge.
+                    legacy: dict[Any, Any] = {}
+                    for report in reports:
+                        legacy.update(report)
+                    kv_connector.set_xfer_handshake_metadata_pp_aware(legacy)
+                    return
+                content: dict[WorkerRanks, Any] = {}
+                for report in reports:
+                    for ranks, metadata in report.items():
+                        if ranks in content:
+                            raise ValueError(
+                                "Two workers reported KV connector handshake "
+                                f"metadata as {ranks}."
+                            )
+                        content[ranks] = metadata
+                kv_connector.set_worker_handshake_metadata(content)
 
     def _reset_caches(
         self,

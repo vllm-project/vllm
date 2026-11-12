@@ -885,7 +885,7 @@ def test_wake_up_republishes_kv_connector_handshake_metadata(tags, republished):
     core.model_executor.wake_up.side_effect = lambda tags: calls.append("wake_up")
     core.model_executor.get_kv_connector_handshake_metadata.return_value = [{}]
     kv_connector = core.scheduler.get_kv_connector.return_value
-    kv_connector.set_xfer_handshake_metadata_pp_aware.side_effect = lambda metadata: (
+    kv_connector.set_worker_handshake_metadata.side_effect = lambda metadata: (
         calls.append("publish")
     )
     EngineCore.wake_up(core, tags)

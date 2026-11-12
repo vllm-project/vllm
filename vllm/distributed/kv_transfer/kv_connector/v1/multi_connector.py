@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
+    WorkerRanks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -619,6 +620,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         for i, c in enumerate(self._connectors):
             c.set_xfer_handshake_metadata_pp_aware(
+                self._sub_connector_handshake_metadata(metadata, i)
+            )
+
+    def set_worker_handshake_metadata(
+        self, metadata: dict[WorkerRanks, KVConnectorHandshakeMetadata]
+    ) -> None:
+        for i, c in enumerate(self._connectors):
+            c.set_worker_handshake_metadata(
                 self._sub_connector_handshake_metadata(metadata, i)
             )
 

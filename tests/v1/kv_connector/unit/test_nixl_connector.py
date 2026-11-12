@@ -36,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
+    WorkerRanks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
@@ -3221,6 +3222,47 @@ def test_registration_generation_bumps_on_changed_payload(
         assert params is not None
         generations.append(params["remote_registration_generation"])
     assert generations[0] == generations[1] < generations[2]
+
+
+@pytest.mark.parametrize(
+    ("dcp_size", "served_pcp_ranks"),
+    [
+        # TP1 PCP+DCP: each PCP rank's DCP shard is a transfer rank.
+        (2, {(0, 0): 0, (0, 1): 1}),
+        # Replicated PCP: decoders read PCP rank 0's copy.
+        (1, {(0, 0): 0}),
+    ],
+)
+def test_worker_handshake_metadata_served_by_transfer_rank(dcp_size, served_pcp_ranks):
+    """Decoders ask the side channel for `(pp_rank, transfer rank)`, so each PCP
+    rank's metadata must be served under its transfer rank."""
+    vllm_config = create_vllm_config(kv_role="kv_producer")
+    vllm_config.parallel_config.prefill_context_parallel_size = 2
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, make_kv_cache_config(16)
+    )
+    scheduler = connector.connector_scheduler
+    assert scheduler is not None
+    scheduler._nixl_handshake_listener_t = MagicMock()  # already serving
+    payloads = [
+        NixlHandshakePayload(compatibility_hash="h", agent_metadata_bytes=agent)
+        for agent in (b"pcp0", b"pcp1")
+    ]
+    try:
+        connector.set_worker_handshake_metadata(
+            {
+                WorkerRanks(pp_rank=0, pcp_rank=pcp_rank, tp_rank=0): payload
+                for pcp_rank, payload in enumerate(payloads)
+            }
+        )
+        encoder = msgspec.msgpack.Encoder()
+        assert scheduler._handshake_data == {
+            key: encoder.encode(payloads[pcp_rank])
+            for key, pcp_rank in served_pcp_ranks.items()
+        }
+    finally:
+        scheduler.shutdown()
 
 
 # ── TTL-based remote engine eviction tests ──────────────────────────
