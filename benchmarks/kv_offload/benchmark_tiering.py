@@ -40,9 +40,13 @@ from urllib.request import urlopen
 MODEL = "openai/gpt-oss-120b"
 TP_SIZE = 2
 PORT = 8000
-# Measured KV bytes for one 64-token block of gpt-oss-120b (TP2) on H100.
-BYTES_PER_BLOCK_64 = 2.3 * 1024**2
-TOKENS_PER_BLOCK = 64
+
+# gpu block size tokens
+BLOCK_SIZE = 64
+# size of a single GPU block; If not set via the env-var, this will be
+# computed at runtime using a vllm dummy run.
+# for gptoss120b, on H100, BLOCK_BYTES is 4.5MB.
+BLOCK_BYTES = os.environ.get("BLOCK_BYTES")
 
 BENCH_MAX_SECONDS = 420  # 7 minutes per guidellm run
 BENCH_RANDOM_SEED = 889
@@ -69,40 +73,18 @@ def gib(n: float) -> int:
     return int(n * 1024**3)
 
 
-def gpu_block_bytes_from_spec(
-    block_size: int = TOKENS_PER_BLOCK, tp_size: int = TP_SIZE
-) -> int:
-    """GPU KV bytes for one TOKENS_PER_BLOCK-token block, per rank.
-
-    Offline: builds a VllmConfig and asks vLLM's KV cache spec machinery,
-    which accounts for hybrid/SWA layer layouts. No GPU or weights needed.
-    """
-    from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
-
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(model=MODEL),
-        cache_config=CacheConfig(block_size=block_size),
-        parallel_config=ParallelConfig(tensor_parallel_size=1),
-    )
-    specs = get_kv_cache_spec(vllm_config)
-    bytes_per_token = sum(sp.page_size_bytes for sp in specs.values()) // block_size
-    return bytes_per_token * TOKENS_PER_BLOCK
-
-
-def gpu_block_bytes_from_engine(block_size: int = TOKENS_PER_BLOCK) -> int:
-    """GPU KV bytes for one TOKENS_PER_BLOCK-token block, whole model.
+def gpu_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
+    """GPU KV bytes for one BLOCK_SIZE-token block, whole model.
 
     Ground truth: builds a TP=1 engine with dummy weights (uniproc executor,
     worker in-process) and reads the allocated cache tensors from the model
-    runner directly. Needs a GPU.
+    runner directly. Needs a GPU. vLLM logging is disabled.
     """
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     from vllm import LLM
 
     llm = LLM(
         model=MODEL,
-        # enforce_eager=True,
         tensor_parallel_size=1,
         load_format="dummy",
         max_model_len=8192,
@@ -127,6 +109,38 @@ def _cell(v: object) -> str:
 
 
 @dataclass
+class Capacity:
+    """Tier capacity given as requests or bytes; materialize fills both."""
+
+    requests: int | None = None
+    bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        assert (self.requests is None) != (self.bytes is None), (
+            "exactly one of requests or bytes must be set"
+        )
+
+    def get_num_requests(self) -> int:
+        assert self.requests is not None, "not materialized"
+        return self.requests
+
+    def get_num_bytes(self) -> int:
+        assert self.bytes is not None, "not materialized"
+        return self.bytes
+
+    def materialize(self, per_request_bytes: float) -> None:
+        if self.bytes is None:
+            assert self.requests is not None
+            self.bytes = int(self.requests * per_request_bytes)
+        if self.requests is None:
+            assert self.bytes is not None
+            self.requests = int(self.bytes // per_request_bytes)
+
+    def is_materialized(self) -> bool:
+        return all([x is not None for x in [self.bytes, self.requests]])
+
+
+@dataclass
 class Scenario:
     """One benchmark configuration; add entries to SCENARIOS to extend."""
 
@@ -135,48 +149,71 @@ class Scenario:
     concurrency: int
     offload_block_size: int  # KV block_size (tokens) written to the FS tier
     prefix_tokens: int  # shared prefix length (tokens) driven into the FS tier
-    cpu_bytes: int
-    gpu_bytes: int  # total GPU KV bytes across all TP ranks
+    gpu: Capacity  # total GPU KV across all TP ranks
+    cpu: Capacity  # whole-model CPU tier budget
     isl_tokens: int = BENCH_PROMPT_TOKENS  # per-turn prompt tokens
     phase: str = "prefill"  # PHASES key
+    _block_bytes: float | None = None
 
-    @property
-    def per_request_bytes(self) -> float:
+    def per_request_bytes(self, block_bytes: float) -> float:
         """Last-turn KV footprint of a single request."""
         osl = PHASES[self.phase]
         turns = BENCH_TURNS - 1
         tokens = self.prefix_tokens + turns * self.isl_tokens + turns * osl
-        return tokens / TOKENS_PER_BLOCK * BYTES_PER_BLOCK_64
+        return tokens / BLOCK_SIZE * block_bytes
+
+    def materialize(self, block_bytes: float) -> None:
+        """Resolve each tier's bytes/requests; all four values set after."""
+        self._block_bytes = block_bytes
+        per_request = self.per_request_bytes(block_bytes)
+        self.gpu.materialize(per_request)
+        self.cpu.materialize(per_request)
 
     def kv_size_roofline(self) -> int:
         """Worst-case KV bytes: last-turn footprint per request x concurrency."""
-        return int(self.concurrency * self.per_request_bytes)
-
-    def requests_fitting(self, budget_bytes: int) -> int:
-        """How many concurrent requests fit in the given byte budget."""
-        return int(budget_bytes // self.per_request_bytes)
+        assert self._block_bytes is not None
+        return int(self.concurrency * self.per_request_bytes(self._block_bytes))
 
     def describe(self) -> None:
-        budget = self.gpu_bytes + self.cpu_bytes
-        roofline = self.kv_size_roofline()
-        over = "OVER" if roofline > budget else "under"
-        print(f"{self.name}: {self.desc}")
-        print(
+        """Print what the scenario holds; unmaterialized fields show as '?'."""
+        print(self.describe_str(), end="")
+
+    def describe_str(self) -> str:
+        """describe() as a string; unmaterialized fields show as '?'."""
+
+        def tier_str(t: Capacity) -> str:
+            bytes_s = f"{t.bytes / 1024**3:.1f}G" if t.bytes is not None else "?"
+            reqs_s = t.requests if t.requests is not None else "?"
+            return f"{bytes_s} ({reqs_s} requests)"
+
+        s = f"{self.name}: {self.desc}\n"
+        s += (
             f"  concurrency={self.concurrency} phase={self.phase} "
-            f"offload_block_size={self.offload_block_size}"
+            f"offload_block_size={self.offload_block_size}\n"
         )
-        print(f"  prefix_tokens={self.prefix_tokens} isl_tokens={self.isl_tokens}")
-        print(
-            f"  gpu={self.gpu_bytes / 1024**3:.0f}G"
-            f" cpu={self.cpu_bytes / 1024**3:.0f}G"
-            f" budget={budget / 1024**3:.0f}G"
-        )
-        gpu_fit = self.requests_fitting(self.gpu_bytes)
-        total_fit = self.requests_fitting(budget)
-        print(
-            f"  kv roofline={roofline} bytes ({over} budget) "
-            f"requests_fit: gpu={gpu_fit} gpu+cpu={total_fit}"
-        )
+        s += f"  prefix_tokens={self.prefix_tokens} isl_tokens={self.isl_tokens}\n"
+        s += f"  gpu={tier_str(self.gpu)}\n"
+        s += f"  cpu={tier_str(self.cpu)}\n"
+        if self.gpu.requests is not None:
+            assert self.cpu.requests is not None
+            fits = self.gpu.requests + self.cpu.requests
+            over = "OVER" if self.concurrency > fits else "under"
+            s += (
+                f" requests: need {self.concurrency} vs fits {fits} "
+                f" (gpu {self.gpu.requests}, cpu {self.cpu.requests})"
+                f"  ({over})\n"
+            )
+        if self._block_bytes is not None:
+            assert self.gpu.bytes is not None
+            assert self.cpu.bytes is not None
+            roofline = self.kv_size_roofline()
+            budget = self.gpu.bytes + self.cpu.bytes
+            over = "OVER" if roofline > budget else "under"
+            s += (
+                f"  kv roofline={roofline / 1024**3:.1f}G"
+                f" vs budget={budget / 1024**3:.1f}G ({over})"
+            )
+        return s
 
 
 QUICK = [
@@ -186,8 +223,8 @@ QUICK = [
         concurrency=16,
         offload_block_size=64,
         prefix_tokens=20_000,
-        cpu_bytes=gib(50),
-        gpu_bytes=gib(22),
+        cpu=Capacity(bytes=gib(50)),
+        gpu=Capacity(bytes=gib(22)),
     ),
     Scenario(
         "tight-c32",
@@ -195,8 +232,8 @@ QUICK = [
         concurrency=32,
         offload_block_size=64,
         prefix_tokens=20_000,
-        cpu_bytes=gib(50),
-        gpu_bytes=gib(22),
+        cpu=Capacity(bytes=gib(50)),
+        gpu=Capacity(bytes=gib(22)),
     ),
     Scenario(
         "overflow-c64",
@@ -204,8 +241,8 @@ QUICK = [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=20_000,
-        cpu_bytes=gib(50),
-        gpu_bytes=gib(22),
+        cpu=Capacity(bytes=gib(50)),
+        gpu=Capacity(bytes=gib(22)),
     ),
     Scenario(
         "overflow-c64-mixed",
@@ -214,8 +251,8 @@ QUICK = [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=20_000,
-        cpu_bytes=gib(50),
-        gpu_bytes=gib(22),
+        cpu=Capacity(bytes=gib(50)),
+        gpu=Capacity(bytes=gib(22)),
         phase="mixed",
     ),
     Scenario(
@@ -225,8 +262,8 @@ QUICK = [
         concurrency=16,
         offload_block_size=64,
         prefix_tokens=100_000,
-        cpu_bytes=gib(40),
-        gpu_bytes=gib(20),
+        cpu=Capacity(bytes=gib(40)),
+        gpu=Capacity(bytes=gib(20)),
     ),
 ]
 
@@ -237,8 +274,8 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=1024,
         prefix_tokens=20_000,
-        cpu_bytes=gib(50),
-        gpu_bytes=gib(22),
+        cpu=Capacity(bytes=gib(50)),
+        gpu=Capacity(bytes=gib(22)),
     ),
     Scenario(
         "staging-cpu",
@@ -246,8 +283,8 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=20_000,
-        cpu_bytes=gib(20),
-        gpu_bytes=gib(40),
+        cpu=Capacity(bytes=gib(20)),
+        gpu=Capacity(bytes=gib(40)),
     ),
     Scenario(
         "buffered-cpu",
@@ -255,8 +292,8 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=20_000,
-        cpu_bytes=gib(100),
-        gpu_bytes=gib(40),
+        cpu=Capacity(bytes=gib(100)),
+        gpu=Capacity(bytes=gib(40)),
     ),
     Scenario(
         "large-ctx-large-cpu",
@@ -264,8 +301,8 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=100_000,
-        cpu_bytes=gib(200),
-        gpu_bytes=gib(20),
+        cpu=Capacity(bytes=gib(200)),
+        gpu=Capacity(bytes=gib(20)),
     ),
     Scenario(
         "large-ctx-small-cpu",
@@ -273,8 +310,8 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=100_000,
-        cpu_bytes=gib(40),
-        gpu_bytes=gib(20),
+        cpu=Capacity(bytes=gib(40)),
+        gpu=Capacity(bytes=gib(20)),
     ),
     Scenario(
         "small-ctx-large-cpu",
@@ -282,8 +319,8 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=5_000,
-        cpu_bytes=gib(50),
-        gpu_bytes=gib(10),
+        cpu=Capacity(bytes=gib(50)),
+        gpu=Capacity(bytes=gib(10)),
         isl_tokens=1024,
     ),
     Scenario(
@@ -292,8 +329,8 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=5_000,
-        cpu_bytes=gib(10),
-        gpu_bytes=gib(10),
+        cpu=Capacity(bytes=gib(10)),
+        gpu=Capacity(bytes=gib(10)),
         isl_tokens=1024,
     ),
 ]
@@ -511,7 +548,7 @@ class BenchmarkRun:
             config_path,
             self.run_dir / "vllm.log",
             self.port,
-            self.spec.gpu_bytes // TP_SIZE,
+            self.spec.gpu.get_num_bytes() // TP_SIZE,
         ):
             print("  [4/5] Running guidellm benchmark...")
             result = {
@@ -539,7 +576,7 @@ class BenchmarkRun:
             "kv_role": "kv_both",
             "kv_connector_extra_config": {
                 "spec_name": "TieringOffloadingSpec",
-                "cpu_bytes_to_use": self.spec.cpu_bytes,
+                "cpu_bytes_to_use": self.spec.cpu.get_num_bytes(),
                 "eviction_policy": "lru",
                 "secondary_tiers": [
                     {
@@ -574,15 +611,7 @@ class BenchmarkSession:
             f"(~{len(self.specs) * (self.max_seconds + 120) // 60} min total):"
         )
         for spec in self.specs:
-            roofline = spec.kv_size_roofline()
-            budget = spec.gpu_bytes + spec.cpu_bytes
-            over = "OVER" if roofline > budget else "under"
-            print(
-                f"  {spec.name}: roofline {roofline / 1024**3:.1f}G"
-                f" vs budget {budget / 1024**3:.0f}G"
-                f" (gpu {spec.gpu_bytes / 1024**3:.0f}G"
-                f" + cpu {spec.cpu_bytes / 1024**3:.0f}G) ({over})"
-            )
+            spec.describe()
 
         for i, spec in enumerate(self.specs, 1):
             print(f"\n[{i}/{len(self.specs)}]")
@@ -631,22 +660,8 @@ def compare(session_a: Path, session_b: Path) -> None:
 
 def preflight(fs_dir: Path, port: int) -> None:
     if shutil.which("guidellm") is None:
-        answer = (
-            input(
-                "guidellm not found on PATH. Install it now "
-                "(pip install guidellm)? [y/N] "
-            )
-            .strip()
-            .lower()
-        )
-        if answer != "y":
-            raise RuntimeError("Install guidellm and re-run: pip install guidellm")
-        subprocess.run([sys.executable, "-m", "pip", "install", "guidellm"], check=True)
-        if shutil.which("guidellm") is None:
-            raise RuntimeError(
-                "guidellm was installed but is not on PATH; "
-                "check that it landed in this environment's bin dir."
-            )
+        raise RuntimeError("guidellm not found on PATH (pip install guidellm)")
+
     if shutil.which("vllm") is None:
         raise RuntimeError("vllm not found on PATH")
     probe = socket.socket()
@@ -735,12 +750,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--prefix-tokens", type=int, required=True, help="shared prefix length"
     )
-    run.add_argument(
-        "--cpu-gib", type=float, required=True, help="CPU tier budget in GiB"
-    )
-    run.add_argument(
-        "--gpu-gib", type=float, required=True, help="GPU KV cache size in GiB"
-    )
+    run.add_argument("--cpu-gib", type=float, help="CPU tier budget in GiB")
+    run.add_argument("--gpu-gib", type=float, help="GPU KV cache size in GiB")
+    run.add_argument("--cpu-requests", type=int, help="CPU tier capacity in requests")
+    run.add_argument("--gpu-requests", type=int, help="GPU tier capacity in requests")
     run.add_argument("--isl-tokens", type=int, help="per-turn prompt tokens")
     run.add_argument(
         "--phase", choices=sorted(PHASES), help="prefill or mixed (default: prefill)"
@@ -752,6 +765,14 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("session_a", type=Path, metavar="MAIN_DIR")
     compare_parser.add_argument("session_b", type=Path, metavar="PR_DIR")
     return parser
+
+
+def _resolve_block_bytes() -> float:
+    """BLOCK_BYTES from the environment, else calibrate with a dummy engine."""
+    if BLOCK_BYTES is not None:
+        return float(BLOCK_BYTES)
+    print("BLOCK_BYTES not set; calibrating with a dummy engine...")
+    return gpu_block_bytes_from_engine()
 
 
 def _main() -> None:
@@ -775,18 +796,23 @@ def _main() -> None:
                 concurrency=args.concurrency,
                 offload_block_size=args.offload_block_size,
                 prefix_tokens=args.prefix_tokens,
-                cpu_bytes=gib(args.cpu_gib),
-                gpu_bytes=gib(args.gpu_gib),
+                cpu=Capacity(args.cpu_requests, args.cpu_gib),
+                gpu=Capacity(args.gpu_requests, args.gpu_gib),
                 isl_tokens=args.isl_tokens or BENCH_PROMPT_TOKENS,
                 phase=args.phase or "prefill",
             )
         ]
-        specs[0].describe()
     elif args.command == "bench":
         specs = QUICK if args.quick else SCENARIOS
     else:
         assert args.command == "bench-scenario"
         specs = [by_name[n] for n in args.scenario]
+
+    block_bytes = _resolve_block_bytes()
+    print(f" ===== Using GPU block bytes: {block_bytes} =====")
+    for spec in specs:
+        spec.materialize(block_bytes)
+        spec.describe()
 
     try:
         preflight(args.fs_dir, args.port)
