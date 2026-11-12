@@ -12,6 +12,18 @@ from vllm.model_executor.custom_op import CustomOp
 from .common import ApplyRotaryEmb
 
 
+def _tie_token_dims(positions: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
+    """Return `positions` viewed with the leading token dims of `query`.
+
+    The RoPE IR op is opaque to Dynamo, so nothing else ties these sizes while
+    tracing. They would otherwise get separate symbols that are only unified
+    when the op is lowered, after graph splitting, so the piecewise subgraphs
+    saved on a cold start would take an extra size input that the reloaded
+    graph does not provide on a warm start.
+    """
+    return positions.view(query.shape[: positions.dim()])
+
+
 # --8<-- [start:rotary_embedding]
 @CustomOp.register("rotary_embedding")
 class RotaryEmbeddingBase(CustomOp):
@@ -215,6 +227,8 @@ class RotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A PyTorch-native implementation of forward()."""
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        if torch.compiler.is_compiling():
+            positions = _tie_token_dims(positions, query)
         if key is None:
             query = ir.ops.rotary_embedding_query_only(
                 positions,
@@ -256,6 +270,8 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         # the native fallback) returns new tensors. Under torch.compile inputs
         # are donated to maybe_inplace, so return its outputs instead.
         compiling = torch.compiler.is_compiling()
+        if compiling:
+            positions = _tie_token_dims(positions, query)
         if key is None:
             query_out = ir.ops.rotary_embedding_query_only.maybe_inplace(
                 positions,
