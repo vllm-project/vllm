@@ -3,7 +3,7 @@
 """Gated delta net prefill on RDNA3.5, as a single HIP kernel.
 
 Replaces the cumsum, WY transform, state recurrence and output kernels with
-one launch of ``torch.ops._rocm_C.rdna35_gdn_chunked``.
+one launch of `torch.ops._rocm_C.rdna35_gdn_chunked`.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def is_hip_gdn_supported(
     value: torch.Tensor,
     cu_seqlens: torch.Tensor | None,
 ) -> bool:
-    """Whether :func:`chunk_gdn_hip_fwd` can serve this call.
+    """Whether `chunk_gdn_hip_fwd` can serve this call.
 
     Mirrors every shape and dtype the kernel asserts on, so an unsupported
     call falls back to the Triton kernels instead of raising.
@@ -66,9 +66,9 @@ def chunk_gdn_hip_fwd(
     cu_seqlens: torch.Tensor,
     core_attn_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run the gated delta rule and return ``(output, final_state)``.
+    """Run the gated delta rule and return `(output, final_state)`.
 
-    ``g`` is the raw per-token log decay; the kernel takes the cumsum itself,
+    `g` is the raw per-token log decay; the kernel takes the cumsum itself,
     so this must be called before any chunk-local cumsum.
     """
     head_key_dim = k.shape[-1]

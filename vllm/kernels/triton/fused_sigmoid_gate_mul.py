@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused sigmoid-gate-multiply Triton kernel: ``out = x * sigmoid(gate)``."""
+"""Fused sigmoid-gate-multiply Triton kernel: `out = x * sigmoid(gate)`."""
 
 import torch
 
@@ -42,9 +42,9 @@ def _fused_sigmoid_gate_mul_kernel(
 def fused_sigmoid_gate_mul(
     x: torch.Tensor, gate: torch.Tensor, scale: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """Compute ``x * sigmoid(gate)`` in a single Triton kernel.
+    """Compute `x * sigmoid(gate)` in a single Triton kernel.
 
-    Falls back to the eager ``x * torch.sigmoid(gate)`` sequence unless both
+    Falls back to the eager `x * torch.sigmoid(gate)` sequence unless both
     inputs are same-shape, same-dtype, contiguous 2D CUDA tensors.
 
     Args:

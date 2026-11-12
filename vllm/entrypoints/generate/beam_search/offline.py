@@ -111,7 +111,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
-        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
+        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534
         base_sampling_params = SamplingParams(
             logprobs=2 * beam_width,
             max_tokens=1,
