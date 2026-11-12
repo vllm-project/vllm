@@ -466,12 +466,6 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if isinstance(allof, list) and len(allof) >= 2:
             return True
 
-        # Xgrammar lacks support of multi-branch allOf; accepting it would
-        # silently weaken the schema.
-        allof = obj.get("allOf")
-        if isinstance(allof, list) and len(allof) >= 2:
-            return True
-
         # Recursively check all nested objects and arrays
         for value in obj.values():
             if isinstance(value, dict):
@@ -645,19 +639,6 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         except Exception as e:
             raise VLLMValidationError("Invalid structural tag specification.") from e
 
-        # xgrammar silently ignores some JSON-schema keywords (e.g.
-        # multipleOf) when it compiles a structural tag, so a nested schema
-        # with unsupported features would validate successfully while its
-        # constraint is dropped from the compiled grammar. Mirror the
-        # plain-`json` branch: reject up front so backend="auto" falls back
-        # to guidance/outlines instead of serving the wrong grammar.
-        for schema in _structural_tag_json_schemas(s_tag):
-            if has_xgrammar_unsupported_json_features(schema):
-                raise XgrammarUnsupportedJsonFeaturesError(
-                    "The provided JSON schema contains features not supported "
-                    "by xgrammar."
-                )
-
         try:
             # Using the deprecated method of compiling structural tag
             if "structures" in s_tag:
@@ -674,6 +655,22 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise VLLMValidationError("Invalid structural tag specification.") from e
+
+        # Check nested schemas only after a successful compile. xgrammar
+        # silently ignores some JSON-schema keywords (e.g. multipleOf) when
+        # it compiles a structural tag, so a nested schema with unsupported
+        # features would otherwise validate successfully while its
+        # constraint is dropped from the compiled grammar. Checking before
+        # compilation would let a malformed tag hide behind the feature
+        # error: request-level validation swallows that error (the tag is
+        # well-formed, only its schemas use unsupported features), so the
+        # malformed tag would pass validation.
+        for schema in _structural_tag_json_schemas(s_tag):
+            if has_xgrammar_unsupported_json_features(schema):
+                raise XgrammarUnsupportedJsonFeaturesError(
+                    "The provided JSON schema contains features not supported "
+                    "by xgrammar."
+                )
         return
 
     raise VLLMValidationError(

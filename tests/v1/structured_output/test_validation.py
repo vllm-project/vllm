@@ -394,9 +394,11 @@ def _legacy_structural_tag(schema):
 )
 def test_structural_tag_with_unsupported_json_features_rejected(make_tag):
     """JSON schemas nested in a structural tag get the same xgrammar
-    unsupported-feature check as plain `json` constraints. Without it the tag
-    compiles (xgrammar silently drops e.g. multipleOf) and backend="auto"
-    never falls back, so the model can emit schema-violating output (#58930).
+    unsupported-feature check as plain `json` constraints. The check is what
+    makes explicit `backend="xgrammar"` reject the request and what routes
+    legacy-shaped tags to the guidance backend in `auto` mode (#58930);
+    new-style tags in `auto` mode keep main's behavior (served with xgrammar
+    + warning) because no other backend supports them.
     """
     from vllm.v1.structured_output.backend_xgrammar import (
         XgrammarUnsupportedJsonFeaturesError,
@@ -446,13 +448,37 @@ def test_auto_backend_falls_back_for_structural_tag_unsupported_features():
     assert params.structured_outputs._backend == "guidance"
 
 
-def test_auto_backend_rejects_new_style_structural_tag_unsupported_features():
+def test_auto_keeps_xgrammar_for_new_style_tag_unsupported_features():
     """New-style structural tags with xgrammar-unsupported features cannot
     fall back: the guidance backend only supports the legacy
-    structures/triggers shape, so the request is rejected with a clear error
-    explaining that no backend can enforce the constraint (not the
-    misleading "Invalid grammar specification: 'triggers'" the guidance
-    serializer used to produce)."""
+    structures/triggers shape (#55153, still open). Until a backend can
+    enforce the constraint, `auto` keeps main's behavior — the request is
+    served with xgrammar, which silently drops the unsupported keywords,
+    with a warning — instead of rejecting a request main accepted. This
+    matters because tool parsers (Harmony/gpt-oss, strict tools, Cohere
+    Command) wrap plain response_format schemas into new-style structural
+    tags, so rejecting here would turn working requests into 400s for users
+    who never sent a structural tag.
+    """
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            structural_tag=_new_style_structural_tag(SCHEMA_WITH_MULTIPLE_OF)
+        )
+    )
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend="auto"),
+        tokenizer=object.__new__(TokenizersBackend),
+    )
+    assert params.structured_outputs._backend == "xgrammar"
+    assert params.structured_outputs._backend_was_auto
+
+
+def test_explicit_xgrammar_rejects_new_style_structural_tag_unsupported_features():
+    """With an explicit `backend="xgrammar"` there is no fallback, so a
+    new-style structural tag whose nested schemas use unsupported features
+    is rejected instead of being served with a silently dropped
+    constraint."""
     params = SamplingParams(
         structured_outputs=StructuredOutputsParams(
             structural_tag=_new_style_structural_tag(SCHEMA_WITH_MULTIPLE_OF)
@@ -460,11 +486,11 @@ def test_auto_backend_rejects_new_style_structural_tag_unsupported_features():
     )
     with pytest.raises(
         VLLMValidationError,
-        match="no other structured output backend supports the new-style",
+        match="not supported by xgrammar",
     ):
         params._validate_structured_outputs(
             _StubModelConfig(is_diffusion=False),
-            StructuredOutputsConfig(backend="auto"),
+            StructuredOutputsConfig(backend="xgrammar"),
             tokenizer=object(),
         )
 
@@ -549,7 +575,8 @@ def test_structural_tag_payload_validation_defers_unsupported_features(make_tag)
     nested schemas use xgrammar-unsupported features: at request-parse time
     no backend fallback is possible, so the tag is let through and the
     engine's `auto` backend selection handles it (falling back to guidance
-    where supported). Rejecting here would make the fallback unreachable
+    for legacy-shaped tags, or keeping xgrammar with a warning for
+    new-style tags). Rejecting here would make the fallback unreachable
     from the OpenAI API."""
     from vllm.entrypoints.generate.base.protocol import validate_structural_tag_payload
 
@@ -564,6 +591,36 @@ def test_structural_tag_payload_validation_defers_unsupported_features(make_tag)
         match="Invalid response_format structural_tag specification",
     ):
         validate_structural_tag_payload('{"nope": 1}', parameter="response_format")
+
+
+def test_structural_tag_payload_rejects_malformed_tag_with_unsupported_features():
+    """Nested schemas are checked only after a successful compile, so a
+    malformed tag that also contains e.g. multipleOf is still rejected as a
+    bad request instead of being let through because the feature error is
+    swallowed before compilation runs."""
+    from vllm.entrypoints.generate.base.protocol import validate_structural_tag_payload
+
+    # Legacy shape whose second structure lacks "schema": compilation fails,
+    # while the first structure's schema contains multipleOf.
+    malformed = json.dumps(
+        {
+            "type": "structural_tag",
+            "structures": [
+                {
+                    "begin": "Answer: ",
+                    "schema": SCHEMA_WITH_MULTIPLE_OF,
+                    "end": "",
+                },
+                {"begin": "Other: ", "end": ""},
+            ],
+            "triggers": ["Answer: "],
+        }
+    )
+    with pytest.raises(
+        VLLMValidationError,
+        match="Invalid response_format structural_tag specification",
+    ):
+        validate_structural_tag_payload(malformed, parameter="response_format")
 
 
 def test_guidance_backend_rejects_new_style_structural_tag_clearly():
@@ -582,6 +639,8 @@ def test_guidance_backend_rejects_new_style_structural_tag_clearly():
         match="does not support new-style structural tags",
     ):
         validate_guidance_grammar(params, tokenizer=None)
+
+
 # ================================================
 # Test validate_structured_outputs functionality
 # ================================================
