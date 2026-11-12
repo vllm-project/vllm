@@ -12,6 +12,7 @@ from transformers import NemotronHConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.model_executor.layers.draft_vocab import DraftVocab
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -252,10 +253,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
         self.pattern_len = len(self.pattern_str)
         assert self.pattern_len > 0
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        self.embed_tokens: VocabParallelEmbedding | None = None
 
         # Build flat list of layers
         self.layers = torch.nn.ModuleDict()
@@ -333,10 +331,10 @@ class NemotronHMultiTokenPredictor(nn.Module):
 class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
     """NemotronH MTP model."""
 
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"language_model.": ""},
-        orig_to_new_substr={"embeddings": "embed_tokens"},
-    )
+    has_own_embed_tokens = False
+    has_own_lm_head = False
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"language_model.": ""})
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -372,16 +370,10 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             prefix=maybe_prefix(prefix, "mtp"),
         )
 
-        # LM head for generating logits
-        self.has_own_lm_head = False
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        self.lm_head: ParallelLMHead | None = None
 
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        self.draft_vocab = DraftVocab(self.logits_processor, self.config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -424,12 +416,18 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         assert self.lm_head is not None, (
             "lm_head not initialized - must be shared from target model"
         )
-        return self.logits_processor(self.lm_head, hidden_states)
+        return self.draft_vocab.compute_logits(self.lm_head, hidden_states)
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.lm_head is not None
+        return self.draft_vocab.get_top_tokens(self.lm_head, hidden_states)
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
-        """Only MTP, embedding and LM head weights are loaded."""
+        """Only MTP weights are loaded: the embedding and LM head are the
+        target's, shared after loading, so a target refit also updates the
+        drafter."""
         name = name.removeprefix("language_model.")
-        return not name.startswith(("mtp.", "lm_head.")) and "embeddings" not in name
+        return not name.startswith("mtp.")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
@@ -463,19 +461,11 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             name = name.removeprefix("language_model.")
             if self.is_unused_checkpoint_weight(name):
                 continue
-            is_lm_head_weight = name.startswith("lm_head.")
-            if is_lm_head_weight:
-                self.has_own_lm_head = True
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
                 continue
 
             name = name.replace("mtp.layers.", "model.layers.")
-
-            if "embeddings" in name:
-                name = name.replace("embeddings", "embed_tokens")
-                if name.startswith("backbone."):
-                    name = name.replace("backbone.", "model.")
 
             if "scale" in name or "zero_point" in name:
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
@@ -556,10 +546,5 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             assert weight_loader is not None
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        if not self.has_own_lm_head:
-            loaded_params.update(
-                name for name in params_dict if name.startswith("lm_head.")
-            )
 
         return loaded_params

@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
 
+from vllm import LLM
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
@@ -227,7 +230,7 @@ class TestUpdateConnectorOutput:
         """Test that _kv_cache_events is set when it was None."""
         kv_events = LMCacheKVEvents(num_workers=1)
         event = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1, 2],
             block_size=16,
@@ -248,7 +251,7 @@ class TestUpdateConnectorOutput:
         # Set up existing events
         existing_events = LMCacheKVEvents(num_workers=2)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -264,7 +267,7 @@ class TestUpdateConnectorOutput:
         # Create new events to add
         new_events = LMCacheKVEvents(num_workers=1)
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -295,7 +298,7 @@ class TestUpdateConnectorOutput:
         # Create new events from 3 workers
         new_events = LMCacheKVEvents(num_workers=3)
         event = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -317,7 +320,7 @@ class TestUpdateConnectorOutput:
         # First update
         events1 = LMCacheKVEvents(num_workers=1)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -332,7 +335,7 @@ class TestUpdateConnectorOutput:
         # Second update
         events2 = LMCacheKVEvents(num_workers=2)
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -347,7 +350,7 @@ class TestUpdateConnectorOutput:
         # Third update
         events3 = LMCacheKVEvents(num_workers=1)
         event3 = BlockStored(
-            block_hashes=["hash3"],
+            block_hashes=[b"hash3"],
             parent_block_hash=None,
             token_ids=[3],
             block_size=16,
@@ -369,7 +372,7 @@ class TestUpdateConnectorOutput:
         # First update with actual events
         events1 = LMCacheKVEvents(num_workers=1)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -409,7 +412,7 @@ class TestTakeEvents:
         # Set up events
         kv_events = LMCacheKVEvents(num_workers=1)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -418,7 +421,7 @@ class TestTakeEvents:
             lora_name=None,
         )
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -445,7 +448,7 @@ class TestTakeEvents:
         # Set up events from multiple workers
         kv_events = LMCacheKVEvents(num_workers=3)
         common_event = BlockStored(
-            block_hashes=["hash_common"],
+            block_hashes=[b"hash_common"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -454,7 +457,7 @@ class TestTakeEvents:
             lora_name=None,
         )
         uncommon_event = BlockStored(
-            block_hashes=["hash_uncommon"],
+            block_hashes=[b"hash_uncommon"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -485,7 +488,7 @@ class TestTakeEvents:
         # First call with events
         kv_events1 = LMCacheKVEvents(num_workers=1)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -508,7 +511,7 @@ class TestTakeEvents:
         # Third call after adding new events
         kv_events2 = LMCacheKVEvents(num_workers=1)
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -528,7 +531,7 @@ class TestTakeEvents:
         # Set up events from 2 workers with no common events
         kv_events = LMCacheKVEvents(num_workers=2)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -537,7 +540,7 @@ class TestTakeEvents:
             lora_name=None,
         )
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -688,8 +691,8 @@ class TestIntegrationScenarios:
 
         # Define common and unique events
         common_event = BlockStored(
-            block_hashes=["hash_common"],
-            parent_block_hash="parent_common",
+            block_hashes=[b"hash_common"],
+            parent_block_hash=b"parent_common",
             token_ids=[1, 2, 3],
             block_size=16,
             lora_id=None,
@@ -698,8 +701,8 @@ class TestIntegrationScenarios:
         )
 
         worker1_unique_event = BlockStored(
-            block_hashes=["hash_worker1"],
-            parent_block_hash="parent_w1",
+            block_hashes=[b"hash_worker1"],
+            parent_block_hash=b"parent_w1",
             token_ids=[4, 5],
             block_size=16,
             lora_id=None,
@@ -708,8 +711,8 @@ class TestIntegrationScenarios:
         )
 
         worker2_unique_event = BlockStored(
-            block_hashes=["hash_worker2"],
-            parent_block_hash="parent_w2",
+            block_hashes=[b"hash_worker2"],
+            parent_block_hash=b"parent_w2",
             token_ids=[6, 7],
             block_size=16,
             lora_id=None,
@@ -718,8 +721,8 @@ class TestIntegrationScenarios:
         )
 
         worker3_unique_event = BlockStored(
-            block_hashes=["hash_worker3"],
-            parent_block_hash="parent_w3",
+            block_hashes=[b"hash_worker3"],
+            parent_block_hash=b"parent_w3",
             token_ids=[8, 9],
             block_size=16,
             lora_id=None,
@@ -741,13 +744,12 @@ class TestIntegrationScenarios:
         worker2_events.add_events([common_event, worker3_unique_event])
 
         # Create ModelRunnerOutput instances for each worker
-        worker_outputs = []
+        worker_outputs: list[ModelRunnerOutput | None] = []
         for i, worker_events in enumerate(
             [worker0_events, worker1_events, worker2_events]
         ):
             output = ModelRunnerOutput(
                 req_ids=[f"req_{i}"],
-                req_id_to_index={f"req_{i}": 0},
                 sampled_token_ids=[[123]],  # dummy token
                 logprobs=None,
                 prompt_logprobs_dict={},
@@ -766,6 +768,8 @@ class TestIntegrationScenarios:
 
         # Use the real aggregation mechanism (like MultiprocExecutor.execute_model)
         aggregated_output = aggregator.aggregate(worker_outputs, output_rank=0)
+        assert aggregated_output is not None
+        assert aggregated_output.kv_connector_output is not None
         kv_cache_events = aggregated_output.kv_connector_output.kv_cache_events
 
         assert isinstance(kv_cache_events, LMCacheKVEvents)
@@ -782,8 +786,8 @@ class TestIntegrationScenarios:
         assert aggregated_events[0] == common_event
 
         # Verify the common event properties
-        assert aggregated_events[0].block_hashes == ["hash_common"]
-        assert aggregated_events[0].parent_block_hash == "parent_common"
+        assert aggregated_events[0].block_hashes == [b"hash_common"]
+        assert aggregated_events[0].parent_block_hash == b"parent_common"
         assert aggregated_events[0].token_ids == [1, 2, 3]
 
 
@@ -814,3 +818,30 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
         connector.clear_connector_metadata()
 
     assert connector._lmcache_engine.layerwise_storers == []
+
+
+def test_engine_shutdown_stops_lmcache_threads(monkeypatch):
+    """LMCache starts non-daemon threads. If engine shutdown does not stop
+    them, the EngineCore process cannot exit and is force-killed."""
+    pytest.importorskip("lmcache")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("LMCACHE_MAX_LOCAL_CPU_SIZE", "1")
+    threads_before = set(threading.enumerate())
+
+    llm = LLM(
+        model="Qwen/Qwen3-0.6B",
+        enforce_eager=True,
+        gpu_memory_utilization=0.3,
+        max_model_len=128,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="LMCacheConnectorV1", kv_role="kv_both"
+        ),
+    )
+    llm.llm_engine.engine_core.shutdown()
+
+    leftover = [
+        t.name
+        for t in threading.enumerate()
+        if not t.daemon and t not in threads_before
+    ]
+    assert leftover == []

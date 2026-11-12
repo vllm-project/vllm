@@ -3,23 +3,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Detect the manylinux platform tag for a wheel and rename it in place.
 
-vLLM's build images produce wheels with the generic ``linux_<arch>`` platform
-tag, which installers like ``pip`` won't accept off PyPI/our index. We need to
-rewrite the platform tag to the appropriate ``manylinux_<major>_<minor>_<arch>``
+vLLM's build images produce wheels with the generic `linux_<arch>` platform
+tag, which installers like `pip` won't accept off PyPI/our index. We need to
+rewrite the platform tag to the appropriate `manylinux_<major>_<minor>_<arch>`
 before uploading.
 
-Historically the tag was hard-coded per build (``manylinux_2_31`` for the
-Ubuntu 20.04-based image, ``manylinux_2_35`` for the Ubuntu 22.04-based
+Historically the tag was hard-coded per build (`manylinux_2_31` for the
+Ubuntu 20.04-based image, `manylinux_2_35` for the Ubuntu 22.04-based
 images). That is brittle: bumping the base image silently produces wheels
-labelled with the wrong glibc requirement. This script asks ``auditwheel``
+labelled with the wrong glibc requirement. This script asks `auditwheel`
 to derive the tag from the symbol versions actually referenced by the
 binaries inside the wheel, so the label tracks reality.
 
-We can't simply call ``auditwheel repair`` -- it tries to graft external
+We can't simply call `auditwheel repair` -- it tries to graft external
 shared libraries into the wheel and fails on vLLM's CUDA/cuBLAS dependencies.
-Instead we use ``auditwheel.wheel_abi.analyze_wheel_abi`` directly, which is
-the same call that powers ``auditwheel show``, and read off
-``winfo.sym_policy.name``.
+Instead we use `auditwheel.wheel_abi.analyze_wheel_abi` directly, which is
+the same call that powers `auditwheel show`, and read off
+`winfo.sym_policy.name`.
 
 Usage:
     detect-manylinux-tag.py <wheel_path>
@@ -46,10 +46,10 @@ from auditwheel.wheeltools import get_wheel_architecture, get_wheel_libc
 def detect_platform_tag(wheel_path: Path) -> str:
     """Return the most precise platform tag the wheel is consistent with.
 
-    Mirrors ``auditwheel show`` but returns ``sym_policy`` rather than
-    ``overall_policy``: we only care about the glibc symbol versions used,
+    Mirrors `auditwheel show` but returns `sym_policy` rather than
+    `overall_policy`: we only care about the glibc symbol versions used,
     not about other policy axes (ISA extensions, blacklist, etc.) that
-    ``overall_policy`` folds in.
+    `overall_policy` folds in.
     """
     fn = wheel_path.name
 

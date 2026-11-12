@@ -1,16 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Draft lm_heads that cover a subset of the target vocabulary."""
+"""Draft lm_heads that cover a subset of the target vocabulary.
+
+`DraftVocab` serves two kinds of drafters:
+
+- Checkpoints with a pruned draft lm_head and `draft_id_to_target_id` offsets
+  (EAGLE3, DFlash, DSpark). This used to live in each model file.
+- MTP drafters that share the target's full lm_head, restricted at load time
+  by `speculative_config.draft_token_map`. On bandwidth-bound GPUs the full
+  head dominates the draft step, so each draft token computes exact logits
+  only for:
+  1. the listed rows, a fixed list of frequent tokens, and
+  2. optionally `draft_token_map_dynamic_rows` more rows per draft token,
+     picked by a rank-256 projection of the lm_head (built from its weights
+     at load time), which recovers what the list misses, e.g. other languages.
+
+Either way `compute_logits` returns target-vocabulary logits that are `-inf`
+outside the subset, so speculators need no special handling. The target still
+verifies with its full head, so only the acceptance length can change.
+"""
 
 import json
 from collections.abc import Callable, Iterable, Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -34,14 +52,14 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.model_executor.kernels.linear import (
-        FP8ScaledMMLinearKernel,
-        NvFp4LinearKernel,
-    )
+    from vllm.model_executor.kernels.linear import FP8ScaledMMLinearKernel
 
 logger = init_logger(__name__)
 
 _UNQUANTIZED = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+# Rank of the lm_head projection that scores the dynamic rows. On Qwen3.8
+# MTP, rank 256 alone puts 97.5% of the greedy draft tokens in its top 16k.
+_DYNAMIC_RANK = 256
 
 
 def load_draft_token_ids(path: str, extra_ids: list[int]) -> torch.Tensor:
@@ -107,15 +125,17 @@ def _quantize_rows(
 
 
 class _Rows(ReplicatedLinear):
-    """lm_head rows as a linear layer, optionally weight-only quantized.
-
-    FP8 keeps one scale per row and NVFP4 one E4M3 scale per 16 weights; both
-    run on the platform's weight-only kernel.
-    """
+    """lm_head rows as a linear layer, optionally FP8 weight-only with one scale
+    per row on the platform's weight-only kernel."""
 
     weight: nn.Parameter
 
     def __init__(self, weight: torch.Tensor, quantization: str | None):
+        num_rows = weight.shape[0]
+        # Weight-only kernels can require aligned output rows, which the
+        # dynamic candidates need not be.
+        if quantization is not None and (padding := -num_rows % 8):
+            weight = F.pad(weight, (0, 0, 0, padding))
         with torch.device(weight.device):
             super().__init__(
                 weight.shape[1],
@@ -125,48 +145,41 @@ class _Rows(ReplicatedLinear):
                 return_bias=False,
                 disable_tp=True,
             )
-        self.kernel: FP8ScaledMMLinearKernel | NvFp4LinearKernel | None = None
+        self.num_rows = num_rows
+        self.kernel: FP8ScaledMMLinearKernel | None = None
         if quantization is None:
             self.weight_loader(self.weight, weight)
             self.quant_method.process_weights_after_loading(self)
             return
-        from vllm.model_executor.kernels.linear import (
-            init_nvfp4_linear_kernel,
-            init_wfp8_a16_linear_kernel,
-        )
+        assert quantization == "fp8"
+        from vllm.model_executor.kernels.linear import init_wfp8_a16_linear_kernel
 
         # What a quantization scheme sets on its layer in create_weights.
         self.input_size_per_partition = self.input_size
         self.output_size_per_partition = self.output_size
         self.logical_widths = self.output_partition_sizes
         self.orig_dtype = self.params_dtype
-        quantized = _quantize_rows(weight, quantization)
-        if quantization == "fp8":
-            self.kernel = init_wfp8_a16_linear_kernel(
-                weight_quant_key=kFp8StaticChannelSym,
-                activation_quant_key=kFp8DynamicTensorSym,
-                weight_shape=tuple(weight.shape),
-                input_dtype=weight.dtype,
-                out_dtype=weight.dtype,
-            )
-            # The scaled-mm kernels take the weight as (K, N), tagged as such.
-            self.weight = nn.Parameter(quantized[0].t(), requires_grad=False)
-            self.weight.input_dim = 0
-            self.weight.output_dim = 1
-            self.weight_scale = nn.Parameter(quantized[1], requires_grad=False)
-            self.input_scale = None
-            self.weight_block_size = None
-        else:
-            self.kernel = init_nvfp4_linear_kernel(use_a16=True)
-            self.weight = nn.Parameter(quantized[0], requires_grad=False)
-            self.weight_scale = nn.Parameter(quantized[1], requires_grad=False)
-            self.weight_global_scale = nn.Parameter(quantized[2], requires_grad=False)
+        weight_fp8, weight_scale = _quantize_rows(weight, quantization)
+        self.kernel = init_wfp8_a16_linear_kernel(
+            weight_quant_key=kFp8StaticChannelSym,
+            activation_quant_key=kFp8DynamicTensorSym,
+            weight_shape=tuple(weight.shape),
+            input_dtype=weight.dtype,
+            out_dtype=weight.dtype,
+        )
+        # The scaled-mm kernels take the weight as (K, N), tagged as such.
+        self.weight = nn.Parameter(weight_fp8.t(), requires_grad=False)
+        self.weight.input_dim = 0
+        self.weight.output_dim = 1
+        self.weight_scale = nn.Parameter(weight_scale, requires_grad=False)
+        self.input_scale = None
+        self.weight_block_size = None
         self.kernel.process_weights_after_loading(self)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         if self.kernel is None:
             return self.quant_method.apply(self, x)
-        return self.kernel.apply_weights(self, x)
+        return self.kernel.apply_weights(self, x)[..., : self.num_rows]
 
 
 def _listed_rows(
@@ -178,7 +191,7 @@ def _listed_rows(
     `head` loaded before repacking, and the others are copied. The rows then
     go through the head's quantization method like any other loaded layer.
     """
-    device = next(head.parameters()).device
+    device = head.weight.device
     with set_default_torch_dtype(head.params_dtype), torch.device(device):
         rows = ParallelLMHead(
             ids.numel(),
@@ -186,11 +199,15 @@ def _listed_rows(
             params_dtype=head.params_dtype,
             quant_config=head.quant_config,
             prefix=head.prefix,
-            disable_tp=head.tp_size == 1,
+            disable_tp=True,
         )
     params = dict(rows.named_parameters())
     for name, weight in weights.items():
         param = params.get(name)
+        if param is None:
+            # Not a parameter of the head either, so its loader skipped it too
+            # (e.g. the input_scale of a weight-only head).
+            continue
         output_dim = getattr(param, "output_dim", None)
         if output_dim == 0 and getattr(param, "packed_dim", None) != 0:
             if weight.shape[0] != head.org_vocab_size:
@@ -198,13 +215,13 @@ def _listed_rows(
                     f"lm_head.{name} of shape {tuple(weight.shape)} is not "
                     "indexed by output row."
                 )
-            weight = weight.index_select(0, ids)
-        elif param is None or output_dim is not None:
+            weight = weight.index_select(0, ids.to(weight.device))
+        elif output_dim is not None:
             raise ValueError(
                 f"draft_token_map cannot take rows of lm_head.{name} for "
                 f"{type(rows.quant_method).__name__}."
             )
-        param.weight_loader(param, weight.to(device))  # type: ignore[union-attr]
+        param.weight_loader(param, weight.to(device))
     rows.quant_method.process_weights_after_loading(rows)
     return rows
 
@@ -236,6 +253,9 @@ def _nvfp4_head(
     return packed, scales, global_scale.float().reshape(1)
 
 
+# The two kernels below compute `x[n] @ weight[ids[n, j]]` for the dynamic
+# rows, reading only the picked rows instead of gathering them into a copy.
+# One program handles BLOCK_ROWS picked rows of one token.
 @triton.jit
 def _gather_rows_gemv_kernel(
     x_ptr,
@@ -300,6 +320,8 @@ def _gather_rows_gemv_nvfp4_kernel(
         bcols = start + tl.arange(0, BLOCK_BYTES)
         bmask = bcols < num_bytes
         mask = row_mask[:, None] & bmask[None, :]
+        # Each byte packs two E2M1 values (low nibble first) and every 8 bytes
+        # (16 values) share one E4M3 block scale.
         b = tl.load(
             packed_ptr + ids[:, None] * packed_stride + bcols[None, :],
             mask=mask,
@@ -376,37 +398,6 @@ def gather_rows_gemv(
     return out
 
 
-@triton.jit
-def _scatter_draft_logits_kernel(
-    out_ptr,
-    listed_ptr,
-    token_ids_ptr,
-    picked_ptr,
-    picks_ptr,
-    candidate_ids_ptr,
-    vocab_size,
-    num_listed,
-    num_picked,
-    BLOCK: tl.constexpr,
-):
-    token = tl.program_id(0)
-    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    is_listed = cols < num_listed
-    is_picked = (cols >= num_listed) & (cols < num_listed + num_picked)
-    pcols = tl.where(is_picked, cols - num_listed, 0)
-    listed_id = tl.load(token_ids_ptr + cols, mask=is_listed, other=0)
-    listed = tl.load(listed_ptr + token * num_listed + cols, mask=is_listed, other=0.0)
-    pick = tl.load(picks_ptr + token * num_picked + pcols, mask=is_picked, other=0)
-    picked_id = tl.load(candidate_ids_ptr + pick, mask=is_picked, other=0)
-    picked = tl.load(picked_ptr + token * num_picked + pcols, mask=is_picked, other=0.0)
-    ids = tl.where(is_listed, listed_id, picked_id).to(tl.int64)
-    tl.store(
-        out_ptr + token * vocab_size + ids,
-        tl.where(is_listed, listed, picked),
-        mask=is_listed | is_picked,
-    )
-
-
 def scatter_draft_logits(
     vocab_size: int,
     listed: torch.Tensor,
@@ -418,40 +409,16 @@ def scatter_draft_logits(
     """Target-vocabulary logits, `-inf` outside the listed and picked rows.
 
     `out[n, token_ids] = listed[n]` and `out[n, candidate_ids[picks[n]]] =
-    picked[n]`, in one kernel on CUDA.
+    picked[n]`.
     """
     out = listed.new_full((listed.shape[0], vocab_size), float("-inf"))
-    if not listed.is_cuda:
-        out[:, token_ids] = listed
-        out.scatter_(1, candidate_ids[picks], picked)
-        return out
-    num_listed, num_picked = listed.shape[1], picked.shape[1]
-    block = 1024
-    grid = (listed.shape[0], triton.cdiv(num_listed + num_picked, block))
-    _scatter_draft_logits_kernel[grid](
-        out,
-        listed.contiguous(),
-        token_ids,
-        picked.contiguous(),
-        picks.contiguous(),
-        candidate_ids,
-        vocab_size,
-        num_listed,
-        num_picked,
-        BLOCK=block,
-    )
+    out[:, token_ids] = listed
+    out.scatter_(1, candidate_ids[picks], picked)
     return out
 
 
 class DraftVocab:
     """Draft logits over a subset of the target vocabulary.
-
-    The subset is either a pruned draft lm_head with `draft_id_to_target_id`
-    offsets (EAGLE3 and DFlash checkpoints), or the rows of the drafter's full
-    lm_head listed in `speculative_config.draft_token_map` (see
-    `load_token_map`). `compute_logits` always returns target-vocabulary
-    logits that are `-inf` outside the subset, so speculators need no special
-    handling.
 
     Args:
         logits_processor: Logits processor of the draft lm_head.
@@ -483,10 +450,7 @@ class DraftVocab:
         # Set by load_token_map.
         self.token_ids: torch.Tensor | None = None
         self.rows: _Rows | ParallelLMHead | None = None
-        self.tp_size = 1
-        self.valid_cols: torch.Tensor | None = None
         self.num_dynamic_rows = 0
-        self.gather_rows: tuple[torch.Tensor, ...] = ()
 
     def compute_logits(
         self, lm_head: VocabParallelEmbedding, hidden_states: torch.Tensor
@@ -564,8 +528,7 @@ class DraftVocab:
         lm_head: VocabParallelEmbedding,
         token_ids: torch.Tensor,
         dynamic_rows: int = 0,
-        dynamic_rank: int = 256,
-        quantization: str | None = None,
+        quantization: Literal["fp8", "nvfp4"] | None = None,
     ) -> None:
         """Restrict drafting to the `token_ids` rows of `lm_head`.
 
@@ -579,9 +542,10 @@ class DraftVocab:
             lm_head: The drafter's full-vocabulary lm_head.
             token_ids: Sorted, unique target ids of the listed rows.
             dynamic_rows: Rows outside the list picked per draft token.
-            dynamic_rank: Rank of the projection that scores those rows.
-            quantization: "fp8" or "nvfp4" for weight-only quantized rows of
-                an unquantized `lm_head`.
+            quantization: `draft_lm_head_quantization`, applied to the copied
+                rows of an unquantized `lm_head` only. The listed rows are a
+                quantized lm_head copy, see `quantized_lm_head_copy`; the
+                dynamic rows are weight-only.
 
         """
         head = getattr(lm_head, "base_layer", lm_head)
@@ -612,10 +576,12 @@ class DraftVocab:
             )
         if quantized and quantization is not None:
             raise ValueError(
-                "draft_token_map_quantization applies to unquantized lm_heads. "
+                "draft_lm_head_quantization applies to unquantized lm_heads. "
                 "This lm_head is quantized in the checkpoint and its rows keep "
                 "that format."
             )
+        if head.tp_size > 1:
+            raise ValueError("draft_token_map does not support tensor parallelism.")
 
         vocab_size = head.org_vocab_size
         bad = token_ids[(token_ids < 0) | (token_ids >= vocab_size)]
@@ -626,61 +592,32 @@ class DraftVocab:
             )
 
         device = head.weight.device
+        self.token_ids = token_ids.to(device)
+        self.num_dynamic_rows = dynamic_rows
         if quantized:
             assert isinstance(head, ParallelLMHead)
-            # The rows form their own vocab-parallel head, whose gathered
-            # logits end in padding columns.
-            self.rows = _listed_rows(head, loaded, token_ids)
-            tp_size = self.rows.tp_size
-            if self.rows.num_embeddings_padded > token_ids.numel():
-                self.valid_cols = torch.arange(token_ids.numel(), device=device)
             assert head.quant_config is not None
+            self.rows = _listed_rows(head, loaded, token_ids)
             row_format: str = head.quant_config.get_name()
+            if dynamic_rows > 0:
+                self._init_quantized_dynamic_rows(head, loaded)
         else:
-            tp_size = self._load_unquantized_rows(head, token_ids, quantization)
-            row_format = quantization or str(head.weight.dtype)
-        self.token_ids = token_ids.to(device)
-        self.tp_size = tp_size
-
-        self.num_dynamic_rows = dynamic_rows
-        if dynamic_rows > 0:
-            if tp_size > 1:
-                raise ValueError(
-                    "draft_token_map_dynamic_rows does not support tensor "
-                    "parallelism yet."
-                )
-            # Quantized gather rows hold only the candidates and are indexed
-            # by position.
-            if quantized:
-                packed, scales, global_scale = _nvfp4_head(loaded, head.embedding_dim)
-                dtype = head.params_dtype
-
-                def rows_of(ids: torch.Tensor) -> torch.Tensor:
-                    ids = ids.cpu()
-                    return dequantize_to_dtype(
-                        packed[ids].to(device),
-                        scales[ids].to(device),
-                        global_scale.to(device),
-                        dtype,
-                        _NVFP4_GROUP,
-                        swizzle=False,
-                    )
-
-                self._init_dynamic_rows(rows_of, vocab_size, dynamic_rank, True)
-                ids = self.candidate_ids.cpu()
-                self.gather_rows = (
-                    packed[ids].to(device),
-                    scales[ids].to(device),
-                    global_scale.to(device),
-                )
+            weight = head.weight[:vocab_size]
+            if quantization is None:
+                self.rows = _Rows(weight[self.token_ids], None)
             else:
-                weight = head.weight[:vocab_size]
-                self._init_dynamic_rows(
-                    lambda ids: weight[ids],
-                    vocab_size,
-                    dynamic_rank,
-                    quantization is not None,
+                from vllm.model_executor.layers.quantization.online.lm_head import (
+                    quantized_lm_head_copy,
                 )
+
+                self.rows = quantized_lm_head_copy(head, quantization, self.token_ids)
+            row_format = quantization or str(weight.dtype)
+            if dynamic_rows > 0:
+                self._init_dynamic_rows(
+                    lambda ids: weight[ids], vocab_size, quantization is not None
+                )
+                # Quantized copies hold only the candidates and are indexed by
+                # position.
                 self.gather_rows = (
                     (weight,)
                     if quantization is None
@@ -695,62 +632,52 @@ class DraftVocab:
             row_format,
         )
 
-    def _load_unquantized_rows(
-        self,
-        head: VocabParallelEmbedding,
-        token_ids: torch.Tensor,
-        quantization: str | None,
-    ) -> int:
-        """Copy the listed rows out of an unquantized head; returns TP size."""
-        # Each TP rank keeps the listed rows of its own vocab shard, padded to
-        # a common count. The gathered logits drop the padding columns.
-        tp_size, tp_rank = head.tp_size, head.tp_rank
-        rank_ids = []
-        for rank in range(tp_size):
-            shard = type(head)._get_indices(
-                head.num_embeddings_padded,
-                head.org_vocab_size_padded,
-                head.num_embeddings,
-                head.org_vocab_size,
-                rank,
-                tp_size,
-            )
-            in_shard = (token_ids >= shard.org_vocab_start_index) & (
-                token_ids < shard.org_vocab_end_index
-            )
-            rank_ids.append(token_ids[in_shard] - shard.org_vocab_start_index)
-        rows_per_rank = max(ids.numel() for ids in rank_ids)
-        valid = torch.zeros(tp_size, rows_per_rank, dtype=torch.bool)
-        for rank, ids in enumerate(rank_ids):
-            valid[rank, : ids.numel()] = True
+    def _init_quantized_dynamic_rows(
+        self, head: ParallelLMHead, loaded: dict[str, torch.Tensor]
+    ) -> None:
+        """Dynamic rows of a ModelOpt NVFP4 lm_head, from its packed rows."""
+        packed, scales, global_scale = _nvfp4_head(loaded, head.embedding_dim)
+        device = head.weight.device
+        dtype = head.params_dtype
 
-        weight = head.weight
-        rows = weight.index_select(0, rank_ids[tp_rank].to(weight.device))
-        pad = rows.new_zeros(rows_per_rank - rows.shape[0], rows.shape[1])
-        self.rows = _Rows(torch.cat([rows, pad]), quantization)
-        if not valid.all():
-            self.valid_cols = valid.flatten().nonzero()[:, 0].to(weight.device)
-        return tp_size
+        def rows_of(ids: torch.Tensor) -> torch.Tensor:
+            ids = ids.cpu()
+            return dequantize_to_dtype(
+                packed[ids].to(device),
+                scales[ids].to(device),
+                global_scale.to(device),
+                dtype,
+                _NVFP4_GROUP,
+                swizzle=False,
+            )
+
+        self._init_dynamic_rows(rows_of, head.org_vocab_size, True)
+        ids = self.candidate_ids.cpu()
+        self.gather_rows = (
+            packed[ids].to(device),
+            scales[ids].to(device),
+            global_scale.to(device),
+        )
 
     def _init_dynamic_rows(
         self,
         rows_of: Callable[[torch.Tensor], torch.Tensor],
         vocab_size: int,
-        rank: int,
         quantize_scorer: bool,
     ) -> None:
-        """Score the rows outside the list with a rank-`rank` lm_head factor.
+        """Score the rows outside the list with a rank-256 lm_head factor.
 
-        The basis is the top right singular vectors of the lm_head, so
+        The basis is the top right singular vectors of the lm_head (the top
+        eigenvectors of `W^T W`), so
         `(x @ basis) @ (weight[i] @ basis)` approximates the logit of row `i`.
         The best `num_dynamic_rows` per token then get exact logits. The rows
         come from `rows_of(ids)` one chunk at a time.
         """
         assert self.token_ids is not None
         device = self.token_ids.device
-        is_static = torch.zeros(vocab_size, dtype=torch.bool, device=device)
-        is_static[self.token_ids] = True
-        self.candidate_ids = (~is_static).nonzero()[:, 0]
+        is_listed = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        is_listed[self.token_ids] = True
+        self.candidate_ids = (~is_listed).nonzero()[:, 0]
         if self.num_dynamic_rows > self.candidate_ids.numel():
             raise ValueError(
                 "draft_token_map_dynamic_rows must be at most "
@@ -766,13 +693,7 @@ class DraftVocab:
                 gram = block.new_zeros(block.shape[1], block.shape[1])
             gram.addmm_(block.t(), block)
         assert gram is not None
-        hidden_size = gram.shape[0]
-        if not 0 < rank <= hidden_size:
-            raise ValueError(
-                f"draft_token_map_dynamic_rank must be in [1, {hidden_size}], "
-                f"got {rank}."
-            )
-        basis = torch.linalg.eigh(gram).eigenvectors[:, -rank:].flip(-1)
+        basis = torch.linalg.eigh(gram).eigenvectors[:, -_DYNAMIC_RANK:].flip(-1)
         del gram
         self.basis = basis.to(dtype).contiguous()
         scores = torch.cat(
@@ -789,15 +710,10 @@ class DraftVocab:
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Logits of the listed rows, and of the picked rows with the picks as
         positions in `candidate_ids`."""
-        assert self.rows is not None
-        if isinstance(self.rows, ParallelLMHead):
-            logits = self.rows.quant_method.apply(self.rows, hidden_states)
-        else:
-            logits = self.rows(hidden_states)
-        if self.tp_size > 1:
-            logits = tensor_model_parallel_all_gather(logits)
-        if self.valid_cols is not None:
-            logits = logits.index_select(-1, self.valid_cols)
+        assert self.rows is not None and self.token_ids is not None
+        rows = self.rows
+        logits = rows.quant_method.apply(rows, hidden_states)
+        logits = logits[..., : self.token_ids.numel()]
         if self.num_dynamic_rows == 0:
             return logits, None
         scores = self.scorer(hidden_states @ self.basis)
@@ -829,6 +745,9 @@ def load_draft_token_map(model: nn.Module, vllm_config: "VllmConfig") -> None:
         model.lm_head,
         load_draft_token_ids(spec.draft_token_map, eos_ids),
         spec.draft_token_map_dynamic_rows,
-        spec.draft_token_map_dynamic_rank,
-        spec.draft_token_map_quantization,
+        spec.draft_lm_head_quantization,
     )
+    if isinstance(draft_vocab.rows, ParallelLMHead):
+        # A submodule, so that refresh_quantized_lm_heads re-derives it from
+        # the target lm_head after weight updates.
+        model.draft_token_map_head = draft_vocab.rows

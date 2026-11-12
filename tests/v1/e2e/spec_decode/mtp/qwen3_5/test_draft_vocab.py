@@ -37,6 +37,7 @@ def test_mtp_draft_token_map(monkeypatch: pytest.MonkeyPatch, tmp_path, vllm_run
                 "method": "mtp",
                 "num_speculative_tokens": 1,
                 "draft_token_map": draft_token_map,
+                "draft_token_map_dynamic_rows": 1024 if draft_token_map else 0,
             },
         ) as runner:
             accuracy = evaluate_gsm8k_offline(runner.llm, num_questions=200)["accuracy"]

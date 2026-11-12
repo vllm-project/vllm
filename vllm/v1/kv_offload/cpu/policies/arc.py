@@ -63,7 +63,9 @@ class ARCCachePolicy(CachePolicy):
         return self.t1.get(key) or self.t2.get(key)
 
     @override
-    def insert(self, key: OffloadKey, chunk: ChunkStatus) -> None:
+    def insert(
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+    ) -> None:
         self.t1[key] = chunk
         self.b1.pop(key, None)
         self.b2.pop(key, None)
@@ -92,24 +94,6 @@ class ARCCachePolicy(CachePolicy):
     ) -> None:
         for key in reversed(list(keys)):
             self._adapt_to_ghost_hit(key)
-
-    @override
-    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        for key in reversed(list(keys)):
-            if key in self.t1:
-                chunk = self.t1.pop(key)
-                if not chunk.is_ready:
-                    # chunk was just prepared to be stored, not really touched
-                    # twice — keep it in T1 and mark as most recently used
-                    self.t1[key] = chunk
-                else:
-                    self.t2[key] = chunk
-
-            elif key in self.t2:
-                self.t2.move_to_end(key)
-
-            else:
-                self._adapt_to_ghost_hit(key)
 
     @override
     def on_request_finished(
