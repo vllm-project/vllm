@@ -8,6 +8,18 @@ import torch
 from vllm.model_executor.models.glm4_1v import Glm4vMultiModalDataParser
 
 
+def test_python_llm_requires_rust_for_multimodal(vllm_runner, monkeypatch):
+    """Reject Python multimodal initialization before loading model weights."""
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "0")
+    with pytest.raises(ValueError, match="requires the Rust frontend"):
+        vllm_runner(
+            "zai-org/GLM-5.3-Flash",
+            dtype="bfloat16",
+            max_model_len=2048,
+            enforce_eager=True,
+        )
+
+
 @pytest.mark.parametrize("allow_missing", [False, True])
 def test_glm5_image_metadata_requires_ec_consumer(allow_missing):
     parser = Glm4vMultiModalDataParser(

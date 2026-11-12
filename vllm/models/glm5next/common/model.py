@@ -72,7 +72,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
 from vllm.model_executor.models.glm4_1v import (
-    Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
 )
 from vllm.model_executor.models.interfaces import (
@@ -108,8 +107,9 @@ from ..nvidia.specialized_decode.runtime import specialized_decode_config
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
-    Glm5NextMultiModalProcessor,
     Glm5NextProcessingInfo,
+    Glm5NextProfilingInputsBuilder,
+    Glm5NextProfilingProcessor,
     Glm5NextVisionTransformer,
 )
 
@@ -1386,9 +1386,9 @@ class Glm5NextForCausalLM(
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    Glm5NextMultiModalProcessor,
+    Glm5NextProfilingProcessor,
     info=Glm5NextProcessingInfo,
-    dummy_inputs=Glm4vDummyInputsBuilder,
+    dummy_inputs=Glm5NextProfilingInputsBuilder,
 )
 class Glm5NextForConditionalGeneration(
     Glm4vForConditionalGeneration,
@@ -1403,6 +1403,7 @@ class Glm5NextForConditionalGeneration(
     # cache); the mamba-state classmethods delegate to the text model.
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
+    supports_mm_device_do_normalize = False
 
     # GLM-5.3-Flash stores the dense-MLP gate/up as separate tensors (like
     # ``Glm4vMoeForConditionalGeneration``, ``glm4_moe`` and ``deepseek_v2``),

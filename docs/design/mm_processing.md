@@ -83,7 +83,6 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | `gemma-3`                  | `Gemma3ForConditionalGeneration`           | `google/gemma-3-4b-it`, etc.                          |
 | `gemma-4`                  | `Gemma4ForConditionalGeneration`           | `google/gemma-4-E2B-it`, etc.                         |
 | `glm-4v`                   | `Glm4vForConditionalGeneration`            | `zai-org/GLM-4.1V-9B-Thinking`, etc.                  |
-| `glm-5-next`               | `Glm5NextForConditionalGeneration`         | `zai-org/GLM-5.3-Flash`                               |
 | `glm-ocr`                  | `GlmOcrForConditionalGeneration`           | `zai-org/GLM-OCR`                                     |
 | `intern-s1-pro`            | `InternS1ProForConditionalGeneration`      | `internlm/Intern-S1-Pro`                              |
 | `intern-s2-mobius`         | `InternS2MobiusForConditionalGeneration`   | `internlm/Intern-S2-Mobius`                           |

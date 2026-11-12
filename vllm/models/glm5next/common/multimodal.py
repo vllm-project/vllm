@@ -1,23 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash vision tower and multimodal processor."""
+"""GLM-5.3-Flash vision tower and encoder profiling inputs."""
 
 import math
 from collections.abc import Mapping
 from functools import partial
-from typing import Any
 
 import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers.video_utils import VideoMetadata
 
+from vllm import envs
+from vllm.config import SchedulerConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     parallel_state,
 )
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalInput, mm_input
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
@@ -33,9 +34,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.glm4_1v import (
-    Glm4vMultiModalProcessor,
     Glm4vProcessingInfo,
 )
+from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -45,7 +46,15 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    ProcessorInputs,
+    TimingContext,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -704,66 +713,6 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             height=short_side * factor,
         )
 
-    def _get_video_second_idx_glm46v(
-        self, metadata: dict[str, Any], total_frames: int
-    ) -> list[int]:
-        """Timestamps for the video placeholder, from the pixel path's sampler.
-
-        The inherited GLM-4.6V timestamp sampling uses different constants
-        than this checkpoint's `Glm5NextVideoProcessor` pixel sampling, so
-        placeholder count and `video_grid_thw` disagree outside 30-300s
-        durations. Sampling with the pixel path's own policy makes one
-        timestamp per temporal patch == `grid_t`.
-        """
-        video_processor = self.get_video_processor()
-        temporal_patch_size = int(
-            getattr(video_processor, "temporal_patch_size", 1) or 1
-        )
-        video_fps = float(metadata["fps"])
-        do_sample_frames = metadata.get("do_sample_frames", True)
-
-        if not do_sample_frames:
-            # Loader or HF write-back already picked the frames; use those
-            # indices for timestamps. After HF write-back, do_sample_frames is
-            # cleared so the count is len(frames_indices); a pre-sampled loader
-            # hands in frames whose count matches frames_indices.
-            frame_indices = [int(idx) for idx in metadata["frames_indices"]]
-            num_frames = len(frame_indices)
-        else:
-            frame_indices = [
-                int(idx)
-                for idx in video_processor.sample_frames(
-                    VideoMetadata(
-                        total_num_frames=int(
-                            metadata.get("total_num_frames", total_frames)
-                        ),
-                        fps=video_fps,
-                        duration=metadata.get("duration"),
-                    )
-                )
-            ]
-            num_frames = len(frame_indices)
-
-        if not frame_indices or num_frames <= 0:
-            # ``duration * fps < 1`` selects no frames at all; the
-            # pixel path raises an opaque IndexError on the same input a moment
-            # later, so say what happened while there is still a request.
-            raise ValueError(
-                "The GLM-5-Next frame sampler selected no frames for this "
-                f"video (fps={video_fps}, duration={metadata.get('duration')!r},"
-                f" total_num_frames={metadata.get('total_num_frames')!r}). "
-                "Clips shorter than one frame sampling interval cannot be "
-                "processed."
-            )
-
-        num_padded_frames = num_frames + (-num_frames % temporal_patch_size)
-        grid_t = max(num_padded_frames // temporal_patch_size, 1)
-        last = len(frame_indices) - 1
-        return [
-            int(frame_indices[min(i * temporal_patch_size, last)] / video_fps)
-            for i in range(grid_t)
-        ]
-
     def _get_vision_info(
         self,
         *,
@@ -826,16 +775,119 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         return preprocessed_size, num_vision_tokens
 
 
-class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
-    """`Glm5NextProcessor` extracts image/video features
-    only and passes the prompt text through unchanged, so prompt expansion
-    is owned by the inherited GLM-4V prompt-update machinery."""
+_RUST_FRONTEND_REQUIRED = (
+    "GLM-5.3-Flash multimodal preprocessing requires the Rust frontend. "
+    "Serve with VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash "
+    "or vllm-rs serve zai-org/GLM-5.3-Flash. "
+    "For Python text-only inference, set limit_mm_per_prompt="
+    "{'image': 0, 'video': 0}."
+)
 
-    def _hf_processor_applies_updates(
+
+class Glm5NextProfilingInputsBuilder(BaseDummyInputsBuilder[Glm5NextProcessingInfo]):
+    def get_dummy_text(self, mm_counts):
+        return ""
+
+    def get_dummy_mm_data(self, seq_len, mm_counts, mm_options):
+        raise ValueError(_RUST_FRONTEND_REQUIRED)
+
+
+class Glm5NextProfilingProcessor(BaseMultiModalProcessor[Glm5NextProcessingInfo]):
+    """Generate synthetic encoder inputs; Rust owns media preprocessing."""
+
+    def __init__(
         self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+        info: Glm5NextProcessingInfo,
+        dummy_inputs: BaseDummyInputsBuilder[Glm5NextProcessingInfo],
+    ) -> None:
+        if not envs.VLLM_USE_RUST_FRONTEND:
+            raise ValueError(_RUST_FRONTEND_REQUIRED)
+        super().__init__(info, dummy_inputs)
+
+    def apply(
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
+    ) -> MultiModalInput:
+        raise ValueError(_RUST_FRONTEND_REQUIRED)
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        return _create_qwen2vl_field_factory(
+            self.info.get_hf_config().vision_config.spatial_merge_size
+        )(hf_inputs)
+
+    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
+        raise ValueError(_RUST_FRONTEND_REQUIRED)
+
+    def get_dummy_mm_inputs(
+        self,
+        mm_counts: Mapping[str, int],
+        *,
+        cache: BaseMultiModalProcessorCache | None = None,
+        scheduler_config: SchedulerConfig | None = None,
+    ) -> MultiModalInput:
+        info = self.info
+        vision_config = info.get_hf_config().vision_config
+        seq_len = info.ctx.model_config.max_model_len
+        if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
+            seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
+
+        width, height = info.get_image_size_with_most_features()
+        patch_size = vision_config.patch_size
+        temporal_patch_size = vision_config.temporal_patch_size
+        patch_dim = vision_config.in_channels * temporal_patch_size * patch_size**2
+        data = {}
+        placeholders = {}
+        hashes = {}
+        prompt_ids: list[int] = []
+        for modality, count in mm_counts.items():
+            if count == 0:
+                continue
+            if modality == "image":
+                num_frames = 1
+                max_pixels = info._get_image_max_pixels()
+                pixel_key = "pixel_values"
+            elif modality == "video":
+                num_frames = info.get_num_frames_with_most_features(seq_len, mm_counts)
+                max_pixels = info._get_video_max_pixels()
+                pixel_key = "pixel_values_videos"
+            else:
+                raise ValueError(f"Unsupported modality: {modality}")
+
+            size, num_tokens = info._get_vision_info(
+                image_width=width,
+                image_height=height,
+                num_frames=num_frames,
+                max_image_pixels=max_pixels,
+            )
+            grid = (
+                max(1, math.ceil(num_frames / temporal_patch_size)),
+                size.height // patch_size,
+                size.width // patch_size,
+            )
+            data[f"{modality}_grid_thw"] = torch.tensor(
+                [grid] * count, dtype=torch.long, device="cpu"
+            )
+            data[pixel_key] = torch.zeros(
+                (math.prod(grid) * count, patch_dim), dtype=torch.float32, device="cpu"
+            )
+            placeholders[modality] = [
+                PlaceholderRange(
+                    offset=len(prompt_ids) + i * num_tokens, length=num_tokens
+                )
+                for i in range(count)
+            ]
+            hashes[modality] = [
+                f"glm5next-profiling-{modality}-{i}" for i in range(count)
+            ]
+            prompt_ids.extend(
+                [info.get_hf_config().image_token_id] * num_tokens * count
+            )
+
+        prompt_ids.extend([0] * max(0, seq_len - len(prompt_ids)))
+        return mm_input(
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=MultiModalKwargsItems.from_hf_inputs(
+                data, self._get_mm_fields_config(data, {})
+            ),
+            mm_hashes=hashes,
+            mm_placeholders=placeholders,
+        )
