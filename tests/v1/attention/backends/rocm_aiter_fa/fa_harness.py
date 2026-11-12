@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Drive ROCM_AITER_FA the way the model runner does, one layer at a time.
 
-``FaCase`` owns a VllmConfig shaped like one model's attention layer, real
-``Attention`` layers bound to ``AiterFlashAttentionBackend``, the metadata
+`FaCase` owns a VllmConfig shaped like one model's attention layer, real
+`Attention` layers bound to `AiterFlashAttentionBackend`, the metadata
 builder, and a KV cache allocated through the same view helpers the runner
-uses. ``run`` writes the batch's K/V through ``do_kv_cache_update`` and calls
-``forward``; ``reference`` recomputes the result in float32 from logical K/V.
+uses. `run` writes the batch's K/V through `do_kv_cache_update` and calls
+`forward`; `reference` recomputes the result in float32 from logical K/V.
 """
 
 import sys

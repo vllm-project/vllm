@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCM_AITER_FA defects this suite found that are not fixed yet.
 
-Every test matching a defect's patterns is marked ``xfail(strict=True)``: it
+Every test matching a defect's patterns is marked `xfail(strict=True)`: it
 fails today, and the PR that fixes the defect deletes the entry, so the same
 tests must then pass. A defect whose failure depends on memory contents is
-marked non-strict instead. Patterns are pytest node ids in which ``*``
+marked non-strict instead. Patterns are pytest node ids in which `*`
 matches any text; everything else, brackets included, is literal.
 """
 
