@@ -85,7 +85,7 @@ steps:
     --ignore=entrypoints/rl/weight_transfer
     --ignore=entrypoints/rl/return_routed_experts/test_openai_api.py
     --ignore=entrypoints/rl/weight_transfer_metrics &&
-    PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc'
+    PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc'
 
 - label: ":intel: (BMG) Entrypoints Integration (API Server Scale Out)"
   key: entrypoints-integration-api-server-scale-out-intel
@@ -120,7 +120,7 @@ steps:
   device: intel_gpu_k8s
   num_devices: 1
   resource_claim_template: b70-1
-  working_dir: "/workspace/vllm/"
+  working_dir: "/vllm-workspace/"
   env:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
@@ -152,7 +152,7 @@ steps:
   device: intel_gpu_k8s
   num_devices: 1
   resource_claim_template: b70-1
-  working_dir: "/workspace/vllm/"
+  working_dir: "/vllm-workspace/"
   env:
     VLLM_TEST_DEVICE: "xpu"
   optional: true
