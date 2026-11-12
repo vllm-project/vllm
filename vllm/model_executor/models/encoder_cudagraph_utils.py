@@ -21,15 +21,15 @@ class GridThwEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     Inputs are concatenated patches (`pixel_values` or
     `pixel_values_videos`) with one `(t, h, w)` row per item in
     `image_grid_thw` or `video_grid_thw`. `self.visual` must provide
-    `spatial_merge_size`, `patch_embed`, `prepare_encoder_metadata()`
-    and accept `encoder_metadata` in its forward; the default dummy
-    `pixel_values` also read `input_norm`. Hosts still implement
+    `spatial_merge_size`, `prepare_encoder_metadata()` and accept
+    `encoder_metadata` in its forward; the capture inputs also read
+    `patch_embed` and `input_norm`. Hosts still implement
     `get_encoder_cudagraph_config()`.
 
     This class holds only the glue to the encoder CUDA graph manager;
     model-specific metadata belongs in the vision tower. Do not add
-    per-model branches here: override a hook, or implement the protocol
-    directly.
+    per-model branches here: a model that differs overrides the protocol
+    method itself.
     """
 
     visual: Any
@@ -93,73 +93,6 @@ class GridThwEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             grid_thw_key: [grid_thw[i] for i in indices],
         }
 
-    def _get_encoder_cudagraph_per_item_output(
-        self,
-        token_budget: int,
-        max_batch_size: int,
-    ) -> int:
-        """Return each dummy item's output-token budget, before frame rounding."""
-        # Ceil so one item using the full budget fits the captured buffers.
-        return (token_budget + max_batch_size - 1) // max_batch_size
-
-    def _get_encoder_cudagraph_capture_grid(
-        self,
-        token_budget: int,
-        max_batch_size: int,
-        max_frames_per_batch: int,
-    ) -> list[list[int]]:
-        """Return the dummy `grid_thw` the graph is captured with."""
-        m = self.visual.spatial_merge_size
-        per_item_output = self._get_encoder_cudagraph_per_item_output(
-            token_budget, max_batch_size
-        )
-        frames_per_item = max_frames_per_batch // max_batch_size
-        if frames_per_item > 1:
-            # Video layout (T > 1) so cu_seqlens, with one entry per frame, is
-            # sized for video replays. Ceil keeps frames_per_item *
-            # tokens_per_frame >= per_item_output.
-            tokens_per_frame = (
-                per_item_output + frames_per_item - 1
-            ) // frames_per_item
-            return [
-                [frames_per_item, m, tokens_per_frame * m]
-                for _ in range(max_batch_size)
-            ]
-        return [[1, m, per_item_output * m] for _ in range(max_batch_size)]
-
-    def _get_encoder_cudagraph_patch_dim(self) -> int:
-        patch_embed = self.visual.patch_embed
-        return (
-            patch_embed.proj.in_channels
-            * patch_embed.temporal_patch_size
-            * patch_embed.patch_size
-            * patch_embed.patch_size
-        )
-
-    def _get_encoder_cudagraph_dummy_pixel_values(
-        self,
-        num_patches: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """Return the capture-time `pixel_values`; overwritten on replay."""
-        # uint8 when normalization is fused on-device.
-        return torch.zeros(
-            num_patches,
-            self._get_encoder_cudagraph_patch_dim(),
-            device=device,
-            dtype=self.visual.input_norm.input_dtype or dtype,
-        )
-
-    def _get_encoder_cudagraph_capture_metadata_kwargs(
-        self,
-        token_budget: int,
-        max_batch_size: int,
-        max_frames_per_batch: int,
-    ) -> dict[str, Any]:
-        """Return extra capture kwargs for `visual.prepare_encoder_metadata`."""
-        return {}
-
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
@@ -170,11 +103,34 @@ class GridThwEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         path: str = "default",
         axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
-        grid_config = self._get_encoder_cudagraph_capture_grid(
-            token_budget, max_batch_size, max_frames_per_batch
-        )
-        dummy_pixel_values = self._get_encoder_cudagraph_dummy_pixel_values(
-            sum(t * h * w for t, h, w in grid_config), device, dtype
+        m = self.visual.spatial_merge_size
+        # Ceil so one item using the full budget fits the captured buffers.
+        per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+        frames_per_item = max_frames_per_batch // max_batch_size
+        if frames_per_item > 1:
+            # Video layout (T > 1) so cu_seqlens, with one entry per frame, is
+            # sized for video replays. Ceil keeps frames_per_item *
+            # tokens_per_frame >= per_item_output.
+            tokens_per_frame = (
+                per_item_output + frames_per_item - 1
+            ) // frames_per_item
+            grid_config = [
+                [frames_per_item, m, tokens_per_frame * m]
+                for _ in range(max_batch_size)
+            ]
+        else:
+            grid_config = [[1, m, per_item_output * m] for _ in range(max_batch_size)]
+
+        # Overwritten on replay; uint8 when normalization is fused on-device.
+        patch_embed = self.visual.patch_embed
+        dummy_pixel_values = torch.zeros(
+            sum(t * h * w for t, h, w in grid_config),
+            patch_embed.proj.in_channels
+            * patch_embed.temporal_patch_size
+            * patch_embed.patch_size
+            * patch_embed.patch_size,
+            device=device,
+            dtype=self.visual.input_norm.input_dtype or dtype,
         )
         # max_seqlen is baked into the graph at capture, so it must cover one
         # item consuming the full budget.
@@ -182,11 +138,8 @@ class GridThwEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
-            max_seqlen_override=token_budget * self.visual.spatial_merge_size**2,
+            max_seqlen_override=token_budget * m**2,
             device=device,
-            **self._get_encoder_cudagraph_capture_metadata_kwargs(
-                token_budget, max_batch_size, max_frames_per_batch
-            ),
         )
         # Image and video pixel_values share the [num_patches, C*T*P*P] layout,
         # so one capture buffer serves both modalities.
