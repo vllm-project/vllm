@@ -3207,7 +3207,7 @@ class VllmConfig:
         kv_cache_access = (
             KVCacheAccess.IN_PROCESS
             if self.kv_transfer_config is None
-            else self.kv_transfer_config.kv_cache_access()
+            else self.kv_transfer_config.kv_cache_access(self.parallel_config)
         )
         unsupported = None
         if not current_platform.is_cuda_alike():

@@ -347,6 +347,14 @@ class OffloadingConnectorWorker:
         self._connector_worker_meta = OffloadingWorkerMetadata()
         return meta
 
+    def unregister_kv_caches(self) -> None:
+        if self.worker is not None:
+            self.worker.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        if self.worker is not None:
+            self.worker.restore_kv_caches()
+
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()

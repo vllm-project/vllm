@@ -4,9 +4,12 @@
 import enum
 import uuid
 from dataclasses import field
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from vllm.config.utils import CompileFactors, config
+
+if TYPE_CHECKING:
+    from vllm.config.parallel import ParallelConfig
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -68,10 +71,16 @@ class KVCacheAccess(enum.IntFlag):
     LEGACY_IPC = enum.auto()
     """Shares it through legacy CUDA IPC: the extensible KV cache is unsupported."""
 
+    REGISTERS_ACROSS_NODES = enum.auto()
+    """Registers it with UCX or RDMA only when the engine's workers span
+    nodes; `KVTransferConfig.kv_cache_access` resolves it for an engine."""
+
     def needs_single_chunk(self) -> bool:
-        """Whether each segment must be backed by one physical allocation."""
+        """Whether each segment must be backed by one physical allocation.
+        `REGISTERS_ACROSS_NODES` counts until it is resolved for an engine."""
+        registers = KVCacheAccess.REGISTERS | KVCacheAccess.REGISTERS_ACROSS_NODES
         exports = KVCacheAccess.EXPORTS_FD | KVCacheAccess.EXPORTS_FABRIC
-        return bool(self & (KVCacheAccess.REGISTERS | exports))
+        return bool(self & (registers | exports))
 
 
 def kv_buffer_device_default_factory() -> str:
@@ -186,23 +195,48 @@ class KVTransferConfig:
             return self.kv_connector_extra_config.get("connectors", [])
         return [{"kv_connector": self.kv_connector}]
 
-    def kv_cache_access(self) -> KVCacheAccess:
+    def kv_cache_access(
+        self, parallel_config: "ParallelConfig | None" = None
+    ) -> KVCacheAccess:
         """How the configured connectors reach the device KV cache, directly or
         in MultiConnector. Imports the connector class to ask it, through
-        `KVConnectorBase_V1.kv_cache_access`."""
+        `KVConnectorBase_V1.kv_cache_access`. Given the engine's
+        parallel_config, `REGISTERS_ACROSS_NODES` becomes `REGISTERS` if its
+        workers may span nodes, and is dropped otherwise; without it, the
+        flag is returned as the connector reported it."""
         if self.kv_connector is None:
             return KVCacheAccess.IN_PROCESS
         from vllm.distributed.kv_transfer.kv_connector.factory import (
             KVConnectorFactory,
         )
 
-        return KVConnectorFactory.kv_cache_access(self)
+        access = KVConnectorFactory.kv_cache_access(self)
+        if parallel_config is None or (
+            KVCacheAccess.REGISTERS_ACROSS_NODES not in access
+        ):
+            return access
+        from vllm.v1.kv_offload.config import (
+            places_workers_by_nnodes,
+            workers_may_span_nodes,
+        )
 
-    def registers_kv_cache_memory(self) -> bool:
+        access &= ~KVCacheAccess.REGISTERS_ACROSS_NODES
+        if workers_may_span_nodes(
+            parallel_config.world_size,
+            parallel_config.local_world_size,
+            places_workers_by_nnodes(parallel_config.distributed_executor_backend),
+        ):
+            access |= KVCacheAccess.REGISTERS
+        return access
+
+    def registers_kv_cache_memory(
+        self, parallel_config: "ParallelConfig | None" = None
+    ) -> bool:
         """Whether a connector registers the device KV cache with UCX or RDMA,
         or another process imports it, directly or in MultiConnector: each
-        segment must then be backed by one physical allocation."""
-        return self.kv_cache_access().needs_single_chunk()
+        segment must then be backed by one physical allocation. parallel_config
+        is the engine's, as in `kv_cache_access`."""
+        return self.kv_cache_access(parallel_config).needs_single_chunk()
 
     def has_connector(self, connector_name: str) -> bool:
         """Whether `connector_name` is configured, directly or in MultiConnector."""

@@ -374,7 +374,7 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
     kv_transfer_config = vllm_config.kv_transfer_config
     return (
         kv_transfer_config is not None
-        and kv_transfer_config.registers_kv_cache_memory()
+        and kv_transfer_config.registers_kv_cache_memory(vllm_config.parallel_config)
     )
 
 

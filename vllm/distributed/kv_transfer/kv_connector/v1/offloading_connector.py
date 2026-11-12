@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -117,6 +118,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def unregister_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         assert self.connector_worker is not None
@@ -248,6 +257,16 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # The spec says whether its workers register the device KV cache when
+        # they span nodes (the tiering spec's mirror of CPU region slots).
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
+        if spec_cls.registers_kv_cache_across_nodes(extra_config):
+            return KVCacheAccess.REGISTERS_ACROSS_NODES
+        return KVCacheAccess.IN_PROCESS
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
