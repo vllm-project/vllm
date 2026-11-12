@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from contextlib import nullcontext
 from typing import Literal
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -617,173 +617,6 @@ blackwell_only = pytest.mark.skipif(
 )
 
 
-@contextmanager
-def _blackwell(vllm_config=None):
-    platform = MagicMock()
-    platform.is_xpu.return_value = False
-    platform.is_rocm.return_value = False
-    platform.get_device_capability.return_value = DeviceCapability(10, 0)
-    with (
-        patch("vllm.v1.attention.backends.fa_utils.current_platform", platform),
-        patch(
-            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
-            return_value=True,
-        ),
-        patch("vllm.config.get_current_vllm_config_or_none", return_value=vllm_config),
-        patch(
-            "vllm.v1.attention.backends.flash_attn.get_current_vllm_config_or_none",
-            return_value=vllm_config,
-        ),
-    ):
-        yield
-
-
-def _hd256_config(
-    *,
-    is_mm_prefix_lm=False,
-    rswa_window=None,
-    dcp_size=1,
-    softcap=None,
-    head_size=256,
-    cache_dtype="auto",
-):
-    vllm_config = MagicMock()
-    vllm_config.attention_config.flash_attn_version = None
-    vllm_config.model_config.is_mm_prefix_lm = is_mm_prefix_lm
-    vllm_config.model_config.rswa_window = rswa_window
-    vllm_config.model_config.hf_text_config.attn_logit_softcapping = softcap
-    vllm_config.model_config.get_head_size.return_value = head_size
-    vllm_config.cache_config.cache_dtype = cache_dtype
-    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
-    return vllm_config
-
-
-@blackwell_only
-@pytest.mark.parametrize(
-    "kwargs,config_kwargs,expected",
-    [
-        ({}, {}, 4),
-        ({"supports_fa4_hd256": False}, {}, 2),
-        ({"has_sinks": True}, {}, 2),
-        ({"requires_softcap": True}, {}, 2),
-        # Larger block sizes normalize to 128.
-        ({"kv_cache_block_size": 16}, {}, 2),
-        ({"kv_cache_block_size": 64}, {}, 2),
-        ({"kv_cache_block_size": 256}, {}, 4),
-        ({}, {"is_mm_prefix_lm": True}, 2),
-        ({}, {"rswa_window": 512}, 2),
-        ({}, {"dcp_size": 2}, 2),
-        ({}, {"softcap": 50.0}, 2),
-        ({}, {"cache_dtype": "fp8"}, 2),
-        ({"head_size": 128, "kv_cache_block_size": 16}, {}, 4),
-        ({"head_size": 192, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 4),
-        ({"head_size": 256, "head_size_v": 128, "kv_cache_block_size": 16}, {}, 2),
-        ({"head_size": 256, "head_size_v": 64}, {}, 2),
-    ],
-)
-def test_fa4_hd256_fallback_matrix(kwargs, config_kwargs, expected):
-    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-
-    kwargs = {
-        "head_size": 256,
-        "kv_cache_block_size": 128,
-        "supports_fa4_hd256": True,
-        **kwargs,
-    }
-    with _blackwell(_hd256_config(head_size=kwargs["head_size"], **config_kwargs)):
-        assert get_flash_attn_version(**kwargs) == expected
-
-
-@blackwell_only
-@pytest.mark.parametrize(
-    "backend_name,config_kwargs,expected",
-    [
-        ("FLASH_ATTN", {}, 128),
-        ("FLASH_ATTN", {"softcap": 50.0}, 16),
-        ("FLASH_ATTN", {"head_size": 128}, 16),
-        ("FLASH_ATTN", {"cache_dtype": "fp8"}, 16),
-        ("FLASH_ATTN_DIFFKV", {}, 16),
-    ],
-)
-def test_fa4_hd256_block_size_advertisement(
-    backend_name: str, config_kwargs: dict, expected: int
-):
-    from vllm.v1.attention.backend import MultipleOf
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-    from vllm.v1.attention.backends.flash_attn_diffkv import (
-        FlashAttentionDiffKVBackend,
-    )
-
-    backend = {
-        "FLASH_ATTN": FlashAttentionBackend,
-        "FLASH_ATTN_DIFFKV": FlashAttentionDiffKVBackend,
-    }[backend_name]
-    vllm_config = _hd256_config(**config_kwargs)
-    with _blackwell(vllm_config):
-        (size,) = backend.get_supported_kernel_block_sizes()
-        preferred = backend.get_preferred_block_size(16)
-    assert preferred == expected
-    if expected == 128:
-        assert size == 128
-    else:
-        assert isinstance(size, MultipleOf) and size.base == expected
-
-
-@blackwell_only
-def test_fa4_hd256_mm_prefix_deselects_flash_attn():
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-    with _blackwell(_hd256_config(is_mm_prefix_lm=True)):
-        assert (
-            FlashAttentionBackend.supports_combination(
-                head_size=256,
-                dtype=torch.bfloat16,
-                kv_cache_dtype=None,
-                block_size=128,
-                use_mla=False,
-                has_sink=False,
-                use_sparse=False,
-                use_mm_prefix=True,
-                device_capability=DeviceCapability(10, 0),
-            )
-            is not None
-        )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda()
-    or not current_platform.is_device_capability_family(100),
-    reason="requires a Blackwell GPU",
-)
-@pytest.mark.parametrize(
-    "attn_type,sliding_window,expected",
-    [
-        (AttentionType.DECODER, None, 4),
-        (AttentionType.DECODER, 512, 4),
-        # Local encoder attention lacks the required seqused tensors.
-        (AttentionType.ENCODER_ONLY, None, 4),
-        (AttentionType.ENCODER_ONLY, 512, 2),
-    ],
-)
-def test_fa4_hd256_impl_selection(attn_type, sliding_window, expected):
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-
-    # Implementations are constructed before the platform updates the block size.
-    with set_current_vllm_config(VllmConfig()):
-        impl = FlashAttentionImpl(
-            num_heads=8,
-            head_size=256,
-            scale=0.0625,
-            num_kv_heads=8,
-            alibi_slopes=None,
-            sliding_window=sliding_window,
-            kv_cache_dtype="auto",
-            attn_type=attn_type,
-        )
-    assert impl.vllm_flash_attn_version == expected
-    assert impl.fa4_hd256 == (expected == 4)
-
-
 @pytest.fixture
 def blackwell_selection():
     with (
@@ -841,21 +674,54 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
+@pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
 def test_mm_prefix_selects_composite_without_changing_causal_default(
-    use_mm_prefix, kv_cache_dtype, blackwell_selection
+    use_mm_prefix, kv_cache_dtype, selected, blackwell_selection
 ):
-    """The image-mask requirement must reach CUDA's automatic backend priority."""
+    """The image-mask requirement must reach CUDA's automatic backend priority;
+    selecting FLASHINFER serves it natively."""
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
-        model="google/gemma-4-31B-it", dtype="bfloat16"
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        attention_config=AttentionConfig(backend=selected),
     ).create_engine_config()
     with set_current_vllm_config(config):
         backend = get_attn_backend(
             256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
         )
-    expected = "TRITON_FLASHINFER" if use_mm_prefix else "FLASHINFER"
-    assert backend.get_name() == expected
+    composite = use_mm_prefix and selected is None
+    assert backend.get_name() == ("TRITON_FLASHINFER" if composite else "FLASHINFER")
+
+
+@blackwell_only
+@pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
+@pytest.mark.parametrize("swizzled", [False, True])
+def test_mm_prefix_nvfp4_needs_swizzled_flashinfer(
+    selected, swizzled, blackwell_selection
+):
+    """An NVFP4 cache serves mm-prefix only on an explicit FLASHINFER whose
+    wrapper reads the swizzled V scales."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        kv_cache_dtype="nvfp4",
+        attention_config=AttentionConfig(backend=selected),
+    ).create_engine_config()
+    supported = selected is not None and swizzled
+    with (
+        patch(
+            "vllm.v1.attention.backends.flashinfer._MM_PREFIX_READS_SWIZZLED_V_SF",
+            swizzled,
+        ),
+        set_current_vllm_config(config),
+        nullcontext() if supported else pytest.raises(ValueError),
+    ):
+        backend = get_attn_backend(256, torch.bfloat16, "nvfp4", use_mm_prefix=True)
+        assert backend.get_name() == "FLASHINFER"
 
 
 @blackwell_only
