@@ -97,14 +97,13 @@ def _lay_out_hisparse_groups(
     groups = _fill_hisparse_groups(vllm_config, mla_specs, regular_groups, block_bytes)
     if not block_bytes or vllm_config.cache_config.kv_cache_layout is None:
         return groups
-    pool_block_bytes = _pool_bytes_per_block(vllm_config, groups)
-    if pool_block_bytes == block_bytes:
+    if _pool_bytes_per_block(vllm_config, groups) == block_bytes:
         return groups
     other_groups = [
         group for group in groups if group.role is not KVCacheGroupRole.HISPARSE_INDEXER
     ]
     candidates = [
-        _fill_hisparse_groups(vllm_config, mla_specs, regular_groups, pool_block_bytes),
+        groups,
         _fill_hisparse_groups(
             vllm_config,
             mla_specs,
