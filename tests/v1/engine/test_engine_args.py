@@ -256,6 +256,11 @@ def test_extensible_kv_cache_from_cli():
 requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="requires CUDA"
 )
+# ROCm refuses single-chunk KV cache access, which POSIX fd importers need.
+requires_cuda_not_rocm = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="requires CUDA, not ROCm",
+)
 
 
 @requires_cuda
@@ -369,7 +374,7 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert fake.extensible_kv_cache_unsupported_reason([{}]) is not None
 
 
-@requires_cuda
+@requires_cuda_not_rocm
 def test_extensible_kv_cache_does_not_fall_back_under_a_posix_fd_importer():
     """The torch allocator's KV cache cannot be exported as POSIX file
     descriptors, so a failed VMM probe stops startup instead."""
@@ -705,7 +710,7 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
         assert config.cache_config.enable_extensible_kv_cache is False
 
 
-@requires_cuda
+@requires_cuda_not_rocm
 @pytest.mark.parametrize(
     "kwargs, match",
     [
