@@ -158,9 +158,9 @@ DSV41_FLASH_QUANT_CONFIG = {
 }
 
 
-def _dsv41_flash_experts_quant_config(monkeypatch, moe_activation):
+def _dsv41_flash_experts_quant_config(monkeypatch, moe_spec):
     """The quant config DeepSeek-V4.1-Flash's routed experts build, with
-    quantization_config.moe.activation set to `moe_activation` (or unset)."""
+    quantization_config.moe set to `moe_spec` (or unset)."""
     from vllm.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
@@ -170,11 +170,7 @@ def _dsv41_flash_experts_quant_config(monkeypatch, moe_activation):
     from vllm.model_executor.layers.quantization import mxfp4 as mxfp4_quant
     from vllm.models.deepseek_v41 import quant_config as dsv41_quant_config
 
-    user_args = (
-        None
-        if moe_activation is None
-        else QuantizationConfigArgs(moe={"activation": moe_activation})
-    )
+    user_args = None if moe_spec is None else QuantizationConfigArgs(moe=moe_spec)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
@@ -187,6 +183,9 @@ def _dsv41_flash_experts_quant_config(monkeypatch, moe_activation):
         dsv41_quant_config, "get_current_vllm_config", lambda: vllm_config
     )
     monkeypatch.setattr(mxfp4_oracle, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(
+        mxfp4_oracle, "get_current_vllm_config_or_none", lambda: vllm_config
+    )
     # What MI355X selects for these experts, without depending on the device
     # or AITER build the test runs on.
     monkeypatch.setattr(
@@ -214,21 +213,23 @@ def _dsv41_flash_experts_quant_config(monkeypatch, moe_activation):
 @requires_aiter_on_gfx950
 @requires_mori
 @pytest.mark.parametrize(
-    "moe_activation,dispatch_dtype",
+    "moe_spec,dispatch_dtype",
     [
         # The checkpoint names no activation scheme for its experts, so this is
         # the MXFP8 DeepseekV4FP8Config defaults to.
         pytest.param(None, current_platform.fp8_dtype(), id="checkpoint-default"),
         # These experts cannot run MXFP4 activations, so the override turns the
         # MXFP8 default off rather than being outvoted by it.
-        pytest.param("mxfp4", torch.bfloat16, id="user-override"),
+        pytest.param({"activation": "mxfp4"}, torch.bfloat16, id="user-override"),
+        # An explicit null asks for unquantized activations, not the default.
+        pytest.param({"activation": None}, torch.bfloat16, id="user-null"),
     ],
 )
 def test_dsv41_flash_dispatch_dtype(
-    aiter_moe_env, monkeypatch, moe_activation, dispatch_dtype
+    aiter_moe_env, monkeypatch, moe_spec, dispatch_dtype
 ):
     """The dispatch dtype follows the MoE activation key, user over model."""
-    quant_config = _dsv41_flash_experts_quant_config(monkeypatch, moe_activation)
+    quant_config = _dsv41_flash_experts_quant_config(monkeypatch, moe_spec)
     prepare_finalize, args = _make_mori_dispatch(quant_config)
 
     assert args["quant_dtype"] == dispatch_dtype

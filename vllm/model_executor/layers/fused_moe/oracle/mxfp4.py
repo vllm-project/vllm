@@ -539,11 +539,12 @@ def resolve_default_moe_activation_key(
     default_activation_key: QuantKey | None,
 ) -> QuantKey | None:
     """Combine an activation key the model only defaults to with the user
-    override, which takes precedence. Unlike `_resolve_activation_key`, a
-    disagreement is not a conflict: nothing in the checkpoint depends on the
-    default."""
-    user_override = _user_moe_activation_override()
-    return default_activation_key if user_override is None else user_override
+    override, which takes precedence (`null` included, BF16). Unlike
+    `_resolve_activation_key`, a disagreement is not a conflict: nothing in the
+    checkpoint depends on the default."""
+    if not _user_moe_activation_override_is_set():
+        return default_activation_key
+    return _user_moe_activation_override()
 
 
 def _humming_input_schema(model_activation_key: QuantKey | None):
