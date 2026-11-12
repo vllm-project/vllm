@@ -1,18 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the KV-offload tiering subsystem with guidellm.
+"""Benchmark the KV tiering subsystem with guidellm.
 
-Currently only the FS secondary tier is supported.
+Starts a vLLM server, drives it with `guidellm`, and records per-run
+metrics. The tier configuration is set with `--mode`:
 
-Starts a vLLM server with a TieringOffloadingSpec config,
-drives it with `guidellm`, and records per-run metrics.
+- `gpu`: GPU KV only; no kv-transfer-config is passed to vLLM.
+- `cpu`: GPU + CPU tiers; kv-transfer-config without secondary tiers.
+- `fs`: GPU + CPU + FS tiers (requires `--fs-dir`).
 
-Run all scenarios:
-    python benchmarks/kv_offload/benchmark_tiering.py bench-scenario <fs-dir>
+Run all scenarios against the FS tier:
+    python benchmarks/kv_offload/benchmark_tiering.py --mode fs \
+        --fs-dir /mnt/nvme bench
 
-Run selected scenarios:
-    python benchmarks/kv_offload/benchmark_tiering.py bench-scenario <fs-dir> \
-        --scenario fit-c16 overflow-c64
+Run selected scenarios CPU-only:
+    python benchmarks/kv_offload/benchmark_tiering.py --mode cpu \
+        bench-scenario --scenario fit-c16 overflow-c64
+
+Run one ad-hoc scenario:
+    python benchmarks/kv_offload/benchmark_tiering.py --mode fs \
+        --fs-dir /mnt/nvme run --concurrency 16 --offload-block-size 1024 \
+        --prefix-tokens 20000
 
 List scenarios with their estimated KV footprint:
     python benchmarks/kv_offload/benchmark_tiering.py list
@@ -802,21 +810,21 @@ def _resolve_block_bytes() -> float:
 def _main() -> None:
     args = build_parser().parse_args()
 
-    if args.mode == "fs":
-        if args.fs_dir is None:
-            sys.exit("--mode fs requires an fs_dir")
-    elif args.fs_dir is not None:
-        sys.exit(f"--mode {args.mode} does not use an fs_dir")
-
-    if args.command == "compare":
-        compare(args.session_a, args.session_b)
-        return
-
     by_name = {sc.name: sc for sc in SCENARIOS}
     if args.command == "list":
         for sc in SCENARIOS:
             sc.describe()
         return
+
+    if args.command == "compare":
+        compare(args.session_a, args.session_b)
+        return
+
+    if args.mode == "fs":
+        if args.fs_dir is None:
+            sys.exit("--mode fs requires an fs_dir")
+    elif args.fs_dir is not None:
+        sys.exit(f"--mode {args.mode} does not use an fs_dir")
 
     if args.command == "run":
         specs = [
