@@ -107,10 +107,10 @@ def test_routed_scale_mode_scales_output():
     assert RoutedScaleMode.OUTPUT_FP16_GUARD.scales_output
 
 
-def _mha_moe_config(model: str):
-    from transformers import AXK1Config, DeepseekV2Config
+def _mha_moe_config():
+    from transformers import DeepseekV2Config
 
-    common = dict(
+    return DeepseekV2Config(
         hidden_size=HIDDEN_SIZE,
         intermediate_size=INTERMEDIATE_SIZE,
         moe_intermediate_size=INTERMEDIATE_SIZE,
@@ -128,22 +128,17 @@ def _mha_moe_config(model: str):
         first_k_dense_replace=0,
         torch_dtype=torch.float16,
     )
-    if model == "axk1":
-        return AXK1Config(mlp_layer_types=["sparse"], **common)
-    return DeepseekV2Config(**common)
 
 
-@pytest.mark.parametrize("model", ["deepseek_v2", "axk1"])
 def test_mha_decoder_layer_does_not_divide_shared_output(
-    model: str, tmp_path, dist_init, workspace_init
+    tmp_path, dist_init, workspace_init
 ):
-    """MHA DeepseekV2/AXK1 decoder layers skip the FP16 compensation, so their
+    """MHA DeepseekV2 decoder layers skip the FP16 compensation, so their
     MoE must scale the routed output instead of dividing the shared output."""
     from vllm.config import ModelConfig
-    from vllm.model_executor.models.AXK1 import AXK1DecoderLayer
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2DecoderLayer
 
-    config = _mha_moe_config(model)
+    config = _mha_moe_config()
     config.save_pretrained(tmp_path)
     model_config = ModelConfig(
         model=str(tmp_path),
@@ -152,9 +147,8 @@ def test_mha_decoder_layer_does_not_divide_shared_output(
         dtype="float16",
     )
     vllm_config = VllmConfig(model_config=model_config)
-    layer_cls = AXK1DecoderLayer if model == "axk1" else DeepseekV2DecoderLayer
     with set_current_vllm_config(vllm_config):
-        layer = layer_cls(
+        layer = DeepseekV2DecoderLayer(
             vllm_config=vllm_config, prefix="model.layers.0", config=config
         )
     assert layer.use_mha

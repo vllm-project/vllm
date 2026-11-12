@@ -380,7 +380,6 @@ th {
 | `AfmoeForCausalLM` | Afmoe | TBA | ✅︎ | ✅︎ |
 | `AliceAIForCausalLM` | AliceAI | `yandex/AliceAI-Foundation-80B-A3B-Base` | ✅︎ | |
 | `ApertusForCausalLM` | Apertus | `swiss-ai/Apertus-8B-2509`, `swiss-ai/Apertus-70B-Instruct-2509`, etc. | ✅︎ | ✅︎ |
-| `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | | ✅︎ |
 | `BailingMoeForCausalLM` | Ling | `inclusionAI/Ling-lite-1.5`, `inclusionAI/Ling-plus`, etc. | ✅︎ | ✅︎ |
 | `BailingMoeV2ForCausalLM` | Ling | `inclusionAI/Ling-mini-2.0`, etc. | ✅︎ | ✅︎ |
 | `BailingMoeV2_5ForCausalLM` | Ling | `inclusionAI/Ling-2.5-1T`, `inclusionAI/Ring-2.5-1T` | | ✅︎ |
@@ -484,6 +483,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | ✅︎ | ✅︎ |
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
 | `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
 | `FlexOlmoForCausalLM` | FlexOlmo | `allenai/FlexOlmo-7x7B-1T`, `allenai/FlexOlmo-7x7B-1T-RT`, etc. | ✅︎ | ✅︎ |

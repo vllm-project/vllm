@@ -231,9 +231,7 @@ def _write_minimal_moe_config(
         "rope_theta": 10000,
         "quantization_config": _QUARK_MXFP4_CONFIG,
     }
-    if architecture == "AXK1ForCausalLM":
-        config["model_type"] = "axk1"
-    elif architecture == "MiniMaxM3SparseForCausalLM":
+    if architecture == "MiniMaxM3SparseForCausalLM":
         text_config = {
             **config,
             "model_type": "minimax_m3_text",
@@ -512,7 +510,6 @@ def test_online_shared_expert_reload_compatibility(
 @pytest.mark.parametrize(
     "architecture",
     [
-        "AXK1ForCausalLM",
         "DeepseekForCausalLM",
         "DeepseekV2ForCausalLM",
         "DeepseekV32ForCausalLM",

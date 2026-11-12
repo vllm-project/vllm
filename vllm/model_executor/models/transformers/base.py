@@ -19,6 +19,7 @@
 import os
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
@@ -144,6 +145,9 @@ class Base(
         """Ignore unexpected weights whose qualname starts with these prefixes."""
         self.ignore_unexpected_suffixes: list[str] = []
         """Ignore unexpected weights whose qualname ends with these suffixes."""
+        self.ignore_unexpected_patterns: list[str] = []
+        """Ignore unexpected weights whose checkpoint name, after Transformers'
+        renamings, matches these regexes."""
         self.packed_modules_mapping: dict[str, list[str]] = {}
         """Fused module -> constituent projections, populated by `recursive_replace`
         for the quantization machinery and loaders (e.g. bitsandbytes)."""
@@ -202,6 +206,9 @@ class Base(
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
+        # Like Transformers, only skip these if nothing loads them
+        ignore_unexpected = self.model._keys_to_ignore_on_load_unexpected or []
+        self.ignore_unexpected_patterns.extend(ignore_unexpected)
         # Remove layers not on this pipeline parallel rank
         self.start_layer, self.end_layer = self._pp_indices()
         self.pipeline_parallel()
@@ -347,11 +354,6 @@ class Base(
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
             # TODO: Handle WeightConverter to enable layer merging
-
-        # Handle unexpected weights which should be ignored
-        if self.model._keys_to_ignore_on_load_unexpected is not None:
-            for key in self.model._keys_to_ignore_on_load_unexpected:
-                orig_to_new_regex[re.compile(key)] = None
 
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
@@ -916,12 +918,18 @@ class Base(
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Rename first, as Transformers matches `_keys_to_ignore_on_load_unexpected`
+        # against renamed checkpoint keys
+        renamings = self.hf_to_vllm_mapper.orig_to_new_renaming
+        weights = WeightsMapper(orig_to_new_renaming=renamings).apply(weights)
+        mapper = replace(self.hf_to_vllm_mapper, orig_to_new_renaming=[])
         loader = AutoWeightsLoader(
             self,
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
+            ignore_unexpected_patterns=self.ignore_unexpected_patterns,
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
     @staticmethod
     def check_version(min_version: str, feature: str):

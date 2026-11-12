@@ -121,6 +121,8 @@ class _AllLeafTracer(fx.Tracer):
 
     varkw: str | None = None
     """Name of the traced forward's `**kwargs` parameter, if any."""
+    seq_len: int = 8
+    """Sequence length of the placeholder hidden states."""
 
     def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
         return True
@@ -142,9 +144,8 @@ class _AllLeafTracer(fx.Tracer):
             # vLLM always feeds the model [1, seq_len, hidden_size] hidden states.
             weight = _reference_weight(self.root)
             if str(target) == "hidden_states" and weight is not None:
-                return torch.empty(
-                    1, 8, weight.shape[-1], dtype=weight.dtype, device="meta"
-                )
+                shape = (1, self.seq_len, weight.shape[-1])
+                return torch.empty(shape, dtype=weight.dtype, device="meta")
             return _UNKNOWN
         if kind == "get_attr":
             with _unpatched_modules():
@@ -246,8 +247,10 @@ def _leaf_attention_interfaces():
     return mock.patch.object(AttentionInterface, "get_interface", get_interface)
 
 
-def trace(module: nn.Module) -> fx.Graph | None:
-    """Trace `module.forward`, returning the partial graph on failure."""
+def trace(module: nn.Module, seq_len: int = 8) -> fx.Graph | None:
+    """Trace `module.forward` in eval mode, returning the partial graph on failure.
+
+    vLLM only runs inference, so branches on `self.training` take that path."""
     parameters = forward_parameters(type(module))
     # vLLM never passes `past_key_values` so it is always the default value of `None`.
     # Make this concrete to simplify tracing.
@@ -256,6 +259,7 @@ def trace(module: nn.Module) -> fx.Graph | None:
         concrete_args = {"past_key_values": None}
     # Get the name of the kwargs parameter passed to module.forward (usually "kwargs")
     tracer = _AllLeafTracer()
+    tracer.seq_len = seq_len
     tracer.varkw = next(
         (
             p.name
@@ -264,12 +268,15 @@ def trace(module: nn.Module) -> fx.Graph | None:
         ),
         None,
     )
+    training, module.training = module.training, False
     try:
         with _leaf_attention_interfaces():
             return tracer.trace(module, concrete_args=concrete_args)
     except Exception as exc:
         logger.debug("Could not fully trace %s: %s", type(module), exc)
         return getattr(tracer, "graph", None)
+    finally:
+        module.training = training
 
 
 def recover_forward(cls: type[nn.Module]) -> tuple[ast.FunctionDef, Callable]:

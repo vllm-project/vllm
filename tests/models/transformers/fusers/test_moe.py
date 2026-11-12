@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Transformers modeling backend's MoE fuser."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
@@ -273,8 +275,8 @@ class MoEBlockSharedNonGLU(MoEBlock):
         return self.shared_expert(x)
 
 
-class MoEBlockUnaccounted(MoEBlock):
-    """A weight-bearing child outside the fused dataflow (pre-router) -> declined."""
+class MoEBlockPreProjection(MoEBlock):
+    """Projects the input before the router and experts -> kept around the fused MoE."""
 
     def __init__(self):
         super().__init__()
@@ -286,23 +288,51 @@ class MoEBlockUnaccounted(MoEBlock):
         return self.experts(x, index, weights).reshape(hidden_states.shape)
 
 
-class BufferScale(nn.Module):
-    """A stateful child carrying only a buffer (no parameters)."""
+class MoEBlockExpertsReused(MoEBlockSharedNoGate):
+    """Uses the experts' output outside its sum with the shared expert -> declined."""
 
-    def __init__(self, hidden: int = 16):
-        super().__init__()
-        self.register_buffer("scale", torch.ones(hidden))
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        out = self.experts(x, index, weights)
+        return out + self.shared_expert(x) + out
 
-    def forward(self, x):
-        return x * self.scale
+
+class MoEBlockSeqLenSpecialized(MoEBlock):
+    """Reads the sequence length as a Python int, which tracing bakes in -> declined."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(len(hidden_states[0]), -1)
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights).reshape(hidden_states.shape)
 
 
-class MoEBlockUnaccountedBuffer(MoEBlockUnaccounted):
-    """Like `MoEBlockUnaccounted`, but the extra child holds only a buffer."""
+class MoEBlockOptionalInput(MoEBlock):
+    """Branches on an optional input, which tracing fixes -> declined."""
 
-    def __init__(self):
-        super().__init__()
-        self.extra = BufferScale()
+    def forward(self, hidden_states, scale=None):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        out = self.experts(x, index, weights)
+        return out if scale is None else out * scale
+
+
+class MoEBlockExpertsAttribute(MoEBlock):
+    """Reads an experts' weight, which the fused MoE replaces -> declined."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights) + self.experts.down_proj.sum()
+
+
+class MoEBlockTrainingNoise(MoEBlock):
+    """Perturbs its input in training mode only (Mixtral's router jitter)."""
+
+    def forward(self, hidden_states):
+        if self.training:
+            hidden_states = hidden_states * torch.rand_like(hidden_states)
+        return super().forward(hidden_states)
 
 
 class MoEBlockExpertsKeywords(MoEBlock):
@@ -356,6 +386,15 @@ class MoEBlockScaled(MoEBlockSharedNoGate):
         x = hidden_states.reshape(-1, hidden_states.shape[-1])
         _, weights, index = self.gate(x)
         return self.experts(x, index, weights) * 2.5 + self.shared_expert(x)
+
+
+class MoEBlockScaledLeft(MoEBlockSharedNoGate):
+    """Scales the experts' output with the constant on the left."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        return 2.5 * self.experts(x, index, weights) + self.shared_expert(x)
 
 
 class MoEBlockScaledBiasedRouter(MoEBlockScaled):
@@ -412,6 +451,26 @@ class MoEBlockIdentityLatent(MoEBlockSharedNoGate):
             self.experts(self.fc1_latent_proj(x), index, weights)
         )
         return out + self.shared_expert(x)
+
+
+class MoEBlockPostNorm(MoEBlockSharedNoGate):
+    """Normalizes the block's output (A.X-K1's `post_mlp_layernorm`)."""
+
+    def __init__(self):
+        super().__init__()
+        self.post_norm = nn.RMSNorm(16)
+
+    def forward(self, hidden_states):
+        return self.post_norm(super().forward(hidden_states))
+
+
+class StubMoERunner(nn.Module):
+    """Stands in for the `MoERunner` that the rewritten forward calls."""
+
+    moe_config = SimpleNamespace(is_sequence_parallel=False)
+
+    def forward(self, hidden_states, router_logits):
+        return 2 * hidden_states
 
 
 @pytest.mark.parametrize("sigmoid", [False, True])
@@ -532,11 +591,12 @@ def test_moe_fuser_detects_non_glu_shared_expert():
         lambda: MoEBlock(BiasedRouter),  # router with an unrecognized extra param
         MoEBlockTuple,  # tuple-returning block (e.g. gpt-oss)
         MoEBlockTupleVar,  # tuple returned via a name binding, not a literal
-        MoEBlockUnaccounted,  # weight-bearing child outside the fused dataflow
-        MoEBlockUnaccountedBuffer,  # buffer-only child outside the fused dataflow
+        MoEBlockExpertsReused,  # experts' output used outside the fused sum
+        MoEBlockSeqLenSpecialized,  # trace specialized on the sequence length
+        MoEBlockOptionalInput,  # optional input fixed by tracing
+        MoEBlockExpertsAttribute,  # experts read outside the fused call
         MoEBlockExpertsExtraArg,  # extra experts argument the fused forward drops
         MoEBlockNoShared,  # gate-derived term added to the experts' output
-        MoEBlockSharedAveraged,  # experts' and shared expert's outputs averaged
         MoEBlockGateExtraInput,  # gate input the fused forward drops
     ],
 )
@@ -572,20 +632,6 @@ def test_moe_fuser_unrecognized_router_moves_shared_expert():
     assert fuser.shared_name == "shared_expert"
 
 
-@pytest.mark.parametrize(
-    ("block_cls", "scoring_func"),
-    [
-        (MoEBlockSharedUnflattened, None),  # routing falls back to Transformers
-        (MoEBlock, "softmax"),  # no shared output to divide
-    ],
-)
-def test_moe_fuser_divided_shared_output(block_cls, scoring_func):
-    with torch.device("meta"):
-        fuser = MoEBlockFuser.match(block_cls(), "experts", divides_shared_output=True)
-    assert fuser is not None
-    assert fuser.scoring_func == scoring_func
-
-
 def test_moe_fuser_scaled_output_needs_vllm_routing():
     """Only vLLM routing applies the routed scale, so nothing else moves without it."""
     with torch.device("meta"):
@@ -599,10 +645,14 @@ def test_moe_fuser_matches_experts_called_by_keyword():
     assert isinstance(MoEBlockFuser.match(block, "experts"), MoEBlockFuser)
 
 
-def test_moe_fuser_scaled_output_with_vllm_routing():
-    """A scaled block fuses because vLLM routing applies `routed_scaling_factor`."""
+@pytest.mark.parametrize("block_cls", [MoEBlockScaled, MoEBlockScaledLeft])
+def test_moe_fuser_scaled_output_with_vllm_routing(block_cls):
+    """A scaled block fuses because vLLM routing applies `routed_scaling_factor`,
+    but only if that is the scale the block applies."""
     with torch.device("meta"):
-        fuser = MoEBlockFuser.match(MoEBlockScaled(), "experts")
+        block = block_cls()
+    assert MoEBlockFuser.match(block, "experts", routed_scaling_factor=1.0) is None
+    fuser = MoEBlockFuser.match(block, "experts", routed_scaling_factor=2.5)
     assert fuser is not None
     assert fuser.scoring_func == "softmax"
     assert fuser.shared_name == "shared_expert"
@@ -614,3 +664,25 @@ def test_moe_fuser_looks_through_casts_and_identity(block_cls):
         fuser = MoEBlockFuser.match(block_cls(), "experts")
     assert fuser is not None
     assert fuser.shared_name == "shared_expert"
+
+
+@pytest.mark.parametrize(
+    ("block_cls", "expected"),
+    [
+        (MoEBlockPreProjection, lambda block, x: 2 * block.extra(x)),
+        (MoEBlockPostNorm, lambda block, x: block.post_norm(2 * x)),
+        (MoEBlockSharedAveraged, lambda block, x: x),
+        (MoEBlockTrainingNoise, lambda block, x: 2 * x),
+    ],
+)
+def test_moe_fuser_keeps_the_rest_of_the_forward(block_cls, expected):
+    block = block_cls()
+    for param in block.parameters():
+        nn.init.normal_(param)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert fuser is not None
+
+    block.experts = StubMoERunner()
+    fuser.rewrite_forward(block)
+    x = torch.randn(1, 3, 16)
+    torch.testing.assert_close(block(x), expected(block, x))

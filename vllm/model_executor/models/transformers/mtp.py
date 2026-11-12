@@ -59,12 +59,6 @@ class MTPMixin(CausalMixin):
 
         # The proposer shares the target's LM head with the draft
         del mtp_model.shared_head
-        # With PP, the last rank has no target embedding to share with the draft
-        if self.pp_group.world_size > 1:
-            mtp_model._keys_to_ignore_on_load_unexpected = [
-                r"layers\..*embed_tokens\.weight" if "embed_tokens" in k else k
-                for k in mtp_model._keys_to_ignore_on_load_unexpected
-            ]
         self.text_config = mtp_model.config
         return mtp_model
 
