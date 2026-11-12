@@ -13,6 +13,7 @@ const SEED_OSS_CONFIG: QwenCoderConfig = QwenCoderConfig {
     next_tool_call_start: "\n<seed:tool_call>",
     tool_call_end: "</seed:tool_call>",
     trim_parameter_newlines: true,
+    allow_json_tool_body: false,
 };
 
 /// Tool parser for Seed-OSS XML-style tool calls.
@@ -259,6 +260,19 @@ mod tests {
         assert_tool_framing_preserves_body_whitespace::<SeedOssToolParser>(
             "\n\n",
             "<seed:tool_call>\n<function=get_weather>\n</function>\n</seed:tool_call>",
+        );
+    }
+
+    #[test]
+    fn seed_oss_rejects_hermes_json_tool_body() {
+        let mut parser = SeedOssToolParser::new(&test_tools());
+
+        assert!(
+            parser
+                .parse_complete(
+                    "<seed:tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</seed:tool_call>",
+                )
+                .is_err()
         );
     }
 }

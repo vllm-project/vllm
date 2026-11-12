@@ -13,6 +13,7 @@ const MIMO_CONFIG: QwenCoderConfig = QwenCoderConfig {
     next_tool_call_start: "<tool_call>",
     tool_call_end: "</tool_call>",
     trim_parameter_newlines: false,
+    allow_json_tool_body: false,
 };
 
 /// MiMo V2 uses Qwen Coder's XML grammar with unframed content and parameter values.
@@ -49,7 +50,7 @@ impl ToolParser for MiMoToolParser {
 mod tests {
     use super::*;
     use crate::tool::ToolParserTestExt as _;
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use serde_json::{Value, json};
 
@@ -122,5 +123,18 @@ mod tests {
             "<tool_call><function=get_weather>"
         );
         assert_eq!(value["format"]["tags"][0]["end"], "</function></tool_call>");
+    }
+
+    #[test]
+    fn mimo_rejects_hermes_json_tool_body() {
+        let mut parser = MiMoToolParser::create(&test_tools(), test_tokenizer()).unwrap();
+
+        assert!(
+            parser
+                .parse_complete(
+                    "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>",
+                )
+                .is_err()
+        );
     }
 }
