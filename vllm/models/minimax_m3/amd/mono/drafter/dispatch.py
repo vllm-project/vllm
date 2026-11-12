@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Which MiniMax-M3.1 DSpark draft steps run on the drafter kernels
-(`VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1`).
+(`--monokernel`).
 
 A draft step of 1..MAX_REQS requests (7 query rows each) runs its 5 layers and
 final norm in launches of up to 8 requests; other steps run the stock layers.
@@ -31,7 +31,7 @@ def _flydsl_available() -> bool:
     return importlib.util.find_spec("flydsl") is not None
 
 
-def _config_refusal(vllm_config: VllmConfig) -> str | None:
+def config_refusal(vllm_config: VllmConfig) -> str | None:
     """Why this deployment cannot use the drafter kernels at all, or None."""
     pc = vllm_config.parallel_config
     spec = vllm_config.speculative_config
@@ -59,7 +59,7 @@ class DrafterDecode:
     def __init__(self, model, vllm_config: VllmConfig) -> None:
         self._model = model
         self._runner: DrafterRunner | None = None
-        why = _config_refusal(vllm_config)
+        why = config_refusal(vllm_config)
         self._enabled = why is None
         if why is not None:
             logger.info("MiniMax-M3 DSpark drafter kernels off: %s", why)

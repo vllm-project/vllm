@@ -147,7 +147,7 @@ features:
         args: []
   mono_decode:
     label: "Mono decode"
-    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager."
+    description: "AMD MI355X single node, MXFP4 (Quark) checkpoint, low concurrency: a decode step of up to 16 tokens (4 requests with DSpark 3) runs each layer as one fused kernel; larger steps and steps with prefill run on the normal path. Uses FP8 KV and indexer K caches (fewer KV tokens than NVFP4) and FULL_DECODE_ONLY graphs, so prefill and mixed steps run eager. With a seven-token DSpark draft, `--monokernel` also runs the draft steps as fused kernels."
     strategies: [single_node_tp]
     modes:
       # The kernels read the experts as AITER MXFP4 tables, which only the
@@ -163,9 +163,9 @@ features:
           - '{"indexer_kv_dtype": "fp8"}'
           - "--compilation-config"
           - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+          - "--monokernel"
         env:
           VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
-          VLLM_ROCM_MINIMAX_M3_MONO: "1"
         # Measured on MI355X only.
         hardware:
           hopper: unsupported
@@ -1453,9 +1453,6 @@ presets:
       - "--enable-prefix-caching"
     env:
       VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
-      # the DSpark drafter kernels (seven-token drafts; c64's three-token draft keeps
-      # the stock draft layers)
-      VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
       # the FP8 indexer of the mono points bypasses it
       VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
       VLLM_USE_RUST_FRONTEND: "1"
@@ -1465,6 +1462,9 @@ presets:
       "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
     # json_args cannot add --compilation-config (mono_decode owns it). The capture list is
     # the V2 runner's deprecated alias for the prefill and decode graph sizes.
+    # --monokernel comes from mono_decode at c1-c8 and is passed at c16-c32 for the
+    # drafter kernels; c64's three-token draft fits no MiniMax-M3 monokernel, so
+    # --monokernel would refuse it.
     points:
       c1:
         label: "1 (mono)"
@@ -1489,12 +1489,12 @@ presets:
       c16:
         label: "16 (graphs)"
         concurrency: 16
-        args: ["--max-num-seqs", "32", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--compilation-config", '{"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]}']
+        args: ["--max-num-seqs", "32", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--monokernel", "--compilation-config", '{"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]}']
         env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", VLLM_USE_BREAKABLE_CUDAGRAPH: "1" }
       c32:
         label: "32 (graphs)"
         concurrency: 32
-        args: ["--max-num-seqs", "64", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--compilation-config", '{"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]}']
+        args: ["--max-num-seqs", "64", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--monokernel", "--compilation-config", '{"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]}']
         env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", VLLM_USE_BREAKABLE_CUDAGRAPH: "1" }
       c64:
         label: "64 (KV offload)"
@@ -1519,9 +1519,10 @@ presets:
       decode top-k, per-XCD sparse-decode splits, the MXFP8 GEMM tile retune for
       M=17-256), the lane turns on the switches that default off:
 
-      - `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1` runs seven-token DSpark draft steps of up
-        to 10 requests as fused FlyDSL kernels (the three-token draft at c64 keeps the
-        stock layers).
+      - `--monokernel` (concurrency 1-32) runs seven-token DSpark draft steps of up
+        to 10 requests as fused FlyDSL kernels, and at concurrency 1-8 the mono
+        decode too. Concurrency 64 leaves it off: its three-token draft fits none of
+        the MiniMax-M3 monokernels, which `--monokernel` refuses at startup.
       - `VLLM_ROCM_PARALLEL_INDEX_TOPK=1` selects the top-16 blocks of the NVFP4 indexer
         in parallel; the FP8 indexer of the mono points bypasses it.
       - `VLLM_USE_RUST_FRONTEND=1` serves the API with the Rust frontend.
@@ -1597,6 +1598,7 @@ presets:
       - "1048576"
       - "--gpu-memory-utilization"
       - "0.85"
+      - "--monokernel"
     env:
       VLLM_USE_V2_MODEL_RUNNER: "1"
       DEBUG_HIP_DYNAMIC_QUEUES: "0"
@@ -1608,7 +1610,6 @@ presets:
       HIP_FORCE_DEV_KERNARG: "1"
       NCCL_DMABUF_ENABLE: "0"
       HSA_ENABLE_IPC_MODE_LEGACY: "1"
-      VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
       VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
       VLLM_USE_RUST_FRONTEND: "1"
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
@@ -1821,8 +1822,8 @@ guide: |
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
   - With a seven-token DSpark draft (`num_speculative_tokens: 7`),
-    `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1` runs draft steps of up to 10 requests
-    as fused FlyDSL kernels.
+    `--monokernel` runs draft steps of up to 10 requests as fused FlyDSL
+    kernels.
 
   ### Parallel index top-k (AMD MI355X)
 
