@@ -39,7 +39,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """Whether collapsed (constant-output) experts can replace rows of the
         expert weights. Requires every per-expert tensor (weights and scales)
         to load through the expert-ID mapping so compact physical rows stay
-        consistent, and a decomposed ``apply`` path."""
+        consistent, and a decomposed `apply` path."""
         return False
 
     @property

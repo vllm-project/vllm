@@ -31,7 +31,7 @@ MOE_PREFIX = "model.layers.1.mlp.experts"
 
 
 def _moe_sparsity_config(num_experts):
-    """The ``quantization_config.moe_sparsity_config`` novice format."""
+    """The `quantization_config.moe_sparsity_config` novice format."""
     return {"method": "novice", "num_experts": num_experts}
 
 
@@ -60,6 +60,7 @@ def test_parse_moe_sparsity_config():
         is None
     )
     spec = get_expert_substitution_spec(_model_config([None, 3, None, 5]))
+    assert spec is not None
     assert spec.retained_experts == {1: 3, 3: 5}
     text_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(
@@ -67,7 +68,9 @@ def test_parse_moe_sparsity_config():
         ),
         hf_config=SimpleNamespace(),
     )
-    assert get_expert_substitution_spec(text_config).retained_experts == {0: 2}
+    text_spec = get_expert_substitution_spec(text_config)
+    assert text_spec is not None
+    assert text_spec.retained_experts == {0: 2}
 
 
 @pytest.mark.parametrize(

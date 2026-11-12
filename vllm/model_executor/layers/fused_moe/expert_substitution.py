@@ -4,16 +4,16 @@
 
 MoNE (https://arxiv.org/abs/2507.00390) collapses low-importance experts into
 "novices" that return a constant vector. Checkpoints declare the per-layer
-retained expert count in ``quantization_config.moe_sparsity_config`` with
-``method="novice"`` and store, per MoE layer:
+retained expert count in `quantization_config.moe_sparsity_config` with
+`method="novice"` and store, per MoE layer:
 
 * the router at its full original width, with rows reordered so the retained
   experts occupy the leading rows and the collapsed experts the trailing rows;
 * the retained experts left-shifted into compact stacked tensors
-  (``<experts prefix>.gate_up_proj`` and ``<experts prefix>.down_proj``), so
-  physical row ``r`` holds the expert of router row ``r``;
-* one ``<experts prefix>.novices`` tensor of shape
-  ``[num_collapsed, hidden_size]`` whose rows match the trailing router rows.
+  (`<experts prefix>.gate_up_proj` and `<experts prefix>.down_proj`), so
+  physical row `r` holds the expert of router row `r`;
+* one `<experts prefix>.novices` tensor of shape
+  `[num_collapsed, hidden_size]` whose rows match the trailing router rows.
 """
 
 from collections.abc import Mapping
@@ -103,7 +103,7 @@ class ConstantExpertSubstitution(nn.Module):
     """Constant novice experts for the collapsed experts of one MoE layer.
 
     Router outputs keep the full logical expert set. The trailing logical IDs
-    are the collapsed experts; ``transform_routes`` maps the leading (retained)
+    are the collapsed experts; `transform_routes` maps the leading (retained)
     IDs to their compact physical rows and turns collapsed routes into
     zero-weight routes to physical expert 0, so any decomposed MoE backend can
     run them unchanged. The novice constants are loaded for checkpoint

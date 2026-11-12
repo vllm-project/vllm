@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import re
 from collections.abc import Iterable
 from itertools import islice
 
+import regex as re
 import torch
 
 import vllm.envs as envs
@@ -56,9 +56,9 @@ from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
 
 _EXPERTS_WEIGHT_RE = re.compile(r"^layers\.(\d+)\.mlp\.experts\.(.+)$")
 """Matches a decoder-layer routed-expert tensor, e.g.
-``layers.3.mlp.experts.gate_up_proj.weight_packed``; group 2 is the name
-relative to the MoE's ``experts`` module (per-expert ``3.gate_proj.weight``
-and fused ``gate_up_proj.weight_packed`` layouts alike)."""
+`layers.3.mlp.experts.gate_up_proj.weight_packed`; group 2 is the name
+relative to the MoE's `experts` module (per-expert `3.gate_proj.weight`
+and fused `gate_up_proj.weight_packed` layouts alike)."""
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):

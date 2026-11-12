@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, Literal
 
@@ -135,9 +134,10 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
     assert kpool is not None
     return round_up(topk + kpool - 1, 128)
 
+
 _EXPERTS_WEIGHT_RE = re.compile(r"^layers\.(\d+)\.mlp\.experts\.(.+)$")
-"""Matches a decoder-layer expert tensor, e.g. ``layers.3.mlp.experts.
-gate_up_proj.weight_packed``; group 2 is the name relative to the MoE."""
+"""Matches a decoder-layer expert tensor, e.g. `layers.3.mlp.experts.
+gate_up_proj.weight_packed`; group 2 is the name relative to the MoE."""
 
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
