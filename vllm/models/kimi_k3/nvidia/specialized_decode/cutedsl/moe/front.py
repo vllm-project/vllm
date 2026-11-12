@@ -360,9 +360,12 @@ FUSED, SPLIT = "9-64:1", "9-12:6,13-24:4,25-64:2"
 # tokens: TP8 DL7 M16/32/64 -5.9/-12.9/-1.1%, TP16 M32 -5.9%.
 # TP8 verify 9-12 rows (two requests at k = 4): SharedDown on 12 SMs instead of 6, so
 # it no longer outlasts the routed experts (decode-step A/B: -6% per token; 8 and 16
-# SMs were slower).
+# SMs were slower). Decode-step A/B at 131K context, per token, TP8 verify 17-40 rows
+# (four to eight requests): 6 SMs instead of 4 at 17-32 rows, -4.4/-4.0/-1.2% at 4/5/6
+# requests; then 8 SMs at 17-24 rows, a further -2.1% at 4 requests; 6 SMs instead of
+# 3 at 33-40 rows, -4.0/-2.5% at 7/8 requests.
 SPLITS = {
-    8: ("25-32:3", "9-12:12,13-16:6,25-32:4,33-64:3"),
+    8: ("25-32:3", "9-12:12,13-16:6,17-24:8,25-40:6,41-64:3"),
     16: ("", "25-32:3"),
 }
 # Split-K shared-expert batches whose routing kernel releases the persistent experts
