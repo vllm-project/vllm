@@ -310,6 +310,9 @@ class OpenAIServingResponses(GenerateBaseServing):
             previous_response_outputs=previous_response_outputs,
             tool_server=self.tool_server,
             skip_mm_cache=skip_mm_cache,
+            render_builtin_tools=(
+                envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT and not self.use_harmony
+            ),
         )
 
     async def create_responses(
@@ -635,6 +638,9 @@ class OpenAIServingResponses(GenerateBaseServing):
             previous_messages=None,
             previous_response_outputs=None,
             tool_server=self.tool_server,
+            # Only ParsableContext reaches this branch (HarmonyContext uses
+            # render_responses_harmony_messages), so builtin tools are valid.
+            render_builtin_tools=True,
         )
         if isinstance(render_result, ErrorResponse):
             raise VLLMValidationError(render_result.error.message)

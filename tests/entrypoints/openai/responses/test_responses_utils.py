@@ -1033,3 +1033,207 @@ class TestBuildResponseOutputItemsStatus:
         assert message.status == "completed"
         assert first.status == "completed"
         assert last.status == "incomplete"
+
+
+# ---------------------------------------------------------------------------
+# Tests: builtin tool extraction for prompt rendering
+# ---------------------------------------------------------------------------
+
+
+class _FakeToolDescription:
+    def __init__(self, name, description, parameters):
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+
+
+class _FakeToolNamespaceConfig:
+    def __init__(self, tools):
+        self.description = "namespace-level description (must not be used)"
+        self.tools = tools
+
+
+class _FakeToolServer:
+    """Minimal ToolServer stub exposing builtin tool availability + schemas."""
+
+    def __init__(
+        self,
+        available=("browser", "python", "container"),
+        descriptions=None,
+    ):
+        self._available = set(available)
+        self._descriptions = descriptions or {}
+
+    def has_tool(self, tool_name):
+        return tool_name in self._available
+
+    def get_tool_description(self, tool_name, allowed_tools=None):
+        return self._descriptions.get(tool_name)
+
+
+def test_builtin_tools_rendered_as_functions():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_tool_dicts,
+    )
+
+    tools = [
+        {"type": "code_interpreter", "container": {"type": "auto"}},
+        {"type": "web_search_preview"},
+    ]
+    dicts = construct_builtin_tool_dicts(tools, _FakeToolServer(), tool_choice="auto")
+
+    names = {d["function"]["name"] for d in dicts}
+    assert names == {"code_interpreter", "web_search_preview"}
+    for d in dicts:
+        assert d["type"] == "function"
+    code = next(d for d in dicts if d["function"]["name"] == "code_interpreter")
+    props = code["function"]["parameters"]["properties"]
+    assert "code" in props
+    search = next(d for d in dicts if d["function"]["name"] == "web_search_preview")
+    assert "query" in search["function"]["parameters"]["properties"]
+
+
+def test_container_tool_rendered_with_exec_schema():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_tool_dicts,
+    )
+
+    dicts = construct_builtin_tool_dicts(
+        [{"type": "container"}], _FakeToolServer(), tool_choice="auto"
+    )
+    assert len(dicts) == 1
+    params = dicts[0]["function"]["parameters"]
+    assert "cmd" in params["properties"]
+    assert params["required"] == ["cmd"]
+
+
+def test_builtin_tool_skipped_when_server_lacks_it():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_tool_dicts,
+    )
+
+    dicts = construct_builtin_tool_dicts(
+        [{"type": "web_search_preview"}],
+        _FakeToolServer(available=()),
+        tool_choice="auto",
+    )
+    assert dicts is None
+
+
+def test_builtin_tool_skipped_without_server():
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_tool_dicts,
+    )
+
+    dicts = construct_builtin_tool_dicts(
+        [{"type": "code_interpreter"}], None, tool_choice="auto"
+    )
+    assert dicts is None
+
+
+def test_mcp_tools_are_not_rendered():
+    """Only names dispatched by ParsableContext may appear in the prompt."""
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_tool_dicts,
+    )
+
+    tools = [
+        {
+            "type": "mcp",
+            "server_label": "deepwiki",
+            "server_url": "https://example.com/mcp",
+            "allowed_tools": ["search", "read_page"],
+        }
+    ]
+    assert (
+        construct_builtin_tool_dicts(tools, _FakeToolServer(), tool_choice="auto")
+        is None
+    )
+
+
+def test_builtin_schema_comes_from_tool_server():
+    """Server-provided description/parameters win over the fallback spec."""
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_tool_dicts,
+    )
+
+    server_schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "topn": {"type": "number"}},
+        "required": ["query"],
+    }
+    server = _FakeToolServer(
+        descriptions={
+            "browser": _FakeToolNamespaceConfig(
+                [
+                    _FakeToolDescription(
+                        "search", "Server search description.", server_schema
+                    )
+                ]
+            )
+        }
+    )
+    dicts = construct_builtin_tool_dicts(
+        [{"type": "web_search_preview"}], server, tool_choice="auto"
+    )
+    function = dicts[0]["function"]
+    assert function["description"] == "Server search description."
+    assert function["parameters"] == server_schema
+    assert "topn" in function["parameters"]["properties"]
+
+
+def test_builtin_schema_falls_back_when_server_exposes_none():
+    """Demo python tool has no ToolDescription; hardcoded spec is used."""
+    from vllm.entrypoints.openai.responses.utils import (
+        _BUILTIN_TOOL_FALLBACK_SPECS,
+        construct_builtin_tool_dicts,
+    )
+
+    server = _FakeToolServer(descriptions={"python": _FakeToolNamespaceConfig([])})
+    dicts = construct_builtin_tool_dicts(
+        [{"type": "code_interpreter"}], server, tool_choice="auto"
+    )
+    function = dicts[0]["function"]
+    assert "code" in function["parameters"]["properties"]
+    assert (
+        function["description"]
+        == (_BUILTIN_TOOL_FALLBACK_SPECS["code_interpreter"]["description"])
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_choice, exclude, expected_names",
+    [
+        ("none", False, ["code_interpreter"]),
+        ("none", True, []),
+        ("auto", False, ["code_interpreter"]),
+        ("required", False, ["code_interpreter"]),
+    ],
+)
+def test_builtin_tools_respect_tool_choice(tool_choice, exclude, expected_names):
+    """tool_choice="none" mirrors construct_tool_dicts: tools are omitted
+    only when the server opted into exclude_tools_when_tool_choice_none."""
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_tool_dicts,
+    )
+
+    dicts = construct_builtin_tool_dicts(
+        [{"type": "code_interpreter", "container": {"type": "auto"}}],
+        _FakeToolServer(),
+        tool_choice=tool_choice,
+        exclude_tools_when_tool_choice_none=exclude,
+    )
+    names = [d["function"]["name"] for d in dicts or []]
+    assert names == expected_names
+
+
+def test_builtin_tools_require_tool_choice_argument():
+    """tool_choice is mandatory so callers cannot silently ignore it."""
+    from vllm.entrypoints.openai.responses.utils import (
+        construct_builtin_tool_dicts,
+    )
+
+    with pytest.raises(TypeError):
+        construct_builtin_tool_dicts(
+            [{"type": "web_search_preview"}], _FakeToolServer()
+        )

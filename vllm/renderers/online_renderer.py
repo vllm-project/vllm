@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.responses.harmony import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import (
+    construct_builtin_tool_dicts,
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
@@ -348,8 +349,16 @@ class OnlineRenderer:
         previous_response_outputs: list[ResponseOutputItem] | None = None,
         tool_server: "ToolServer | None" = None,
         skip_mm_cache: bool = False,
+        render_builtin_tools: bool = False,
     ) -> ResponsesRenderResult | ErrorResponse:
-        """Render a Responses request using only explicitly supplied history."""
+        """Render a Responses request using only explicitly supplied history.
+
+        ``render_builtin_tools`` is set by the serving layer only for the
+        ``ParsableContext`` path. ``SimpleContext`` cannot execute builtin or
+        MCP tool calls, so exposing those tools in its prompt would let the
+        model emit calls that the server would never run. Harmony models take
+        the dedicated branch above and render their own tool descriptions.
+        """
         template_error = self.validate_chat_template(
             request_chat_template=None,
             chat_template_kwargs=request.chat_template_kwargs,
@@ -382,6 +391,17 @@ class OnlineRenderer:
                 self.exclude_tools_when_tool_choice_none
             ),
         )
+        if render_builtin_tools:
+            builtin_dicts = construct_builtin_tool_dicts(
+                request.tools,
+                tool_server,
+                tool_choice=request.tool_choice,
+                exclude_tools_when_tool_choice_none=(
+                    self.exclude_tools_when_tool_choice_none
+                ),
+            )
+            if builtin_dicts:
+                tool_dicts = (tool_dicts or []) + builtin_dicts
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
