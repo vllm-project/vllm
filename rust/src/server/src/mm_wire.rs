@@ -21,7 +21,7 @@ pub(crate) fn encode_kwargs(item: &MmKwargsItem) -> Result<Vec<u8>, String> {
 }
 
 /// Decode one item using the engine protocol's typed serde schema, rejecting
-/// deep nesting and trailing data.
+/// deep nesting, trailing data, and reserved model arguments.
 pub(crate) fn decode_kwargs(bytes: &[u8]) -> Result<MmKwargsItem, String> {
     let mut decoder = rmp_serde::Deserializer::new(Cursor::new(bytes));
     decoder.set_max_depth(MAX_MSGPACK_DEPTH);
@@ -33,6 +33,9 @@ pub(crate) fn decode_kwargs(bytes: &[u8]) -> Result<MmKwargsItem, String> {
     })?;
     if decoder.position() != bytes.len() as u64 {
         return Err("kwargs contains trailing MessagePack data".to_string());
+    }
+    if kwargs.contains_key("self") {
+        return Err("Multimodal features must not contain reserved key 'self'".to_string());
     }
     Ok(kwargs)
 }

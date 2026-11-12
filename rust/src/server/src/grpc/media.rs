@@ -393,6 +393,34 @@ mod tests {
     }
 
     #[test]
+    fn protobuf_features_reject_reserved_model_argument() {
+        let kwargs = BTreeMap::from([(
+            "self",
+            MmFieldElem {
+                data: Some(MmKwargValue::Int(1)),
+                field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+            },
+        )]);
+        let encoded = rmp_serde::to_vec_named(&kwargs).unwrap();
+        for modality in [
+            pb::Modality::Image,
+            pb::Modality::Video,
+            pb::Modality::Audio,
+        ] {
+            let mut item = preprocessed();
+            item.modality = modality as i32;
+            let Some(pb::media_item::Source::Features(feature)) = &mut item.source else {
+                unreachable!()
+            };
+            feature.kwargs = Some(encoded.clone());
+
+            let error = from_proto(vec![item], None).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains("reserved key 'self'"));
+        }
+    }
+
+    #[test]
     fn aggregate_payload_limit_is_checked_before_decoding_items() {
         let mut item = preprocessed();
         let Some(pb::media_item::Source::Features(feature)) = &mut item.source else {
