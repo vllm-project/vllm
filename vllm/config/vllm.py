@@ -1560,6 +1560,19 @@ class VllmConfig:
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
+        # Model hooks may read the attention backend, so set the speculator's
+        # first.
+        if (
+            self.speculative_config is not None
+            and self.attention_config.backend is None
+        ):
+            backend = self.speculative_config.speculator_config.attention_backend
+            if backend is not None:
+                logger.info(
+                    "Using the speculator's attention backend %s.", backend.name
+                )
+                self.attention_config.backend = backend
+
         # Model hooks derive values from max_model_len, so apply the draft's
         # limit first.
         self._limit_max_model_len_to_draft()

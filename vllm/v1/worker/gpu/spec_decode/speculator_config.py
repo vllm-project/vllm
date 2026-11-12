@@ -22,6 +22,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.spec_decode.resources import (
         BudgetView,
         SpecCapabilities,
@@ -69,6 +70,9 @@ class SpeculatorConfig:
     # Qualified name of a `(vllm_config) -> Mapping[KernelKey, SpecKernel]`
     # factory: the kernels that let layers verify trees (spec_decode/kernels.py).
     spec_kernels: ClassVar[str | None] = None
+    # The target's attention backend when the user doesn't choose one (e.g. one
+    # that can verify this speculator's trees).
+    attention_backend: ClassVar["AttentionBackendEnum | None"] = None
 
     # --- SpeculativeConfig setup ---
 

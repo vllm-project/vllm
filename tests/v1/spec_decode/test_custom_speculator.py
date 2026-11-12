@@ -15,8 +15,9 @@ import torch
 
 import vllm.envs as envs
 from tests.v1.spec_decode.utils import fake_speculative_config
-from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config import AttentionConfig, SpeculativeConfig, VllmConfig
 from vllm.model_executor.models.registry import ModelRegistry
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode import speculator_config as speculator_config_module
 from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramGPUSpeculatorConfig
@@ -110,6 +111,22 @@ def test_custom_speculator(register, lazy: bool):
         ValueError, match="V1 does not support: custom speculative method 'dummy'"
     ):
         config._validate_v1_model_runner()
+
+
+class CustomBackendSpeculatorConfig(DummySpeculatorConfig):
+    attention_backend = AttentionBackendEnum.CUSTOM
+
+
+def test_custom_speculator_sets_unchosen_attention_backend(register):
+    register("dummy", CustomBackendSpeculatorConfig)
+    config = VllmConfig(speculative_config=_custom_spec_config())
+    assert config.attention_config.backend == AttentionBackendEnum.CUSTOM
+
+    chosen = AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN)
+    config = VllmConfig(
+        speculative_config=_custom_spec_config(), attention_config=chosen
+    )
+    assert config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
 
 
 def test_custom_speculator_inherits_builtin_config(register):
