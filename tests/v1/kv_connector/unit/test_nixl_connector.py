@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorWorker,
     NixlHandshakePayload,
     NixlKVConnectorStats,
+    NixlPushConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HeartbeatInfo,
@@ -65,6 +66,7 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.kv_cache_interface import (
@@ -75,6 +77,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheLayout,
     KVQuantMode,
+    MambaSpec,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
 )
@@ -5173,6 +5176,70 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
         (
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("connector_cls", [NixlConnector, NixlPushConnector])
+@pytest.mark.parametrize("connector_role", list(KVConnectorRole))
+@pytest.mark.parametrize("kv_role", ["kv_consumer", "kv_both"])
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_pp_rejects_receiving_roles(
+    default_vllm_config, dist_init, connector_cls, connector_role, kv_role
+):
+    """Reject decode PP before stages can report TP-only read completions."""
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(kv_role=kv_role, block_size=block_size)
+    config.parallel_config.pipeline_parallel_size = 2
+
+    with pytest.raises(NotImplementedError, match="NIXL connectors.*kv_producer"):
+        connector_cls(
+            config,
+            connector_role,
+            make_kv_cache_config(block_size=block_size),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("connector_cls", [NixlConnector, NixlPushConnector])
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_pp_rejects_mamba_with_shared_error(
+    default_vllm_config, dist_init, connector_cls, monkeypatch
+):
+    """Both transfer modes explain the shared Mamba PP restriction."""
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(kv_role="kv_producer", block_size=block_size)
+    config.parallel_config.pipeline_parallel_size = 2
+    cache = make_kv_cache_config(block_size=block_size)
+    cache = KVCacheConfig(
+        num_blocks=cache.num_blocks,
+        kv_cache_tensors=cache.kv_cache_tensors,
+        kv_cache_groups=[
+            *cache.kv_cache_groups,
+            KVCacheGroupSpec(
+                ["mamba0"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((16, 4), (16, 4)),
+                    dtypes=(torch.float16, torch.float32),
+                    mamba_type=MambaAttentionBackendEnum.MAMBA1,
+                ),
+            ),
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="NIXL connectors.*Mamba/SSM"):
+        connector_cls(
+            config,
+            KVConnectorRole.WORKER,
+            cache,
         )
 
 

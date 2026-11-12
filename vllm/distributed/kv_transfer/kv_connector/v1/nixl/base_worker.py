@@ -179,7 +179,8 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
-    # Only NixlPushConnector supports PP with HMA or packed KV caches.
+    # Push additionally supports MLA HMA and packed PP; attention-only HMA
+    # pull uses the shared layer pairing without these paths.
     _supports_pp_hma = False
 
     def _compute_desc_ids(
@@ -978,14 +979,8 @@ class NixlBaseConnectorWorker:
             # Mamba/SSM hybrid PP stages are not validated yet.
             if self._has_mamba:
                 raise NotImplementedError(
-                    "NixlPushConnector does not support pipeline_parallel_size > 1 "
+                    "NIXL connectors do not support pipeline_parallel_size > 1 "
                     "with Mamba/SSM hybrid KV cache layouts yet."
-                )
-            # Decode-side PP is unsupported (completions counted per consumer rank).
-            if vllm_config.kv_transfer_config.kv_role == "kv_consumer":
-                raise NotImplementedError(
-                    "NixlPushConnector consumer (decode) does not support "
-                    "pipeline_parallel_size > 1."
                 )
         # Keep heartbeat handshakes to a PP-sharded producer notif-only.
         self._hb_handshake_notif_only = False
@@ -1116,6 +1111,16 @@ class NixlBaseConnectorWorker:
         # Block-outermost layouts (BLHNC/BHLNC) pack every layer's page into one
         # block row of a shared allocation.
         self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
+        if (
+            self._TRANSFER_MODE == "pull"
+            and self.pp_size > 1
+            and self._has_packed_cache
+        ):
+            raise NotImplementedError(
+                "NixlConnector (pull) does not support PP with packed KV cache layout "
+                f"{self.kv_cache_layout}. Use a supported non-packed layout; "
+                "NixlPushConnector has separate packed PP restrictions."
+            )
         # The layers of each region, which pair regions with a peer's.
         self.region_members = []
         self._regions_by_layer = {}
@@ -2560,6 +2565,8 @@ class NixlBaseConnectorWorker:
                 "Attention-HMA push does not support decode TP greater than "
                 "prefill TP yet"
             )
+        if remote_pp_size > 1:
+            self._check_remote_pp_supported(nixl_agent_meta)
         if (
             self._packed_member_layouts
             and self._packed_member_layouts != nixl_agent_meta.packed_member_layouts
@@ -2569,8 +2576,6 @@ class NixlBaseConnectorWorker:
                 "Packed KV block rows differ between P and D. Use the same "
                 "VLLM_KV_CACHE_LAYOUT and block size on both sides."
             )
-        if remote_pp_size > 1:
-            self._check_remote_pp_supported(nixl_agent_meta)
         pairs = self._pair_regions(nixl_agent_meta, remote_pp_stage=remote_pp_size > 1)
         if remote_pp_size > 1 and not pairs.groups_match:
             raise NotImplementedError(
@@ -2808,6 +2813,17 @@ class NixlBaseConnectorWorker:
         do not support. Under HMA a stage may hold no layer of a cache group (a
         draft's group on the stages before the last); it then has no pair of
         that group, so its reads skip the group."""
+        if (
+            self._has_packed_cache
+            or KVCacheLayout[nixl_agent_meta.kv_cache_layout].is_block_outermost
+        ):
+            raise NotImplementedError(
+                "NixlConnector (pull) does not support PP with packed KV cache layouts "
+                f"(local {self.kv_cache_layout}, "
+                f"remote {nixl_agent_meta.kv_cache_layout}). "
+                "Use supported non-packed layouts on both endpoints; "
+                "NixlPushConnector has separate packed PP restrictions."
+            )
         if (
             self.pp_size > 1
             or self._has_mamba

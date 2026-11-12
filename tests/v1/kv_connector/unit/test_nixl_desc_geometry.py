@@ -2523,6 +2523,7 @@ def _make_pp_attn_worker(
     block_size=4,
     kernel_block_size=4,
     nixl_wrapper=_RecordingNixl,
+    layout=KVCacheLayout.LBHNC,
 ):
     """Pull worker holding `layer_names` of a model with full-attention
     `_PP_TARGET_LAYERS` and a draft's `_PP_DRAFT_LAYER`.
@@ -2559,15 +2560,17 @@ def _make_pp_attn_worker(
         tensor = KVCacheTensor(
             size=raw.nbytes,
             layers=list(group.layer_names),
-            layer_stride=num_blocks * page,
-            block_stride=page,
+            layer_stride=page if layout.is_block_outermost else num_blocks * page,
+            block_stride=page * len(group.layer_names)
+            if layout.is_block_outermost
+            else page,
         )
         tensors.append(tensor)
         views = create_kv_cache_views(
             raw,
             group.kv_cache_spec,
             num_blocks,
-            KVCacheLayout.LBHNC,
+            layout,
             tensor,
             kernel_block_size,
         )
@@ -2576,6 +2579,7 @@ def _make_pp_attn_worker(
     config = create_vllm_config(
         block_size=block_size, kv_role="kv_producer" if pp_stage else "kv_consumer"
     )
+    config.cache_config.kv_cache_layout = layout.name
     config.scheduler_config.disable_hybrid_kv_cache_manager = not hma
     config.kv_transfer_config.kv_buffer_device = "cuda"
     if pp_stage:
@@ -2608,6 +2612,61 @@ def _pp_stage_metadata(stage, pp_rank):
     )
     metadata.agent_metadata = f"prefill-pp{pp_rank}".encode()
     return metadata
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("layout", [KVCacheLayout.BLHNC, KVCacheLayout.BHLNC])
+@pytest.mark.parametrize("hma", [False, True])
+def test_pull_pp_rejects_packed_layout_before_registering(layout, hma):
+    """Reject packed PP before cache registration, independently of HMA."""
+    wrapper = _RecordingNixl()
+    with pytest.raises(NotImplementedError, match="pull.*packed.*" + layout.name):
+        _make_pp_attn_worker(
+            "prefill",
+            _PP_TARGET_LAYERS[:2],
+            pp_stage=(0, 2),
+            hma=hma,
+            layout=layout,
+            nixl_wrapper=lambda *args, **kwargs: wrapper,
+        )
+
+    assert wrapper.registered == []
+    assert wrapper.dlists == {}
+    assert wrapper.xfers == []
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("layout", [KVCacheLayout.BLHNC, KVCacheLayout.BHLNC])
+@pytest.mark.parametrize("packed_endpoint", ["local", "remote", "both"])
+def test_pull_pp_rejects_packed_peer_before_pairing(layout, packed_endpoint):
+    """A packed PP peer fails capability checks before descriptor setup.
+
+    PP1 construction supplies real packed rows for a peer running older code;
+    the advertised PP topology is a separate handshake argument.
+    """
+    decode = _make_pp_attn_worker(
+        "decode",
+        _PP_TARGET_LAYERS,
+        hma=False,
+        layout=layout if packed_endpoint in ("local", "both") else KVCacheLayout.LBHNC,
+    )
+    peer = _make_pp_attn_worker(
+        "prefill",
+        _PP_TARGET_LAYERS[:2],
+        hma=False,
+        layout=layout if packed_endpoint in ("remote", "both") else KVCacheLayout.LBHNC,
+    )
+    wrapper = decode.nixl_wrapper
+    registrations = list(wrapper.registered)
+    handles = set(wrapper.dlists)
+
+    with pytest.raises(NotImplementedError, match="pull.*packed.*" + layout.name):
+        decode.add_remote_agent(_pp_stage_metadata(peer, 0), remote_pp_size=2)
+
+    assert wrapper.registered == registrations
+    assert set(wrapper.dlists) == handles
+    assert wrapper.xfers == []
+    assert "prefill" not in decode._remote_stages
 
 
 def _add_prefill_stages(decode, stages):

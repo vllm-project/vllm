@@ -112,11 +112,15 @@ holds only some of the layers, so KV moves layer by layer: with the pull
 push `NixlPushConnector`, each P stage writes its layers to D. See
 [NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
 
+For both connectors, `PP>1` requires `kv_role="kv_producer"` and
+`bidirectional_kv_xfer=false`. Decode-side PP, including `kv_both`, is unsupported: completion notifications count consumer TP ranks, not PP stages. Bidirectional transfer would also make the PP producer receive KV on later turns.
+
 Current pull PP limitations:
 
 - Only P can use PP; D must run with `PP=1`.
 - Hybrid SSM/Mamba models, DCP and mixed-memory KV caches are not supported.
-- Under HMA, only attention KV caches are supported. MLA and CSA-linear caches fail at startup; use the push connector for them.
+- Attention-only hybrid cache groups are supported. MLA and CSA-linear combinations that require HMA are currently rejected; other MLA/CSA combinations have not been validated for pull PP. The HMA setting alone does not determine the physical cache layout or whether hybrid allocation is required.
+- Block-outermost packed layouts (`BLHNC` / `BHLNC`) on either endpoint are unsupported, whether HMA is enabled or disabled. A packed PP producer is rejected at initialization; a PP1 consumer can only reject a packed PP peer once its metadata is known. Use a non-packed layout supported by the attention backend, or check the separate push restrictions below. Sharing an allocation between HMA cache groups does not by itself make a layout packed.
 - P and D must put each layer in the same KV cache group.
 
 Current push PP + HMA limitations:
