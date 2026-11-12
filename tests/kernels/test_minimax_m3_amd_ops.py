@@ -871,19 +871,27 @@ def test_fused_input_norm_mxfp8_qkv_proj(dist_init, n, k, block32, m):
         assert _relerr(got, ref) < 5e-2
 
 
-@pytest.fixture
-def aiter_flydsl_mxfp8_linear(monkeypatch):
-    """MXFP8 linears select `AiterFlyDSLMxfp8LinearKernel`: AITER linear on and
-    every shape treated as tuned (an untuned one runs AITER's heuristic)."""
+@pytest.fixture(params=["flydsl", "triton"])
+def aiter_mxfp8_linear(request, monkeypatch):
+    """MXFP8 linears select the AITER FlyDSL or Triton kernel (the param): AITER
+    linear on and every shape tuned for that one only. Yields the kernel class."""
     pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.aiter import (
+        AiterFlyDSLMxfp8LinearKernel,
+        AiterTritonMxfp8LinearKernel,
+    )
 
+    flydsl = request.param == "flydsl"
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     rocm_aiter_ops.refresh_env_variables()
     monkeypatch.setattr(
-        rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: True
+        rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: flydsl
     )
-    yield
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_triton_gemm_afp8wfp8_tuned", lambda n, k: not flydsl
+    )
+    yield AiterFlyDSLMxfp8LinearKernel if flydsl else AiterTritonMxfp8LinearKernel
     monkeypatch.undo()
     rocm_aiter_ops.refresh_env_variables()
 
@@ -895,15 +903,10 @@ def aiter_flydsl_mxfp8_linear(monkeypatch):
 )
 @pytest.mark.parametrize("m", [1, 16, 37])
 @torch.inference_mode()
-def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
-    dist_init, aiter_flydsl_mxfp8_linear, n, k, m
-):
-    """With the AITER kernel selected, the producers still fuse the MXFP8
+def test_fused_mxfp8_inputs_on_aiter_kernels(dist_init, aiter_mxfp8_linear, n, k, m):
+    """With an AITER kernel selected, the producers still fuse the MXFP8
     quant and the linear on their output equals the unfused norm -> linear;
     swiglu fuses at every M, since AITER does not quantize in the GEMM."""
-    from vllm.model_executor.kernels.linear.mxfp8.aiter import (
-        AiterFlyDSLMxfp8LinearKernel,
-    )
     from vllm.model_executor.layers.fusion.quant_activation import (
         QuantizedActivation,
     )
@@ -917,7 +920,7 @@ def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
         layer, scheme = _quark_mxfp8_linear(n, k)
     finally:
         torch.set_default_dtype(prev_dtype)
-    assert isinstance(scheme.ocp_mx_linear, AiterFlyDSLMxfp8LinearKernel)
+    assert isinstance(scheme.ocp_mx_linear, aiter_mxfp8_linear)
     assert _can_fuse_input_norm_mxfp8(layer)
     scheme.process_weights_after_loading(layer)
     mlp = object.__new__(MiniMaxM3MLP)

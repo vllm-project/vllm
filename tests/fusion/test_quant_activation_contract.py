@@ -14,6 +14,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.kernels.linear.mxfp8.aiter import (
     AiterFlyDSLMxfp8LinearKernel,
+    AiterTritonMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
@@ -77,6 +78,7 @@ SUPPORTING = {
     FlashInferCutlassMxfp8LinearKernel,
     RocmDotScaledMxfp8LinearKernel,
     AiterFlyDSLMxfp8LinearKernel,
+    AiterTritonMxfp8LinearKernel,
 }
 if current_platform.is_cuda():
     SUPPORTING.add(TorchMxFp8LinearKernel)

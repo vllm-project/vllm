@@ -143,6 +143,14 @@ def _aiter_backend_forced() -> bool:
     return _get_linear_backend(quantization="mxfp8") == "aiter"
 
 
+def _monokernel_enabled() -> bool:
+    """Whether `--monokernel` is on; DSV4.1's reads 32x32 block scales."""
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    return config is not None and config.kernel_config.monokernel
+
+
 class AiterTritonMxfp8LinearKernel(Mxfp8LinearKernel):
     """AITER Triton MXFP8 GEMM on ROCm."""
 
@@ -172,6 +180,8 @@ class AiterTritonMxfp8LinearKernel(Mxfp8LinearKernel):
             return False, "batched MXFP8 GEMM is not supported"
         if K % MXFP8_BLOCK_SIZE != 0:
             return False, f"K={K} is not a multiple of {MXFP8_BLOCK_SIZE}"
+        if _monokernel_enabled():
+            return False, "--monokernel reads the 32x32 block scales"
         if rocm_aiter_ops.is_triton_gemm_afp8wfp8_tuned(N, K):
             return True, None
         # Untuned shapes are slower than native, so take them only when forced.
@@ -192,10 +202,21 @@ class AiterTritonMxfp8LinearKernel(Mxfp8LinearKernel):
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale.contiguous())
 
+    def input_quant_key(self) -> QuantKey:
+        # Row-major [M, K // 32] E8M0 scales, as RocmDotScaledMxfp8LinearKernel
+        # reads them (FlashInfer's are swizzled under the same key).
+        return kMxfp8Dynamic
+
+    @staticmethod
+    def supports_quantized_input(layer: torch.nn.Module) -> bool:
+        """Whether `apply_weights` reads a `QuantizedActivation` for `layer`
+        as is; always, since the weight stays fp8."""
+        return True
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if layer.weight_scale.dtype != MXFP8_SCALE_DTYPE:
@@ -203,12 +224,18 @@ class AiterTritonMxfp8LinearKernel(Mxfp8LinearKernel):
                 f"Expected {MXFP8_SCALE_DTYPE} weight_scale, got "
                 f"{layer.weight_scale.dtype}."
             )
-        out_shape = (*x.shape[:-1], layer.weight.shape[0])
-        x2d = x.reshape(-1, x.shape[-1])
-        out = rocm_aiter_ops.triton_mxfp8_gemm_dynamic_quant(
-            x2d, layer.weight, layer.weight_scale, x.dtype
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            out_dtype, in_shape = qa.orig_dtype, qa.orig_shape
+            x_q, x_scale = qa.data.reshape(-1, in_shape[-1]), qa.scale
+        else:
+            assert isinstance(x, torch.Tensor)
+            out_dtype, in_shape = x.dtype, x.shape
+            x_q, x_scale = mxfp8_e4m3_quantize(x.reshape(-1, in_shape[-1]))
+        out = rocm_aiter_ops.triton_mxfp8_gemm(
+            x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
         )
-        out = out.reshape(out_shape)
+        out = out.reshape(*in_shape[:-1], layer.weight.shape[0])
         if bias is not None:
             out = out + bias
         return out

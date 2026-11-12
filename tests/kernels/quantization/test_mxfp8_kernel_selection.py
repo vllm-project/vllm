@@ -190,6 +190,21 @@ def test_init_mxfp8_linear_kernel_rocm(weight_shape, expected_kernel_cls):
     assert isinstance(kernel, expected_kernel_cls)
 
 
+def test_init_mxfp8_linear_kernel_rocm_monokernel():
+    """--monokernel reads the checkpoint's 32x32 block scales, so a tuned shape
+    stays on the native kernel, which keeps them."""
+    with (
+        _patch_rocm_platform(),
+        patch(
+            "vllm.model_executor.kernels.linear.mxfp8.aiter._monokernel_enabled",
+            return_value=True,
+        ),
+    ):
+        kernel = init_mxfp8_linear_kernel(weight_shape=_AITER_TUNED_SHAPE)
+
+    assert isinstance(kernel, RocmDotScaledMxfp8LinearKernel)
+
+
 def test_aiter_mxfp8_not_supported_when_batch_invariant():
     """The tuned decode configs split K, so batch-invariant runs must use a
     different kernel."""

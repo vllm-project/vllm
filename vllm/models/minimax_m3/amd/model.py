@@ -40,6 +40,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8.aiter import (
     AiterFlyDSLMxfp8LinearKernel,
+    AiterTritonMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     _FUSED_QUANT_MAX_M,
@@ -1611,7 +1612,12 @@ def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
         return False
     kernel = _mxfp8_linear_kernel(qkv_proj)
     return isinstance(
-        kernel, (RocmDotScaledMxfp8LinearKernel, AiterFlyDSLMxfp8LinearKernel)
+        kernel,
+        (
+            RocmDotScaledMxfp8LinearKernel,
+            AiterFlyDSLMxfp8LinearKernel,
+            AiterTritonMxfp8LinearKernel,
+        ),
     ) and kernel.supports_quantized_input(qkv_proj)
 
 
