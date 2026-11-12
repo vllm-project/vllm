@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -148,6 +149,24 @@ def dsv4_topk(
     shape = (num_tokens, _TOPK)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
+    if envs.VLLM_BATCH_INVARIANT:
+        if num_tokens:
+            from vllm import _custom_ops as ops
+
+            ops.topk_hash_softplus_sqrt(
+                topk_weights,
+                topk_ids,
+                torch.empty(shape, device=gating_output.device, dtype=torch.int32),
+                gating_output,
+                renormalize=True,
+                routed_scaling_factor=routed_scaling_factor,
+                e_score_correction_bias=correction_bias,
+                input_tokens=input_ids if has_vl else None,
+                is_padding=is_padding,
+                bias_vl=bias_vl if has_vl else None,
+                image_sentinel_lo=image_sentinel_lo,
+            )
+        return topk_weights, topk_ids
     if num_tokens > 0:
         _dsv4_topk_kernel[(num_tokens,)](
             gating_output,

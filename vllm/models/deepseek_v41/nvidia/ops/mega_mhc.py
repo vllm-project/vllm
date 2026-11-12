@@ -5,6 +5,7 @@ import functools
 
 import torch
 
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     _import_deep_gemm,
@@ -35,8 +36,11 @@ def can_use_mega_mhc(
     norm_weight: torch.Tensor | None,
     capture_aux: bool,
 ) -> bool:
+    # Deterministic Mega mHC cannot be captured, so batch invariance keeps
+    # eager and graph steps on the fixed-split TileLang kernels.
     return (
-        pre_mix is not None
+        not envs.VLLM_BATCH_INVARIANT
+        and pre_mix is not None
         and norm_weight is not None
         and not capture_aux
         and x.shape[0] <= 1 << 20
