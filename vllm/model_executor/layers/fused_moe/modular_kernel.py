@@ -509,6 +509,25 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         """
         raise NotImplementedError
 
+    def supports_precomputed_routing(self) -> bool:
+        """Whether `prepare_routed` is implemented."""
+        return False
+
+    def prepare_routed(
+        self,
+        a1: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+        """Like `prepare`, but dispatch vLLM's routing instead of logits.
+
+        Returns the quantized and dispatched (a1q, a1q_scale, topk_weights,
+        topk_ids).
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def finalize(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
         """Optional method for subclasses compatible with monolithic
@@ -1116,6 +1135,27 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         """
         return False
 
+    def supports_precomputed_routing(self) -> bool:
+        """Whether `apply_precomputed_routing` is implemented."""
+        return False
+
+    def apply_precomputed_routing(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        a1q_scale: torch.Tensor | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Same as `apply`, but with routing computed by vLLM's router.
+
+        Tokens whose `topk_ids` are -1 (padding) must not reach any expert.
+        """
+        raise NotImplementedError
+
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -1201,7 +1241,7 @@ class FusedMoEKernelModularImpl:
         Returns the workspace tensors, output tensor, and whether the output
         uses a prepare/finalize-provided allocation.
         """
-        assert M_full > 0 and M_chunk > 0
+        assert M_full >= 0 and M_chunk >= 0
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
@@ -1243,7 +1283,8 @@ class FusedMoEKernelModularImpl:
         # externally aliased. The workspace manager profiles and locks a
         # process-wide high-water mark; later graph shapes may need this
         # storage for workspace13.
-        max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+        # Idle collective ranks still need the workspace manager initialized.
+        max_shape_size = max(1, prod(workspace13_shape), prod(fused_out_shape))
 
         if current_platform.is_cpu():
             # Every CPU FusedMoEExpertsModular kernel reports zero-sized
@@ -1399,13 +1440,9 @@ class FusedMoEKernelModularImpl:
             a1q, w1, w2, topk_ids
         )
 
-        # This happens when none of the tokens from the all2all reach this
-        # EP rank. Also, note that this is only relevant for CUDAGraph
-        # incompatible all2all kernels like the DeepEP high-throughput
-        # kernels. CUDAGraph compatible all2all kernels like the DeepEP
-        # low-latency kernels are always batched and can never run into
-        # the tensor.numel() == 0 case.
-        if M_full == 0:
+        # After dispatch, an EP rank may have no work. With passthrough,
+        # dispatch happens inside the experts, so idle ranks must participate.
+        if M_full == 0 and not self.moe_parallel_config.use_passthrough_all2all:
             out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
             return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 
@@ -1738,7 +1775,51 @@ class FusedMoEKernelMonolithicImpl:
         )
         if routing_sink is not None:
             routing_sink.capture_fn(routing_replay_out)
+        return self._finalize(fused_out)
 
+    def supports_precomputed_routing(self) -> bool:
+        return (
+            self.fused_experts.supports_precomputed_routing()
+            and self.prepare_finalize.supports_precomputed_routing()
+        )
+
+    def apply_routed(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        *,
+        routing_sink: RoutedExpertsSink | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Like `apply`, but with routing from vLLM's top-k."""
+        a1q, a1q_scale, topk_weights, topk_ids = self.prepare_finalize.prepare_routed(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            quant_config=self.fused_experts.quant_config,
+            defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+        )
+        fused_out = self.fused_experts.apply_precomputed_routing(
+            hidden_states=a1q,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            a1q_scale=a1q_scale,
+        )
+        if routing_sink is not None:
+            routing_sink.capture_fn(topk_ids)
+        return self._finalize(fused_out)
+
+    def _finalize(
+        self, fused_out: torch.Tensor | UnfinalizedMoEOutput
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         if isinstance(fused_out, UnfinalizedMoEOutput):
             if not self.prepare_finalize.supports_deferred_moe_finalize():
                 raise RuntimeError(
@@ -1866,6 +1947,37 @@ class FusedMoEKernel:
             routing_sink=routing_sink,
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
+        )
+
+    def supports_precomputed_routing(self) -> bool:
+        """Whether `apply_monolithic_routed` can replace `apply_monolithic`."""
+        return (
+            isinstance(self.impl, FusedMoEKernelMonolithicImpl)
+            and self.impl.supports_precomputed_routing()
+        )
+
+    def apply_monolithic_routed(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        *,
+        routing_sink: RoutedExpertsSink | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
+        return self.impl.apply_routed(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            routing_sink=routing_sink,
         )
 
     def apply(
