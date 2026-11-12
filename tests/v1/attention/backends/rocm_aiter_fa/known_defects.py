@@ -4,8 +4,9 @@
 
 Every test matching a defect's patterns is marked ``xfail(strict=True)``: it
 fails today, and the PR that fixes the defect deletes the entry, so the same
-tests must then pass. Patterns are pytest node ids in which ``*`` matches any
-text; everything else, brackets included, is literal.
+tests must then pass. A defect whose failure depends on memory contents is
+marked non-strict instead. Patterns are pytest node ids in which ``*``
+matches any text; everything else, brackets included, is literal.
 """
 
 import re
@@ -18,6 +19,9 @@ import pytest
 class Defect:
     reason: str
     tests: tuple[str, ...]
+    # False only where the failure depends on memory contents and so does not
+    # show on every run.
+    strict: bool = True
 
 
 _FA = "tests/v1/attention/backends/rocm_aiter_fa/"
@@ -128,6 +132,8 @@ def mark_known_defects(items: list[pytest.Item]) -> None:
             continue
         for defect in KNOWN_DEFECTS.values():
             if any(_matches(item.nodeid, pattern) for pattern in defect.tests):
-                item.add_marker(pytest.mark.xfail(strict=True, reason=defect.reason))
+                item.add_marker(
+                    pytest.mark.xfail(strict=defect.strict, reason=defect.reason)
+                )
                 item.stash[_MARKED] = True
                 break
