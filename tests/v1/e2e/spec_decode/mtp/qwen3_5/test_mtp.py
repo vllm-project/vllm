@@ -53,7 +53,6 @@ def _add_random_mtp_module(model_name: str, path: Path) -> Path:
 
 @single_gpu_only
 def test_mtp_draft_steps_use_their_own_module(
-    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     tmp_path: Path,
     vllm_runner,
@@ -61,7 +60,6 @@ def test_mtp_draft_steps_use_their_own_module(
     """With two MTP modules, draft step 2 must run module 1, also with the
     default drafter CUDA graphs. Module 1 has random weights, so its drafts are
     rejected while module 0's are still accepted."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     model = _add_random_mtp_module("Qwen/Qwen3.5-0.8B-Base", tmp_path)
     with vllm_runner(
         str(model),
@@ -210,13 +208,11 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
 
 @single_gpu_only
 def test_mtp_draft_lm_head_quantization(
-    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     vllm_runner,
 ):
     """A quantized draft copy of the shared lm_head only changes drafting:
     greedy outputs match stock MTP and acceptance stays within 10%."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     prompts = get_test_prompts(mm_enabled=False)
     results = {}
     # NVFP4 needs a CUDA W4A16 kernel.
@@ -258,14 +254,12 @@ def test_mtp_draft_lm_head_quantization(
     not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
 )
 def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
-    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     vllm_runner,
 ):
     """The quantized draft head is derived from the target head: it must come
     back intact after a level 1 sleep and be re-derived after a target weight
     reload, so outputs and acceptance match the run before."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     prompts = get_test_prompts(mm_enabled=False)
     with vllm_runner(
         "Qwen/Qwen3.5-0.8B-Base",
