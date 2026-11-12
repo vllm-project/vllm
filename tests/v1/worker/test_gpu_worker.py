@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -280,6 +280,56 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     with pytest.raises(Profiled):
         gpu_worker.Worker.determine_available_memory(worker)
     assert get_current_vllm_config_or_none() is None
+
+
+@pytest.mark.parametrize(
+    "compiles,expected",
+    [(True, ["profile", "reset", "profile"]), (False, ["profile"])],
+)
+def test_memory_profile_measures_the_forward_alone_after_compiling(
+    monkeypatch, compiles, expected
+):
+    """A compile inside the profile pass peaks above the forward. Charging that
+    peak as activation headroom shrinks the KV cache on a cold compile cache, so
+    the forward is profiled again after the peak is reset."""
+    from vllm.compilation.counter import compilation_counter
+
+    events = []
+
+    class Profiled(Exception):
+        pass
+
+    def profile_run(*, randomize_inputs=False):
+        events.append("profile")
+        if compiles and events.count("profile") == 1:
+            monkeypatch.setattr(
+                compilation_counter,
+                "num_backend_compilations",
+                compilation_counter.num_backend_compilations + 1,
+            )
+
+    @contextmanager
+    def memory_profiling(*args, **kwargs):
+        yield
+        raise Profiled
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(),
+        randomize_dummy_inputs=False,
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=None),
+        model_runner=SimpleNamespace(profile_run=profile_run, model_memory_usage=0),
+        init_snapshot=SimpleNamespace(free_memory=2, device_=None),
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(gpu_worker, "memory_profiling", memory_profiling)
+    monkeypatch.setattr(
+        torch.accelerator, "reset_peak_memory_stats", lambda dev: events.append("reset")
+    )
+
+    with pytest.raises(Profiled):
+        gpu_worker.Worker.determine_available_memory(worker)
+    assert events == expected
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,7 @@ import torch.nn as nn
 from torch.distributed import ReduceOp
 
 import vllm.envs as envs
+from vllm.compilation.counter import compilation_counter
 from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
@@ -743,7 +744,14 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
             set_current_vllm_config(self.vllm_config),
         ):
+            compilations = compilation_counter.num_backend_compilations
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            if compilation_counter.num_backend_compilations != compilations:
+                # Compilation peaked inside the pass; profile the forward alone.
+                torch.accelerator.reset_peak_memory_stats(self.init_snapshot.device_)
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
 
         # Profile CUDA graph memory if graphs will be captured. The runner
         # decides itself, since encoder graphs don't depend on cudagraph_mode.
