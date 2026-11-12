@@ -825,13 +825,10 @@ class Base(
                 # Already a vLLM parameter, nothing to do
                 if hasattr(param, "weight_loader"):
                     continue
-                data = torch.empty_like(
-                    param.data, dtype=dtype or param.dtype, device=device
-                )
-                # Integer storage (e.g. packed weights) cannot require grad
-                setattr(
-                    module, name, nn.Parameter(data, requires_grad=param.requires_grad)
-                )
+                dtype = dtype or param.dtype
+                data = torch.empty_like(param.data, dtype=dtype, device=device)
+                param = nn.Parameter(data, requires_grad=param.requires_grad)
+                setattr(module, name, param)
             for child in module.children():
                 _init_parameters(child)
 
