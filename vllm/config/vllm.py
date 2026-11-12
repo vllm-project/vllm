@@ -1753,7 +1753,7 @@ class VllmConfig:
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
+            if "-quant_fp8" not in custom_ops and "+quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
         current_platform.apply_config_platform_defaults(self)
@@ -2256,7 +2256,7 @@ class VllmConfig:
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
+            if "-quant_fp8" not in custom_ops and "+quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
         self._verify_kv_transfer_compat()

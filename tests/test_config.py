@@ -3202,6 +3202,30 @@ def test_is_prefix_caching_supported(
     assert reason in caplog_vllm.text
 
 
+def test_replace_keeps_compile_factors_with_blocked_fp8_weights(tmp_path):
+    """Caches keyed by the compile factors (the FlashInfer autotune cache,
+    compiled graphs) must resolve to the same entry before and after replace()."""
+    from transformers import LlamaConfig
+
+    from vllm.config import replace
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(str(tmp_path)),
+        quant_config=Fp8Config(weight_block_size=[128, 128]),
+    )
+    assert config.compilation_config.custom_ops.count("+quant_fp8") == 1
+    before = config.compile_factors()
+
+    copied = replace(config, cache_config=replace(config.cache_config))
+
+    assert copied.compilation_config.custom_ops.count("+quant_fp8") == 1
+    assert copied.compile_factors() == before
+    # replace() shares the compilation config with the original.
+    assert config.compile_factors() == before
+
+
 @pytest.mark.parametrize(
     ("backend", "custom_ops", "expected"),
     [
