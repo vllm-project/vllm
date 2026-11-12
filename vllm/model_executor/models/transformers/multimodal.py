@@ -53,7 +53,6 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
-from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d, token_ids_to_tensor
 
@@ -1376,34 +1375,18 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if (
-            hasattr(self, "deepstack_input_embeds")
-            and multimodal_embeddings is not None
-            and len(multimodal_embeddings) > 0
-        ):
-            multimodal_embeddings = self._stash_deepstack_embeds(
-                multimodal_embeddings, _require_is_multimodal(is_multimodal)
-            )
+        if hasattr(self, "deepstack_input_embeds"):
+            # Cleared here rather than after `forward`, which full CUDA graphs skip
+            if self.deepstack_num_tokens:
+                self.deepstack_input_embeds[:, 0, : self.deepstack_num_tokens].zero_()
+                self.deepstack_num_tokens = 0
+            if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
+                multimodal_embeddings = self._stash_deepstack_embeds(
+                    multimodal_embeddings, _require_is_multimodal(is_multimodal)
+                )
         return super().embed_input_ids(
             input_ids, multimodal_embeddings, is_multimodal=is_multimodal
         )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
-        output = super().forward(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
-        )
-        # Steps without multimodal inputs must not reuse the previous features
-        if self.deepstack_num_tokens:
-            self.deepstack_input_embeds[:, 0, : self.deepstack_num_tokens].zero_()
-            self.deepstack_num_tokens = 0
-        return output
 
     def get_mrope_input_positions(
         self,
