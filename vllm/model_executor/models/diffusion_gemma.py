@@ -1284,6 +1284,11 @@ class DiffusionSampler:
                 "DiffusionGemma does not support repetition/frequency/presence "
                 "penalties; ignoring them for this request."
             )
+        if sampling_params.temperature != 1.0:
+            logger.warning_once(
+                "DiffusionGemma uses its own temperature schedule; ignoring "
+                "the request temperature."
+            )
         # Purge any stale logprobs stashed under this slot by a prior request
         # that was aborted between its converging denoise and commit steps.
         self._wide_logprobs.pop(req_idx, None)

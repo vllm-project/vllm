@@ -16,18 +16,15 @@ def validate_diffusion_sampling_params(
     *,
     canvas_length: int | None,
     vocab_size: int,
-    per_request_temperature: bool = False,
 ) -> None:
     """Validate request options and normalize one-canvas reads at admission.
 
     Diffusion models denoise a whole canvas per step, so most per-request
-    sampling parameters are not supported. Models whose sampler applies the
-    request temperature set `per_request_temperature`. Penalties are ignored
-    by the sampler with a warning.
+    sampling parameters are not supported. Models whose sampler ignores the
+    request temperature or penalties warn about it.
     """
     if (
-        (params.temperature != 1.0 and not per_request_temperature)
-        or params.min_p > _SAMPLING_EPS
+        params.min_p > _SAMPLING_EPS
         or params.seed is not None
         or params.min_tokens > 0
         or params.logit_bias
@@ -35,7 +32,7 @@ def validate_diffusion_sampling_params(
         or params.allowed_token_ids
     ):
         raise VLLMValidationError(
-            "The temperature, min_p, seed, min_tokens, logit_bias, "
+            "The min_p, seed, min_tokens, logit_bias, "
             "bad_words, and allowed_token_ids sampling parameters "
             "are not yet supported with diffusion models."
         )

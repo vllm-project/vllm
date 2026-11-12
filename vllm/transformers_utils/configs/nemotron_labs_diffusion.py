@@ -61,9 +61,6 @@ class NemotronLabsDiffusionConfig(PreTrainedConfig):
         # drives vLLM's diffusion detection and the per-step canvas size.
         self.mask_token_id = mask_token_id
         self.block_size = block_size
-        # Nemotron accepts per-request temperatures in diffusion mode, unlike
-        # diffusion models that use an engine-level temperature schedule.
-        self.diffusion_per_request_temperature = True
 
         # Normalize RoPE config: the checkpoint carries the same YaRN dict
         # under both ``rope_parameters`` and (legacy) ``rope_scaling``. Pop

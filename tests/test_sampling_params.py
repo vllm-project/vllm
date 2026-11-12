@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +15,6 @@ from vllm.v1.engine.input_processor import InputProcessor
 @dataclass
 class MockModelConfig:
     is_diffusion: bool = False
-    hf_config: SimpleNamespace = field(default_factory=SimpleNamespace)
     max_logprobs: int = 20
     logits_processors: list | None = None
     return_sampling_mask: bool = False
@@ -24,16 +23,10 @@ class MockModelConfig:
         return 1024
 
 
-def _admit(
-    params: SamplingParams,
-    hf_config: SimpleNamespace | None = None,
-    async_scheduling: bool = False,
-) -> None:
+def _admit(params: SamplingParams, async_scheduling: bool = False) -> None:
     """Run the engine's admission checks for a diffusion model."""
     processor = SimpleNamespace(
-        model_config=MockModelConfig(
-            is_diffusion=True, hf_config=hf_config or SimpleNamespace()
-        ),
+        model_config=MockModelConfig(is_diffusion=True),
         vllm_config=SimpleNamespace(
             scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
         ),
@@ -50,8 +43,6 @@ def _admit(
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"temperature": 0.7},
-        {"temperature": 0.0},
         {"min_p": 0.1},
         {"seed": 42},
         {"min_tokens": 5},
@@ -66,16 +57,13 @@ def test_diffusion_rejects_unsupported_params(kwargs: dict):
         _admit(params)
 
 
-@pytest.mark.parametrize("temperature", [0.0, 0.7, 1.5])
-def test_diffusion_per_request_temperature_is_a_model_opt_in(temperature):
-    hf_config = SimpleNamespace(diffusion_per_request_temperature=True)
-    _admit(SamplingParams(temperature=temperature), hf_config)
-    with pytest.raises(VLLMValidationError, match="not yet supported with diffusion"):
-        _admit(SamplingParams(temperature=temperature, seed=42), hf_config)
-
-
 def test_diffusion_accepts_default_params():
     _admit(SamplingParams())
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_diffusion_accepts_request_temperature(temperature: float):
+    _admit(SamplingParams(temperature=temperature))
 
 
 def test_diffusion_accepts_top_k_top_p():
