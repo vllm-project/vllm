@@ -505,7 +505,7 @@ def _make_requests(
     block_ids_per_req: list[list[int]],
     num_prompt_tokens: list[int] | None = None,
 ) -> dict[str, MagicMock]:
-    """Create mock CachedRequestState objects."""
+    """Create mock request state objects."""
     requests = {}
     for i, req_id in enumerate(req_ids):
         req = MagicMock()
@@ -956,7 +956,7 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     state = object.__new__(MambaHybridModelState)
     state.cache_config = CacheConfig(mamba_cache_mode="align")
     state._align_mode = True
-    state._use_flashinfer_replayssm = False
+    state._use_replayssm_trackers = False
     state._mamba_group_ids = []
     state._mamba_spec = None
     state._mamba_state_copy_funcs = _COPY_FUNCS

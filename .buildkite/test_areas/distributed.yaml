@@ -394,10 +394,12 @@ steps:
   - tests/distributed/test_events
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
+  - tests/distributed/test_pp_transport.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_pynccl.py
+  - pytest -v -s distributed/test_pp_transport.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # test multi-node TP with multiproc executor (simulated on single node)
@@ -552,6 +554,27 @@ steps:
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
 
+- label: ":nvidia: (H100) DeepSeek ShardQ Sequence Parallel"
+  key: deepseek-shardq-sequence-parallel
+  timeout_in_minutes: 30
+  device: h100
+  working_dir: "/vllm-workspace/"
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/models/deepseek_v32/
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/model_executor/layers/attention/
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/v1/attention/ops/shardq.py
+  - vllm/v1/attention/backends/mla/
+  - vllm/lora/
+  - vllm/v1/worker/gpu/spec_decode/
+  - vllm/config/speculative.py
+  - vllm/config/attention.py
+  - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  commands:
+  - pytest -v -s tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
   automatic_shard: true
@@ -635,6 +658,7 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
+    - pytest -v -s tests/distributed/test_pp_cudagraph.py::test_pp_cudagraph_mode_differs_across_stages
   mirror:
     amd:
       automatic_shard: true
@@ -872,6 +896,7 @@ steps:
 
 - label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2xb200
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: b200-k8s
