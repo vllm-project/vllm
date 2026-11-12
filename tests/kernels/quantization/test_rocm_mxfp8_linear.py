@@ -985,3 +985,103 @@ def test_rocm_mxfp8_wo_a_flydsl_matches_triton(flydsl, m):
     out = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, rank)
     expected = rocm_mxfp8_wo_a_bmm(a, a_scale, ref_wo_a, n_groups, rank).float()
     assert _rel_err(out, expected) < 1e-3
+
+
+@pytest.fixture
+def hipbmm_kernel(monkeypatch):
+    """Enable HIPBMM only for tests requesting it, then restore AITER's cache."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.hipbmm import (
+        RocmHipbmmMxfp8LinearKernel,
+    )
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_ROCM_USE_AITER", "1")
+            patch.setenv("VLLM_ROCM_USE_AITER_LINEAR", "1")
+            patch.setenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "1")
+            patch.setenv("VLLM_BATCH_INVARIANT", "0")
+            rocm_aiter_ops.refresh_env_variables()
+            yield RocmHipbmmMxfp8LinearKernel
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize("block32", [False, True], ids=["per-row", "block32"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_rocm_mxfp8_hipbmm_linear_matches_dequant_reference(
+    hipbmm_kernel, block32, dtype
+):
+    """Sanity-check scale preprocessing, bias and output dtype through the layer."""
+    torch.manual_seed(0)
+    n, k, num_tokens = 64, 256, 16
+    layer = _make_block32_layer(n, k, "cuda") if block32 else _make_layer(n, k, "cuda")
+    w_q, w_scale = layer.weight.data.clone(), layer.weight_scale.data.clone()
+    kernel = hipbmm_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+
+    bias = torch.randn(n, device="cuda", dtype=dtype) * 0.05
+    x = torch.randn(num_tokens, k, device="cuda", dtype=dtype) * 0.5
+    out = kernel.apply_weights(layer, x, bias)
+    assert out.shape == (num_tokens, n) and out.dtype == dtype
+    assert torch.isfinite(out).all()
+
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    expected = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(w_q, w_scale).float().T
+    )
+    expected += bias.float()
+    assert _rel_err(out, expected) < 5e-3
+
+
+@torch.inference_mode()
+def test_rocm_mxfp8_hipbmm_linear_cuda_graph_replay(hipbmm_kernel):
+    """The layer preserves leading dimensions under compiled graph replay."""
+    torch.manual_seed(0)
+    n, k, m = 64, 256, 16
+    layer = _make_layer(n, k, "cuda")
+    kernel = hipbmm_kernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+    kernel.process_weights_after_loading(layer)
+    x = torch.randn(1, m, k, device="cuda", dtype=torch.bfloat16)
+    eager = kernel.apply_weights(layer, x)
+    assert eager.shape == (1, m, n)
+    compiled = torch.compile(kernel.apply_weights, fullgraph=True, dynamic=True)
+    torch.testing.assert_close(compiled(layer, x), eager, rtol=0, atol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = compiled(layer, x)
+    x.copy_(torch.randn_like(x))
+    graph.replay()
+    torch.testing.assert_close(captured, kernel.apply_weights(layer, x), rtol=0, atol=0)
+    assert not torch.equal(captured, eager)
+
+
+@torch.inference_mode()
+def test_rocm_mxfp8_hipbmm_preserves_wo_a_scales(hipbmm_kernel):
+    """DeepSeek's direct weight reader must see logical scales after preprocessing."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
+
+    # Two groups with nonuniform block scales expose accidental scale shuffling.
+    torch.manual_seed(17)
+    groups, rank, k = 2, 32, 256
+    layer = _make_block32_layer(groups * rank, k, "cuda")
+    block_scales = (
+        (torch.arange(groups * k // 32, device="cuda") % 5 + 125)
+        .reshape(groups, k // 32)
+        .to(torch.uint8)
+    )
+    layer.weight_scale.data.copy_(block_scales.repeat_interleave(32, 0))
+    expected = dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).view(
+        groups, rank, k
+    )
+
+    # Linear preprocessing creates separate shuffled scales for hipBLASLt.
+    kernel = hipbmm_kernel(Mxfp8LinearLayerConfig(weight_shape=(groups * rank, k)))
+    kernel.process_weights_after_loading(layer)
+
+    # Exercise the existing consumer, which bypasses linear.apply_weights.
+    actual = _get_cached_wo_a_bf16(layer, groups, rank, k)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
