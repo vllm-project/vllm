@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
+from torch import nn
 
+from vllm.models.kimi_k3.amd import linear
+from vllm.models.kimi_k3.amd.linear import KimiLinearModel
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+from vllm.v1.worker import workspace
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -99,6 +106,7 @@ def test_amd_attn_res_matches_reference(
         0.0,
     )
 
+    assert isinstance(actual, torch.Tensor)
     torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
     torch.testing.assert_close(prefix, original_prefix, atol=0, rtol=0)
     torch.testing.assert_close(blocks, original_blocks, atol=0, rtol=0)
@@ -185,6 +193,7 @@ def test_amd_attn_res_fused_contract(
         output_eps,
     )
 
+    assert isinstance(actual, torch.Tensor)
     torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
     torch.testing.assert_close(prefix, expected_prefix, atol=0, rtol=0)
     if write_block:
@@ -294,3 +303,99 @@ def test_mla_input_quant_requires_all_consumers(matching, requires_unquantized):
     assert actual == (
         kFp8DynamicTokenSym if matching and not requires_unquantized else None
     )
+
+
+# Small so the CPU tests stay cheap; the size itself has no significance.
+BANK_TOKENS = 64
+HIDDEN = 16
+
+
+@pytest.fixture
+def workspace_manager(monkeypatch):
+    """A CPU workspace manager with two DBO micro-batch slots; set ubatch[0]."""
+    ubatch = [0]
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: ubatch[0])
+    workspace.init_workspace_manager(torch.device("cpu"), num_ubatches=2)
+    yield ubatch
+    workspace.reset_workspace_manager()
+
+
+def _model() -> KimiLinearModel:
+    model = object.__new__(KimiLinearModel)
+    nn.Module.__init__(model)
+    model.max_num_batched_tokens = BANK_TOKENS
+    return model
+
+
+def _pass_through_layer(positions, hidden_states, residual, prefix_delta):
+    return hidden_states, residual, torch.zeros_like(hidden_states)
+
+
+@pytest.mark.parametrize(
+    "step_tokens",
+    [
+        pytest.param((1, 17, 40, 41, 63, BANK_TOKENS), id="growing"),
+        pytest.param((BANK_TOKENS, 40, 1), id="shrinking"),
+        pytest.param((BANK_TOKENS, 1, BANK_TOKENS, 7), id="full-bank-repeats"),
+    ],
+)
+def test_forward_reuses_one_fixed_bank_across_steps(
+    workspace_manager, monkeypatch, step_tokens
+):
+    # Per-step allocations sized by the token count are what piled up; every
+    # step's block residual must instead be a view of the same fixed bank.
+    model = _model()
+    model.config = SimpleNamespace(attn_res_block_size=2, hidden_size=HIDDEN)
+    model.start_layer, model.end_layer = 0, 1
+    model.layers = [_pass_through_layer]
+    # A non-last PP rank returns the block residual it built.
+    monkeypatch.setattr(
+        linear,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=False),
+    )
+
+    residuals = []
+    for num_tokens in step_tokens:
+        out = model.forward(
+            None,
+            torch.arange(num_tokens),
+            None,
+            inputs_embeds=torch.randn(num_tokens, HIDDEN),
+        )
+        assert isinstance(out, IntermediateTensors)
+        residuals.append(out["residual"])
+    bank = workspace.current_workspace_manager().get_persistent(
+        "kimi_k3_attn_res_block_residual", (BANK_TOKENS, 1, HIDDEN), torch.float32
+    )
+    for num_tokens, residual in zip(step_tokens, residuals):
+        assert residual.shape == (num_tokens, 1, HIDDEN)
+        assert residual.data_ptr() == bank.data_ptr()
+
+
+def test_each_dbo_ubatch_slot_keeps_its_own_bank(workspace_manager):
+    model = _model()
+    hidden_states = torch.empty(BANK_TOKENS, HIDDEN)
+    banks = []
+    for ubatch in (0, 1):
+        workspace_manager[0] = ubatch
+        banks.append(model._new_block_residual(hidden_states, num_blocks=2))
+    assert banks[0].data_ptr() != banks[1].data_ptr()
+
+    # Once warmed, each slot serves every step from its bank after the lock.
+    workspace.current_workspace_manager().lock()
+    for ubatch, bank in enumerate(banks):
+        workspace_manager[0] = ubatch
+        rows = model._new_block_residual(hidden_states[:7], num_blocks=2)
+        assert rows.data_ptr() == bank.data_ptr()
+
+
+def test_block_residual_rejects_steps_past_the_bank(workspace_manager):
+    with pytest.raises(AssertionError):
+        _model()._new_block_residual(torch.empty(BANK_TOKENS + 1, HIDDEN), num_blocks=2)
+
+
+def test_block_residual_without_workspace_manager(monkeypatch):
+    monkeypatch.setattr(workspace, "_manager", None)
+    rows = _model()._new_block_residual(torch.empty(5, HIDDEN), num_blocks=2)
+    assert rows.shape == (5, 2, HIDDEN)

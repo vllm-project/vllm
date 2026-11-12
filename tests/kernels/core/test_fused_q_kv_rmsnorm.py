@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness + large-token-count launch tests for fused_q_kv_rmsnorm.
 
-Before the grid-dim fix the kernel used grid ``(2, num_tokens)``, which hit
-CUDA's 65535 grid-y cap for ``num_tokens >= 65536`` and failed with
-``Triton Error [CUDA]: invalid argument`` at every large chunked-prefill
+Before the grid-dim fix the kernel used grid `(2, num_tokens)`, which hit
+CUDA's 65535 grid-y cap for `num_tokens >= 65536` and failed with
+`Triton Error [CUDA]: invalid argument` at every large chunked-prefill
 profile run. These tests pin the new grid layout.
 """
 

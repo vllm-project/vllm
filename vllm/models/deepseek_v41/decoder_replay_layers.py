@@ -3,10 +3,10 @@
 """Decoder-side SWA bounded replay: running the replay layers on their batch.
 
 Once the last KV-source layer has written every row's KV, it and the layers past
-it (which own only SWA KV) run on each request's last ``window`` rows only.
-``DeepseekV41ModelState`` prepares those rows as a sub-batch with attention
+it (which own only SWA KV) run on each request's last `window` rows only.
+`DeepseekV41ModelState` prepares those rows as a sub-batch with attention
 metadata and a forward context of its own, like a microbatch;
-``DecoderReplayLayers`` gathers the layer inputs by its rows, runs the layers
+`DecoderReplayLayers` gathers the layer inputs by its rows, runs the layers
 under that context and scatters the outputs back to batch rows. FULL graphs and
 small PIECEWISE ones keep the layers on the whole batch; larger PIECEWISE graphs
 break out to the replay batch, which may run in a graph of its own
@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 
 @dataclass
 class ReplayBatch:
-    """One forward's replay batch; ``run_graph`` is set when it runs in a graph."""
+    """One forward's replay batch; `run_graph` is set when it runs in a graph."""
 
     rows: torch.Tensor
     forward_context: ForwardContext
@@ -41,11 +41,13 @@ class ReplayBatch:
 class DecoderReplayLayers:
     """Runs the replay layers on the step's replay batch.
 
-    ``run_layers`` takes a batch's layer inputs and returns its per-row outputs;
-    ``write_batch_kv`` takes them too and writes the first replay layer's KV for
-    every row. ``metadata_prefixes`` are the attention metadata keys the layers
-    read, so the replay batch builds only those. ``first_swa_prefix`` keys the
+    `run_layers` takes a batch's layer inputs and returns its per-row outputs;
+    `write_batch_kv` takes them too and writes the first replay layer's KV for
+    every row. `metadata_prefixes` are the attention metadata keys the layers
+    read, so the replay batch builds only those. `first_swa_prefix` keys the
     first replay layer's SWA metadata, built with the batch's window starts.
+    `has_early_aux` tells whether layers before the replay layers capture aux
+    hidden states, which the forward holds across the replay layers.
     """
 
     def __init__(
@@ -55,12 +57,14 @@ class DecoderReplayLayers:
         write_batch_kv: Callable[..., None],
         metadata_prefixes: set[str],
         first_swa_prefix: str,
+        has_early_aux: Callable[[], bool] = lambda: False,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
         self.write_batch_kv = write_batch_kv
         self.metadata_prefixes = metadata_prefixes
         self.first_swa_prefix = first_swa_prefix
+        self.has_early_aux = has_early_aux
         # Set by the model state every step; None runs the layers on the batch.
         self.replay_batch: ReplayBatch | None = None
         # Set by the model state with replay graphs: PIECEWISE model graphs of
@@ -88,7 +92,7 @@ class DecoderReplayLayers:
         return self.replay_batch is not None
 
     def graph_uses_replay_batch(self, num_tokens: int) -> bool:
-        """Whether a PIECEWISE graph of ``num_tokens`` breaks out to the replay
+        """Whether a PIECEWISE graph of `num_tokens` breaks out to the replay
         batch; capture and the model state's runtime replay batch share it."""
         return self.trim_threshold is not None and num_tokens >= self.trim_threshold
 
