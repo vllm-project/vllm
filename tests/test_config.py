@@ -2785,7 +2785,7 @@ def test_get_and_verify_max_len_with_nope_layers(
 @pytest.mark.parametrize(
     ("rope_type", "factor", "expected_max_len"),
     [
-        # TeleChat3-36B-Thinking: 32768 already scaled from 8192 by 4
+        # 32768 already scaled from 8192 by 4
         ("yarn", 4.0, 32768),
         # sarvam-105b: declares factor 40 but only serves 131072 of it
         ("deepseek_yarn", 40.0, 32768),
