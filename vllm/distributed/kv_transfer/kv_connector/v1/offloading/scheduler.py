@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
@@ -269,26 +270,34 @@ class SchedulerOffloadConfig(NamedTuple):
                 )
             )
         kv_group_configs = tuple(kv_group_configs_list)
-        group_block_sizes = {config.tokens_per_block for config in kv_group_configs}
         has_partial_recurrent_group = any(
-            config.requires_cow_source
-            and config.tokens_per_block > spec.tokens_per_hash
-            for config in kv_group_configs
+            config.requires_cow_source for config in kv_group_configs
         )
-        # Partial tails currently require one physical block per offload chunk
-        # and uniform, non-windowed groups so one boundary identifies every
-        # group's source. EAGLE groups key their partial tail at a proof
-        # position past the boundary. DCP needs additional hand-off semantics.
+        # Store sub-block tails only when core can reuse them. Recurrent blocks
+        # stay unsharded under DCP and must divide the full-attention chunk.
+        # EAGLE proof positions are not validated under DCP yet.
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        cache_hit_alignment = kv_cache_config.cache_hit_alignment_tokens
         supports_partial_tail = (
             spec.blocks_per_chunk == 1
-            and len(group_block_sizes) == 1
+            and alignment_tokens is not None
+            and cache_hit_alignment is not None
+            and cache_hit_alignment < alignment_tokens
             and has_partial_recurrent_group
             and all(
                 config.sliding_window_size_in_chunks is None
-                or config.requires_cow_source
+                or (
+                    config.requires_cow_source
+                    and alignment_tokens % config.tokens_per_block == 0
+                    and config.tokens_per_block % spec.tokens_per_hash == 0
+                )
                 for config in kv_group_configs
             )
-            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and spec.tokens_per_hash % dcp_world_size == 0
+            and (
+                dcp_world_size == 1
+                or not any(config.is_eagle_group for config in kv_group_configs)
+            )
         )
 
         if retention_interval is not None:
@@ -317,7 +326,7 @@ class SchedulerOffloadConfig(NamedTuple):
             supports_partial_tail=supports_partial_tail,
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
-            dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_world_size=dcp_world_size,
             # Per-step KV bytes (per worker) loaded within the step (0 disables).
             sync_load_budget_bytes=int(
                 spec.extra_config.get("sync_load_budget_bytes", 0)
@@ -646,11 +655,10 @@ class OffloadingConnectorScheduler:
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
-        self._partial_tail_block_size = (
-            self.config.kv_group_configs[0].tokens_per_block
-            if self.config.supports_partial_tail
-            else 0
-        )
+        self._partial_tail_block_size = 0
+        if self.config.supports_partial_tail:
+            assert self.config.alignment_tokens is not None
+            self._partial_tail_block_size = self.config.alignment_tokens
         # Core's prefix cache matches an EAGLE group this many tokens past a
         # hit and then drops them. A partial tail stores and looks up EAGLE
         # groups at that proof position, with the margin rule of the core
@@ -671,6 +679,13 @@ class OffloadingConnectorScheduler:
             and config.is_eagle_group
             and not config.requires_cow_source
         }
+        self._cache_hit_alignment_tokens = alignment
+        self._num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
+        self._drop_eagle_checkpoint_block = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_eagle_block_drop()
+            and not self.use_lookahead_block_hashes
+        )
         self._cow_source_groups = frozenset(
             config.group_idx
             for config in self.config.kv_group_configs
@@ -1296,8 +1311,8 @@ class OffloadingConnectorScheduler:
         `bridge_pending` is True if a complete chunk that the hit also loads
         is not ready yet.
         Returns `(hit, pending)`. `hit` is True only if every key is ready.
-        `pending` is True if a key looked up before the first miss is not
-        ready yet.
+        `pending` is True if no required key missed and a required key or
+        bridge chunk is not ready yet.
         """
         req = req_status.req
         req_context = req_status.req_context
@@ -1314,7 +1329,7 @@ class OffloadingConnectorScheduler:
             pending |= key in (self._chunks_being_loaded or ())
             result = self.manager.lookup(key, req_context)
             if result is LookupResult.MISS:
-                return False, pending
+                return False, False
             pending |= result is not LookupResult.HIT
             boundary_keys.append((group_config, key_tokens, key))
 
@@ -1807,8 +1822,19 @@ class OffloadingConnectorScheduler:
                 # Requests that did not load from the offload tier keep their
                 # EAGLE tail in the GPU prefix cache; skip the store.
                 continue
-            boundaries = {boundary for _, _, boundary in entries}
-            if len(boundaries) != 1:
+            # Chunk-aligned entries belong to the aligned store. Several
+            # off-chunk boundaries still cannot share one partial-tail job.
+            group_tokens_per_chunk = {
+                config.group_idx: config.tokens_per_chunk
+                for config in self.config.kv_group_configs
+            }
+            partial_boundaries: set[int] = set()
+            for group_idx, _, boundary in entries:
+                tokens_per_chunk = group_tokens_per_chunk.get(group_idx)
+                if tokens_per_chunk is None or boundary % tokens_per_chunk == 0:
+                    continue
+                partial_boundaries.add(boundary)
+            if len(partial_boundaries) > 1:
                 # A partial-tail job stores every group at one boundary, so a
                 # hand-off carrying several cannot be stored. Dropping it only
                 # loses the offload hit.
@@ -1817,8 +1843,17 @@ class OffloadingConnectorScheduler:
                     "boundaries."
                 )
                 continue
-            boundary = boundaries.pop()
             req = req_status.req
+            assert self._cache_hit_alignment_tokens is not None
+            boundary = get_mamba_prefill_checkpoint_position(
+                req.num_prompt_tokens,
+                self._cache_hit_alignment_tokens,
+                drop_eagle_block=self._drop_eagle_checkpoint_block,
+                num_hash_lookahead_tokens=self._num_hash_lookahead_tokens,
+            )
+            entries = [entry for entry in entries if entry[2] == boundary]
+            if not entries:
+                continue
             group_states = {
                 group.group_idx: state
                 for group, state in zip(
@@ -1856,11 +1891,15 @@ class OffloadingConnectorScheduler:
             assert self._cow_source_groups.issubset(cow_blocks)
 
             assert boundary % self._partial_tail_block_size != 0
-            block_idx = boundary // self._partial_tail_block_size
+            group_block_idx = [
+                (boundary - 1) // group.tokens_per_block
+                for group in self.config.kv_group_configs
+            ]
             if any(
                 group.group_idx not in self._cow_source_groups
-                and block_idx >= len(group_states[group.group_idx].block_ids)
-                for group in self.config.kv_group_configs
+                and group_block_idx[config_idx]
+                >= len(group_states[group.group_idx].block_ids)
+                for config_idx, group in enumerate(self.config.kv_group_configs)
             ):
                 continue
             key_tokens = [
@@ -1876,8 +1915,10 @@ class OffloadingConnectorScheduler:
             block_ids = [
                 cow_blocks[group.group_idx]
                 if group.group_idx in self._cow_source_groups
-                else group_states[group.group_idx].block_ids[block_idx]
-                for group in self.config.kv_group_configs
+                else group_states[group.group_idx].block_ids[
+                    group_block_idx[config_idx]
+                ]
+                for config_idx, group in enumerate(self.config.kv_group_configs)
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
@@ -1902,10 +1943,10 @@ class OffloadingConnectorScheduler:
             accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
             group_sizes = [0] * len(self.config.kv_group_configs)
             block_indices = [0] * len(self.config.kv_group_configs)
-            for group_idx in accepted_groups:
-                group_sizes[group_idx] = 1
-                block_indices[group_idx] = block_idx
-            source_blocks = [block_ids[group_idx] for group_idx in accepted_groups]
+            for config_idx in accepted_groups:
+                group_sizes[config_idx] = 1
+                block_indices[config_idx] = group_block_idx[config_idx]
+            source_blocks = [block_ids[config_idx] for config_idx in accepted_groups]
 
             job_id = self._generate_job_id()
             req_status.transfer_jobs.add(job_id)
