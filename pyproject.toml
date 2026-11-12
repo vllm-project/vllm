@@ -185,7 +185,7 @@ unresolved-attribute = "ignore"
 [[tool.ty.overrides]]
 # Tests deliberately pass mocks and stand-ins where real types are expected,
 # and a None where an attribute is expected fails the test anyway
-include = ["tests/**"]
+include = ["tests/**", "**/test_*.py"]
 
 [tool.ty.overrides.rules]
 invalid-argument-type = "ignore"
