@@ -6474,22 +6474,22 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
 
 
 @pytest.mark.parametrize(
-    "use_eagle, prompt_cached, hit_blocks",
+    "use_eagle, expected_cached, hit_blocks",
     [
-        # Replay boundary 51 -> state block 2; the last decode boundary (80).
-        (False, {2}, 5),
+        # Replay boundary 51 -> state block 2; the last decode boundary (96).
+        (False, {2, 5}, 6),
         # EAGLE backs the prompt boundary off to 32 (block 1), and the hit at
         # the last decode boundary drops one block, landing on the previous
-        # (also decode-crossed) boundary at 64.
-        (True, {1}, 4),
+        # decode boundary at 80, which is kept too.
+        (True, {1, 4, 5}, 5),
     ],
 )
-def test_mamba_zero_retention_keeps_decode_boundaries(
-    use_eagle, prompt_cached, hit_blocks
+def test_mamba_zero_retention_keeps_latest_decode_boundary(
+    use_eagle, expected_cached, hit_blocks
 ):
-    """Under `prefix_cache_retention_interval=0` the Mamba states written at
-    block boundaries crossed during decode are hashed, while the prompt stays
-    sparse, so a follow-up turn replaying the output resumes near its end."""
+    """Under `prefix_cache_retention_interval=0` the Mamba state at the latest
+    block boundary crossed during decode is hashed and earlier ones are
+    dropped, so a follow-up turn replaying the output resumes near its end."""
     block_size = 16
     manager = make_kv_cache_manager(
         _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba"]),
@@ -6508,14 +6508,13 @@ def test_mamba_zero_retention_keeps_decode_boundaries(
         blocks = manager.allocate_slots(req0, chunk_end - req0.num_computed_tokens)
         assert blocks is not None
         req0.num_computed_tokens = chunk_end
-    # Decode 40 tokens, crossing the block boundaries at 64 and 80.
-    for token in range(100, 140):
+    # Decode 56 tokens, crossing the block boundaries at 64, 80 and 96.
+    for token in range(100, 156):
         req0.append_output_token_ids(token)
         assert manager.allocate_slots(req0, 1) is not None
         req0.num_computed_tokens += 1
 
     pool = manager.block_pool
-    expected_cached = prompt_cached | {3, 4}
     for i in range(len(req0.block_hashes)):
         cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
         if i in expected_cached:

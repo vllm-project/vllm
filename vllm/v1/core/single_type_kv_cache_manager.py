@@ -1470,6 +1470,11 @@ class MambaManager(SingleTypeKVCacheManager):
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # Decode-crossed boundary states hashed under zero retention, oldest
+            # first, with the hash they were cached under.
+            self._decode_boundary_states: dict[
+                str, list[tuple[KVCacheBlock, BlockHashWithGroupId]]
+            ] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -1572,9 +1577,9 @@ class MambaManager(SingleTypeKVCacheManager):
           `> 0`  -> keep one state per `retention_interval`-sized segment
 
         `reachable_boundaries` are proven reuse points (the replay boundary,
-        any cross-request shared-prefix junction, Marconi-style APC, and the
-        boundaries crossed during decode); their boundary state is always kept
-        so sparse retention does not defeat reuse.
+        any cross-request shared-prefix junction, Marconi-style APC, and under
+        `0` the latest boundary crossed during decode); their boundary state is
+        always kept so sparse retention does not defeat reuse.
         """
         if retention_interval is None or alignment_tokens is None:
             # Dense caching or no alignment constraint imposed.
@@ -1962,6 +1967,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._num_retired_blocks.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
+            self._decode_boundary_states.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
             # the pool now, so drop its not-yet-offered hand-offs rather than
@@ -1990,20 +1996,23 @@ class MambaManager(SingleTypeKVCacheManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        if self.mamba_cache_mode == "align" and retention_interval is not None:
-            # Decode writes the exact state at every block boundary it crosses,
-            # and a later turn replaying the output resumes at the last one.
-            # Keep them all: dense over the output, sparse over the prompt.
-            # Under EAGLE a hit at a boundary also matches the block above it,
-            # so the previous decode boundary serves that hit.
-            first_block = max(
-                num_cached_blocks_before, request.num_prompt_tokens // self.block_size
+        first_decode_block = request.num_prompt_tokens // self.block_size
+        # Decode writes the exact state at every block boundary it crosses, and
+        # a later turn replaying the output resumes at the last one. EAGLE drops
+        # the last block of an attention hit, so there the hit lands on the
+        # boundary below it. Zero retention keeps just those latest states.
+        keep_decode_boundaries = (
+            self.mamba_cache_mode == "align" and retention_interval == 0
+        )
+        num_decode_boundaries_kept = 2 if self.drop_eagle_checkpoint_block else 1
+        if keep_decode_boundaries:
+            first_block = max(num_cached_blocks_before, first_decode_block)
+            decode_boundaries = range(
+                (first_block + 1) * self.block_size, num_tokens + 1, self.block_size
             )
             replay_boundaries = (
                 *replay_boundaries,
-                *range(
-                    (first_block + 1) * self.block_size, num_tokens + 1, self.block_size
-                ),
+                *decode_boundaries[-num_decode_boundaries_kept:],
             )
         super().cache_blocks(
             request,
@@ -2042,6 +2051,17 @@ class MambaManager(SingleTypeKVCacheManager):
                             block.block_hash_num_tokens,
                         )
                     )
+                if keep_decode_boundaries and idx >= first_decode_block:
+                    self._decode_boundary_states.setdefault(
+                        request.request_id, []
+                    ).append((block, block.block_hash))
+        if keep_decode_boundaries:
+            kept = self._decode_boundary_states.get(request.request_id, [])
+            while len(kept) > num_decode_boundaries_kept:
+                block, block_hash = kept.pop(0)
+                # A freed block may have been reallocated and re-keyed since.
+                if block.block_hash == block_hash:
+                    self.block_pool._maybe_evict_cached_block(block)
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
