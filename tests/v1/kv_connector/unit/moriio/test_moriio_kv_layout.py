@@ -493,12 +493,16 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         _is_mamba_layer=lambda name: True,
         _hybrid_payload_index_by_layer={"kda": 2},
         _region_session_indices=lambda name: [0, 1],
+        kv_region_mr_offsets={},
         _compute_mamba_transfer_offsets=Mock(
             return_value=([10, 20, 30, 40], [50, 60, 70, 80], [2, 4, 8, 16], 3)
         ),
     )
     worker._mamba_blocks_for_layer = lambda name, blocks: (
         MoRIIOConnectorWorker._mamba_blocks_for_layer(worker, name, blocks)
+    )
+    worker._mamba_region_mr_offsets = lambda *args: (
+        MoRIIOConnectorWorker._mamba_region_mr_offsets(worker, *args)
     )
     writer = make_moriio_writer(worker)
     task = _write_task("kda")

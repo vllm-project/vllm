@@ -66,9 +66,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     KeyMetadata,
     MambaStoreLayout,
     PoolKey,
+    RankLocalStoreLayout,
     StoreLayout,
     StoreShardId,
     TokenMajorStoreLayout,
+    group_compact_kernel_blocks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -2126,11 +2128,10 @@ class MooncakeStoreWorker:
                 for layer_name in group.layer_names
             }
             seen_storage_ptrs: set[int] = set()
+            # Kernel-block views: RankLocalStoreLayout groups them itself,
+            # after checking that each manager block is one gapless byte run.
             cache_by_layer = {
-                layer_name: [
-                    group_kernel_blocks(view, self.num_blocks)
-                    for view in _layer_views(cache)
-                ]
+                layer_name: _layer_views(cache)
                 for layer_name, cache in kv_caches.items()
                 if layer_name in store_layer_names
             }
@@ -2172,9 +2173,13 @@ class MooncakeStoreWorker:
                     group_tensors = [views[0] for views in group_views]
                 else:
                     group_tensors = [cache for views in group_views for cache in views]
-                db.store_layout.register_kv_caches(
-                    group_tensors or cache_tensors, self.num_blocks
-                )
+                group_tensors = group_tensors or cache_tensors
+                if not isinstance(db.store_layout, RankLocalStoreLayout):
+                    group_tensors = [
+                        group_kernel_blocks(cache, self.num_blocks)
+                        for cache in group_tensors
+                    ]
+                db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
@@ -2207,7 +2212,7 @@ class MooncakeStoreWorker:
                     assert num_blocks is not None
                 else:
                     num_blocks = self._kv_cache_config.num_blocks
-                cache = group_kernel_blocks(cache, num_blocks)
+                cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
                 cache_storage = cache.untyped_storage()
                 if is_host_resident:
                     base_addr = cache.data_ptr()
@@ -2241,7 +2246,7 @@ class MooncakeStoreWorker:
                     )
 
                 regions: list[tuple[int, int]] = []
-                if not is_non_overlapping_and_dense(cache[0]):
+                if not block_compact:
                     for head_idx in range(cache.shape[1]):
                         head_cache = cache[:, head_idx]
                         assert is_non_overlapping_and_dense(head_cache[0])
