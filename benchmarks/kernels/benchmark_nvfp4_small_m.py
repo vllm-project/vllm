@@ -2,29 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Small-M (decode) NVFP4 linear benchmark across vLLM's NVFP4 kernels.
 
-Each provider is a vLLM ``NvFp4LinearKernel`` driven through
-``process_weights_after_loading`` + ``apply_weights``, so the timed region is
+Each provider is a vLLM `NvFp4LinearKernel` driven through
+`process_weights_after_loading` + `apply_weights`, so the timed region is
 exactly what the model runs (activation quant, padding, GEMM). Timing uses
-FlashInfer CUPTI on a CUDA graph that walks ``copies`` distinct weight copies
+FlashInfer CUPTI on a CUDA graph that walks `copies` distinct weight copies
 whose total size exceeds L2, so every call reads its weight from DRAM.
 
 Bandwidth is the theoretical minimum traffic (FP4 weight + E4M3 block scales
 read once, without any N/K padding a kernel may add; activation and output are
-<0.1% at M <= 16) over the measured time. Pass ``--peak-gbps`` to also report it
+<0.1% at M <= 16) over the measured time. Pass `--peak-gbps` to also report it
 as a percentage of the device's peak. CUPTI sums kernel durations only, so launch
 gaps between a provider's kernels (quant, pad, GEMM) are not counted.
 
-By default only providers vLLM can select are timed; ``--include-gated`` adds the
+By default only providers vLLM can select are timed; `--include-gated` adds the
 ones it gates off (FlashInfer CuTe-DSL W4A4 is limited to sm_10x) by bypassing
-``is_supported``.
+`is_supported`.
 
 Providers whose output deviates from the dequantized-weight reference
-(cosine similarity below ``--min-cos``) are reported as errors.
+(cosine similarity below `--min-cos`) are reported as errors.
 
-Example:
-    python benchmarks/kernels/benchmark_nvfp4_small_m.py \
-        --output-json results/micro/nvfp4_small_m.json
+A typical run times every kernel, including the gated ones (add
+`--output-json <path>` to save the results):
 
+```bash
+python benchmarks/kernels/benchmark_nvfp4_small_m.py --include-gated
+```
 """
 
 import argparse
