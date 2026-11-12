@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Single-GPU kernels of the DeepSeek-V4.1 specialized decode
-(``vllm/models/deepseek_v41/nvidia/specialized_decode``), each against the stock path
+(`vllm/models/deepseek_v41/nvidia/specialized_decode`), each against the stock path
 it replaces, eagerly and replayed from a CUDA graph where the decode captures
 it. Needs one SM100-family GPU; about 5 minutes, mostly kernel compilation.
 
@@ -70,7 +70,12 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm i
 from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.metadata_graphs import (
     AttnMetadataCudaGraphs,
 )
+from vllm.models.deepseek_v41.nvidia.specialized_decode.sampling.sharded_markov import (  # noqa: E501
+    RANK_DIM,
+    make_sharded_sampler,
+)
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 pytestmark = pytest.mark.skipif(
     not (
@@ -83,7 +88,7 @@ DEVICE = torch.device("cuda")
 
 
 def _capture(fn):
-    """``fn`` run once eagerly (compiling its kernels), then captured into a
+    """`fn` run once eagerly (compiling its kernels), then captured into a
     CUDA graph; returns the graph and the captured outputs."""
     fn()
     torch.accelerator.synchronize()
@@ -105,7 +110,7 @@ def _bf16_ulp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def _routing(
     rows: int, generator: torch.Generator, pool_size: int = 22
 ) -> torch.Tensor:
-    """Top-k ids of ``rows`` rows drawn from ``pool_size`` experts (22, as a
+    """Top-k ids of `rows` rows drawn from `pool_size` experts (22, as a
     decode step of six rows routes); above eight rows experts own several
     tiles, and with a pool of six every expert takes every row."""
     pool = torch.randperm(EXPERTS, generator=generator)[:pool_size]
@@ -179,8 +184,8 @@ def _gemm(experts) -> RoutedExpertGemm:
 
 
 def _flashinfer_experts(experts, routing, output=None):
-    """``TrtLlmMxfp4ExpertsModular``'s FlashInfer call on the same quantized
-    input: GEMM2 rows and their permutation, or the finalized ``output``."""
+    """`TrtLlmMxfp4ExpertsModular`'s FlashInfer call on the same quantized
+    input: GEMM2 rows and their permutation, or the finalized `output`."""
     from flashinfer import trtllm_fp4_block_scale_routed_moe
 
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -255,7 +260,8 @@ def _fma_finalize(rows: torch.Tensor, permuted: torch.Tensor, weights: torch.Ten
 def test_routed_experts_match_flashinfer(experts, rows, pool_size, graph):
     """Route + GEMM pair: the routed rows bitwise those of FlashInfer's
     TRT-LLM-gen MoE, and their top-k reduction within one BF16 ulp (plus FP32
-    summation-order error) of its finalized output."""
+    summation-order error) of its finalized output; the finalize kernel's (the
+    DSpark draft's in-layer finalize) bitwise the same FMA chain."""
     generator = torch.Generator().manual_seed(rows)
     gemm = _gemm(experts)
 
@@ -286,6 +292,8 @@ def test_routed_experts_match_flashinfer(experts, rows, pool_size, graph):
     ours = _fma_finalize(
         out.gemm2_permuted, out.expanded_idx_to_permuted_idx, out.expert_weights
     )
+    # The finalize kernel computes the same FMA chain.
+    assert torch.equal(gemm.finalize(out).cpu(), ours)
     # FlashInfer may add the k products in another order (newer releases split
     # them into groups), so allow FP32's reordering error on top of the ulp.
     magnitude = (out.expert_weights.cpu().double()[..., None] * routed.cpu()).abs()
@@ -368,6 +376,7 @@ def _chain(gemm: RoutedExpertGemm, x, logits, ids, is_padding=None):
     from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 
     config = gemm.front_config
+    assert config is not None
     weights, topk_ids = dsv4_topk(
         logits,
         config.bias,
@@ -460,7 +469,7 @@ def test_front_matches_the_chain(experts, rows, image, scale):
     ],
 )
 def test_cooperative_candidates_match_stock(workspace_init, ends, k):
-    """Each row's candidate set equals the stock ``torch.topk`` selection,
+    """Each row's candidate set equals the stock `torch.topk` selection,
     including the pinned newest block and -inf blocks left as -1."""
     from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
         select_candidate_blocks,
@@ -572,10 +581,11 @@ def test_sparse_mla_persistent_kv_counters(dtype, query_lens):
 
 
 class _Mxfp8Linear(nn.Module):
-    """An MXFP8 linear with weights processed for the ``cute-dsl`` kernel."""
+    """An MXFP8 linear with weights processed for the `cute-dsl` kernel."""
 
     def __init__(self, n: int, k: int):
         super().__init__()
+        self.params_dtype = torch.bfloat16
         w = torch.randn(n, k, device=DEVICE) / k**0.5
         w_q, w_s = mxfp8_e4m3_quantize(
             w.to(torch.bfloat16), is_sf_swizzled_layout=False
@@ -604,9 +614,9 @@ def _quantized(rows: int, k: int) -> QuantizedActivation:
 @pytest.mark.parametrize("rows", [1, 5, 6, 8])
 @pytest.mark.parametrize("shape", list(mxfp8_linear.PINNED_TACTICS), ids=str)
 def test_low_latency_mxfp8_mm(shape, rows):
-    """``fused_wqa_wkv``/``wq_b``/``wo_b`` at their TP4 shapes on
-    ``cutedsl_low_latency``, eagerly and replayed, within BF16 tolerance of the
-    stock ``cute-dsl`` layer; a BF16 input is left to the stock layer."""
+    """`fused_wqa_wkv`/`wq_b`/`wo_b` at their TP4 shapes on
+    `cutedsl_low_latency`, eagerly and replayed, within BF16 tolerance of the
+    stock `cute-dsl` layer; a BF16 input is left to the stock layer."""
     if not mxfp8_linear._backend_supported():
         pytest.skip("FlashInfer mm_mxfp8 has no cutedsl_low_latency backend")
     n, k = shape
@@ -630,7 +640,7 @@ def test_low_latency_mxfp8_mm(shape, rows):
 @pytest.mark.parametrize("rows", [9, 12, 18, 30, 48, 72, 192, 288, 384])
 @pytest.mark.parametrize("shape", list(mxfp8_linear.CUTE_DSL_TACTICS), ids=str)
 def test_pinned_mxfp8_mm(shape, rows):
-    """``fused_wqa_wkv``/``wq_b``/``wo_b`` at their TP4 shapes on ``cute-dsl``
+    """`fused_wqa_wkv`/`wq_b`/`wo_b` at their TP4 shapes on `cute-dsl`
     with the pinned tactic of the row count, eagerly and replayed, within BF16
     tolerance of the stock layer, for MXFP8 and BF16 inputs."""
     if not current_platform.is_device_capability(103):
@@ -656,10 +666,10 @@ def test_pinned_mxfp8_mm(shape, rows):
 @pytest.mark.parametrize("rows", [9, 12, 16, 17, 24, 32, 33, 48])
 @pytest.mark.parametrize("shape", list(mxfp8_linear.WIDE_TACTICS), ids=str)
 def test_wide_low_latency_mxfp8_mm(shape, rows):
-    """``fused_wqa_wkv``/``wq_b``/``wo_b`` at their TP4 shapes on the
+    """`fused_wqa_wkv`/`wq_b`/`wo_b` at their TP4 shapes on the
     low-latency kernel with a 16-, 32- or 48-row activation tile, eagerly and
     replayed, within BF16 tolerance of the stock layer, for MXFP8 and BF16
-    inputs; above ``WIDE_LOW_LATENCY_MAX_ROWS`` rows it does not run."""
+    inputs; above `WIDE_LOW_LATENCY_MAX_ROWS` rows it does not run."""
     if not mxfp8_linear._wide_supported():
         pytest.skip("the wide tactics are pinned on GB300, FlashInfer >= 0.7.2")
     n, k = shape
@@ -683,7 +693,7 @@ def test_wide_low_latency_mxfp8_mm(shape, rows):
 
 
 def test_pinned_mxfp8_mm_rows():
-    """Up to ``LOW_BATCH_MAX_ROWS`` rows, and for an unpinned shape, the
+    """Up to `LOW_BATCH_MAX_ROWS` rows, and for an unpinned shape, the
     stock layer runs."""
     n, k = next(iter(mxfp8_linear.CUTE_DSL_TACTICS))
     assert mxfp8_linear.pinned_mm(_Mxfp8Linear(n, k), _quantized(8, k)) is None
@@ -692,7 +702,7 @@ def test_pinned_mxfp8_mm_rows():
 
 @pytest.mark.parametrize("rows", [1, 5, 6, 8, 16, 17])
 def test_low_batch_lm_head(dist_init, default_vllm_config, rows):
-    """The logits processor's LM head on CuTe DSL ``mm_bf16`` for 1-16 rows,
+    """The logits processor's LM head on CuTe DSL `mm_bf16` for 1-16 rows,
     within BF16 rounding of the FP32 product; 17 rows keep the default GEMM."""
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.models.deepseek_v41.nvidia.specialized_decode.logits.lm_head import (
@@ -722,7 +732,7 @@ def test_low_batch_lm_head(dist_init, default_vllm_config, rows):
     [(1024, 5120), (512, 5120), (64, 5120), (128, 512)],
 )
 def test_aux_projection_gemm(n, k, rows):
-    """FP32 ``x @ W.T`` that differs from the exact product by no more than
+    """FP32 `x @ W.T` that differs from the exact product by no more than
     any K-term summation order can."""
     if not ll_bf16.is_available():
         pytest.skip("CuTe DSL ll_bf16 is unavailable")
@@ -738,7 +748,7 @@ def test_aux_projection_gemm(n, k, rows):
 
 @pytest.mark.parametrize("ratio", [1, 2])
 def test_fp32_index_key_store(ratio):
-    """The index key store fed by ``wk``'s FP32 output writes the MXFP4 cache
+    """The index key store fed by `wk`'s FP32 output writes the MXFP4 cache
     bytes the shared store writes for its BF16 output."""
     if not ll_bf16.is_available():
         pytest.skip("CuTe DSL ll_bf16 is unavailable")
@@ -861,7 +871,7 @@ def _swa_prefix(layer_id: int) -> str:
 
 
 class SideBuildStep:
-    """One pure-decode step through the sparse-index lookups of ``LAYOUT``,
+    """One pure-decode step through the sparse-index lookups of `LAYOUT`,
     with real table builds and inputs refreshed in place."""
 
     def __init__(self, seed: int):
@@ -952,7 +962,7 @@ class SideBuildStep:
             group.flashinfer_sparse_index_cache.clear()
 
     def lookup_args(self, layer):
-        """The arguments of ``layer``'s sparse-index build."""
+        """The arguments of `layer`'s sparse-index build."""
         swa_only = layer.compress_ratio == 0
         return (
             None if swa_only else self.compressed_cache,
@@ -963,7 +973,7 @@ class SideBuildStep:
         )
 
     def forward(self, layers, tables, mode, stop=None, join_at_end=True):
-        """The layers' table lookups in model order, on ``tables`` (None: the
+        """The layers' table lookups in model order, on `tables` (None: the
         stock build of each layer): each index source joins the side builds,
         then its indexer writes the top-k indices; the executor joins after
         its layers. Returns copies of each layer's table."""
@@ -1105,8 +1115,8 @@ def _same_bytes(a: torch.Tensor, b: torch.Tensor) -> bool:
 def test_sparse_mla_decode_launches_the_stock_decode(
     monkeypatch, dtype, layer_id, wide
 ):
-    """``SparseMlaDecode.run`` launches the sparse-MLA decode with the
-    arguments the stock ``_forward`` passes for a pure-decode step (padded
+    """`SparseMlaDecode.run` launches the sparse-MLA decode with the
+    arguments the stock `_forward` passes for a pure-decode step (padded
     query heads, padded output rows, DSpark's wide window), plus the KV
     counters."""
     step = SideBuildStep(seed=1)
@@ -1255,7 +1265,7 @@ def test_metadata_graph_replay_matches_eager_build(monkeypatch, readers):
                 layer_names=[f"g{i}.l{j}" for j in range(2)],
                 kv_cache_spec=None,
                 kv_cache_group_id=i,
-                metadata_builders=[builder],
+                metadata_builders=[builder],  # type: ignore[list-item]
             )
         ]
         for i, builder in enumerate(builders)
@@ -1271,7 +1281,7 @@ def test_metadata_graph_replay_matches_eager_build(monkeypatch, readers):
                     layer_names=[f"g{i}.r{j}" for j in range(2)],
                     kv_cache_spec=None,
                     kv_cache_group_id=i,
-                    metadata_builders=[_ReaderBuilder(10 + i, 64)],
+                    metadata_builders=[_ReaderBuilder(10 + i, 64)],  # type: ignore[list-item]
                 )
             )
 
@@ -1325,6 +1335,126 @@ def test_metadata_graph_replay_matches_eager_build(monkeypatch, readers):
         for k, want in expected.items():
             assert torch.equal(seen[k], want), (step, k)
             assert torch.equal(replayed[k], want), (step, k)
+
+
+# ------------------------------------------------- DSpark Markov sampling
+
+MARKOV_VOCAB = 129280  # DeepSeek-V4.1's vocabulary
+MARKOV_STEPS = 5
+MARKOV_QUERY = 6  # draft query rows per request; the anchor token is the first
+
+
+def _markov_case(dtype: torch.dtype) -> SimpleNamespace:
+    """Four request rows, the last a padding row (request-state index -1), at
+    temperatures 0, 1 and 0.6. The Markov weights are integer multiples of
+    1/16, so every bias element is an exact sum whatever the reduction order,
+    and cuBLAS and the sharded kernel round it to BF16 alike."""
+    gen = torch.Generator(device=DEVICE).manual_seed(0)
+    rows, max_reqs = 4, 6
+
+    def ternary(*shape):
+        values = torch.randint(-1, 2, shape, generator=gen, device=DEVICE)
+        return values.to(torch.bfloat16)
+
+    states = torch.tensor([3, 0, 5, -1], device=DEVICE)
+    temperature = torch.zeros(max_reqs, dtype=torch.float32, device=DEVICE)
+    temperature[states[:3]] = torch.tensor([0.0, 1.0, 0.6], device=DEVICE)
+    base = torch.randn(rows, MARKOV_STEPS, MARKOV_VOCAB, generator=gen, device=DEVICE)
+    return SimpleNamespace(
+        rows=rows,
+        max_reqs=max_reqs,
+        embed=ternary(MARKOV_VOCAB, RANK_DIM),
+        head=ternary(MARKOV_VOCAB, RANK_DIM) / 16,
+        base=(base * 4).to(dtype),
+        input_ids=torch.randint(
+            0,
+            MARKOV_VOCAB,
+            (rows * MARKOV_QUERY,),
+            generator=gen,
+            device=DEVICE,
+            dtype=torch.int32,
+        ),
+        idx_mapping=states.repeat_interleave(MARKOV_STEPS),
+        sample_pos=torch.arange(rows * MARKOV_STEPS, device=DEVICE) + 100,
+        temperature=temperature,
+        seeds=torch.randint(0, 2**62, (max_reqs,), generator=gen, device=DEVICE),
+    )
+
+
+def _markov_outputs(case: SimpleNamespace) -> tuple[torch.Tensor, torch.Tensor]:
+    """A zeroed draft-logits cache (in the base logits' dtype, which the BF16
+    bias promotes to) and draft-token buffer."""
+    cache = torch.zeros(
+        case.max_reqs,
+        MARKOV_STEPS,
+        MARKOV_VOCAB,
+        dtype=case.base.dtype,
+        device=DEVICE,
+    )
+    tokens = torch.zeros(case.max_reqs, MARKOV_STEPS, dtype=torch.int64, device=DEVICE)
+    return cache, tokens
+
+
+def _markov_eager(case, cache, tokens):
+    """The speculator's eager loop: per position, the Markov bias of the
+    previous token, the logits add and `gumbel_sample`."""
+    prev = case.input_ids[::MARKOV_QUERY].long()
+    idx_mapping = case.idx_mapping.view(case.rows, MARKOV_STEPS)
+    sample_pos = case.sample_pos.view(case.rows, MARKOV_STEPS)
+    for i in range(MARKOV_STEPS):
+        logits = case.base[:, i] + case.embed[prev] @ case.head.t()
+        prev = gumbel_sample(
+            logits,
+            idx_mapping[:, i],
+            case.temperature,
+            case.seeds,
+            sample_pos[:, i] - 1,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=cache,
+            logits_cache_col=torch.tensor(i, dtype=torch.int32, device=DEVICE),
+        )
+        tokens[: case.rows, i] = prev
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_sharded_markov_chain_matches_eager(dtype):
+    """The vocabulary-sharded chain on one rank (the whole head) draws the
+    eager loop's tokens and caches its logits bitwise, eagerly and replayed
+    from a CUDA graph."""
+    case = _markov_case(dtype)
+    want_cache, want_tokens = _markov_outputs(case)
+    _markov_eager(case, want_cache, want_tokens)
+    sampler = make_sharded_sampler(
+        case.embed, case.head, MARKOV_VOCAB, MARKOV_STEPS, dtype, None, case.max_reqs
+    )
+    assert sampler is not None and sampler.supports(case.rows, case.base)
+    cache, tokens = _markov_outputs(case)
+
+    def run():
+        sampler.fork_noise(case.idx_mapping, case.sample_pos, case.seeds)
+        sampler.join_noise()
+        sampler.sample(
+            case.base,
+            case.input_ids,
+            MARKOV_QUERY,
+            case.idx_mapping,
+            case.temperature,
+            cache,
+            tokens,
+        )
+
+    graph, _ = _capture(run)
+    # Padding rows draw nothing that is read.
+    real = case.rows - 1
+    for replay in range(3):
+        if replay:
+            cache.zero_()
+            tokens.zero_()
+            graph.replay()
+            torch.accelerator.synchronize()
+        assert torch.equal(tokens[:real], want_tokens[:real]), replay
+        assert torch.equal(cache, want_cache), replay
 
 
 @pytest.mark.parametrize("rows", [1, 12, 48, 192])

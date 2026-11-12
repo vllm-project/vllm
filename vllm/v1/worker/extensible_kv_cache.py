@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
@@ -25,6 +26,10 @@ from vllm.platforms import current_platform
 from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import device_memory_info, format_gib
+from vllm.utils.vmm_driver import (
+    MEM_HANDLE_TYPE_FABRIC,
+    MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+)
 from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -85,6 +90,7 @@ class ExtensibleKVCache:
         kv_cache_config: KVCacheConfig,
         device: torch.device,
         layout: KVCacheLayout,
+        export_handle_types: int = 0,
     ):
         tensors = [
             tensor
@@ -98,6 +104,7 @@ class ExtensibleKVCache:
         self.capacity_blocks = kv_cache_config.num_blocks
         if self.capacity_blocks <= 0:
             raise ValueError(f"Invalid KV cache capacity {self.capacity_blocks}.")
+        self._is_block_outermost = layout.is_block_outermost
         self.segment_offsets, self.segment_strides = self._segments(tensors, layout)
         self.bytes_per_block = sum(self.segment_strides)
         self.num_committed_blocks = 0
@@ -117,6 +124,7 @@ class ExtensibleKVCache:
                 end - start
                 for start, end in pairwise([*self.segment_offsets, self.size])
             ],
+            export_handle_types=export_handle_types,
         )
 
     def _segments(
@@ -168,10 +176,16 @@ class ExtensibleKVCache:
             raise ValueError("KV cache tensors do not tile the allocation.")
         return offsets, strides
 
+    @property
+    def min_committed_blocks(self) -> int:
+        """The null block, plus one under block-outermost layouts, whose views
+        start inside block 0 and read past it (see `pad_kv_cache_segments`)."""
+        return 2 if self._is_block_outermost else 1
+
     def allocate(self, size: int) -> torch.Tensor:
-        """Allocator hook for allocate_kv_cache; commits only the null block."""
+        """Allocator hook for allocate_kv_cache; commits the minimum."""
         assert size == self.size, f"Expected {self.size} bytes, got {size}."
-        self.commit(1)
+        self.commit(self.min_committed_blocks)
         return self.buffer.full_view()
 
     def commit(
@@ -372,19 +386,45 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
     )
 
 
+def kv_cache_export_handle_types(vllm_config: "VllmConfig") -> int:
+    """Handle types other processes import the KV cache through, for
+    `VmmDriver.create`."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return 0
+    access = kv_transfer_config.kv_cache_access()
+    handle_types = 0
+    if KVCacheAccess.EXPORTS_FD in access:
+        handle_types |= MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+    if KVCacheAccess.EXPORTS_FABRIC in access:
+        handle_types |= MEM_HANDLE_TYPE_FABRIC
+    return handle_types
+
+
 def pad_kv_cache_segments(
-    kv_cache_config: KVCacheConfig, layout: KVCacheLayout, granule: int
+    kv_cache_config: KVCacheConfig,
+    layout: KVCacheLayout,
+    granule: int,
+    *,
+    registers_memory: bool = False,
 ) -> KVCacheConfig:
-    """Start every layer's region on a granule, so that a defragmenting commit
-    of any block count can back each segment with one physical chunk.
+    """Start every layer's region on a granule.
+
+    Committing the null block then backs each layer's first granule, which
+    TMA gathers with out-of-bounds indices touch beyond the rows they address.
+    It also lets a defragmenting commit of any block count back each segment
+    with one physical chunk, as RDMA registration (registers_memory) requires.
 
     Only address space grows: commits already map whole granules per segment.
-    Block-outermost layouts have a single segment at offset 0 and are returned
-    as is.
+    Block-outermost layouts (one segment at offset 0, see `allocate`) are
+    returned as is, and so are other layouts that are not block-compact, unless
+    registers_memory.
     """
     if layout.is_block_outermost:
         return kv_cache_config
-    assert layout.is_block_compact, f"{layout.name} has no per-layer segments."
+    if not layout.is_block_compact:
+        assert not registers_memory, f"{layout.name} has no per-layer segments."
+        return kv_cache_config
     num_blocks = kv_cache_config.num_blocks
     tensors = kv_cache_config.kv_cache_tensors
     assert all(t.layer_stride == num_blocks * t.block_stride for t in tensors)
@@ -518,6 +558,16 @@ def extend_kv_cache(
             for cache in runner.kv_caches_by_layer.values()
             if cache.device == runner.device
         ]
+        if runner.vllm_config.cache_config.use_replayssm:
+            from vllm.v1.worker.replayssm_utils import (
+                get_replayssm_block_copy_tensors,
+                initialize_replayssm_ring_trackers,
+            )
+
+            initialize_replayssm_ring_trackers(runner.kv_cache_config, forward_context)
+            runner.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
+                forward_context
+            )
     runner.kv_connector = get_kv_connector(
         runner.vllm_config, runner.kv_caches_by_layer
     )
@@ -570,15 +620,42 @@ def measure_kv_cache_blocks(
     torch.accelerator.synchronize()
     gc.collect()
     torch.accelerator.empty_cache()
-    free_memory, _ = device_memory_info(device)
+    free_memory = current_platform.free_device_memory(device)
     transient_peak = kv_cache.reserved_headroom_bytes
-    available = measure_kv_cache_bytes(
+    measured = dict(
         init_free_memory=init_free_memory,
         free_memory=free_memory,
         committed_bytes=kv_cache.physical_bytes,
-        requested_memory=requested_memory,
         transient_peak_bytes=transient_peak,
     )
+    available = measure_kv_cache_bytes(requested_memory=requested_memory, **measured)
+    utilization = vllm_config.cache_config.gpu_memory_utilization
+    # Explicit values just under 1.0 are mostly habits from estimate-based
+    # sizing, which needed that headroom; this sizing measures it instead. Some
+    # still leave room for memory this sizing cannot see, which the message
+    # lists so that those users can keep their setting.
+    if utilization is not None and 0.7 < utilization < 1.0:
+        # A budget of all memory free at startup is bound by the device alone.
+        withheld = (
+            measure_kv_cache_bytes(requested_memory=init_free_memory, **measured)
+            - available
+        )
+        if withheld >= 1 << 30:
+            logger.warning_once(
+                "gpu_memory_utilization=%s caps this instance at %s GiB, keeping "
+                "%s GiB of free device memory out of the KV cache. The "
+                "extensible KV cache is sized from the memory measured after "
+                "warmup and CUDA graph capture, so vLLM's own use needs no "
+                "headroom below 1.0. Leave gpu_memory_utilization unset unless "
+                "it leaves room for memory vLLM does not measure: other "
+                "processes sharing the GPU (including ones that allocate on it "
+                "later), the CPU on a unified-memory device, weight transfer "
+                "buffers for weight updates, or a KV connector's own device "
+                "buffers.",
+                utilization,
+                format_gib(requested_memory),
+                format_gib(withheld),
+            )
     kv_cache_bytes = reserve_mm_ipc_gpu_memory(
         available,
         vllm_config.model_config.multimodal_config,
@@ -671,7 +748,7 @@ def _release_for_weight_update(
     layer_bytes = max_layer_reload_bytes(model)
     needed = WEIGHT_UPDATE_PEAK_LAYER_FACTOR * layer_bytes
     free = (
-        device_memory_info()[0]
+        current_platform.free_device_memory()
         + torch.accelerator.memory_reserved()
         - torch.accelerator.memory_allocated()
     )
