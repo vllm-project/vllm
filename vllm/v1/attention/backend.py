@@ -442,6 +442,10 @@ class CommonAttentionMetadata:
     has positions available so that builders can pre-compute position-dependent
     sparse metadata for DeepSeek V4 C128A layers."""
 
+    pcp_gather_num_reqs: int | None = None
+    """Uniform request rows for PCP metadata gathers, including graph padding.
+    None for batches that bypass PCP partitioning, such as capture batches."""
+
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
     (num_computed_tokens < num_prompt_tokens). Used by some backends to

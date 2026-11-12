@@ -148,10 +148,18 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
         # Pre-allocate compressed slot mapping buffer for CUDA graph address
         # stability when compress_ratio > 1.
+        self.pcp_compressed_slot_mapping_buffer: torch.Tensor | None = None
         if self.compress_ratio > 1:
             self.compressed_slot_mapping_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int64, device=device
             )
+            self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+            if self.pcp_size > 1:
+                self.pcp_compressed_slot_mapping_buffer = torch.empty(
+                    max_num_batched_tokens * self.pcp_size,
+                    dtype=torch.int64,
+                    device=device,
+                )
 
         # Pre-allocate C128A topk buffers for CUDA graph address stability.
         if self.compress_ratio == 128:
@@ -202,6 +210,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
+                pcp_buffer=self.pcp_compressed_slot_mapping_buffer,
             )
 
         c128a_fields: dict[str, torch.Tensor | None] = {}
@@ -290,6 +299,10 @@ class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
 
 
 class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHMLA_SPARSE_DSV4"

@@ -7,6 +7,7 @@ import torch
 from transformers import DeepseekV4Config
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import get_pcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
@@ -581,9 +582,17 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         )
         self.decode_swa_indices_noncausal: torch.Tensor | None = None
         self._max_tokens = max_tokens
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        if self.pcp_size > 1:
+            self.pcp_cache_positions = torch.empty(
+                max_tokens * self.pcp_size, dtype=torch.int64, device=self.device
+            )
         # replay_start when no group replays: no lower bound.
         self.no_replay_start = torch.zeros(
-            self.vllm_config.scheduler_config.max_num_seqs + 1,
+            self.vllm_config.scheduler_config.max_num_seqs
+            * (2 if self.pcp_size > 1 else 1)
+            + 1,
             dtype=torch.int32,
             device=self.device,
         )
@@ -607,6 +616,11 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         which each request holds window KV; the model state passes it for every
         batch of a replaying group, graph captures pass nothing.
         """
+        global_slot_mapping = common_attn_metadata.slot_mapping
+        if self.pcp_size > 1:
+            common_attn_metadata = common_attn_metadata.replace(
+                slot_mapping=global_slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
+            )
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         query_start_loc = common_attn_metadata.query_start_loc
@@ -753,6 +767,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # each type triggers the planner and all same-type layers reuse the
         # resulting plan for the rest of the step.
         tile_sched = self.build_tile_scheduler(num_decode_tokens)
+        cache_slot_mapping = None
+        cache_positions = None
+        if self.pcp_size > 1:
+            positions = common_attn_metadata.positions
+            assert positions is not None
+            cache_slot_mapping = global_slot_mapping
+            cache_positions = self.pcp_cache_positions[
+                : positions.numel() * self.pcp_size
+            ]
+            cache_positions.copy_(get_pcp_group().all_gather(positions, dim=0))
 
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
@@ -760,6 +784,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             query_start_loc_cpu=query_start_loc_cpu,
             block_table=block_table,
             slot_mapping=slot_mapping,
+            cache_slot_mapping=cache_slot_mapping,
+            cache_positions=cache_positions,
             is_valid_token=is_valid_token,
             token_to_req_indices=token_to_req_indices,
             decode_swa_indices=decode_swa_indices[:num_decode_tokens],

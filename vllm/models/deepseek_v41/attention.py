@@ -86,6 +86,7 @@ from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.attention.ops.sparse_swa import insert_swa_kv
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -782,24 +783,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             swa_metadata = cast(
                 "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
             )
-            cache_kv, slot_mapping = kv, swa_metadata.slot_mapping
-            if self.use_pcp:
-                cache_kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
-                assert swa_metadata.cache_slot_mapping is not None
-                assert swa_metadata.cache_positions is not None
-                slot_mapping = swa_metadata.cache_slot_mapping
-                cache_positions = swa_metadata.cache_positions
-            torch.ops._C.fused_deepseek_v4_kv_rope_insert(
-                cache_kv,
+            cache_positions = insert_swa_kv(
+                kv,
                 cache,
-                slot_mapping,
-                cache_positions,
+                swa_metadata,
+                positions,
                 self.rotary_emb.cos_sin_cache,
-                self.swa_cache_layer.block_size,
-                self._flashinfer_fp8_kv_scale
-                if cache.dtype == torch.float8_e4m3fn
-                else None,
-                self.kv_mxfp8,
+                use_pcp=self.use_pcp,
+                fp8_scale=(
+                    self._flashinfer_fp8_kv_scale
+                    if cache.dtype == torch.float8_e4m3fn
+                    else None
+                ),
+                kv_mxfp8=self.kv_mxfp8,
             )
         if self.compressor is not None:
             latent = self.compressor(kv_score, positions)
@@ -1143,22 +1139,20 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         cache_dtype = swa_kv_cache.dtype
         slot_mapping = swa_metadata.slot_mapping
         if self.use_pcp:
-            cache_kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
-            assert swa_metadata.cache_slot_mapping is not None
-            assert swa_metadata.cache_positions is not None
-            torch.ops._C.fused_deepseek_v4_kv_rope_insert(
-                cache_kv,
+            insert_swa_kv(
+                kv,
                 swa_kv_cache,
-                swa_metadata.cache_slot_mapping,
-                swa_metadata.cache_positions,
+                swa_metadata,
+                positions,
                 cos_sin_cache,
-                swa_metadata.block_size,
-                self._flashinfer_fp8_kv_scale
-                if cache_dtype == torch.float8_e4m3fn
-                else None,
-                self.kv_mxfp8,
+                use_pcp=self.use_pcp,
+                fp8_scale=(
+                    self._flashinfer_fp8_kv_scale
+                    if cache_dtype == torch.float8_e4m3fn
+                    else None
+                ),
+                kv_mxfp8=self.kv_mxfp8,
             )
-            # The fused op now only prepares the rank-local queries.
             slot_mapping = slot_mapping[:0]
 
         # kv is unchanged; attention reads kv solely via swa_kv_cache.
