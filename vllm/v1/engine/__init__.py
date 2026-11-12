@@ -357,6 +357,7 @@ class EngineCoreOutputs(
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: SchedulerStats | None = None
     timestamp: float = 0.0
+
     utility_output: UtilityOutput | None = None
     finished_requests: set[str] | None = None
 

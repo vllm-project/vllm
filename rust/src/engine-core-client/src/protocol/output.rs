@@ -544,8 +544,6 @@ mod tests {
         assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output; 2]);
     }
 
-
-
     #[test]
     fn engine_core_output_requires_valid_known_fields() {
         for fields in [

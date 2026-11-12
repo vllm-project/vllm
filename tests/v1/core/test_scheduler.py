@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import random
-import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock, patch

@@ -122,7 +122,6 @@ pub enum DecodedTextEvent {
         /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
-    /// Worker-reported progress for the request's prefill work.
     PrefillProgress(Box<PrefillProgress>),
     /// Decoded text and sampled metadata observed during one output update.
     ///

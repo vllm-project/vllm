@@ -13,9 +13,7 @@ use crate::client::output_channel::output_channel;
 pub(crate) use crate::client::output_channel::{OutputReceiver, OutputSender};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
-use crate::protocol::output::{
-    EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
-};
+use crate::protocol::output::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::ConnectedEngine;
@@ -264,7 +262,6 @@ impl RequestRegistry {
         }
         None
     }
-
 
     /// Advance the request's LoRA scheduling phase from the engine-core events
     /// attached to one output, mirroring the Python frontend's

@@ -256,7 +256,6 @@ class Scheduler(SchedulerInterface):
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
         self.running: list[Request] = []
-        # Per-request prefill progress reporting state, keyed by request id.
         self._prefill_progress: dict[str, _PrefillProgressState] = {}
 
         # The request IDs that are finished in between the previous and the
@@ -2280,17 +2279,24 @@ class Scheduler(SchedulerInterface):
                 return
             del self._prefill_progress[request.request_id]
             pending.setdefault(state.client_index, []).append(
-                PrefillProgress(request_id=request.request_id, remaining_prefill_tokens=0)
+                PrefillProgress(
+                    request_id=request.request_id, remaining_prefill_tokens=0
+                )
             )
             return
         if state is None:
             state = _PrefillProgressState(client_index=request.client_index)
             self._prefill_progress[request.request_id] = state
-        if state.last_remaining is not None and remaining > state.last_remaining * 3 // 4:
+        if (
+            state.last_remaining is not None
+            and remaining > state.last_remaining * 3 // 4
+        ):
             return
         state.last_remaining = remaining
         pending.setdefault(state.client_index, []).append(
-            PrefillProgress(request_id=request.request_id, remaining_prefill_tokens=remaining)
+            PrefillProgress(
+                request_id=request.request_id, remaining_prefill_tokens=remaining
+            )
         )
 
     def update_from_output(
