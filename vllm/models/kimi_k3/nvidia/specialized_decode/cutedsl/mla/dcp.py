@@ -80,7 +80,10 @@ FORMATS = ("bf16", PROJECTED)
 # served numerics stay those of the BF16 exchange until a gsm8k run gates "proj"
 # (then lower it to 40). The DcpBox allocates the "proj" mailbox and the layers
 # gather W_UV only when a batch up to its cap uses "proj".
-PARTIALS_DEFAULT = {"mla": "1-64:bf16,65-320:proj", "dsa": "1-159:bf16,160-320:proj"}
+PARTIALS_DEFAULT = {
+    "mla": "1-64:bf16,65-320:proj",
+    "dsa": "1-159:bf16,160-1024:proj",
+}
 # Request rows per merging CTA of the "pushed" merge (the sparse decode pushed the
 # rows), batch tables per DCP size; absent: one CTA per (head, 16 rows). One CTA per
 # (head, R rows) reads each row's DCP partial chunks on 128 threads in one round

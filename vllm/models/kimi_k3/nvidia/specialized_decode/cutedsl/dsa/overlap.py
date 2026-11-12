@@ -81,14 +81,14 @@ from ..mla.query import Q_SENT, tiled_from
 #   207.5 / 219.4, fork 233.6 / 249.8; R64 wait 250.0, fork 295.5, front 320.1
 #   (MlaQuery front 271.8).
 QUERY_OVERLAP = {
-    "tp": "1-20:late_front,21-320:fork",
-    "dcp": "1-320:front",
-    "dcp_split": "1-239:fork,240-320:wait",
-    "tp1": "1-320:fork",
+    "tp": "1-20:late_front,21-1024:fork",
+    "dcp": "1-1024:front",
+    "dcp_split": "1-239:fork,240-1024:wait",
+    "tp1": "1-1024:fork",
 }
 # TP without the fused indexer (the late modes follow its select): the TP table the
 # stack ran before them.
-QUERY_OVERLAP_UNFUSED = "1:front,2-9:serial,10:front,11-320:fork"
+QUERY_OVERLAP_UNFUSED = "1:front,2-9:serial,10:front,11-1024:fork"
 MODES = ("serial", "fork", "wait", "front", "late", "late_front")
 LATE = ("late", "late_front")  # TP with the fused indexer only (else: fork, front)
 NORM = ("fork", "late")  # QueryNorm writes the q_c rows
