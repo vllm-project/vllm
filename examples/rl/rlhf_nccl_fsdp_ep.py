@@ -181,6 +181,7 @@ def start_vllm_server(server_gpus: str) -> subprocess.Popen:
         "--enforce-eager",
         "--load-format",
         "dummy",
+        # Leave headroom for the weight transfer's buffers, which vLLM doesn't reserve.
         "--gpu-memory-utilization",
         "0.7",
         "--port",

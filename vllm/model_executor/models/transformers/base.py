@@ -51,6 +51,7 @@ from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -67,10 +68,10 @@ from vllm.model_executor.models.transformers.fusers.attention import (
 from vllm.model_executor.models.transformers.utils import (
     attrsetter,
     can_enable_torch_compile,
-    disable_noop_dynamic_rope,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
+    maybe_disable_dynamic_rope_update,
     named_state,
     replace_conv_class,
     replace_embedding_class,
@@ -84,7 +85,9 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
+from vllm.model_executor.offloader import BaseOffloader, NoopOffloader, get_offloader
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -114,8 +117,10 @@ class Base(
     SupportsPP,
     SupportsEagle,
     SupportsEagle3,
+    EagleModelMixin,
 ):
     hf_to_vllm_mapper: WeightsMapper
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         nn.Module.__init__(self)
@@ -158,6 +163,10 @@ class Base(
         self._output_aux_hidden_states_kwargs: dict[str, bool] = {}
         """Kwargs to pass to model forward for Eagle3 aux hidden states."""
 
+        self._pre_decoder_layer_replace: Callable[[nn.Module, str], None]
+        """Called on each decoder layer before `recursive_replace` replaces it."""
+        self._pre_decoder_layer_replace = lambda layer, prefix: None
+
         if self.quant_config:
             quant_method_name = self.quant_config.get_name()
             # Check for unsupported quantization methods.
@@ -166,6 +175,12 @@ class Base(
                     "Transformers modeling backend does "
                     "not support MXFP4 quantization yet."
                 )
+
+        if self.model_config.uses_mrope:
+            # CUDA graphs replay their capture-time input addresses, see `forward`
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            mrope_positions = torch.zeros(3 * max_tokens, dtype=torch.long)
+            self.register_buffer("mrope_positions", mrope_positions, persistent=False)
 
         self._patch_config()
         self._decorate_for_torch_compile()
@@ -188,9 +203,10 @@ class Base(
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
+        self.start_layer, self.end_layer = self._pp_indices()
         self.pipeline_parallel()
-        # Skip the device sync of dynamic rope where it can never rescale
-        disable_noop_dynamic_rope(self.model.get_decoder(), vllm_config)
+        # Skip the device sync of rope updates where `inv_freq` can be fixed
+        maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
@@ -394,13 +410,8 @@ class Base(
         if self.pp_group.world_size <= 1:
             return
 
-        if self.model.supports_pp_plan:
-            module = self.model
-            names = list(module._pp_plan.keys())
-        else:
-            module = self.model.get_decoder()
-            has_parameters = lambda m: next(m.parameters(), None) is not None
-            names = [n for n, c in module.named_children() if has_parameters(c)]
+        module, names = self._pp_split
+        if not self.model.supports_pp_plan:
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
@@ -414,26 +425,19 @@ class Base(
                 tip,
             )
 
-        module_lists = []
-        module_list_idx = None
-        for i, name in enumerate(names):
-            # attrgetter in case the module is nested (e.g. "text_model.layers")
-            if isinstance(attrgetter(name)(module), nn.ModuleList):
-                module_lists.append(name)
-                module_list_idx = i
-
-        if len(module_lists) > 1:
-            raise ValueError(
-                "Pipeline parallel of models with multiple `ModuleList`s "
-                "in the base model are not supported yet!"
-            )
-        if module_list_idx is None:
-            raise ValueError(f"Could not find `ModuleList` in {type(module)}")
+        if (layers := self._decoder_layers) is None:
+            raise ValueError(f"Could not identify the decoder layers of {type(module)}")
+        # attrgetter in case the module is nested (e.g. "text_model.layers")
+        module_list_idx = next(
+            i for i, name in enumerate(names) if attrgetter(name)(module) is layers
+        )
 
         # Layers before module list
         for name in names[:module_list_idx]:
-            if self.pp_group.is_first_rank or (
-                self._get_tie_word_embeddings() and self.pp_group.is_last_rank
+            if (
+                self.pp_group.is_first_rank
+                or (self._get_tie_word_embeddings() and self.pp_group.is_last_rank)
+                or spec_decode_needs_target_embed(self.vllm_config)
             ):
                 continue
             # attrsetter in case the module is nested (e.g. "text_model.embed_tokens")
@@ -441,9 +445,6 @@ class Base(
 
         # Module list
         start_layer, end_layer = self._pp_indices()
-        layers_name = names[module_list_idx]
-        # attrgetter in case the module is nested (e.g. "text_model.layers")
-        layers = attrgetter(layers_name)(module)
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
@@ -455,6 +456,40 @@ class Base(
             if not self.pp_group.is_last_rank:
                 # attrsetter in case the module is nested (e.g. "text_model.norm")
                 attrsetter(name)(module, PPMissingLayer())
+
+    @cached_property
+    def _pp_split(self) -> tuple[nn.Module, list[str]]:
+        """The module the pipeline parallel split is applied to, and the names (in
+        order) of its children that the split assigns to ranks."""
+        if self.model.supports_pp_plan:
+            return self.model, list(self.model._pp_plan.keys())
+        module = self.model.get_decoder()
+        has_parameters = lambda m: next(m.parameters(), None) is not None
+        return module, [n for n, c in module.named_children() if has_parameters(c)]
+
+    @cached_property
+    def _decoder_layers(self) -> nn.ModuleList | None:
+        """The decoder layers, i.e. the only `ModuleList` in `self._pp_split`, if it
+        has `num_hidden_layers` entries."""
+        module, names = self._pp_split
+
+        def get(name: str) -> nn.Module | None:
+            # A plan may name a module the model lacks (e.g. `MtpModel`'s "norm")
+            try:
+                return attrgetter(name)(module)
+            except AttributeError:
+                return None
+
+        module_lists = [m for n in names if isinstance(m := get(n), nn.ModuleList)]
+        if len(module_lists) != 1:
+            return None
+        # Some models have multiple attention layers per entry
+        layers = module_lists[0]
+        return layers if len(layers) == self.text_config.num_hidden_layers else None
+
+    def _offloader(self) -> BaseOffloader:
+        """The offloader for the decoder layers."""
+        return get_offloader()
 
     def _vocab_embeddings(self) -> set[nn.Embedding]:
         """The `nn.Embedding`s in `self.model` which hold a vocab table."""
@@ -511,9 +546,6 @@ class Base(
 
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
-        # Detect fusable patterns once per module class (cached, so this is cheap)
-        fusers = Fusers(self.model, self.vllm_config)
-
         vocab_embeddings = self._vocab_embeddings()
 
         orig_to_new_stacked: dict[str, tuple[str, ShardId]] = {}
@@ -542,63 +574,97 @@ class Base(
             if self.quant_config is not None:
                 self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
-        def _recursive_replace(module: nn.Module, prefix: str):
-            for child_name, child_module in module.named_children():
-                new_module = child_module
-                qual_name = maybe_prefix(prefix, child_name)
-                if (
-                    isinstance(module, nn.ModuleList)
-                    and len(module) == self.text_config.num_hidden_layers
-                ):
-                    # Populate Eagle3 attrs
-                    self._target_class = type(child_module)
-                    layer_name = qual_name.removeprefix("model.")
-                    self._layer_names[int(child_name)] = layer_name
-                    # MTP weights should not be loaded into the base model
-                    num_hidden_layers = self.text_config.num_hidden_layers
-                    names = (
-                        "n_predict",  # Override from SpeculativeConfig
-                        "num_nextn_predict_layers",  # Most models
-                        "mtp_num_hidden_layers",  # Qwen 3.5
-                    )
-                    n_predict = getattr_iter(self.text_config, names, 0) or 0
-                    for i in range(num_hidden_layers, num_hidden_layers + n_predict):
-                        mtp_prefix = f"{prefix}.{i}."
-                        if mtp_prefix not in self.ignore_unexpected_prefixes:
-                            self.ignore_unexpected_prefixes.append(mtp_prefix)
-                # Replace modules as needed
-                if isinstance(child_module, nn.Linear):
-                    generator = (p for p in tp_plan if re.match(p, qual_name))
-                    pattern = next(generator, None)
-                    # Some weight loaders expect all linear layers to inherit
-                    # LinearBase, so we set a default style which causes any
-                    # unspecified layers to be replaced with ReplicatedLinear
-                    style = tp_plan.get(pattern, "replicate")
-                    new_module = replace_linear_class(
-                        child_module, style, self.quant_config, prefix=qual_name
-                    )
-                elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
-                    new_module = replace_conv_class(child_module)
-                elif child_module in vocab_embeddings:
-                    new_module = replace_embedding_class(
-                        child_module, self.quant_config, prefix=qual_name
-                    )
-                elif isinstance(child_module, nn.LayerNorm):
-                    new_module = replace_layernorm_class(child_module)
-                elif child_module_fusers := fusers[child_module]:
-                    for fuser in child_module_fusers:
-                        register_fusion(fuser, qual_name, child_module)
-                        new_module = fuser.fuse(new_module, qual_name, self.vllm_config)
-                        logger.info_once(fuser.info(child_name))
-                    _recursive_replace(new_module, prefix=qual_name)
-                elif not isinstance(child_module, MoERunner):
-                    # MoERunner can contain aliases of shared experts and gates,
-                    # so we don't want to recurse into it and break weight loading.
-                    _recursive_replace(child_module, prefix=qual_name)
+        offloader = self._offloader()
+        if (decoder_layers := self._decoder_layers) is None and not isinstance(
+            offloader, NoopOffloader
+        ):
+            logger.warning_once(
+                "Could not identify the decoder layers of %s, so weight offloading "
+                "will not be applied to them.",
+                type(self.model).__name__,
+            )
+        # Decoder layers are detected as they are built, after their pre-replace hook
+        fusers = Fusers(self.model, self.vllm_config, skip=decoder_layers)
 
-                if new_module is not child_module:
-                    setattr(module, child_name, new_module)
-                    log_replacement(qual_name, child_module, new_module)
+        def _replace_decoder_layers(layers: nn.ModuleList, prefix: str):
+            """Build this rank's decoder layers one at a time and offload each as
+            soon as it is built, as `make_layers` does."""
+            # Record the layers for Eagle3
+            for name, layer in layers.named_children():
+                if not isinstance(layer, PPMissingLayer):
+                    self._target_class = type(layer)
+                self._layer_names[int(name)] = f"{prefix}.{name}".removeprefix("model.")
+            # MTP weights should not be loaded into the base model
+            num_layers = self.text_config.num_hidden_layers
+            names = (
+                "n_predict",  # Override from SpeculativeConfig
+                "num_nextn_predict_layers",  # Most models
+                "mtp_num_hidden_layers",  # Qwen 3.5
+            )
+            n_predict = getattr_iter(self.text_config, names, 0) or 0
+            self.ignore_unexpected_prefixes.extend(
+                f"{prefix}.{i}." for i in range(num_layers, num_layers + n_predict)
+            )
+
+            def build_layers():
+                """Must mimic what `__init__` does to the whole model's parameters,
+                because each layer is offloaded as soon as it is yielded."""
+                for i in range(*self._pp_indices()):
+                    layer_prefix = f"{prefix}.{i}"
+                    self._pre_decoder_layer_replace(layers[i], layer_prefix)
+                    fusers.add(layers[i])
+                    _replace_child(layers, str(i), layers[i], prefix)
+                    self.init_parameters(layers[i])
+                    self.keep_in_fp32(layers[i], layer_prefix.removeprefix("model."))
+                    yield layers[i]
+
+            offloader.wrap_modules(build_layers())
+
+        def _recursive_replace(module: nn.Module, prefix: str):
+            if module is decoder_layers:
+                _replace_decoder_layers(module, prefix)
+                return
+            for child_name, child_module in module.named_children():
+                _replace_child(module, child_name, child_module, prefix)
+
+        def _replace_child(
+            module: nn.Module, child_name: str, child_module: nn.Module, prefix: str
+        ):
+            new_module = child_module
+            qual_name = maybe_prefix(prefix, child_name)
+            # Replace modules as needed
+            if isinstance(child_module, nn.Linear):
+                generator = (p for p in tp_plan if re.match(p, qual_name))
+                pattern = next(generator, None)
+                # Some weight loaders expect all linear layers to inherit
+                # LinearBase, so we set a default style which causes any
+                # unspecified layers to be replaced with ReplicatedLinear
+                style = tp_plan.get(pattern, "replicate")
+                new_module = replace_linear_class(
+                    child_module, style, self.quant_config, prefix=qual_name
+                )
+            elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
+                new_module = replace_conv_class(child_module)
+            elif child_module in vocab_embeddings:
+                new_module = replace_embedding_class(
+                    child_module, self.quant_config, prefix=qual_name
+                )
+            elif isinstance(child_module, nn.LayerNorm):
+                new_module = replace_layernorm_class(child_module)
+            elif child_module_fusers := fusers[child_module]:
+                for fuser in child_module_fusers:
+                    register_fusion(fuser, qual_name, child_module)
+                    new_module = fuser.fuse(new_module, qual_name, self.vllm_config)
+                    logger.info_once(fuser.info(child_name))
+                _recursive_replace(new_module, prefix=qual_name)
+            elif not isinstance(child_module, MoERunner):
+                # MoERunner can contain aliases of shared experts and gates,
+                # so we don't want to recurse into it and break weight loading.
+                _recursive_replace(child_module, prefix=qual_name)
+
+            if new_module is not child_module:
+                setattr(module, child_name, new_module)
+                log_replacement(qual_name, child_module, new_module)
 
         _recursive_replace(self.model, prefix="model")
 
@@ -763,15 +829,19 @@ class Base(
 
         _init_parameters(module)
 
-    def keep_in_fp32(self, module: nn.Module):
-        """Honor `_keep_in_fp32_modules_strict` as `from_pretrained` would."""
+    def keep_in_fp32(self, module: nn.Module, prefix: str = ""):
+        """Honor `_keep_in_fp32_modules_strict` as `from_pretrained` would.
+
+        `module` is `self.model` or one of its submodules, whose qualname from
+        `self.model` is `prefix`."""
         if self.model_config.dtype not in (torch.float16, torch.bfloat16):
             return
-        fragments = getattr(module, "_keep_in_fp32_modules_strict", None)
+        fragments = getattr(self.model, "_keep_in_fp32_modules_strict", None)
         if not fragments:
             return
         pattern = re.compile("|".join(re.escape(f) for f in fragments))
         for name, tensor in named_state(module):
+            name = maybe_prefix(prefix, name)
             if not hasattr(tensor, "weight_loader") and pattern.search(name):
                 tensor.data = tensor.data.to(torch.float32)
 
@@ -790,6 +860,7 @@ class Base(
             assert intermediate_tensors is not None
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         # Add batch dimension before entering Transformers model
         if input_ids is not None and input_ids.ndim == 1:
@@ -801,6 +872,10 @@ class Base(
         if positions.ndim == 1:
             # [seq_len] -> [1, seq_len]
             positions = positions[None, ...]
+        elif self.model_config.uses_mrope:
+            # [3, seq_len] -> [3, 1, seq_len], contiguous and at a fixed address
+            mrope_positions = self.mrope_positions[: positions.numel()].view(3, 1, -1)
+            positions = mrope_positions.copy_(positions[:, None])
 
         # Transformers models expect either input_ids or inputs_embeds, but not both
         if input_ids is not None and inputs_embeds is not None:
@@ -818,13 +893,24 @@ class Base(
 
         # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
+        aux_hidden_states = []
         if self._output_aux_hidden_states_kwargs:
-            aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]
+            # Layers on other PP ranks capture nothing
+            aux_hidden_states = [x[0][0, ...] for x in outputs[1:] if x]
+        # The input embedding isn't called when the caller passes `inputs_embeds`
+        caller_embeds = inputs_embeds if self.pp_group.is_first_rank else None
+        if 0 in self.aux_hidden_state_layers and caller_embeds is not None:
+            aux_hidden_states.insert(0, caller_embeds[0, ...])
 
         if not self.pp_group.is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states})
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
+            )
 
-        if self._output_aux_hidden_states_kwargs and len(aux_hidden_states) > 0:
+        if aux_hidden_states := remote_aux + aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
 
@@ -856,10 +942,17 @@ class Base(
         if self.model._can_record_outputs is None:
             self.model._can_record_outputs = {}
 
-        target_class = self._target_class
-        for layer in layers:
-            # layer - 1 because we want the input to the layer
-            layer_name = self._layer_names[layer - 1]
+        self._set_aux_hidden_state_layers(layers)
+        for layer in self.aux_hidden_state_layers:
+            # The input to a layer is the output of the module before it
+            if layer == 0:
+                embeddings = self.model.get_input_embeddings()
+                target_class = type(embeddings)
+                modules = self.model.named_modules()
+                layer_name = next(n for n, m in modules if m is embeddings)
+            else:
+                target_class = self._target_class
+                layer_name = self._layer_names[layer - 1]
             layer_key = f"aux_hidden_state_{layer}"
             aux_hidden_state_i = OutputRecorder(target_class, layer_name=layer_name)
             self.model._can_record_outputs[layer_key] = aux_hidden_state_i
