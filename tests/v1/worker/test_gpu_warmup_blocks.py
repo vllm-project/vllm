@@ -580,7 +580,7 @@ def test_num_lookahead_tokens_without_speculation():
     assert config.num_lookahead_tokens == 0
 
 
-@pytest.mark.parametrize("max_num_reqs", [4, 2])
+@pytest.mark.parametrize("max_num_reqs", [4, 2, 1])
 @pytest.mark.parametrize("max_logprobs", [0, 5, -1])
 def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(
     max_logprobs, max_num_reqs
@@ -615,8 +615,8 @@ def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(
     warmup.run_kv_cache_sizing_warmup(runner, execute_model, recorder.sample_tokens)
 
     expected = None if max_logprobs == 0 else max_logprobs
-    if max_num_reqs == 2:
-        assert steps == [(MAX_MODEL_LEN, [expected])]
+    if max_num_reqs == 1:
+        assert steps == [(MAX_MODEL_LEN - 1, [expected])]
         return
     logprob_steps = [step for step in steps if step[1] != [None] * len(step[1])]
     if expected is None:
@@ -624,7 +624,7 @@ def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(
     else:
         assert logprob_steps == [(MAX_MODEL_LEN, [expected])]
     budget = runner.scheduler_config.max_num_batched_tokens
-    assert max(n for n, _ in steps) == budget
+    assert max(n for n, _ in steps) == min(budget, max_num_reqs * (MAX_MODEL_LEN - 1))
 
 
 def test_sizing_warmup_waits_for_each_step(monkeypatch):
@@ -650,8 +650,8 @@ def test_sizing_warmup_waits_for_each_step(monkeypatch):
     [
         # Two full-length prompts plus the remainder fill the 2048-token budget.
         (4, None, [MAX_MODEL_LEN - 1, MAX_MODEL_LEN - 1, 1]),
-        # One decode request leaves room for a single prefill request.
-        (2, None, [MAX_MODEL_LEN - 1]),
+        # Two request slots go to prefills rather than to a decode request.
+        (2, None, [MAX_MODEL_LEN - 1, MAX_MODEL_LEN - 1]),
         # 1 decode + 64 prefill blocks fit; a second 64-block prompt does not.
         (4, 100, [MAX_MODEL_LEN - 1]),
         # A single-request runner measures the prefill alone.
@@ -681,6 +681,6 @@ def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
     prefill_lens = [len(r.prompt_token_ids) for r in step.scheduled_new_reqs]
     assert prefill_lens == expected_prefill_lens
     num_decode_reqs = len(step.scheduled_cached_reqs.req_ids)
-    assert num_decode_reqs == (1 if max_num_reqs > 1 else 0)
+    assert num_decode_reqs == (1 if max_num_reqs > 2 else 0)
     assert step.total_num_scheduled_tokens == num_decode_reqs + sum(prefill_lens)
     assert step.total_num_scheduled_tokens == sum(step.num_scheduled_tokens.values())
