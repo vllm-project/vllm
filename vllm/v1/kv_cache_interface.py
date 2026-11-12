@@ -280,12 +280,12 @@ class KVCacheSpec:
     ) -> list[torch.Tensor]:
         """Views of `cache` moved between this rank and another TP rank.
 
-        `cache` is this rank's `[B, H, N, C]` view of one layer's cache,
-        real or on the meta device. The other rank's call, given this rank as
-        its peer and the opposite `receiving`, returns views of the same
-        shapes in the same order, so the two lists pair up for transfer.
-        Empty when the pair moves nothing, so the other rank is not a source
-        (or destination) of this one.
+        `cache` is this rank's page view of one layer (layout is type-specific;
+        see overrides), real or on the meta device. The other rank's call,
+        given this rank as its peer and the opposite `receiving`, returns views
+        of the same shapes in the same order, so the two lists pair up for
+        transfer. Empty when the pair moves nothing, so the other rank is not
+        a source (or destination) of this one.
         """
         if tp_size == other_tp_size and tp_rank == other_tp_rank:
             return [cache]
@@ -530,7 +530,8 @@ class AttentionSpec(KVCacheSpec):
     ) -> list[torch.Tensor]:
         """Narrow `cache` to the KV heads moved between the two ranks.
 
-        A cache whose dim 1 is not its KV heads (custom `num_head_slots`)
+        `cache` is this rank's `[B, H, N, C]` (or head-slot) layer view. A
+        cache whose dim 1 is not its KV heads (custom `num_head_slots`)
         moves whole.
         """
         assert isinstance(other_spec, AttentionSpec)

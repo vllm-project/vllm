@@ -187,30 +187,25 @@ def _nvfp4_kv_views(
     return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
 
-class _NVFP4TPSlicing:
-    """Slices each of an NVFP4 block's K/V data and scale views by KV head
-    (see `_nvfp4_kv_views`), rather than its `2 * H` slots.
+@dataclass(frozen=True, kw_only=True)
+class NVFP4AttentionSpec(AttentionSpec):
+    """NVFP4 Attention page: slice K/V data and scale views by KV head
+    (see `_nvfp4_kv_views`), not the packed `2 * H` slots.
     """
 
     def slice_for_tp_transfer(
         self, cache: torch.Tensor, *args, **kwargs
     ) -> list[torch.Tensor]:
-        assert isinstance(self, AttentionSpec)
         (k_data, v_data), (k_scale, v_scale), layout = _nvfp4_kv_views(
             cache, self.num_kv_heads
         )
         return [
             sliced
             for view in (k_data, k_scale, v_data, v_scale)
-            for sliced in super().slice_for_tp_transfer(  # type: ignore[misc]
+            for sliced in super().slice_for_tp_transfer(
                 view if layout == "HND" else view.transpose(1, 2), *args, **kwargs
             )
         ]
-
-
-@dataclass(frozen=True, kw_only=True)
-class NVFP4AttentionSpec(_NVFP4TPSlicing, AttentionSpec):
-    pass
 
 
 def _get_trtllm_workspace_buffer():
