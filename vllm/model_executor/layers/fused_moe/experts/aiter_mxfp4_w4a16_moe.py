@@ -114,6 +114,8 @@ def _aiter_w4a16_silu_via_a8w4(
     return out
 
 
+# TODO: Duplicated in aiter_mxfp4_w4a4_moe.py. Extract the code shared by the
+# aiter_mxfp4_w4a*_moe.py experts (routing, EP, weight/scale setup).
 def _aiter_ep_local_routing(
     gating_output: torch.Tensor,
     topk: int,

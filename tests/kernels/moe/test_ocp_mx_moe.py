@@ -2336,13 +2336,16 @@ def test_aiter_w4a16_expert_parallel_selection(
             select_deepseek_v4_mxfp4_moe_backend(config)
 
 
-@pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
+@pytest.mark.parametrize(
+    "backend_name",
+    ["AITER_TRITON_MXFP4_BF16", "AITER_TRITON_MXFP4_MXFP4", "AITER_MXFP4_FP8"],
+)
 @pytest.mark.parametrize("use_ep", [False, True])
 def test_aiter_mxfp4_monolithic_expert_parallel_support(
     monkeypatch: pytest.MonkeyPatch, backend_name: str, use_ep: bool
 ):
-    """Naive EP (no all-to-all) is supported by W4A16, which takes an expert_map;
-    W4A8's global routing cannot index local expert weights."""
+    """Naive EP (no all-to-all) is supported by W4A16 and W4A4, which route over
+    local experts; W4A8's global routing cannot index local expert weights."""
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -2355,6 +2358,7 @@ def test_aiter_mxfp4_monolithic_expert_parallel_support(
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8StaticTensorSym,
+        kMxfp4Dynamic,
         kMxfp4Static,
     )
 
@@ -2383,11 +2387,14 @@ def test_aiter_mxfp4_monolithic_expert_parallel_support(
         experts_cls,
         config,
         kMxfp4Static,
-        kFp8StaticTensorSym if backend_name == "AITER_MXFP4_FP8" else None,
+        {
+            "AITER_MXFP4_FP8": kFp8StaticTensorSym,
+            "AITER_TRITON_MXFP4_MXFP4": kMxfp4Dynamic,
+        }.get(backend_name),
         FusedMoEActivationFormat.Standard,
     )
 
-    expect_supported = not use_ep or backend_name == "AITER_TRITON_MXFP4_BF16"
+    expect_supported = not use_ep or backend_name != "AITER_MXFP4_FP8"
     assert supported is expect_supported
     if not expect_supported:
         assert reason is not None

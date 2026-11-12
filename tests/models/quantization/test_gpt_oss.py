@@ -14,6 +14,7 @@ Run: pytest tests/models/quantization/test_gpt_oss.py
 import importlib.metadata
 import importlib.util
 from dataclasses import dataclass
+from typing import Any
 
 import huggingface_hub
 import lm_eval
@@ -27,6 +28,10 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.experts import (
+    aiter_mxfp4_w4a4_moe,
+    aiter_mxfp4_w4a16_moe,
 )
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
     aiter_triton_kernel_w4a8_moe_forward,
@@ -365,12 +370,58 @@ def test_aiter_mxfp4_moe_ignores_padded_rows(
     assert torch.isfinite(output[:TOKENS_UNPADDED]).all()
 
 
+# One case per routing branch of the AITER Triton MXFP4 experts.
+AITER_ROUTING_CASES: dict[str, dict[str, Any]] = {
+    "renormalize": dict(renormalize=True),
+    "softmax": dict(renormalize=False),
+    "sqrtsoftplus": dict(score_mode="sqrtsoftplus", bias=True),
+    "grouped_sigmoid": dict(
+        score_mode="sigmoid", bias=True, num_expert_group=4, topk_group=2
+    ),
+    "hash": dict(score_mode="sqrtsoftplus", hash=True),
+}
+
+
+def _aiter_routing_kwargs(
+    case: str, num_tokens: int, num_experts: int, topk: int, device: torch.device
+) -> dict[str, Any]:
+    spec = AITER_ROUTING_CASES[case]
+    kwargs: dict[str, Any] = dict(
+        renormalize=spec.get("renormalize", True),
+        score_mode=spec.get("score_mode"),
+        num_expert_group=spec.get("num_expert_group"),
+        topk_group=spec.get("topk_group"),
+        e_score_correction_bias=None,
+        routed_scaling_factor=None,
+        input_ids=None,
+        hash_indices_table=None,
+    )
+    if kwargs["score_mode"] is not None:
+        kwargs["routed_scaling_factor"] = 2.5
+    if spec.get("bias"):
+        kwargs["e_score_correction_bias"] = torch.randn(num_experts, device=device)
+    if spec.get("hash"):
+        vocab_size = 64
+        kwargs["hash_indices_table"] = torch.stack(
+            [
+                torch.randperm(num_experts, device=device)[:topk]
+                for _ in range(vocab_size)
+            ]
+        ).to(torch.int32)
+        kwargs["input_ids"] = torch.randint(
+            0, vocab_size, (num_tokens,), dtype=torch.int32, device=device
+        )
+    return kwargs
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
 @pytest.mark.skipif(not is_aiter_found_and_supported(), reason="aiter is not installed")
 @pytest.mark.skipif(torch.accelerator.device_count() == 0, reason="no gpu available")
+@pytest.mark.parametrize("routing", list(AITER_ROUTING_CASES))
 @pytest.mark.parametrize("ep_size", [2, 4])
 def test_aiter_w4a16_moe_expert_parallel_matches_full(
     ep_size: int,
+    routing: str,
     monkeypatch: pytest.MonkeyPatch,
     dist_init,
 ) -> None:
@@ -395,6 +446,9 @@ def test_aiter_w4a16_moe_expert_parallel_matches_full(
     gating_output = torch.randn(
         (num_tokens, num_experts), dtype=torch.bfloat16, device=device
     )
+    routing_kwargs = _aiter_routing_kwargs(
+        routing, num_tokens, num_experts, topk, device
+    )
 
     def forward(experts: slice | None, expert_map: torch.Tensor | None) -> torch.Tensor:
         w13, w2, quant_config = _mxfp4_moe_kernel_weights(
@@ -406,7 +460,6 @@ def test_aiter_w4a16_moe_expert_parallel_matches_full(
             w2=w2,
             gating_output=gating_output,
             topk=topk,
-            renormalize=True,
             quant_config=quant_config,
             global_num_experts=num_experts,
             expert_map=expert_map,
@@ -414,6 +467,7 @@ def test_aiter_w4a16_moe_expert_parallel_matches_full(
             unpadded_K_w1=hidden_size,
             unpadded_N_w2=hidden_size,
             unpadded_K_w2=intermediate_size,
+            **routing_kwargs,
         )
 
     is_padding = torch.zeros(num_tokens, dtype=torch.bool, device=device)
@@ -432,3 +486,106 @@ def test_aiter_w4a16_moe_expert_parallel_matches_full(
 
     # Per-rank partials are rounded to bf16 before the sum.
     torch.testing.assert_close(summed, full, atol=2e-2 * full.abs().max(), rtol=0)
+
+
+def _aiter_gate_experts(
+    hist: torch.Tensor, gather_idx: torch.Tensor, gate_scal: torch.Tensor, n_gates: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expert id and weight of each flat gate (-1 / 0 if not scheduled)."""
+    n_live = int(hist.sum())
+    experts = torch.repeat_interleave(
+        torch.arange(hist.numel(), dtype=torch.int32, device=hist.device), hist
+    )
+    gates = gather_idx[:n_live].long()
+    expert = torch.full((n_gates,), -1, dtype=torch.int32, device=hist.device)
+    weight = torch.zeros(n_gates, dtype=torch.float32, device=hist.device)
+    expert[gates] = experts
+    weight[gates] = gate_scal[:n_live].float()
+    return expert, weight
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.skipif(not is_aiter_found_and_supported(), reason="aiter is not installed")
+@pytest.mark.skipif(torch.accelerator.device_count() == 0, reason="no gpu available")
+@pytest.mark.parametrize("routing", list(AITER_ROUTING_CASES))
+@pytest.mark.parametrize(
+    "module", [aiter_mxfp4_w4a16_moe, aiter_mxfp4_w4a4_moe], ids=["w4a16", "w4a4"]
+)
+def test_aiter_ep_local_routing_matches_global(module, routing: str) -> None:
+    """Each rank's local routing schedules exactly its share of the global gates,
+    with the same weights, and marks only those gates valid."""
+    from aiter.ops.triton.moe.moe_routing import routing as aiter_routing
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    num_tokens, num_experts, topk, ep_size = 64, 32, 4, 4
+    local_experts = num_experts // ep_size
+    n_gates = num_tokens * topk
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.bfloat16, device=device
+    )
+    kw = _aiter_routing_kwargs(routing, num_tokens, num_experts, topk, device)
+    scale = kw["routed_scaling_factor"] or 1.0
+    bias = kw["e_score_correction_bias"]
+
+    if kw["hash_indices_table"] is not None:
+        global_rd, global_gather, _ = aiter_routing.routing_from_hash(
+            gating_output,
+            kw["hash_indices_table"],
+            kw["input_ids"],
+            topk,
+            16,
+            score_mode=kw["score_mode"],
+            renorm=kw["renormalize"],
+            routed_scaling_factor=scale,
+        )
+    elif kw["score_mode"] is not None:
+        global_rd, global_gather, _ = aiter_routing.routing(
+            gating_output,
+            topk,
+            score_mode=kw["score_mode"],
+            bias=bias.float() if bias is not None else None,
+            renorm=kw["renormalize"],
+            routed_scaling_factor=scale,
+            use_grouped_topk=kw["num_expert_group"] is not None,
+            num_expert_group=kw["num_expert_group"],
+            topk_group=kw["topk_group"],
+        )
+    else:
+        global_rd, global_gather, _ = aiter_routing.routing(
+            gating_output, topk, sm_first=not kw["renormalize"]
+        )
+    global_expert, global_weight = _aiter_gate_experts(
+        global_rd.expt_hist, global_gather, global_rd.gate_scal, n_gates
+    )
+    assert (global_expert >= 0).all()
+
+    for rank in range(ep_size):
+        start = rank * local_experts
+        expert_map = torch.full((num_experts,), -1, dtype=torch.int32, device=device)
+        expert_map[start : start + local_experts] = torch.arange(
+            local_experts, dtype=torch.int32, device=device
+        )
+        rd, gather_idx, _, gate_valid = module._aiter_ep_local_routing(
+            gating_output,
+            topk,
+            kw["renormalize"],
+            expert_map,
+            local_experts,
+            score_mode=kw["score_mode"],
+            bias=bias,
+            routed_scaling_factor=scale,
+            num_expert_group=kw["num_expert_group"],
+            topk_group=kw["topk_group"],
+            input_ids=kw["input_ids"],
+            hash_indices_table=kw["hash_indices_table"],
+        )
+        local_expert, local_weight = _aiter_gate_experts(
+            rd.expt_hist, gather_idx, rd.gate_scal, n_gates
+        )
+        owned = (global_expert >= start) & (global_expert < start + local_experts)
+        torch.testing.assert_close(
+            local_expert, torch.where(owned, global_expert - start, -1)
+        )
+        torch.testing.assert_close(local_weight, torch.where(owned, global_weight, 0))
+        torch.testing.assert_close(gate_valid.bool(), owned)
