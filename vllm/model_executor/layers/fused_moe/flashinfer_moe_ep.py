@@ -18,10 +18,13 @@ from vllm.config.kernel import (
     FLASHINFER_MOE_EP_DEEP_GEMM,
 )
 from vllm.distributed import get_ep_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
     kMxfp4Static,
     kNvfp4Static,
 )
@@ -35,17 +38,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 FlashInferMoeEpKernel = Literal["cutedsl", "deep_gemm"]
-FlashInferMoeEpWeightFormat = Literal["nvfp4", "mxfp4"]
+FlashInferMoeEpWeightFormat = Literal["nvfp4", "mxfp4", "fp8_block"]
 _WEIGHT_FORMATS: dict[QuantKey | None, FlashInferMoeEpWeightFormat] = {
     kNvfp4Static: "nvfp4",
     kMxfp4Static: "mxfp4",
+    kFp8Static128BlockSym: "fp8_block",
 }
 
+# FP4 weights run on the Blackwell megakernels (NVFP4 also on SM107), block FP8
+# weights on the Hopper FP8 pull-style CuTeDSL megakernel.
 _BLACKWELL_CAPABILITIES = frozenset({(10, 0), (10, 3)})
 _SM107_CAPABILITY = (10, 7)
 _FORMAT_CAPABILITIES: dict[FlashInferMoeEpWeightFormat, frozenset[tuple[int, int]]] = {
     "nvfp4": _BLACKWELL_CAPABILITIES | {_SM107_CAPABILITY},
     "mxfp4": _BLACKWELL_CAPABILITIES,
+    "fp8_block": frozenset({(9, 0)}),
 }
 _SUPPORTED_CAPABILITIES = frozenset().union(*_FORMAT_CAPABILITIES.values())
 _SM107_ROUTE_CHECK_ENV = "FLASHINFER_SM107_MEGA_CHECK_ROUTES"
@@ -111,7 +118,7 @@ class FlashInferMoeEpEpilogue:
 _BACKEND_SPECS = {
     FLASHINFER_MOE_EP_CUTEDSL: FlashInferMoeEpBackendSpec(
         kernel="cutedsl",
-        weight_formats=frozenset({"nvfp4", "mxfp4"}),
+        weight_formats=frozenset({"nvfp4", "mxfp4", "fp8_block"}),
     ),
     FLASHINFER_MOE_EP_DEEP_GEMM: FlashInferMoeEpBackendSpec(
         kernel="deep_gemm",
@@ -159,6 +166,8 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append(f"{weight_format.upper()} weights on this GPU")
     if weight_key == kNvfp4Static and activation_key is None:
         unsupported.append("A16 activations with NVFP4 weights")
+    if weight_key == kFp8Static128BlockSym and activation_key != kFp8Dynamic128Sym:
+        unsupported.append(f"activation scheme {activation_key} with block FP8")
     if moe.skip_final_all_reduce:
         unsupported.append("skip_final_all_reduce")
     if moe.in_dtype != torch.bfloat16:
@@ -262,6 +271,58 @@ def mxfp4_moe_ep_weights(
     )
 
 
+# The SM90 FP8 megakernel folds SwiGLU over FC1 rows ordered
+# [pair, {gate, up}, _SM90_GATE_UP_INTERLEAVE].
+_SM90_GATE_UP_INTERLEAVE = 8
+_FP8_BLOCK = 128
+# The SM90 FP8 megakernel runs its whole token buffer, with a launch geometry
+# picked for that size, so small batches get small buffers of their own.
+_SM90_WORKSPACE_CAPACITIES = (64, 256, 1024)
+
+
+def sm90_fp8_block_moe_ep_weights(
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reorder block-FP8 `w13` (gate rows, then up rows) for the SM90 kernel.
+
+    After the gate/up interleave a 128-row scale block holds 64 gate and 64 up
+    rows from two checkpoint blocks. Both take the larger of the two scales and
+    the other half is rescaled. Power-of-two scales make that an exponent
+    shift, so only values that drop out of the E4M3 normal range round.
+
+    Args:
+        w13: `(E, 2 * I, H)` E4M3 weights.
+        w13_scale: `(E, 2 * I / 128, H / 128)` float32 dequantization scales.
+
+    Returns:
+        The `(E, 2 * I, H)` weights in kernel row order and their
+        `(E, 2 * I / 128, H / 128)` scales.
+
+    """
+    num_experts, two_i, hidden = w13.shape
+    intermediate = two_i // 2
+    num_blocks = intermediate // _FP8_BLOCK
+    assert intermediate % _FP8_BLOCK == 0 and hidden % _FP8_BLOCK == 0, w13.shape
+    assert w13_scale.shape == (num_experts, 2 * num_blocks, hidden // _FP8_BLOCK)
+    gate_scale, up_scale = w13_scale.split(num_blocks, dim=1)
+    shared_scale = torch.maximum(gate_scale, up_scale)
+    out = torch.empty_like(w13)
+    # One expert at a time bounds the float32 temporaries.
+    for expert in range(num_experts):
+        scale = torch.stack((gate_scale[expert], up_scale[expert]))
+        ratio = (scale / shared_scale[expert]).repeat_interleave(_FP8_BLOCK, 1)
+        ratio = ratio.repeat_interleave(_FP8_BLOCK, 2)
+        halves = w13[expert].view(2, intermediate, hidden).float() * ratio
+        out[expert] = (
+            halves.to(w13.dtype)
+            .view(2, intermediate // _SM90_GATE_UP_INTERLEAVE, -1, hidden)
+            .transpose(0, 1)
+            .reshape(two_i, hidden)
+        )
+    return out, shared_scale.repeat_interleave(2, dim=1).contiguous()
+
+
 class _FlashInferMoeEpApi:
     def __init__(self) -> None:
         try:
@@ -274,6 +335,7 @@ class _FlashInferMoeEpApi:
                 MoEEpTensors,
                 MoEWeightPack,
                 Nvfp4CutedslMegaMoeConfig,
+                Sm90PullFp8MegaMoeConfig,
                 Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig,
             )
         except ImportError as err:
@@ -290,6 +352,7 @@ class _FlashInferMoeEpApi:
         self.MoEEpTensors = MoEEpTensors
         self.MoEWeightPack = MoEWeightPack
         self.Nvfp4CutedslMegaMoeConfig = Nvfp4CutedslMegaMoeConfig
+        self.Sm90PullFp8MegaMoeConfig = Sm90PullFp8MegaMoeConfig
         self.Sm107Nvfp4MegaMoeConfig = Sm107_Nvfp4_Nvfp4_Bf16_Cutedsl_MegaMoeConfig
 
 
@@ -314,6 +377,7 @@ class FlashInferMoeEp:
         epilogue: FlashInferMoeEpEpilogue | None = None,
         *,
         apply_topk_in_fc1: bool,
+        block_fp8: bool = False,
     ) -> None:
         spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)
         if spec.kernel == "deep_gemm":
@@ -333,18 +397,19 @@ class FlashInferMoeEp:
             max_tokens_per_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
         )
-        weight_pack = api.MoEWeightPack(
-            w13=weights.w13,
-            w2=weights.w2,
-            w13_scale=weights.w13_scale,
-            w2_scale=weights.w2_scale,
-        )
         sm107 = is_sm107_device()
         if sm107 and moe.routing_method is RoutingMethodType.DeepseekV4:
             # The DeepSeek-V4 router can return non-finite scores on valid routes,
             # which FlashInfer 0.7.3's SM107 route check turns into a device assert.
             os.environ.setdefault(_SM107_ROUTE_CHECK_ENV, "0")
-        if spec.kernel == "cutedsl":
+        if block_fp8:
+            megakernel = api.Sm90PullFp8MegaMoeConfig(
+                intermediate_size=moe.intermediate_size,
+                top_k=moe.experts_per_token,
+                fp8_scale_mode="blockwise",
+                gate_up_clamp=moe.swiglu_limit,
+            )
+        elif spec.kernel == "cutedsl":
             config_cls = (
                 api.Sm107Nvfp4MegaMoeConfig if sm107 else api.Nvfp4CutedslMegaMoeConfig
             )
@@ -369,11 +434,33 @@ class FlashInferMoeEp:
                 activation_clamp=moe.swiglu_limit,
                 fast_math=True,
             )
-        backend = api.MegaConfig(
-            megakernel=megakernel,
-            quantize_input=True,
-            preprocess_weights=True,
-        )
+        if block_fp8:
+            # The oracle already put w13 in the kernel's row order
+            # (sm90_fp8_block_moe_ep_weights); the kernel reads (E, K, N) views
+            # with K contiguous.
+            assert weights.w13_scale is not None and weights.w2_scale is not None
+            weight_pack = None
+            backend = api.MegaConfig(
+                megakernel=megakernel,
+                quantize_input=True,
+                preprocess_weights=False,
+                transformed_weights=(
+                    (weights.w13.transpose(1, 2), weights.w13_scale, None, None),
+                    (weights.w2.transpose(1, 2), weights.w2_scale, None, None),
+                ),
+            )
+        else:
+            weight_pack = api.MoEWeightPack(
+                w13=weights.w13,
+                w2=weights.w2,
+                w13_scale=weights.w13_scale,
+                w2_scale=weights.w2_scale,
+            )
+            backend = api.MegaConfig(
+                megakernel=megakernel,
+                quantize_input=True,
+                preprocess_weights=True,
+            )
 
         self._moe_ep_tensors_cls = api.MoEEpTensors
         self._mega_layer: Any | None = api.MoEEpMegaLayer(
@@ -382,6 +469,14 @@ class FlashInferMoeEp:
             weight_pack,
             backend,
         )
+        # Created collectively, in the same order on every EP rank.
+        self._workspaces: list[tuple[int, Any]] = []
+        if block_fp8:
+            self._workspaces = [
+                (capacity, self._mega_layer.create_workspace(capacity))
+                for capacity in _SM90_WORKSPACE_CAPACITIES
+                if capacity < moe.max_num_tokens
+            ]
         self._device = weights.w13.device
         self._hidden_size = moe.hidden_dim
         self._max_num_tokens = moe.max_num_tokens
@@ -392,6 +487,7 @@ class FlashInferMoeEp:
         self._return_workspace_view = (
             moe.routing_method is RoutingMethodType.DeepseekV4 and not sm107
         )
+        self._block_fp8 = block_fp8
         logger.info_once("FlashInfer MoE-EP megakernel: %s", type(megakernel).__name__)
 
     @property
@@ -444,7 +540,24 @@ class FlashInferMoeEp:
             self._mega_layer, "supports_output_view", False
         ):
             return self._mega_layer.forward(tensors, return_workspace_view=True)
-        return self._mega_layer(tensors)
+        return self._mega_layer.forward(tensors, workspace=self._workspace())
+
+    def _workspace(self) -> Any | None:
+        """The smallest workspace that fits the batch on every EP rank.
+
+        All ranks must use the same buffer, so without the DP-wide token
+        counts this falls back to the default workspace.
+        """
+        if not self._workspaces or not is_forward_context_available():
+            return None
+        dp_metadata = get_forward_context().dp_metadata
+        if dp_metadata is None:
+            return None
+        num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
+        for capacity, workspace in self._workspaces:
+            if num_tokens <= capacity:
+                return workspace
+        return None
 
     @torch.inference_mode()
     def warmup(self) -> None:
@@ -467,24 +580,34 @@ class FlashInferMoeEp:
             dtype=torch.float32,
             device=self._device,
         )
-        self._mega_layer.warmup(self._tensors(hidden_states, topk_ids, topk_weights))
+        tensors = self._tensors(hidden_states, topk_ids, topk_weights)
+        self._mega_layer.warmup(tensors)
+        for _, workspace in self._workspaces:
+            self._mega_layer.warmup(tensors, workspace=workspace)
 
     def kernel_weights(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Kernel-resident fc1 weight, fc1 scales, fc2 weight, fc2 scales.
 
-        Contiguous per-expert byte tensors that alias the memory the megakernel
-        reads, so a caller may permute experts in place (EPLB).
+        Contiguous per-expert tensors that alias the memory the megakernel
+        reads, so a caller may permute experts in place (EPLB). One-byte FP4
+        data and scales come back as uint8; block-FP8 weights keep FP8.
         """
         if self._mega_layer is None:
             raise RuntimeError("FlashInfer MoE-EP layer was destroyed")
-        (fc1_weight, fc1_sf), (fc2_weight, fc2_sf) = self._mega_layer._transformed
+        # The SM90 FP8 legs carry two (unused in blockwise mode) dequant scales.
+        (fc1_weight, fc1_sf, *_), (fc2_weight, fc2_sf, *_) = (
+            self._mega_layer._transformed
+        )
+        # Block-FP8 weights keep their dtype, so the layer holds the kernel's
+        # FP8 runtime layout that preprocessed-weight loading rebuilds from.
+        as_bytes = not self._block_fp8
         return (
-            _expert_major_bytes(fc1_weight),
-            _expert_major_bytes(fc1_sf),
-            _expert_major_bytes(fc2_weight),
-            _expert_major_bytes(fc2_sf),
+            _expert_major_bytes(fc1_weight, as_bytes),
+            _expert_major_bytes(fc1_sf, as_bytes),
+            _expert_major_bytes(fc2_weight, as_bytes),
+            _expert_major_bytes(fc2_sf, as_bytes),
         )
 
     def expert_weight_views(self) -> tuple[torch.Tensor, ...]:
@@ -499,6 +622,7 @@ class FlashInferMoeEp:
             return
         mega_layer.destroy()
         self._mega_layer = None
+        self._workspaces = []
         self._epilogue = None
 
     def __del__(self) -> None:
@@ -506,8 +630,9 @@ class FlashInferMoeEp:
             self.destroy()
 
 
-def _expert_major_bytes(tensor: torch.Tensor) -> torch.Tensor:
-    """Contiguous storage of a per-expert kernel tensor, 1-byte dtypes as uint8.
+def _expert_major_bytes(tensor: torch.Tensor, as_bytes: bool = True) -> torch.Tensor:
+    """Contiguous storage of a per-expert kernel tensor, 1-byte dtypes as uint8
+    unless `as_bytes` is False.
 
     The CuTeDSL kernel keeps (E, K, N) transpose views over (E, N, K) storage.
     """
@@ -515,4 +640,6 @@ def _expert_major_bytes(tensor: torch.Tensor) -> torch.Tensor:
         tensor = tensor.transpose(1, 2)
     if not tensor.is_contiguous():
         raise ValueError(f"expert tensor is not expert-major: {tensor.stride()}")
-    return tensor.view(torch.uint8) if tensor.element_size() == 1 else tensor
+    if as_bytes and tensor.element_size() == 1:
+        return tensor.view(torch.uint8)
+    return tensor
