@@ -9,17 +9,15 @@ the MXFP8 linear layers and of the MXFP4 routed experts:
   weights dequantized once at load, and decode steps of a few rows on an FP8
   GEMV kernel that reads a packed copy of the FP8 weights.
 - On A100 and H100 the Marlin MXFP4 experts pad the per-rank intermediate
-  size to a multiple of 64 instead of 128.
-- On H100 the experts take BF16 activations when a GEMM K is not a multiple
-  of 128, which Humming's block FP8 needs, and then run on Marlin instead of
-  Humming, whose top-k reduction the next mHC boundary can take over.
+  size to a multiple of 64 instead of 128, and leave their top-k reduction to
+  the next mHC boundary. vLLM picks the experts' backend: Marlin on A100,
+  Humming on H100 unless `--moe-backend marlin` is given.
 
 Every other GPU gets the stock methods.
 """
 
 from __future__ import annotations
 
-import copy
 import functools
 from typing import TYPE_CHECKING, Any
 
@@ -32,10 +30,7 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     fused_marlin_moe,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    Mxfp4MoeBackend,
-    select_deepseek_v4_mxfp4_moe_backend,
-)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -54,20 +49,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
 
 logger = init_logger(__name__)
-
-
-def mxfp4_moe_activation_key(moe: FusedMoEConfig) -> QuantKey | None:
-    """The activation of the MXFP4 routed experts: the checkpoint's MXFP8,
-    or BF16 (None) on Hopper when a GEMM K is not a multiple of 128.
-
-    Humming's SM90 kernels take no MXFP8, so they run it as block FP8 with
-    128-element groups. At TP8 the 2304-wide experts leave 288 columns per
-    rank, which has no block FP8 schedule."""
-    if current_platform.is_device_capability_family(90) and (
-        moe.hidden_dim % 128 or moe.intermediate_size_per_partition % 128
-    ):
-        return None
-    return kMxfp8Dynamic
 
 
 def mxfp8_linear_as_bf16() -> bool:
@@ -346,9 +327,7 @@ class DeferringMarlinExperts(MarlinExperts):
 
 class MarlinMxfp4MoEMethod(Mxfp4MoEMethod):
     """The MXFP4 routed experts on SM80 and SM90: with the Marlin backend, the
-    per-rank intermediate size is padded to a multiple of 64 instead of 128,
-    and on SM90 Marlin replaces Humming when the experts take BF16
-    activations.
+    per-rank intermediate size is padded to a multiple of 64 instead of 128.
 
     Marlin's MXFP4 path rounds the intermediate size up to 128, but Marlin
     needs only 64, its smallest N tile of GEMM1 and K tile of GEMM2 (as
@@ -358,30 +337,11 @@ class MarlinMxfp4MoEMethod(Mxfp4MoEMethod):
     products are unchanged; only FP32 summation orders change (GEMM2's K
     split, and how the GEMMs split their work across SMs).
 
-    With BF16 activations both backends are W4A16 kernels, and on H100 at TP8
-    Marlin with the smaller padding is the faster one at decode sizes. An
-    explicit `moe_backend` keeps vLLM's choice."""
+    The backend is vLLM's choice: Marlin on SM80; on SM90, Humming with block
+    FP8 activations unless `--moe-backend marlin` is given."""
 
     def __init__(self, moe: FusedMoEConfig, activation_key: QuantKey | None = None):
         super().__init__(moe, activation_key=activation_key)
-        if (
-            current_platform.is_device_capability(90)
-            and moe.moe_backend == "auto"
-            and activation_key is None
-            and self.mxfp4_backend == Mxfp4MoeBackend.HUMMING
-        ):
-            # Select on a copy: the layer pads ``moe`` itself in place later,
-            # so the method must keep that object.
-            marlin = copy.copy(moe)
-            marlin.moe_backend = "marlin"
-            self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
-                marlin
-            )
-            logger.info_once(
-                "DeepSeek-V4.1 MXFP4 experts with BF16 activations on SM90: "
-                "%s in place of Humming",
-                self.mxfp4_backend.value,
-            )
         if (
             current_platform.is_device_capability(90)
             or current_platform.is_device_capability(80)
@@ -411,11 +371,11 @@ class MarlinMxfp4MoEMethod(Mxfp4MoEMethod):
 def mxfp4_moe_method(moe: FusedMoEConfig) -> Mxfp4MoEMethod:
     """The method of the MXFP4 routed experts: `MarlinMxfp4MoEMethod`
     on A100 (SM80) and H100 (SM90), the stock method elsewhere, with the
-    activation of `mxfp4_moe_activation_key`."""
+    checkpoint's MXFP8 activation."""
     method_cls = (
         MarlinMxfp4MoEMethod
         if current_platform.is_device_capability(80)
         or current_platform.is_device_capability(90)
         else Mxfp4MoEMethod
     )
-    return method_cls(moe, activation_key=mxfp4_moe_activation_key(moe))
+    return method_cls(moe, activation_key=kMxfp8Dynamic)

@@ -24,23 +24,6 @@ def _platform(capability):
 
 
 @pytest.mark.parametrize(
-    ("capability", "intermediate", "expected"),
-    [
-        # Hopper, TP2: 1152 columns per rank, whole 128-element groups.
-        (90, 1152, kMxfp8Dynamic),
-        # Hopper, TP8: 288 columns per rank, no block FP8 schedule.
-        (90, 288, None),
-        # Blackwell keeps MXFP8 at any split.
-        (100, 288, kMxfp8Dynamic),
-    ],
-)
-def test_mxfp4_moe_activation_key(monkeypatch, capability, intermediate, expected):
-    monkeypatch.setattr(quantization, "current_platform", _platform(capability))
-    moe = SimpleNamespace(hidden_dim=4096, intermediate_size_per_partition=intermediate)
-    assert quantization.mxfp4_moe_activation_key(moe) == expected
-
-
-@pytest.mark.parametrize(
     ("capability", "backend", "per_quant", "expected"),
     [
         (80, "auto", None, True),
@@ -110,45 +93,7 @@ def test_mxfp4_moe_method(monkeypatch, capability, expected):
     )
     method = quantization.mxfp4_moe_method(moe)
     assert type(method) is expected
-    assert created["activation_key"] == quantization.mxfp4_moe_activation_key(moe)
-
-
-@pytest.mark.parametrize(
-    ("capability", "moe_backend", "activation_key", "stock", "expected"),
-    [
-        # H100, TP8: BF16 activations, so Marlin replaces Humming.
-        (90, "auto", None, Mxfp4MoeBackend.HUMMING, Mxfp4MoeBackend.MARLIN),
-        # H100, TP2: Humming's block FP8 activations stay.
-        (90, "auto", kMxfp8Dynamic, Mxfp4MoeBackend.HUMMING, Mxfp4MoeBackend.HUMMING),
-        # An explicit backend keeps vLLM's choice.
-        (90, "humming", None, Mxfp4MoeBackend.HUMMING, Mxfp4MoeBackend.HUMMING),
-        (80, "auto", None, Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.MARLIN),
-    ],
-)
-def test_marlin_in_place_of_humming(
-    monkeypatch, capability, moe_backend, activation_key, stock, expected
-):
-    monkeypatch.setattr(quantization, "current_platform", _platform(capability))
-
-    def init(self, moe, activation_key=None):
-        self.moe = moe
-        self.mxfp4_backend = stock
-        self.experts_cls = "stock experts"
-
-    def select(config):
-        assert config is not moe and config.moe_backend == "marlin"
-        return Mxfp4MoeBackend.MARLIN, "marlin experts"
-
-    monkeypatch.setattr(Mxfp4MoEMethod, "__init__", init)
-    monkeypatch.setattr(quantization, "select_deepseek_v4_mxfp4_moe_backend", select)
-    moe = SimpleNamespace(moe_backend=moe_backend)
-    method = quantization.MarlinMxfp4MoEMethod(moe, activation_key=activation_key)
-    assert method.mxfp4_backend == expected
-    assert method.experts_cls == (
-        "stock experts" if expected == stock else "marlin experts"
-    )
-    # The layer pads its config in place later; the method keeps that object.
-    assert method.moe is moe and moe.moe_backend == moe_backend
+    assert created["activation_key"] == kMxfp8Dynamic
 
 
 @pytest.mark.parametrize(
