@@ -10,6 +10,8 @@ from fastapi import Request
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
 )
@@ -34,8 +36,6 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 SESSION_ID_HEADER = "X-Session-ID"
 PRIORITY_HEADER = "X-Vllm-Priority"
-PRIORITY_MIN = -(2**63)
-PRIORITY_MAX = 2**63 - 1
 
 
 def build_per_request_timing_metrics(

@@ -1001,18 +1001,20 @@ async def test_generate_priority_header_overrides_body(client):
     [["--scheduling-policy", "priority", "--max-num-seqs", "1"]],
     indirect=True,
 )
-async def test_generate_priority_header_is_bounded_to_int64(client):
-    """An `X-Vllm-Priority` outside int64 is rejected with a 400, as in the body."""
+async def test_generate_priority_is_bounded_to_int32(client):
+    """A priority outside int32 is rejected with a 400, in the header or the body."""
     payload = {
         "model": MODEL_NAME,
         "token_ids": [1, 2, 3],
         "sampling_params": {"max_tokens": 1},
     }
-    for priority, expected in ((2**63 - 1, 200), (2**63, 400)):
+    for priority, expected in ((2**31 - 1, 200), (2**31, 400)):
         resp = await client.post(
             GEN_ENDPOINT, json=payload, headers={"X-Vllm-Priority": str(priority)}
         )
-        assert resp.status_code == expected, f"{priority}: {resp.text}"
+        assert resp.status_code == expected, f"header {priority}: {resp.text}"
+        resp = await client.post(GEN_ENDPOINT, json={**payload, "priority": priority})
+        assert resp.status_code == expected, f"body {priority}: {resp.text}"
 
 
 @pytest.mark.asyncio
