@@ -315,11 +315,11 @@ def dispatch_cg_and_sync_dp(
         )
 
     if dp_size == 1:
-        # Pure-TP DBO: the split is a local decision; a split step runs eager.
+        # all-reduce-overlap: the split is a local decision; a split step runs eager.
         if (
             allow_ubatching
             and parallel_config is not None
-            and parallel_config.dbo_tp_only
+            and parallel_config.dbo_schedule == "all-reduce-overlap"
             and check_ubatch_thresholds(
                 parallel_config, num_tokens, uniform_decode=uniform_decode
             )

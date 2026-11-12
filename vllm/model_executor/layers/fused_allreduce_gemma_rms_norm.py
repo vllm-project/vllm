@@ -175,8 +175,10 @@ def fused_allreduce_gemma_rms_norm(
         )
         return norm_out, hidden_states
 
-    # Skip under DBO: the fused all-reduce bypasses the microbatch hand-off hook.
-    if not dbo_enabled() and _can_use_aiter_fused_ar_rms(hidden_states):
+    # all-reduce-overlap: the fused all-reduce bypasses the microbatch hand-off.
+    if not dbo_enabled("all-reduce-overlap") and _can_use_aiter_fused_ar_rms(
+        hidden_states
+    ):
         from vllm._aiter_ops import rocm_aiter_ops
 
         return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(

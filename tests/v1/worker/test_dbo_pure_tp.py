@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DBO under pure tensor parallelism (one DP rank, no EP), without GPUs."""
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -43,29 +44,40 @@ def test_merge_keeps_none_and_intermediate_tensors():
     assert merged["hidden_states"].shape == (4, 4)
 
 
-def _parallel_config(tp=4, dp=1, ep=False, dbo=True):
+def _parallel_config(tp=4, dp=1, ep=False, dbo=True, schedule=None):
     # An explicit backend skips the GPU count check: CI may run this on one GPU.
     return ParallelConfig(
         tensor_parallel_size=tp,
         data_parallel_size=dp,
         enable_expert_parallel=ep,
         enable_dbo=dbo,
+        dbo_schedule=schedule,
         distributed_executor_backend="mp",
     )
 
 
 @pytest.mark.parametrize(
-    ("tp", "dp", "ep", "tp_only"),
+    ("tp", "dp", "ep", "schedule"),
     [
-        (4, 1, False, True),
-        (4, 2, False, False),
-        (4, 1, True, False),
-        (1, 1, False, False),
+        (4, 1, False, "all-reduce-overlap"),
+        (4, 2, False, "dispatch-combine-overlap"),
+        (4, 1, True, "dispatch-combine-overlap"),
+        (1, 1, False, "dispatch-combine-overlap"),
     ],
 )
-def test_dbo_tp_only(tp, dp, ep, tp_only):
-    assert _parallel_config(tp, dp, ep).dbo_tp_only is tp_only
-    assert not _parallel_config(tp, dbo=False).dbo_tp_only
+def test_default_dbo_schedule(tp, dp, ep, schedule):
+    assert _parallel_config(tp, dp, ep).dbo_schedule == schedule
+
+
+@pytest.mark.parametrize("kwargs", [dict(dp=2), dict(ep=True), dict(tp=1)])
+def test_all_reduce_overlap_rejected_outside_pure_tp(kwargs):
+    with pytest.raises(ValueError, match="all-reduce-overlap"):
+        _parallel_config(schedule="all-reduce-overlap", **kwargs)
+
+
+def test_explicit_dbo_schedule_is_kept():
+    config = _parallel_config(schedule="dispatch-combine-overlap")
+    assert config.dbo_schedule == "dispatch-combine-overlap"
 
 
 def _config(tp=4, dp=1, ep=False, spec=False, mm=False, enc_dec=False):
@@ -106,7 +118,7 @@ def test_dbo_unsupported_features(kwargs, rejected):
 def _parallel(threshold_prefill=8192, threshold_decode=32768):
     return SimpleNamespace(
         use_ubatching=True,
-        dbo_tp_only=True,
+        dbo_schedule="all-reduce-overlap",
         num_ubatches=2,
         dbo_prefill_token_threshold=threshold_prefill,
         dbo_decode_token_threshold=threshold_decode,
@@ -154,24 +166,46 @@ def test_workspace_id_shared_across_microbatches(monkeypatch, num_ubatches, expe
     assert manager._get_workspace_id() == expected
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [dict(dp=2), dict(ep=True), dict(dbo=False)],
-)
-def test_no_dbo_overlap_outside_pure_tp_dbo(monkeypatch, kwargs):
-    tp = SimpleNamespace(dbo_overlap=False)
-    monkeypatch.setattr(parallel_state, "_TP", tp)
-    ubatching.enable_dbo_tp_overlap(_parallel_config(**kwargs), comm_stream=None)
-    assert not tp.dbo_overlap
+def _ubatch_contexts(schedule):
+    return ubatching.make_ubatch_contexts(
+        num_micro_batches=2,
+        compute_stream=object(),
+        comm_stream=object(),
+        forward_contexts=[object(), object()],  # type: ignore[list-item]  # stand-ins
+        ready_barrier=threading.Barrier(3),
+        schedule=schedule,
+    )
 
 
-def test_all_reduce_uses_device_communicator_outside_a_microbatch(monkeypatch):
-    # With or without DBO overlap, a step that is not split takes the normal
-    # all-reduce.
+def test_dbo_enabled_for_a_schedule(monkeypatch):
+    # Checks that belong to one schedule (the MoE all-to-all hand-off) must
+    # not fire under another.
+    monkeypatch.setattr(ubatching, "_SCHEDULE", None)
+    _ubatch_contexts("all-reduce-overlap")
+    assert not ubatching.dbo_enabled("all-reduce-overlap")
+    monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {0: 0})
+    assert ubatching.dbo_enabled()
+    assert ubatching.dbo_enabled("all-reduce-overlap")
+    assert not ubatching.dbo_enabled("dispatch-combine-overlap")
+
+
+def test_all_reduce_hand_off_is_a_no_op_under_another_schedule(monkeypatch):
+    monkeypatch.setattr(ubatching, "_SCHEDULE", None)
+    ctx = _ubatch_contexts("dispatch-combine-overlap")[0]
+    # The streams are stand-ins: a hand-off that ran would raise.
+    ctx.switch_to_comm_sync("all-reduce-overlap")
+    ctx.yield_and_switch_from_comm_to_compute("all-reduce-overlap")
+    assert ctx.current_stream is ctx.compute_stream
+
+
+@pytest.mark.parametrize("is_tp_group", [True, False])
+def test_all_reduce_uses_device_communicator_outside_a_microbatch(
+    monkeypatch, is_tp_group
+):
+    # A step that is not split takes the normal all-reduce.
     monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {})
     group = parallel_state.GroupCoordinator.__new__(parallel_state.GroupCoordinator)
     group.device_communicator = SimpleNamespace(all_reduce=lambda x: x + 1)
+    monkeypatch.setattr(parallel_state, "_TP", group if is_tp_group else None)
     x = torch.ones(2)
-    assert torch.equal(group._all_reduce_out_place(x), x + 1)
-    group.dbo_overlap = True
     assert torch.equal(group._all_reduce_out_place(x), x + 1)
