@@ -1417,7 +1417,8 @@ def test_flashinfer_varlen_cudagraph_capability(
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
         model_config=SimpleNamespace(get_num_attention_heads=lambda _: 32),
     )
-    monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
+    monkeypatch.setattr(fi, "force_use_trtllm_attention", lambda: None)
+    monkeypatch.setattr(fi, "supports_trtllm_attention", lambda **_: True)
     monkeypatch.setattr(fi.current_platform, "has_device_capability", lambda _: True)
     monkeypatch.setattr(
         fi.FlashInferMetadataBuilder,
