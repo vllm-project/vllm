@@ -583,8 +583,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output.kv_connector_worker_meta = multi_connector_worker_meta
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        """Get the handshake metadata of every sub-connector, so that each one
-        later receives only its own."""
+        """Collect every sub-connector's handshake metadata, so that the
+        scheduler side can give each one only its own."""
         metadata = tuple(c.get_handshake_metadata() for c in self._connectors)
         if all(m is None for m in metadata):
             return None
@@ -593,10 +593,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def _sub_connector_handshake_metadata(
         self, metadata: dict[Any, KVConnectorHandshakeMetadata], index: int
     ) -> dict[Any, KVConnectorHandshakeMetadata]:
-        """The entries of `metadata` that sub-connector `index` reported.
+        """Return the entries of `metadata` that sub-connector `index` reported.
 
-        Subclasses that override `get_handshake_metadata` report other
-        metadata types; every sub-connector receives those unchanged.
+        If a subclass overrides `get_handshake_metadata` to report a single
+        sub-connector's metadata (e.g. Dynamo's `PdConnector`), every
+        sub-connector receives `metadata` unchanged.
         """
         selected = {}
         for key, multi_metadata in metadata.items():

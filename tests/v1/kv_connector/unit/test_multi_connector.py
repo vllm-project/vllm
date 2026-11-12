@@ -171,8 +171,8 @@ class HandshakeTestMetadata(KVConnectorHandshakeMetadata):
 
 
 class HandshakeTestConnector(ExampleConnector):
-    """Real connector that exchanges handshake metadata with every PP stage, as
-    NixlConnector does."""
+    """Real connector that reports handshake metadata and accepts it from every
+    PP stage, as NixlConnector does."""
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         return HandshakeTestMetadata(
@@ -1355,8 +1355,8 @@ def test_handshake_metadata_reaches_only_its_connector():
 
 @pytest.mark.cpu_test
 def test_handshake_metadata_of_subclass_reaches_every_connector():
-    """A MultiConnector subclass that reports one sub-connector's handshake
-    metadata itself keeps the behavior it was written for: every sub-connector
+    """If a MultiConnector subclass reports one sub-connector's handshake
+    metadata instead of one entry per sub-connector, every sub-connector
     receives that metadata."""
     vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
