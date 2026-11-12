@@ -657,6 +657,59 @@ def test_multi_node_world_size_includes_pcp():
     assert vllm_config.parallel_config.world_size == 2
 
 
+@pytest.fixture
+def fake_parallel_devices(monkeypatch):
+    """One DP rank on a machine that has no GPU.
+
+    These tests only care about how the launch options are resolved, so the
+    platform reports a device and we skip the backend setup for it.
+    """
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "get_device_name", lambda device_id=0: "cpu")
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(current_platform, "check_and_update_config", lambda cfg: None)
+
+
+def _dp_engine_args(**overrides) -> EngineArgs:
+    kwargs = {
+        "model": "facebook/opt-125m",
+        "data_parallel_size": 1,
+        "data_parallel_size_local": 1,
+        "data_parallel_start_rank": 0,
+        "data_parallel_address": "127.0.0.1",
+        "data_parallel_rpc_port": 6884,
+    }
+    kwargs.update(overrides)
+    return EngineArgs(**kwargs)
+
+
+def test_dp_start_rank_zero_single_rank_does_not_infer_external_lb(
+    fake_parallel_devices,
+):
+    """--data-parallel-start-rank 0 on a single DP rank used to pick hybrid LB
+    (which then autoswitches to external LB), and ParallelConfig rejects that
+    for dp_size 1, so the launch crashed. The rank itself should still be
+    honoured."""
+    parallel_config = _dp_engine_args().create_engine_config().parallel_config
+
+    assert parallel_config.data_parallel_rank == 0
+    assert not parallel_config.data_parallel_external_lb
+    assert not parallel_config.data_parallel_hybrid_lb
+
+
+def test_dp_start_rank_zero_multi_rank_still_infers_hybrid_lb(
+    fake_parallel_devices,
+):
+    """The #47692 behaviour on a real multi-rank launch must not change."""
+    engine_args = _dp_engine_args(data_parallel_size=4, data_parallel_size_local=2)
+    parallel_config = engine_args.create_engine_config().parallel_config
+
+    assert parallel_config.data_parallel_rank == 0
+    assert parallel_config.data_parallel_hybrid_lb
+    assert not parallel_config.data_parallel_external_lb
+
+
 def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
