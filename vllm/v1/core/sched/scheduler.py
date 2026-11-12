@@ -2652,6 +2652,20 @@ class Scheduler(SchedulerInterface):
                     continue
                 del self._prefill_progress[request_id]
                 if request_id not in stopped_req_ids:
+                    # Preempted: its work is queued again, so say how much is
+                    # left now instead of leaving the consumer on a stale value.
+                    request = self.requests.get(request_id)
+                    if request is None:
+                        continue
+                    computed = max(
+                        0, request.num_computed_tokens - request.num_in_flight_tokens
+                    )
+                    remaining = max(0, request.num_tokens - computed)
+                    prefill_progress.setdefault(state.client_index, []).append(
+                        PrefillProgress(
+                            request_id=request_id, remaining_prefill_tokens=remaining
+                        )
+                    )
                     continue
                 prefill_progress.setdefault(state.client_index, []).append(
                     PrefillProgress(request_id=request_id, remaining_prefill_tokens=0)
