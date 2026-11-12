@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     HandshakeError,
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
+    MoRIIOConstants,
     MoRIIOError,
     MoRIIOMode,
     MoRIIOTransferAck,
@@ -216,6 +217,7 @@ def _prewarm(consumer: Rank, meta: ReqMeta, monkeypatch) -> dict[str, int]:
     worker._handshake_initiation_executor = ThreadPoolExecutor(1)
     worker._handshake_lock = threading.Lock()
     worker._eager_handshaked_engines = set()
+    worker._handshake_cooldowns = {}
     worker._remote_agents = {}
     worker.layer_name_to_remote_kv_cache_metadata = {}
     worker.tp_group = SimpleNamespace(cpu_group=None)
@@ -439,6 +441,7 @@ def _fail_handshakes_to(worker, bad_host: str, monkeypatch) -> None:
     worker._handshake_initiation_executor = ThreadPoolExecutor(1)
     worker._handshake_lock = threading.Lock()
     worker._eager_handshaked_engines = set()
+    worker._handshake_cooldowns = {}
     worker._remote_agents = {}
     worker.layer_name_to_remote_kv_cache_metadata = {}
     worker.tp_group = SimpleNamespace(cpu_group=None)
@@ -485,8 +488,9 @@ def test_failed_handshake_fails_only_its_requests(monkeypatch):
 
 def test_tp_vote_fails_an_engine_another_rank_could_not_reach(monkeypatch):
     """This rank's handshake succeeds but a peer rank's fails: the vote makes
-    this rank skip the reads too, and the engine is handshaked again on the
-    next step that needs it."""
+    this rank skip the reads too. The engine is not handshaked again for its
+    next few references, since a timed-out handshake stalls the whole batch,
+    and then it is retried."""
     heads, layers = MODELS["mla"]
     state = _global_state(layers, heads)
     producers, (consumer,) = _ranks("mla", 1, 1, True, LAYOUTS[0], state)
@@ -508,21 +512,27 @@ def test_tp_vote_fails_an_engine_another_rank_could_not_reach(monkeypatch):
         metadata = MoRIIOConnectorMetadata()
         meta = _meta(["full"], 1)
         metadata.reqs_to_recv[req_id] = meta
+        worker._invalid_block_ids.clear()
         worker.start_load_kv(metadata)
         return meta
 
-    meta = step("req-1", vote=0)
+    meta = step("req-0", vote=0)
     assert worker._invalid_block_ids == set(meta.local_block_ids[0])
     assert worker._pop_done_transfers() == set()
     assert worker._eager_handshaked_engines == set()
 
-    worker._invalid_block_ids.clear()
-    step("req-2", vote=1)
+    for i in range(MoRIIOConstants.HANDSHAKE_FAILURE_COOLDOWN):
+        meta = step(f"req-cooldown-{i}", vote=1)
+        assert worker._invalid_block_ids == set(meta.local_block_ids[0])
+    assert len(handshakes) == 1
+
+    step("req-retry", vote=1)
     worker._handshake_initiation_executor.shutdown()
     assert len(handshakes) == 2
     assert worker._invalid_block_ids == set()
     assert worker._pop_done_transfers() == {"t"}
     assert worker._eager_handshaked_engines == {"prefill:0"}
+    assert worker._handshake_cooldowns == {}
 
 
 @pytest.mark.parametrize("model", ["mla_hybrid", "sliding"])

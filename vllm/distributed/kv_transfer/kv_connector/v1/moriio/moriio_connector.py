@@ -2084,6 +2084,10 @@ class MoRIIOConnectorWorker:
         self._handshake_lock = threading.RLock()
         # Remote engines already covered by the eager pre-forward handshake.
         self._eager_handshaked_engines: set[EngineId] = set()
+        # Failed engine -> (references left to fail without a new handshake,
+        # cooldown after the next failure). Counted in references, not time, so
+        # every TP worker makes the same decision without another vote.
+        self._handshake_cooldowns: dict[EngineId, tuple[int, int]] = {}
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -3332,8 +3336,10 @@ class MoRIIOConnectorWorker:
         the collective (raising early would hang the peers still waiting for it).
         Every worker reaches the all-reduce(MIN) vote, so every worker agrees on
         which engines failed. A failed engine is returned rather than raised so
-        only its requests fail; the next step retries the missing ranks. It
-        still raises when block-level recovery is unsupported.
+        only its requests fail. It is not handshaked again for its next few
+        references (doubling on each further failure): a handshake that times
+        out stalls the whole batch. It still raises when block-level recovery
+        is unsupported.
 
         Returns:
             Remote engines whose handshake failed on at least one TP worker.
@@ -3353,6 +3359,13 @@ class MoRIIOConnectorWorker:
 
         for remote_engine_id, meta in engines.items():
             if remote_engine_id in self._eager_handshaked_engines:
+                continue
+            left, next_cooldown = self._handshake_cooldowns.get(
+                remote_engine_id, (0, MoRIIOConstants.HANDSHAKE_FAILURE_COOLDOWN)
+            )
+            if left > 0:
+                self._handshake_cooldowns[remote_engine_id] = (left - 1, next_cooldown)
+                failed.add(remote_engine_id)
                 continue
 
             remote_dp_size = int(meta.remote_dp_size)
@@ -3447,9 +3460,17 @@ class MoRIIOConnectorWorker:
                         "on at least one TP rank; this KV cache layout cannot "
                         "report load errors per block"
                     )
+                self._handshake_cooldowns[remote_engine_id] = (
+                    next_cooldown,
+                    min(
+                        2 * next_cooldown,
+                        MoRIIOConstants.MAX_HANDSHAKE_FAILURE_COOLDOWN,
+                    ),
+                )
                 failed.add(remote_engine_id)
                 continue
 
+            self._handshake_cooldowns.pop(remote_engine_id, None)
             self._eager_handshaked_engines.add(remote_engine_id)
         return failed
 
