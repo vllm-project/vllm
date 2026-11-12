@@ -92,6 +92,10 @@ vllm serve <mtp-model> \
 - The dynamic rows are read per draft token, so the gain shrinks with batch
   size. Measure decode speed and acceptance length at your concurrency.
 
+With `draft_lm_head_quantization` (see the notes below) only the listed and
+dynamic rows are quantized (weight-only), not a full copy of the head; the
+dynamic rows' scorer is then stored in FP8.
+
 ## Notes
 
 - MTP only works for model families that support MTP in vLLM.
