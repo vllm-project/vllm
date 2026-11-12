@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import hashlib
 import math
 import os
 import threading
@@ -83,6 +84,7 @@ class WriteTask:
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
     num_prompt_tokens: int | None = None
+    prompt_fingerprint: str | None = None
 
 
 @dataclass
@@ -107,6 +109,7 @@ class RemoteAllocInfo:
     # Leading blocks the consumer already holds from its own prefix cache.
     num_skip_blocks: int = 0
     num_prompt_tokens: int | None = None
+    prompt_fingerprint: str | None = None
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -571,6 +574,7 @@ class ReqMeta:
     # the symmetric single-DP behaviour.
     remote_dp_rank: int = 0
     num_prompt_tokens: int | None = None
+    prompt_fingerprint: str | None = None
     # Multi-pod: list of remote pod IPs indexed by pod_idx.
     multi_pod_hosts: list[str] = field(default_factory=list)
     # Per-pod DP size; 0 means fallback to remote_dp_size.
@@ -599,6 +603,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         write_mode=False,
         num_prompt_tokens: int | None = None,
+        prompt_fingerprint: str | None = None,
     ):
         """Ingest a peer's `kv_transfer_params` into a typed `ReqMeta`.
 
@@ -673,6 +678,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
         _req = ReqMeta(
             num_prompt_tokens=num_prompt_tokens,
+            prompt_fingerprint=prompt_fingerprint,
             transfer_id=transfer_id,
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
@@ -719,3 +725,32 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+def fingerprint_prompt(request: Any, num_tokens: int) -> str | None:
+    """Identify the actual transferred prompt span, independent of router fields."""
+    tokens = getattr(request, "prompt_token_ids", None)
+    embeds = getattr(request, "prompt_embeds", None)
+    if tokens is None and embeds is None:
+        return None
+    features = [
+        (f.identifier, f.mm_position.offset, f.mm_position.length)
+        for f in getattr(request, "mm_features", [])
+        if f.mm_position.offset < num_tokens
+    ]
+    lora = getattr(request, "lora_request", None)
+    payload = [
+        tokens[:num_tokens] if tokens is not None else None,
+        features,
+        lora.lora_int_id if lora else None,
+    ]
+    mask = getattr(request, "prompt_is_token_ids", None)
+    payload.append(mask[:num_tokens] if mask is not None else None)
+    digest = hashlib.sha256(msgspec.msgpack.encode(payload))
+    if embeds is not None:
+        if embeds.device.type != "cpu":
+            raise ValueError("MoRIIO prompt fingerprint requires CPU prompt embeddings")
+        value = embeds[:num_tokens].detach().contiguous()
+        digest.update(msgspec.msgpack.encode((str(value.dtype), list(value.shape))))
+        digest.update(value.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()

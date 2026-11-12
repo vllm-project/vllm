@@ -100,7 +100,10 @@ def _validate_write_block_counts(
 
 
 def validate_write_allocation(
-    task: WriteTask, allocation: RemoteAllocInfo, has_mamba: bool
+    task: WriteTask,
+    allocation: RemoteAllocInfo,
+    has_mamba: bool,
+    mamba_groups: frozenset[int] = frozenset(),
 ) -> None:
     """Reject incomplete WRITE coverage before any layer submits a transfer."""
     local_tokens = task.num_prompt_tokens
@@ -116,13 +119,25 @@ def validate_write_allocation(
             f"prefill={local_tokens}, decode={remote_tokens}. "
             "Both peers must support WRITE token coverage validation."
         )
+    if task.prompt_fingerprint is not None and (
+        allocation.prompt_fingerprint != task.prompt_fingerprint
+    ):
+        raise WriteCoverageError("WRITE prompt content does not match")
     remote_blocks = allocation.block_ids
     if remote_blocks is None or len(task.local_block_ids) != len(remote_blocks):
         raise WriteCoverageError(
             "WRITE source and destination cache groups do not match"
         )
-    for local, remote in zip(task.local_block_ids, remote_blocks, strict=True):
-        _validate_write_block_counts(local, remote, has_mamba)
+    for group, (local, remote) in enumerate(
+        zip(task.local_block_ids, remote_blocks, strict=True)
+    ):
+        if group in mamba_groups:
+            if len(local) != 1 or len(remote) != 1:
+                raise WriteCoverageError(
+                    "WRITE requires one Mamba state slot per group"
+                )
+        else:
+            _validate_write_block_counts(local, remote, has_mamba)
 
 
 class MoRIIOWriter:
@@ -410,7 +425,18 @@ class MoRIIOWriter:
             )
             return
 
-        validate_write_allocation(task, request_info, self.worker._has_mamba)
+        mamba_groups = (
+            frozenset(
+                group
+                for layer, group in getattr(self.worker, "layer_to_group", {}).items()
+                if self.worker._is_mamba_layer(layer)
+            )
+            if self.worker._has_mamba
+            else frozenset()
+        )
+        validate_write_allocation(
+            task, request_info, self.worker._has_mamba, mamba_groups
+        )
 
         # Wait for CUDA event
         # The attention computation of the current layer cannot
@@ -1166,6 +1192,7 @@ class MoRIIOWrapper:
                 num_skip_blocks=int(data.get("num_skip_blocks", 0)),
                 decode_dp_rank=decode_dp_rank,
                 num_prompt_tokens=data.get("num_prompt_tokens"),
+                prompt_fingerprint=data.get("prompt_fingerprint"),
             )
 
     def _handle_write_done_message(self, data: dict):

@@ -584,3 +584,111 @@ def test_write_requires_coverage_in_every_cache_group(
     else:
         with pytest.raises(MoRIIOError, match="WRITE"):
             validate_write_allocation(task, info, has_mamba)
+
+
+@pytest.mark.parametrize("different_content", [False, True])
+def test_write_checks_prompt_content(different_content):
+    from vllm import SamplingParams
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+        fingerprint_prompt,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+        validate_write_allocation,
+    )
+    from vllm.v1.request import Request
+
+    producer = Request(
+        request_id="p",
+        prompt_token_ids=[1] * 16,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    consumer = Request(
+        request_id="d",
+        prompt_token_ids=[2 if different_content else 1] * 16,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    task = WriteTask(
+        request_id="p",
+        transfer_id="t",
+        dst_engine_id="d",
+        local_block_ids=[[1]],
+        remote_block_ids_hint=None,
+        layer_name="a",
+        event=None,
+        remote_notify_port=1,
+        remote_ip="d",
+        num_prompt_tokens=16,
+        prompt_fingerprint=fingerprint_prompt(producer, 16),
+    )
+    info = RemoteAllocInfo(
+        block_ids=[[2]],
+        num_prompt_tokens=16,
+        prompt_fingerprint=fingerprint_prompt(consumer, 16),
+    )
+    if different_content:
+        with pytest.raises(MoRIIOError, match="prompt content"):
+            validate_write_allocation(task, info, False)
+    else:
+        validate_write_allocation(task, info, False)
+
+
+@pytest.mark.parametrize("slots", [[], [2, 3]])
+def test_write_rejects_invalid_mamba_slots_before_layer_transfer(slots):
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+        WriteCoverageError,
+        validate_write_allocation,
+    )
+
+    task = WriteTask(
+        request_id="p",
+        transfer_id="t",
+        dst_engine_id="d",
+        local_block_ids=[[1], [1]],
+        remote_block_ids_hint=None,
+        layer_name="a",
+        event=None,
+        remote_notify_port=1,
+        remote_ip="d",
+        num_prompt_tokens=16,
+    )
+    info = RemoteAllocInfo(block_ids=[[2, 3], slots], num_prompt_tokens=16)
+    with pytest.raises(WriteCoverageError, match="Mamba state slot"):
+        validate_write_allocation(task, info, True, frozenset({1}))
+
+
+def test_invalid_mamba_allocation_notifies_decode_without_writing(monkeypatch):
+    monkeypatch.setattr(
+        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
+    )
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    heads, layers = MODELS["mla_hybrid"]
+    state = _global_state(layers, heads)
+    consumer = _build_rank("mla_hybrid", 0, 1, KVCacheLayout.LBNHC, True, state, False)
+    consumer.wrapper = _consumer_wrapper()
+    producer = _build_rank("mla_hybrid", 0, 1, KVCacheLayout.LBNHC, True, state, True)
+    _connect(producer, [consumer], "decode")
+    for region in consumer.regions:
+        region.fill_(0xAB)
+    before = [region.clone() for region in consumer.regions]
+    producer.wrapper.done_remote_allocate_req_dict["t"] = RemoteAllocInfo(
+        block_ids=[[5, 2], [3, 4]], num_prompt_tokens=8
+    )
+    task = WriteTask(
+        request_id="p",
+        transfer_id="t",
+        dst_engine_id="decode",
+        local_block_ids=[[1, 4], [2]],
+        remote_block_ids_hint=None,
+        layer_name="mla0",
+        event=_CompletedEvent(),
+        remote_notify_port=NOTIFY_PORT,
+        remote_ip="decode",
+        num_prompt_tokens=8,
+    )
+    writer = make_moriio_writer(producer.worker)
+    writer._try_execute_write_task(task)
+    assert consumer.wrapper.pop_failed_write_req_ids() == {"t"}
+    assert consumer.wrapper.pop_finished_write_req_ids() == set()
+    assert all(torch.equal(got, ref) for got, ref in zip(consumer.regions, before))
