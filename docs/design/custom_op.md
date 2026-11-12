@@ -43,8 +43,8 @@ For example:
 
 - Use `--compilation-config '{"custom_ops": ["all"]}'` to enable all custom ops.
 - Use `--compilation-config '{"custom_ops": ["none"]}'` to disable all custom ops.
-- Use `--compilation-config '{"custom_ops": ["all,-op1"]}'` to enable all custom ops except op1 (i.e., prefixed with a `-` means "disable").
-- Use `--compilation-config '{"custom_ops": ["none,+op1,+op2"]}'` to only enable op1 and op2 (i.e., prefixed with a `+` means "enable").
+- Use `--compilation-config '{"custom_ops": ["all", "-op1"]}'` to enable all custom ops except op1 (i.e., prefixed with a `-` means "disable").
+- Use `--compilation-config '{"custom_ops": ["none", "+op1", "+op2"]}'` to only enable op1 and op2 (i.e., prefixed with a `+` means "enable").
 
 ## Types of Supported CustomOp in vLLM
 

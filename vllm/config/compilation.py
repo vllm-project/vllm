@@ -564,8 +564,8 @@ class CompilationConfig:
     names to enable (prefixed with a '+'), or disable (prefixed with a '-').
     Examples:
 
-    - 'all,-op1' to enable all except op1
-    - 'none,+op1,+op2' to enable only op1 and op2
+    - ['all', '-op1'] to enable all except op1
+    - ['none', '+op1', '+op2'] to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: mode>CompilationMode.NONE and
