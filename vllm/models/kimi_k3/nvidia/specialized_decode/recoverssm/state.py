@@ -208,7 +208,7 @@ def install_builder(builder: KimiK3KDAMetadataBuilder, pending: torch.Tensor) ->
                 )
                 step = _DeferredStepCommit(context, deferred)
                 metadata.recoverssm_context = step  # type: ignore[assignment]
-        metadata.recoverssm_deferred = deferred  # type: ignore[attr-defined]
+        metadata.recoverssm_deferred = deferred  # type: ignore[assignment]
         return metadata
 
     builder._get_recoverssm_context = get_context  # type: ignore[method-assign]

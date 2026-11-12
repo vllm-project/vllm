@@ -95,8 +95,13 @@ def _fake_base_init(use_recoverssm: bool):
     return init
 
 
+def _backbone(*attentions) -> SimpleNamespace:
+    layers = [SimpleNamespace(self_attn=attn) for attn in attentions]
+    return SimpleNamespace(layers=layers, start_layer=0, end_layer=len(layers))
+
+
 def _make_state(use_recoverssm: bool, model=None) -> KimiK3ModelState:
-    model = model or SimpleNamespace(specialized_decode_config=None)
+    model = model or SimpleNamespace(specialized_decode_config=None, model=_backbone())
     with patch.object(
         MambaHybridModelState, "__init__", _fake_base_init(use_recoverssm)
     ):
@@ -114,6 +119,45 @@ def test_model_state_hands_itself_to_the_specialized_decode() -> None:
     assert bound == [state]
     # Without the specialized decode the stock state is left as it is.
     assert type(_make_state(use_recoverssm=True).recoverssm) is RecoverSSMState
+
+
+def test_model_state_owns_the_pending_replays_of_deferred_stock_kda_layers() -> None:
+    """Without the specialized decode, KDA layers that verify with the deferred
+    kernel (`deferred_verify`) give the stock state per-slot pending replays:
+    reset per new request, bound with the step's request slots to the RecoverSSM
+    KDA builders before every build (no slots under capture)."""
+    kda = SimpleNamespace(deferred_verify=object())
+    model = SimpleNamespace(
+        specialized_decode_config=None, model=_backbone(kda, SimpleNamespace())
+    )
+    with (
+        patch.object(MambaHybridModelState, "add_request", lambda *args: None),
+        patch.object(MambaHybridModelState, "prepare_attn", lambda *a, **k: {}),
+    ):
+        state = _make_state(use_recoverssm=True, model=model)
+        assert type(state.recoverssm) is RecoverSSMState
+        pending = state.recoverssm_pending
+        assert pending is not None and pending.tolist() == [0] * 8
+        pending.fill_(3)
+        state.add_request(5, SimpleNamespace())
+        assert pending.tolist() == [3] * 5 + [0] + [3] * 2
+
+        groups, deferring, others = _groups()
+        idx_mapping = torch.tensor([2, 0], dtype=torch.int32)
+        batch = SimpleNamespace(idx_mapping=idx_mapping)
+        state.prepare_attn(batch, None, None, None, groups, None)
+        for builder in deferring:
+            assert builder.deferred_pending is pending
+            assert builder.deferred_request_slots is idx_mapping
+            assert builder.deferred_record_rows.tolist() == [-1] * 8
+        assert others[1].deferred_pending is None
+        state.prepare_attn(batch, None, None, None, groups, None, for_capture=True)
+        assert all(b.deferred_request_slots is None for b in deferring)
+
+    # KDA layers without the deferred kernel get no pending replays.
+    stock = SimpleNamespace(deferred_verify=None)
+    model = SimpleNamespace(specialized_decode_config=None, model=_backbone(stock))
+    assert _make_state(True, model).recoverssm_pending is None
 
 
 def test_install_model_state_only_with_recoverssm() -> None:

@@ -67,6 +67,39 @@ def can_use_cute_recoverssm(
     return True, None
 
 
+def can_use_deferred_recoverssm(
+    *,
+    window: int,
+    head_dim: int,
+    conv_width: int,
+    has_conv_bias: bool,
+    activation_dtype: torch.dtype,
+    conv_state_dtype: torch.dtype,
+    f_b_dtype: torch.dtype,
+    lower_bound: float | None,
+) -> tuple[bool, str | None]:
+    """Whether the deferred verify (`KdaDeferredVerify`) can serve a KDA layer
+    with an FP32 SSM state, and if not, why."""
+    from vllm.models.kimi_k3.nvidia.recoverssm import deferred
+
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        return False, "it needs SM10x tensor cores (tcgen05)"
+    low, high = deferred.MIN_WINDOW, deferred.MAX_WINDOW
+    if not low <= window <= high:
+        return False, f"it verifies {low} to {high} tokens per step"
+    if head_dim != K or conv_width != CONV_WIDTH:
+        return False, f"it needs head_dim {K} and a width-{CONV_WIDTH} convolution"
+    if has_conv_bias:
+        return False, "it does not apply a convolution bias"
+    if lower_bound is None:
+        return False, "it needs a bounded KDA gate (gate_lower_bound)"
+    if (activation_dtype, conv_state_dtype, f_b_dtype) != (torch.bfloat16,) * 3:
+        return False, "it needs bfloat16 activations, conv state and F_B weight"
+    return True, None
+
+
 def _architecture(device: torch.device) -> str:
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.common.host import (
         architecture,
