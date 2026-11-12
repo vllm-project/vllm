@@ -1223,6 +1223,20 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
+@triton.jit
+def dcp_local_to_global_index(local, dcp_rank, dcp_size, cp_kv_cache_interleave_size):
+    """Global position of a KV slot held locally by `dcp_rank`.
+
+    Describes the same interleaving as `get_dcp_local_seq_lens` and must
+    stay consistent with it.
+    """
+    return (
+        local // cp_kv_cache_interleave_size * (dcp_size * cp_kv_cache_interleave_size)
+        + dcp_rank * cp_kv_cache_interleave_size
+        + local % cp_kv_cache_interleave_size
+    )
+
+
 @triton.jit(
     do_not_specialize_on_alignment=["out_ptr", "block_table_ptr", "seq_lens_ptr"]
 )

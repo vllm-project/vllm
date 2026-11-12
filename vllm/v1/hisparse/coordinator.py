@@ -511,6 +511,11 @@ class HiSparseCoordinator:
         manager = self.host_manager
         if manager is None:
             return
+        # A lookahead hash arrives only once the tokens after its page are known.
+        num_computed_tokens = min(
+            num_computed_tokens,
+            len(request.block_hashes) * manager.block_pool.hash_block_size,
+        )
         request_id = request.request_id
         self._get_request_state(request_id).publication = _PendingPublication(
             request=request,
