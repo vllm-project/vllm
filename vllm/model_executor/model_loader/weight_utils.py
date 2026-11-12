@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Generator, Iterable
 from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
@@ -58,9 +59,10 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
 from vllm.model_executor.model_loader.threaded_buffer_reader import (
+    ShardSlot,
     ThreadPinnedBuffer,
     largest_tensor,
-    stream_shard_tensors,
+    read_shard,
 )
 from vllm.model_executor.utils import copy_weight_
 from vllm.platforms import current_platform
@@ -1373,46 +1375,106 @@ def streaming_safetensors_weights_iterator(
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Read shards with one pinned buffer per IO thread.
 
-    Each active shard is read by ``io_threads_per_file`` IO threads,
-    each of which owns one pinned buffer and reads a disjoint set of
-    tensors into it. The buffers are created once and reused for every
-    shard, so the pages are pinned once for the whole load rather than
-    once per shard.
+    Up to ``prefetch_file_window`` shards are read concurrently, in
+    input order, and consumed in that same order. Each shard is read by
+    ``io_threads_per_file`` IO threads, each of which owns one pinned
+    buffer and reads a disjoint set of tensors into it. The buffers are
+    created once and reused for every shard, so the pages are pinned
+    once for the whole load rather than once per shard.
 
     Expert weights that do not belong to this rank are skipped before
     they are read, so the storage only moves the bytes this rank needs.
     """
-    if io_threads_per_file < 1:
-        raise ValueError("IO threads per file must be >= 1")
+    if min(prefetch_file_window, io_threads_per_file, block_size) < 1:
+        raise ValueError(
+            "Streaming prefetch file window, IO threads per file and block size "
+            "must be >= 1"
+        )
 
     def keep(name: str) -> bool:
         return not should_skip_weight(name, local_expert_ids)
 
-    # The pinned buffers are created once and reused for every shard, so
-    # the pages are pinned once for the whole load. Pinning is slow
-    # (22 ms for 32 MiB on an A100), so pinning per shard would cost
-    # seconds for a checkpoint of any size. The buffer has to be big
-    # enough for the biggest tensor any shard holds.
-    biggest = max((largest_tensor(path, keep) for path in hf_weights_files), default=0)
-    buffers = [
-        ThreadPinnedBuffer(max(block_size, biggest)) for _ in range(io_threads_per_file)
-    ]
+    window = min(prefetch_file_window, len(hf_weights_files)) or 1
+    paths = iter(hf_weights_files)
 
-    with tqdm(
-        total=len(hf_weights_files),
-        desc="Streaming safetensors checkpoint shards",
-        disable=not enable_tqdm(use_tqdm_on_load),
-        bar_format=_BAR_FORMAT,
-    ) as progress:
-        for path in hf_weights_files:
-            yield from stream_shard_tensors(
-                path,
-                io_threads=io_threads_per_file,
-                keep=keep,
-                buffer_capacity=block_size,
-                buffers=buffers,
+    # Each shard slot has its own set of IO threads and its own pinned
+    # buffers: two shards are read at the same time, so they cannot
+    # share a buffer. A slot's buffers are reused for the next shard
+    # that lands in it, so the pages stay pinned for the whole load.
+    #
+    # The buffer size is decided by the biggest tensor in the whole
+    # checkpoint, so a slot's buffers fit any shard it may read.
+    biggest = max((largest_tensor(path, keep) for path in hf_weights_files), default=0)
+    capacity = max(block_size, biggest)
+
+    with (
+        tqdm(
+            total=len(hf_weights_files),
+            desc="Streaming safetensors checkpoint shards",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+        ) as progress,
+        concurrent.futures.ThreadPoolExecutor(
+            max_workers=window, thread_name_prefix="safetensors-shard"
+        ) as shard_pool,
+    ):
+        # A slot is a buffer set and the thread that reads into it.
+        slots: list[ShardSlot] = [
+            ShardSlot(
+                index,
+                buffers=[
+                    ThreadPinnedBuffer(capacity) for _ in range(io_threads_per_file)
+                ],
             )
+            for index in range(window)
+        ]
+        pending: deque[tuple[concurrent.futures.Future, ShardSlot]] = deque()
+        next_slot = 0
+        for _ in range(window):
+            path = next(paths, None)
+            if path is None:
+                break
+            slot = slots[next_slot]
+            next_slot = (next_slot + 1) % window
+            pending.append(
+                (
+                    shard_pool.submit(
+                        read_shard,
+                        path,
+                        keep=keep,
+                        slot=slot,
+                        buffer_capacity=block_size,
+                    ),
+                    slot,
+                )
+            )
+
+        while pending:
+            # The shards are consumed in the order they were submitted.
+            future, slot = pending.popleft()
+            try:
+                yield from future.result()
+            finally:
+                del future
             progress.update(1)
+
+            # Read the next shard in the slot this one just freed, so
+            # the read of the next shard overlaps the consumer's work on
+            # this one.
+            next_path = next(paths, None)
+            if next_path is not None:
+                pending.append(
+                    (
+                        shard_pool.submit(
+                            read_shard,
+                            next_path,
+                            keep=keep,
+                            slot=slot,
+                            buffer_capacity=block_size,
+                        ),
+                        slot,
+                    )
+                )
 
 
 def safetensors_weights_iterator(

@@ -59,7 +59,7 @@ import os
 import queue
 import struct
 import threading
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -233,50 +233,39 @@ def _assign_batches(
     return per_thread
 
 
-def largest_tensor(path: str, keep: Callable[[str], bool]) -> int:
-    """The size in bytes of the biggest tensor *keep* accepts.
+class ShardSlot:
+    """One shard's read slot: its IO threads' pinned buffers.
 
-    The IO threads' buffers have to be big enough for the biggest
-    tensor they will read, so this decides how much memory is pinned.
+    Two shards are read at the same time, so they cannot share a
+    buffer. A slot's buffers are reused for the next shard that lands
+    in it, so the pages stay pinned for the whole load - pinning is
+    slow (22 ms for 32 MiB on an A100), so pinning per shard would
+    cost seconds for a checkpoint of any size.
     """
-    with open(path, "rb") as file:  # noqa: SIM115
-        size = os.fstat(file.fileno()).st_size
-        header, _ = read_safetensors_header(file.fileno(), size)
-    biggest = 0
-    for name, spec in header.items():
-        if name == "__metadata__" or not keep(name):
-            continue
-        start, end = spec["data_offsets"]
-        biggest = max(biggest, end - start)
-    return biggest
+
+    def __init__(self, index: int, buffers: Sequence[ThreadPinnedBuffer]):
+        self.index = index
+        self.buffers = list(buffers)
+
+    @property
+    def io_threads(self) -> int:
+        return len(self.buffers)
 
 
-def stream_shard_tensors(
+def read_shard(
     path: str,
     *,
-    io_threads: int,
     keep: Callable[[str], bool],
+    slot: ShardSlot,
     buffer_capacity: int,
-    buffers: Sequence[ThreadPinnedBuffer] | None = None,
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Yield the tensors of one shard that *keep* accepts, in file order.
+) -> list[tuple[str, torch.Tensor]]:
+    """Read the tensors of one shard that *keep* accepts, in file order.
 
-    Each of *io_threads* IO threads owns one pinned buffer and reads a
-    disjoint set of batches into it. A tensor is read with a single
-    pread straight into the thread's buffer, so the bytes are touched
-    once, and a tensor *keep* rejects is never fetched at all.
-
-    A thread's batch is copied out of its buffer before the next batch
-    is read into it, so the tensors that are yielded are independent of
-    the buffer they were read into.
-
-    *buffers* are the threads' pinned buffers. Pass the same ones for
-    every shard and they are pinned once for the whole load; pass None
-    and they are allocated per shard.
+    The shard is read by one IO thread per buffer in *slot*, each
+    reading a disjoint set of batches into its own buffer. A tensor is
+    read with a single pread straight into the buffer, so the bytes are
+    touched once, and a tensor *keep* rejects is never fetched at all.
     """
-    if io_threads < 1:
-        raise ValueError("io_threads must be >= 1")
-
     with open(path, "rb") as file:  # noqa: SIM115
         size = os.fstat(file.fileno()).st_size
         if size == 0:
@@ -294,19 +283,14 @@ def stream_shard_tensors(
         start, end = spec["data_offsets"]
         specs.append((len(specs), name, spec["dtype"], start, end))
     if not specs:
-        return
+        return []
 
     # The biggest tensor decides how big each thread's buffer has to be.
     max_nbytes = max(end - start for _, _, _, start, end in specs)
     capacity = max(buffer_capacity, max_nbytes)
 
     batches = _pack_batches(specs, capacity)
-    per_thread = _assign_batches(batches, io_threads)
-
-    if buffers is None:
-        buffers = [ThreadPinnedBuffer(capacity) for _ in range(io_threads)]
-    elif len(buffers) < io_threads:
-        raise ValueError(f"need {io_threads} buffers, got {len(buffers)}")
+    per_thread = _assign_batches(batches, slot.io_threads)
 
     ready: queue.SimpleQueue = queue.SimpleQueue()
     stop = threading.Event()
@@ -315,7 +299,7 @@ def stream_shard_tensors(
         thread_index: int,
         thread_batches: list[list[_TensorSpec]],
     ) -> None:
-        buffer = buffers[thread_index]
+        buffer = slot.buffers[thread_index]
         try:
             with open(path, "rb") as file:  # noqa: SIM115
                 fd = file.fileno()
@@ -345,7 +329,7 @@ def stream_shard_tensors(
             raise
 
     with ThreadPoolExecutor(
-        max_workers=io_threads, thread_name_prefix="safetensors-io"
+        max_workers=slot.io_threads, thread_name_prefix="safetensors-io"
     ) as pool:
         futures = [
             pool.submit(worker, index, thread_batches)
@@ -364,9 +348,26 @@ def stream_shard_tensors(
                     raise item
                 collected.extend(item)
             collected.sort(key=lambda item: item[0])
-            for _, name, view in collected:
-                yield name, view
+            return [(name, view) for _, name, view in collected]
         finally:
             stop.set()
             for future in futures:
                 future.cancel()
+
+
+def largest_tensor(path: str, keep: Callable[[str], bool]) -> int:
+    """The size in bytes of the biggest tensor *keep* accepts.
+
+    The IO threads' buffers have to be big enough for the biggest
+    tensor they will read, so this decides how much memory is pinned.
+    """
+    with open(path, "rb") as file:  # noqa: SIM115
+        size = os.fstat(file.fileno()).st_size
+        header, _ = read_safetensors_header(file.fileno(), size)
+    biggest = 0
+    for name, spec in header.items():
+        if name == "__metadata__" or not keep(name):
+            continue
+        start, end = spec["data_offsets"]
+        biggest = max(biggest, end - start)
+    return biggest
