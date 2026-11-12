@@ -106,8 +106,11 @@ from .utils import (
     EOS_TOKEN_ID,
     create_requests,
     create_scheduler,
+    full_layer,
     mock_kv,
     new_kv_cache_group,
+    new_mamba_layer,
+    new_mla_spec,
     new_sliding_window_layer,
 )
 
@@ -5597,7 +5600,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
     scheduler.aux_output_connector = None
-    scheduler.grammar_compile_error_reqs = {}
+    scheduler.request_errors = {}
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.dropped_streaming_updates = []
     scheduler.vllm_config = Mock()
@@ -9952,3 +9955,221 @@ def test_ec_eviction_published_when_no_tokens_are_scheduled():
     assert [call.args[0].events for call in publisher.publish.call_args_list] == [
         [ECRemoved(mm_hashes=["cached"], medium="GPU")]
     ]
+
+
+@pytest.mark.parametrize("reserve", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_kv_obligation_prevents_preemption(reserve: bool, async_scheduling: bool):
+    scheduler = create_scheduler(
+        max_num_seqs=3,
+        max_num_batched_tokens=64,
+        num_blocks=5,
+        block_size=16,
+        deterministic_kv_reserve=reserve,
+        async_scheduling=async_scheduling,
+    )
+    requests = create_requests(
+        num_requests=3, num_tokens=16, max_tokens=4, ignore_eos=True
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    for _ in range(20):
+        if not scheduler.has_unfinished_requests():
+            break
+        step = scheduler.schedule()
+        request_ids = list(step.num_scheduled_tokens)
+        assert request_ids, "A request must make progress under KV pressure"
+        scheduler.update_from_output(
+            step,
+            ModelRunnerOutput(
+                req_ids=request_ids, sampled_token_ids=[[0] for _ in request_ids]
+            ),
+        )
+
+    assert not scheduler.has_unfinished_requests()
+    assert all(request.num_output_tokens == 4 for request in requests)
+    assert any(request.num_preemptions for request in requests) is not reserve
+
+
+def test_kv_obligation_rejects_request_that_cannot_fit():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=64,
+        num_blocks=3,
+        block_size=16,
+        deterministic_kv_reserve=True,
+    )
+    (oversized,) = create_requests(
+        num_requests=1, num_tokens=17, max_tokens=17, req_ids=["oversized"]
+    )
+    (fits,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=3, req_ids=["fits"]
+    )
+    scheduler.add_request(oversized)
+    scheduler.add_request(fits)
+
+    step = scheduler.schedule()
+    assert list(step.num_scheduled_tokens) == [fits.request_id]
+    assert oversized not in scheduler.waiting
+    outputs = scheduler.update_from_output(
+        step,
+        ModelRunnerOutput(req_ids=[fits.request_id], sampled_token_ids=[[0]]),
+    )
+    (rejected,) = [
+        output
+        for output in outputs[oversized.client_index].outputs
+        if output.request_id == oversized.request_id
+    ]
+    assert rejected.finish_reason == FinishReason.ERROR
+    assert rejected.error is not None
+    assert "require 3 KV blocks" in rejected.error.message
+
+
+def test_kv_obligation_rejected_request_not_requeued_async():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=64,
+        num_blocks=3,
+        block_size=16,
+        deterministic_kv_reserve=True,
+        async_scheduling=True,
+    )
+    (oversized,) = create_requests(
+        num_requests=1, num_tokens=17, max_tokens=17, req_ids=["oversized"]
+    )
+    scheduler.add_request(oversized)
+
+    step = scheduler.schedule()
+    assert step.total_num_scheduled_tokens == 0
+    assert oversized not in scheduler.waiting
+    assert not scheduler.has_requests()
+    assert oversized.request_id in scheduler.requests
+    assert oversized.request_id in scheduler.request_errors
+
+    outputs = scheduler.update_from_output(
+        step, ModelRunnerOutput(req_ids=[], sampled_token_ids=[])
+    )
+    (rejected,) = outputs[oversized.client_index].outputs
+    assert rejected.request_id == oversized.request_id
+    assert rejected.finish_reason == FinishReason.ERROR
+    assert not scheduler.has_unfinished_requests()
+    assert oversized.request_id not in scheduler.requests
+    assert not scheduler.request_errors
+
+
+def test_kv_obligation_with_prefix_caching_and_eviction():
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=128,
+        num_blocks=5,
+        block_size=16,
+        enable_prefix_caching=True,
+        deterministic_kv_reserve=True,
+    )
+    assert scheduler.kv_obligation is not None
+    # Seed prefix cache with a 2-block request (32 tokens + 1 output -> finishes).
+    seed = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=1, same_prompt=True, req_ids=["seed"]
+    )[0]
+    scheduler.add_request(seed)
+    step = scheduler.schedule()
+    assert list(step.num_scheduled_tokens) == ["seed"]
+    scheduler.update_from_output(
+        step, ModelRunnerOutput(req_ids=["seed"], sampled_token_ids=[[0]])
+    )
+    assert not scheduler.has_unfinished_requests()
+
+    # Submit two 16-token requests sharing block 0 plus 17-token decode obligation
+    # (3 total blocks per request) + one 16-token request needing 2 blocks.
+    # Usable blocks = 4 (block 0 is null block).
+    # req0 (3 blocks peak) runs first while cached tail block is evictable; req1 (3)
+    # must wait instead of preempting req0.
+    r0, r1 = create_requests(
+        num_requests=2,
+        num_tokens=16,
+        max_tokens=17,
+        same_prompt=True,
+        ignore_eos=True,
+        req_ids=["r0", "r1"],
+    )
+    scheduler.add_request(r0)
+    scheduler.add_request(r1)
+    for _ in range(40):
+        if not scheduler.has_unfinished_requests():
+            break
+        step = scheduler.schedule()
+        req_ids = list(step.num_scheduled_tokens)
+        assert req_ids
+        assert not (r0 in scheduler.running and r1 in scheduler.running)
+        scheduler.update_from_output(
+            step,
+            ModelRunnerOutput(
+                req_ids=req_ids, sampled_token_ids=[[0] for _ in req_ids]
+            ),
+        )
+
+    assert not scheduler.has_unfinished_requests()
+    assert r0.num_preemptions == 0
+    assert r1.num_preemptions == 0
+    assert r0.num_output_tokens == 17
+    assert r1.num_output_tokens == 17
+
+
+def test_kv_obligation_refuses_reset_prefix_cache_while_running():
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        num_blocks=5,
+        block_size=16,
+        enable_prefix_caching=True,
+        deterministic_kv_reserve=True,
+    )
+    (req,) = create_requests(
+        num_requests=1, num_tokens=16, max_tokens=2, ignore_eos=True, req_ids=["r_keep"]
+    )
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    assert list(step.num_scheduled_tokens) == ["r_keep"]
+    assert not scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert scheduler.running == [req]
+
+    for _ in range(2):
+        scheduler.update_from_output(
+            step, ModelRunnerOutput(req_ids=["r_keep"], sampled_token_ids=[[0]])
+        )
+        if scheduler.has_unfinished_requests():
+            step = scheduler.schedule()
+    assert not scheduler.has_unfinished_requests()
+    assert req.num_preemptions == 0
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+
+
+def test_kv_obligation_rejects_multi_group_and_sliding_window():
+    with pytest.raises(ValueError, match="one full-attention group"):
+        create_scheduler(
+            max_num_seqs=2,
+            max_num_batched_tokens=64,
+            num_blocks=8,
+            block_size=16,
+            mamba_layer_config=new_mamba_layer(),
+            deterministic_kv_reserve=True,
+        )
+
+    with pytest.raises(ValueError, match="one full-attention group"):
+        create_scheduler(
+            max_num_seqs=2,
+            max_num_batched_tokens=64,
+            num_blocks=8,
+            block_size=16,
+            kv_cache_layer_config=new_sliding_window_layer(sliding_window=32),
+            deterministic_kv_reserve=True,
+        )
+
+    with pytest.raises(ValueError, match="one full-attention group"):
+        create_scheduler(
+            max_num_seqs=2,
+            max_num_batched_tokens=64,
+            num_blocks=8,
+            block_size=16,
+            kv_cache_layer_config=full_layer(new_mla_spec()),
+            deterministic_kv_reserve=True,
+        )

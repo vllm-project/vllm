@@ -429,6 +429,7 @@ class KVCacheManager:
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        full_sequence_tokens: int | None = None,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -463,6 +464,8 @@ class KVCacheManager:
                 this step, controls whether watermark is applied.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
                 written by an async load and must not be zeroed concurrently.
+            full_sequence_tokens: If given, check this lifecycle length against
+                available blocks after subtracting existing reservations.
 
         Blocks layout:
         ```
@@ -567,9 +570,14 @@ class KVCacheManager:
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
 
         full_sequence_shortfall = 0
-        if full_sequence_must_fit:
+        if full_sequence_must_fit or full_sequence_tokens is not None:
             # First check whether the full request sequence fits.
-            full_num_tokens = min(request.num_tokens, self.max_model_len)
+            full_num_tokens = min(
+                full_sequence_tokens
+                if full_sequence_tokens is not None
+                else request.num_tokens,
+                self.max_model_len,
+            )
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
                 request_id=request.request_id,
@@ -583,6 +591,8 @@ class KVCacheManager:
                 prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
+            if full_sequence_tokens is not None:
+                required_blocks += reserved_blocks
             full_sequence_shortfall = (
                 required_blocks - self.block_pool.get_num_free_blocks()
             )

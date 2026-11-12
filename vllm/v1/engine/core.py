@@ -1007,6 +1007,24 @@ class EngineCore:
                         content.update(worker_dict)
                 kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
+    def _has_deterministic_kv_reservations(self) -> bool:
+        from vllm.v1.core.sched.kv_obligation import KVObligationAdmission
+
+        return isinstance(
+            getattr(self.scheduler, "kv_obligation", None),
+            KVObligationAdmission,
+        ) and bool(getattr(self.scheduler, "running", None))
+
+    def _validate_pause_for_kv_obligation(
+        self, mode: PauseMode, clear_cache: bool
+    ) -> None:
+        if mode == "keep" and clear_cache and self._has_deterministic_kv_reservations():
+            raise RuntimeError(
+                "Cannot reset KV cache while requests hold deterministic KV "
+                "reservations; drain or abort running requests, or pause with "
+                "clear_cache=False."
+            )
+
     def _reset_caches(
         self,
         reset_running_requests: bool = True,
@@ -1019,6 +1037,12 @@ class EngineCore:
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
         ):
+            if reset_running_requests and self._has_deterministic_kv_reservations():
+                raise RuntimeError(
+                    "Cannot reset KV cache while requests hold deterministic KV "
+                    "reservations; drain or abort running requests, or pause with "
+                    "clear_cache=False."
+                )
             raise RuntimeError("Failed to reset the KV connector cache.")
         self.reset_mm_cache()
         self.reset_encoder_cache()
@@ -1070,6 +1094,7 @@ class EngineCore:
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
+        self._validate_pause_for_kv_obligation(mode, clear_cache)
 
         if mode == "abort":
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
@@ -1865,6 +1890,8 @@ class EngineCoreProc(EngineCore):
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
+            if self.has_work() or not self.is_running():
+                break
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
@@ -2486,6 +2513,7 @@ class EngineCoreProc(EngineCore):
         """
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
+        self._validate_pause_for_kv_obligation(mode, clear_cache)
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             try:
@@ -2545,6 +2573,11 @@ class EngineCoreProc(EngineCore):
             return "Preparing for a checkpoint requires --enable-sleep-mode"
         if self.model_executor.is_sleeping:
             return "Preparing for a checkpoint requires an awake engine"
+        if mode == "keep" and self._has_deterministic_kv_reservations():
+            return (
+                "Cannot prepare a checkpoint with mode='keep' while requests hold "
+                "deterministic KV reservations"
+            )
         self._checkpoint_state = CheckpointState.PREPARING
         try:
             self.pause_generation(mode=mode, clear_cache=False)

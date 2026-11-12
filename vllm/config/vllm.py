@@ -3415,6 +3415,8 @@ class VllmConfig:
         unsupported = None
         if not current_platform.is_cuda_alike():
             unsupported = "it is only supported on CUDA and ROCm"
+        elif self.scheduler_config.deterministic_kv_reserve:
+            unsupported = "deterministic KV reserve requires a fixed-size pool"
         elif cache_config.kv_cache_memory_bytes is not None:
             unsupported = (
                 "it sizes the KV cache from measured memory, which "

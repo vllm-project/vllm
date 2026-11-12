@@ -47,6 +47,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.sched.kv_obligation import KVObligationAdmission
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -289,9 +290,8 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
-        # Grammar compilation failures to finish as per-request errors in
-        # update_from_output.
-        self.grammar_compile_error_reqs: dict[str, RequestError] = {}
+        # Waiting requests to finish with an error in update_from_output.
+        self.request_errors: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
         self._ec_metadata_resolver: PlaceholderMetadataResolver | None = None
 
@@ -408,6 +408,11 @@ class Scheduler(SchedulerInterface):
             cdiv(num_spec_decode_tokens, manager.block_size)
             for manager in self.kv_cache_manager.coordinator.single_type_managers
             if not isinstance(manager, MambaManager)
+        )
+        self.kv_obligation = (
+            KVObligationAdmission(vllm_config, self.kv_cache_manager)
+            if self.scheduler_config.deterministic_kv_reserve
+            else None
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
@@ -925,6 +930,9 @@ class Scheduler(SchedulerInterface):
                     ):
                         break
 
+                    if self.kv_obligation is not None:
+                        raise RuntimeError("A reserved request ran out of KV blocks.")
+
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
@@ -1089,6 +1097,12 @@ class Scheduler(SchedulerInterface):
             max_async_kv_loads = (
                 self.scheduler_config.max_async_kv_loads_per_step or float("inf")
             )
+            kv_obligation = self.kv_obligation
+            owed_blocks = (
+                sum(kv_obligation.owed_blocks(req) for req in self.running)
+                if kv_obligation is not None
+                else 0
+            )
             # Cleared once self.async_kv_waiting's head can't start a load.
             take_async_kv = True
             while True:
@@ -1121,6 +1135,18 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                full_sequence_tokens = None
+                if kv_obligation is not None:
+                    rejection_reason = kv_obligation.rejection_reason(request)
+                    if rejection_reason is not None:
+                        self.request_errors[request_id] = RequestError(
+                            code="validation_error", message=rejection_reason
+                        )
+                        request_queue.pop_request()
+                        self.deferred_waiting.discard(request)
+                        continue
+                    full_sequence_tokens = kv_obligation.peak_tokens(request)
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
@@ -1495,7 +1521,7 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks = 0
+                reserved_blocks = owed_blocks
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
@@ -1503,7 +1529,8 @@ class Scheduler(SchedulerInterface):
                     # plus its own spec decode step blocks, to avoid deadlock and
                     # predictable preemptions.
                     reserved_blocks = (
-                        self._inflight_prefill_reserved_blocks()
+                        owed_blocks
+                        + self._inflight_prefill_reserved_blocks()
                         + self._spec_decode_step_blocks
                     )
 
@@ -1525,6 +1552,7 @@ class Scheduler(SchedulerInterface):
                     ),
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                    full_sequence_tokens=full_sequence_tokens,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
                 )
@@ -1620,6 +1648,8 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
+                if kv_obligation is not None:
+                    owed_blocks += kv_obligation.owed_blocks(request)
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
@@ -2721,8 +2751,8 @@ class Scheduler(SchedulerInterface):
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
 
-        request_errors = self.grammar_compile_error_reqs
-        self.grammar_compile_error_reqs = {}
+        request_errors = self.request_errors
+        self.request_errors = {}
         error_req_ids = set(request_errors)
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()
@@ -3258,6 +3288,7 @@ class Scheduler(SchedulerInterface):
 
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
+            self.request_errors.pop(req_id, None)
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # Invalid request ID.
@@ -3488,6 +3519,8 @@ class Scheduler(SchedulerInterface):
         is no running requests taking KV cache.
         """
         if reset_running_requests:
+            if self.kv_obligation is not None and self.running:
+                return False
             # For logging.
             timestamp = time.monotonic()
             # Invalidate all the current running requests KV's by pushing them to
@@ -3865,7 +3898,7 @@ class Scheduler(SchedulerInterface):
             if not struct_output_req or struct_output_req.grammar is None:
                 return False
             if isinstance(struct_output_req.grammar, Exception):
-                self.grammar_compile_error_reqs[request.request_id] = RequestError(
+                self.request_errors[request.request_id] = RequestError(
                     code="validation_error",
                     message=f"Invalid structured outputs: {struct_output_req.grammar}",
                 )

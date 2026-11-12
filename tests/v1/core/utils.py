@@ -94,6 +94,7 @@ def create_scheduler(
     cache_aware_admission_window: int = 0,
     cache_aware_admission_threshold: float = 0.5,
     scheduling_policy: SchedulerPolicy = "fcfs",
+    deterministic_kv_reserve: bool = False,
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
@@ -152,6 +153,7 @@ def create_scheduler(
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
+        deterministic_kv_reserve=deterministic_kv_reserve,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

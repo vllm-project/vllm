@@ -228,6 +228,9 @@ class SchedulerConfig:
     and starting configuration.
     """
 
+    deterministic_kv_reserve: bool = False
+    """Reserve prompt and maximum output KV capacity for every admitted request."""
+
     scheduler_reserve_full_isl: bool = True
     """If True, the scheduler checks whether the full input sequence length
     fits in the KV cache before admitting a new request, rather than only
@@ -362,6 +365,7 @@ class SchedulerConfig:
             "scheduler_cls",
             "disable_hybrid_kv_cache_manager",
             "scheduler_reserve_full_isl",
+            "deterministic_kv_reserve",
             "watermark",
             "prefill_schedule_interval",
             "async_scheduling",
