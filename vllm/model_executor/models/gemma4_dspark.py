@@ -231,6 +231,12 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         self._rms_norm_eps = attn0.q_norm.variance_epsilon
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        modules: list[nn.Module] = [self.fc, self.hidden_norm, *self._attn_layers]
+        if self._fused_k_weight is None:
+            modules.extend(self._context_k_projs)
+        return modules
+
     def _build_context_kv_buffers(
         self, layers_attn: list[nn.Module], has_bias: bool
     ) -> None:
