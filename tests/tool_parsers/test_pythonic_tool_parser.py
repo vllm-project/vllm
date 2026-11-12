@@ -60,7 +60,7 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 )
 RESERVED_KEYWORD_FUNCTION_OUTPUT = (
     'send_message(from="alice@example.com", in="inbox", class="urgent", '
-    'import=True, return=False, count=42)'
+    "import=True, return=False, count=42)"
 )
 RESERVED_KEYWORD_FUNCTION_CALL = FunctionCall(
     name="send_message",
@@ -213,10 +213,12 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
         default_tokenizer
     )
     model_output_deltas = [
-        "[get_weather(city='San",
-        " Francisco', metric='celsius'), "
-        f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
-        f"{EMPTY_LIST_FUNCTION_OUTPUT}]",
+        (
+            "[get_weather(city='San"
+            " Francisco', metric='celsius'), "
+            f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
+            f"{EMPTY_LIST_FUNCTION_OUTPUT}]"
+        ),
     ]
 
     reconstructor = run_tool_extraction_streaming(
