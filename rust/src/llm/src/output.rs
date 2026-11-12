@@ -261,7 +261,7 @@ impl GenerateOutput {
         }
         if let Some(next_mask) = next.sampling_mask {
             match &mut self.sampling_mask {
-                Some(mask) => mask.rows.extend(next_mask.rows),
+                Some(mask) => mask.append(next_mask),
                 None => self.sampling_mask = Some(next_mask),
             }
         }
@@ -529,8 +529,8 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                             existing.logprobs = Some(step_logprobs);
                         }
                     }
-                    if let Some(mut mask) = sampling_mask {
-                        existing.sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+                    if let Some(mask) = sampling_mask {
+                        existing.sampling_mask.get_or_insert_default().append(mask);
                     }
                 } else {
                     collected = Some(CollectedGenerateOutput {

@@ -16,7 +16,10 @@ from vllm.v1.outputs import (
     SamplingMaskLists,
 )
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import (
+    SamplingMaskTensors,
+    SamplingSupportTensors,
+)
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -89,6 +92,17 @@ def test_sampling_mask_lists_slices_multiple_positions_by_request():
     assert single.offsets is None
     assert multi.to_nested_list() == [[20], [30, 31, 32]]
     assert multi.cu_num_generated_tokens is None
+
+
+def test_sampling_mask_lists_keep_logprobs_aligned_on_request_slice():
+    mask = SamplingMaskLists(
+        token_ids=np.array([10, 11, 20]),
+        offsets=np.array([0, 2, 3]),
+        logprobs=np.array([-0.3, -1.4, 0.0]),
+    )
+    sliced = mask.slice_request(1, 1)
+    assert sliced.token_ids.tolist() == [20]
+    assert sliced.logprobs.tolist() == [0.0]
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
@@ -196,6 +210,123 @@ def test_sampling_mask_tensors_multirow_request_layout():
     assert tensors.rows_per_request == rows_per_request
     assert result.to_nested_list() == expected
     assert result.cu_num_generated_tokens == [0, 1, 3, 7, 7]
+
+
+def _capture_support(logits, num_sampled, cu_num_logits=None, rows_per_request=1):
+    if cu_num_logits is None:
+        cu_num_logits = list(range(len(num_sampled) + 1))
+    tensors = SamplingSupportTensors.from_logits(
+        logits.to(DEVICE_TYPE),
+        torch.tensor(cu_num_logits, device=DEVICE_TYPE, dtype=torch.int32),
+        torch.tensor(num_sampled, device=DEVICE_TYPE, dtype=torch.int32),
+        rows_per_request,
+    ).to_cpu_nonblocking()
+    # The engine waits for the step's copy event before reading the counts.
+    torch.accelerator.synchronize()
+    return tensors.tolists(np.asarray(num_sampled))
+
+
+def _assert_rows_match(result, logits, rows):
+    """Each result row is the finite support of a logits row, with its
+    log-softmax."""
+    assert len(result.offsets) == len(rows) + 1
+    for i, row in enumerate(rows):
+        start, end = result.offsets[i : i + 2]
+        if row is None:
+            assert start == end
+            continue
+        expected_ids = torch.isfinite(logits[row]).nonzero().flatten()
+        assert result.token_ids[start:end].tolist() == expected_ids.tolist()
+        torch.testing.assert_close(
+            torch.from_numpy(result.logprobs[start:end]),
+            torch.log_softmax(logits[row], dim=-1)[expected_ids],
+        )
+
+
+def test_sampling_support_matches_processed_distribution():
+    """Paired logprobs are the log-softmax over the processed logits (i.e.
+    normalized over the nucleus), aligned with the support ids."""
+    logits = torch.tensor([[6.0, 5.0, 4.0, 3.0, 2.0, 1.0]], device=DEVICE_TYPE)
+    processed = apply_top_k_top_p(
+        logits,
+        k=torch.tensor([5], device=DEVICE_TYPE),
+        p=torch.tensor([0.9], device=DEVICE_TYPE),
+    ).cpu()
+
+    result = _capture_support(processed, [1])
+
+    _assert_rows_match(result, processed, [0])
+    assert 0 < len(result.token_ids) < 5
+    assert np.exp(result.logprobs).sum() == pytest.approx(1.0)
+
+
+def test_sampling_support_packs_rows_of_any_width():
+    """Rows from empty to wider than the compact mask stay complete, and
+    requests that commit nothing take no entries."""
+    from vllm.v1.worker.gpu.sample.output import MAX_COMPACT_SUPPORT
+
+    vocab_size = 10_000
+    support_sizes = [7, 0, 1, MAX_COMPACT_SUPPORT + 1, vocab_size, 40]
+    num_sampled = [0, 1, 1, 1, 1, 1]
+    logits = torch.full((len(support_sizes), vocab_size), float("-inf"))
+    generator = torch.Generator().manual_seed(0)
+    for row, size in enumerate(support_sizes):
+        token_ids = torch.randperm(vocab_size, generator=generator)[:size]
+        logits[row, token_ids] = torch.randn(size, generator=generator)
+
+    result = _capture_support(logits, num_sampled)
+
+    _assert_rows_match(result, logits, [None, None, 2, 3, 4, 5])
+    assert len(result.token_ids) == sum(support_sizes[1:])
+
+
+def test_sampling_support_preserves_top_k_boundary_ties():
+    """Keep every boundary-tie token together with its probability."""
+    processed_logits = torch.tensor(
+        [[6.0, 5.0, 4.0, 4.0, 4.0, float("-inf"), float("-inf"), float("-inf")]]
+    )
+
+    result = _capture_support(processed_logits, [1])
+
+    assert result.to_nested_list() == [[0, 1, 2, 3, 4]]
+    _assert_rows_match(result, processed_logits, [0])
+
+
+def test_sampling_support_multirow_request_layout():
+    """Speculative slots: a request owns its committed rows, in order."""
+    logits = torch.full((5, 8), float("-inf"))
+    for row, token_ids in enumerate([[0, 1], [2], [3, 4, 5], [6], [7, 0]]):
+        logits[row, token_ids] = torch.arange(len(token_ids), dtype=torch.float32)
+
+    # Request 0 has logits rows 0-1 and commits both; request 1 has rows 2-4
+    # and commits one.
+    result = _capture_support(
+        logits, [2, 1], cu_num_logits=[0, 2, 5], rows_per_request=3
+    )
+
+    assert result.cu_num_generated_tokens == [0, 2, 3]
+    _assert_rows_match(result, logits, [0, 1, 2])
+    assert result.slice_request(1, 1).token_ids.tolist() == [3, 4, 5]
+
+
+def test_sampling_support_cat_joins_chunks():
+    logits = torch.full((3, 8), float("-inf"))
+    for row, token_ids in enumerate([[0, 1], [2, 3, 4], [5]]):
+        logits[row, token_ids] = torch.arange(len(token_ids), dtype=torch.float32)
+    chunks = [
+        SamplingSupportTensors.from_logits(
+            logits[rows].to(DEVICE_TYPE),
+            torch.arange(len(rows) + 1, device=DEVICE_TYPE, dtype=torch.int32),
+            torch.ones(len(rows), device=DEVICE_TYPE, dtype=torch.int32),
+        )
+        for rows in ([0, 1], [2])
+    ]
+
+    tensors = SamplingSupportTensors.cat(chunks).to_cpu_nonblocking()
+    torch.accelerator.synchronize()
+    result = tensors.tolists()
+
+    _assert_rows_match(result, logits, [0, 1, 2])
 
 
 def test_sampling_mask_preserves_top_k_boundary_ties():

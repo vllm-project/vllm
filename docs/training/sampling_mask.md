@@ -61,8 +61,7 @@ With `stream=true`, each chunk carries the masks of the tokens it emits.
 | --- | --- |
 | `--return-sampling-mask` | Engine-level opt-in (disables FlashInfer sampler) |
 | `--logprobs-mode processed_logprobs` | Returned logprobs are normalized over the nucleus, not full vocab |
-| `temperature > 0` | Greedy has no truncated distribution |
-| `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
+| `temperature > 0` | Greedy has no truncated distribution. Not required of requests that set `return_aux_outputs=False` |
 
 Speculative decoding is supported; each emitted token gets the support of the
 target distribution at its position.
@@ -127,10 +126,10 @@ Each position then carries the sampled token's logprob and the top-128
 `(token_id, logprob)` pairs, normalized over the post-truncation support:
 
 ```json
-{"token": "token_id:11", "logprob": -0.757,
- "top_logprobs": [{"token": "token_id:11", "logprob": -0.757},
-                  {"token": "token_id:13", "logprob": -0.632},
-                  {"token": "token_id:0",  "logprob": -9999.0}, ...]}
+{"token_id": 11, "logprob": -0.757,
+ "top_logprobs": [{"token_id": 11, "logprob": -0.757},
+                  {"token_id": 13, "logprob": -0.632},
+                  {"token_id": 0,  "logprob": -9999.0}, ...]}
 ```
 
 - `--max-logprobs` defaults to 20; raise it to the requested `k`.
@@ -142,8 +141,26 @@ Each position then carries the sampled token's logprob and the top-128
   `return_tokens_as_token_ids`; `/inference/v1/generate` returns an integer
   `token_id` instead.
 
+## Optional sampling-support logprobs
+
+With `--return-sampling-mask --return-sampling-mask-logprobs`, token-generation
+choices also expose `sampling_mask_logprobs`, aligned element-for-element with
+`sampling_mask`. Scores are normalized over each committed token's actual
+post-processing support. This includes accepted speculative positions and
+streaming responses. Ordinary mask-only behavior remains unchanged.
+
+Pure top-p (`top_k=-1`) and top-k boundary ties are returned without
+truncation. Supports are packed on the GPU and only the kept entries are copied
+to the host, so the transport cost follows the support sizes. The device buffers
+are sized for the step's logits (`num_logits * vocab_size` IDs and scores).
+This optional exact-support feature is not required for ordinary top-k score
+centering.
+
 ## Limitations
 
 - **Engine-level flag:** `--return-sampling-mask` globally disables the
   FlashInfer fused sampler. All requests pay the cost of the PyTorch sampling
   path, even if they don't need the mask.
+- **Per-request opt-out:** a request with `return_aux_outputs=False` gets no
+  mask, and its support is not captured; see
+  [Routed Experts](routed_experts.md#return_aux_outputs).

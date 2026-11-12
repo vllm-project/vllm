@@ -78,6 +78,22 @@ pub(crate) fn decode_array1_u32(
     Ok(data)
 }
 
+pub(crate) fn decode_array1_f32(
+    value: WireNdArray,
+    field: &str,
+    frames: &[Bytes],
+) -> Result<Vec<f32>> {
+    let (shape, bytes, _, endianness) =
+        decode_array_metadata(value, field, frames, &[TensorDtype::F32])?;
+    if shape.len() != 1 {
+        return Err(decode_error(
+            field,
+            &format!("expected rank-1 array, got rank {}", shape.len()),
+        ));
+    }
+    decode_f32_vec(&bytes, endianness, field)
+}
+
 pub(super) fn decode_array2_f32(
     value: WireNdArray,
     field: &str,

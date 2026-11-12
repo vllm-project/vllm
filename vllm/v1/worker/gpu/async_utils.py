@@ -18,7 +18,11 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     PoolerOutput,
 )
-from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import (
+    SamplerOutput,
+    SamplingMaskTensors,
+    SamplingSupportTensors,
+)
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
@@ -153,7 +157,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
-            self.sampling_mask_tensors: SamplingMaskTensors | None = None
+            self.sampling_mask_tensors: (
+                SamplingMaskTensors | SamplingSupportTensors | None
+            ) = None
             if sampler_output.sampling_mask_tensors is not None:
                 self.sampling_mask_tensors = (
                     sampler_output.sampling_mask_tensors.to_cpu_nonblocking()

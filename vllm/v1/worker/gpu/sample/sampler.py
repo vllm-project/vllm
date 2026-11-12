@@ -17,6 +17,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     xpu_sample,
     xpu_sampler_supported,
 )
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
@@ -31,7 +32,11 @@ from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
 )
-from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import (
+    SamplerOutput,
+    SamplingMaskTensors,
+    SamplingSupportTensors,
+)
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
@@ -52,6 +57,7 @@ class Sampler:
         use_fp64_gumbel: bool = False,
         enable_trace_replay: bool = False,
         return_sampling_mask: bool = False,
+        return_sampling_mask_logprobs: bool = False,
         custom_logits_processors: Sequence[LogitsProcessor] = (),
     ):
         self.logprobs_mode = logprobs_mode
@@ -88,6 +94,9 @@ class Sampler:
         self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
+        self.return_sampling_mask_logprobs = return_sampling_mask_logprobs
+        # Requests that opt out of auxiliary outputs get no sampling mask.
+        self.returns_sampling_mask = UvaBackedTensor(max_num_reqs, dtype=torch.bool)
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
         )
@@ -108,6 +117,7 @@ class Sampler:
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
             self.trace_replay_state.add_request(req_idx, sampling_params)
+        self.returns_sampling_mask.np[req_idx] = sampling_params.return_aux_outputs
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -117,6 +127,41 @@ class Sampler:
         self.logprob_token_ids_state.apply_staged_writes()
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
+        if self.return_sampling_mask:
+            self.returns_sampling_mask.copy_to_uva()
+
+    def max_num_kept(self, idx_mapping_np: np.ndarray) -> int | None:
+        """Compact sampling-mask width for the given requests, or None when
+        none of them returns a mask."""
+        if not self.returns_sampling_mask.np[idx_mapping_np].any():
+            return None
+        # Size by the top_k batch max; wider supports use the bitmask.
+        return int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
+
+    def capture_sampling_mask(
+        self,
+        processed_logits: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        num_sampled: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        max_num_kept: int,
+        rows_per_request: int = 1,
+    ) -> SamplingMaskTensors | SamplingSupportTensors:
+        """Capture the supports of the requests that return a sampling mask."""
+        num_captured = torch.where(
+            self.returns_sampling_mask.gpu[idx_mapping], num_sampled, 0
+        )
+        if self.return_sampling_mask_logprobs:
+            return SamplingSupportTensors.from_logits(
+                processed_logits, cu_num_logits, num_captured, rows_per_request
+            )
+        return SamplingMaskTensors.from_logits(
+            processed_logits,
+            cu_num_logits,
+            num_captured,
+            max_num_kept,
+            rows_per_request,
+        )
 
     def get_logprobs_dims(self, idx_mapping_np: np.ndarray) -> tuple[int, int] | None:
         """(num_logprobs, max_per_req_token_ids) for the given requests, or
@@ -196,13 +241,15 @@ class Sampler:
         )
 
         sampling_mask_tensors = None
+        max_num_kept = None
         if self.return_sampling_mask:
-            # Size by the validated top_k batch max; wider supports use the bitmask.
-            max_num_kept = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
-            sampling_mask_tensors = SamplingMaskTensors.from_logits(
+            max_num_kept = self.max_num_kept(idx_mapping_np)
+        if max_num_kept is not None:
+            sampling_mask_tensors = self.capture_sampling_mask(
                 processed_logits,
                 input_batch.cu_num_logits,
                 num_sampled,
+                idx_mapping,
                 max_num_kept,
             )
 

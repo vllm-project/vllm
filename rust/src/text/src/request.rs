@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use enum_as_inner::EnumAsInner;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -33,6 +33,25 @@ pub fn normalize_top_k(value: i64) -> std::result::Result<Option<u32>, String> {
         value => Err(format!(
             "top_k must be -1, 0, or a positive integer, got {value}"
         )),
+    }
+}
+
+/// Deserialize a request `top_k` while preserving explicit disable.
+///
+/// Null remains `None` so model generation defaults apply. Explicit `-1` and
+/// `0` become `Some(0)` so the request overrides those defaults and disables
+/// top-k sampling. Positive limits are preserved.
+pub fn deserialize_request_top_k<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => normalize_top_k(value)
+            .map(|value| Some(value.unwrap_or(0)))
+            .map_err(serde::de::Error::custom),
     }
 }
 
@@ -78,6 +97,7 @@ pub struct SamplingParams {
     /// Cumulative probability threshold for nucleus sampling.
     pub top_p: Option<f32>,
     /// Maximum number of top tokens to consider. `Some(0)` means all tokens.
+    #[serde(deserialize_with = "deserialize_request_top_k")]
     pub top_k: Option<u32>,
     /// Random seed used by the sampler when present.
     pub seed: Option<i64>,
@@ -151,6 +171,10 @@ pub struct SamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// `None` returns routing for the whole prompt.
     pub routed_experts_prompt_start: Option<u32>,
+    /// Whether to record and return auxiliary outputs: routed experts,
+    /// sampling masks, sample logprobs and `logprob_token_ids`. `None`
+    /// returns them.
+    pub return_aux_outputs: Option<bool>,
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the
@@ -195,6 +219,7 @@ impl Default for SamplingParams {
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
+            return_aux_outputs: None,
             vllm_xargs: None,
             stream_interval: None,
         }
@@ -337,6 +362,27 @@ fn is_valid_cache_salt(salt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampling_params_preserve_explicit_top_k_disable() {
+        for (value, expected) in [
+            (serde_json::Value::Null, None),
+            (serde_json::json!(-1), Some(0)),
+            (serde_json::json!(0), Some(0)),
+            (serde_json::json!(32), Some(32)),
+        ] {
+            let params: SamplingParams =
+                serde_json::from_value(serde_json::json!({"top_k": value}))
+                    .expect("parse sampling params");
+            assert_eq!(params.top_k, expected);
+        }
+        for value in [-2i64, u32::MAX as i64 + 1] {
+            assert!(
+                serde_json::from_value::<SamplingParams>(serde_json::json!({"top_k": value}))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn validate_rejects_unsafe_cache_salt() {

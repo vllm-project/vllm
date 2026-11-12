@@ -17,7 +17,11 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
-from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import (
+    SamplerOutput,
+    SamplingMaskTensors,
+    SamplingSupportTensors,
+)
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
@@ -324,7 +328,7 @@ class RejectionSampler:
         torch.Tensor,
         torch.Tensor,
         LogprobsTensors | None,
-        SamplingMaskTensors | None,
+        SamplingMaskTensors | SamplingSupportTensors | None,
     ]:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
@@ -343,14 +347,10 @@ class RejectionSampler:
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
         logprobs_chunks: list[LogprobsTensors] = []
-        sampling_mask_chunks: list[SamplingMaskTensors] = []
+        sampling_mask_chunks: list[SamplingMaskTensors | SamplingSupportTensors] = []
         max_num_kept = None
         if self.sampler.return_sampling_mask:
-            max_num_kept = int(
-                np.max(
-                    self.sampler.sampling_states.top_k.np[input_batch.idx_mapping_np]
-                )
-            )
+            max_num_kept = self.sampler.max_num_kept(input_batch.idx_mapping_np)
 
         for start, end in request_chunks:
             lo = int(cu_num_logits_np[start])
@@ -383,10 +383,11 @@ class RejectionSampler:
                 logprobs_chunks.append(chunk_logprobs)
             if max_num_kept is not None:
                 sampling_mask_chunks.append(
-                    SamplingMaskTensors.from_logits(
+                    self.sampler.capture_sampling_mask(
                         processed_logits,
                         chunk_cu_num_logits,
                         num_sampled,
+                        input_batch.idx_mapping[start:end],
                         max_num_kept,
                         self.num_speculative_steps + 1,
                     )
@@ -420,7 +421,7 @@ class RejectionSampler:
         sampled = torch.cat(sampled_chunks)
         num_sampled = torch.cat(num_sampled_chunks)
         sampling_mask_tensors = (
-            SamplingMaskTensors.cat(sampling_mask_chunks)
+            type(sampling_mask_chunks[0]).cat(sampling_mask_chunks)  # type: ignore[arg-type]
             if sampling_mask_chunks
             else None
         )
