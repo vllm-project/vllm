@@ -4,8 +4,9 @@
 
 Every test matching a defect's patterns is marked ``xfail(strict=True)``: it
 fails today, and the PR that fixes the defect deletes the entry, so the same
-tests must then pass. Patterns are pytest node ids in which ``*`` matches any
-text; everything else, brackets included, is literal.
+tests must then pass. A defect whose failure depends on memory contents is
+marked non-strict instead. Patterns are pytest node ids in which ``*``
+matches any text; everything else, brackets included, is literal.
 """
 
 import re
@@ -18,6 +19,9 @@ import pytest
 class Defect:
     reason: str
     tests: tuple[str, ...]
+    # False only where the failure depends on memory contents and so does not
+    # show on every run.
+    strict: bool = True
 
 
 _FA = "tests/v1/attention/backends/rocm_aiter_fa/"
@@ -114,10 +118,19 @@ KNOWN_DEFECTS["zero-query-rows"] = Defect(
     "extend chunk planner and sliding-window gather give them context, "
     "adding chunks no real row needs.",
     (
-        _DISPATCH + "test_zero_query_rows_after_real_rows[*-decode-*]",
+        _DISPATCH + "test_zero_query_rows_after_real_rows[full-decode-kv-load]",
+        _DISPATCH + "test_zero_query_rows_after_real_rows[sliding-decode-*]",
         _BUILDER + "test_chunk_planner_skips_rows_without_queries[*-kv-load]",
         _BUILDER + "test_sliding_window_extend_skips_rows_without_queries[kv-load]",
     ),
+)
+
+KNOWN_DEFECTS["zero-query-rows-pad-decode"] = Defect(
+    "As zero-query-rows, for full-attention decode with seq_len-0 padding "
+    "rows: whether the stray write lands in the checked rows depends on what "
+    "the allocator left there, so the test passes on some runs.",
+    (_DISPATCH + "test_zero_query_rows_after_real_rows[full-decode-pad-seq0]",),
+    strict=False,
 )
 
 _MARKED = pytest.StashKey[bool]()
@@ -136,6 +149,8 @@ def mark_known_defects(items: list[pytest.Item]) -> None:
             continue
         for defect in KNOWN_DEFECTS.values():
             if any(_matches(item.nodeid, pattern) for pattern in defect.tests):
-                item.add_marker(pytest.mark.xfail(strict=True, reason=defect.reason))
+                item.add_marker(
+                    pytest.mark.xfail(strict=defect.strict, reason=defect.reason)
+                )
                 item.stash[_MARKED] = True
                 break
