@@ -15,10 +15,13 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from transformers import LlamaConfig, Qwen3NextConfig
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
@@ -39,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -83,6 +87,8 @@ def _mock_vllm_config(layout: str | None):
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.kv_cache_layout = layout
     config.attention_config.hisparse_config = None
+    config.model_config.is_hybrid = False
+    config.quant_config.has_layerwise_kv_cache.return_value = False
     return config
 
 
@@ -600,7 +606,91 @@ class TestSlidingWindowBucketCap:
         )
 
 
+@pytest.fixture
+def layerwise_config(tmp_path, request):
+    if getattr(request, "param", True):
+        hf_config = Qwen3NextConfig(
+            architectures=["Qwen3NextForCausalLM"],
+            num_hidden_layers=2,
+            layer_types=["linear_attention", "full_attention"],
+        )
+    else:
+        hf_config = LlamaConfig(architectures=["LlamaForCausalLM"], num_hidden_layers=2)
+    hf_config.save_pretrained(tmp_path)
+
+    class LayerwiseKVConfig(Fp8Config):
+        def has_layerwise_kv_cache(self):
+            return True
+
+    config = VllmConfig(
+        cache_config=CacheConfig(block_size=64, mamba_cache_mode="align"),
+        quant_config=LayerwiseKVConfig(),
+    )
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.model_config = ModelConfig(
+        model=str(tmp_path), max_model_len=64, skip_tokenizer_init=True
+    )
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    return config
+
+
 class TestDensePacking:
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.parametrize("layerwise_config", [False, True], indirect=True)
+    def test_layerwise_packing_preserves_exact_pages_and_capacity(
+        self, layerwise_config
+    ):
+        config = layerwise_config
+        fp8 = FullAttentionSpec(
+            block_size=64,
+            num_kv_heads=2,
+            head_size=128,
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        )
+        specs = {
+            "fp8": fp8,
+            "nvfp4": replace(
+                fp8,
+                kv_quant_mode=KVQuantMode.NVFP4,
+                num_head_slots=2 * fp8.num_kv_heads,
+                state_content_bytes=nvfp4_kv_cache_full_dim(128),
+            ),
+        }
+        attention_bytes = sum(spec.page_size_bytes for spec in specs.values())
+        if config.model_config.is_hybrid:
+            specs["mamba"] = MambaSpec(
+                block_size=64,
+                shapes=((20_000,),),
+                dtypes=(torch.bfloat16,),
+                mamba_cache_mode="align",
+            )
+            config.cache_config.kv_cache_layout = None
+            layout = resolve_kv_cache_layout(
+                config, [["LBHNC", "BLHNC"]], specs.values()
+            )
+            assert layout is KVCacheLayout.BLHNC
+
+        groups = get_kv_cache_groups(config, specs)
+        bytes_per_block = _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC)
+        padded_attention_bytes = 2 * fp8.page_size_bytes
+        assert bytes_per_block == attention_bytes
+        assert bytes_per_block < padded_attention_bytes
+        assert all(group.kv_cache_spec.block_size == 64 for group in groups)
+
+        available_memory = bytes_per_block * 32
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config, groups, available_memory
+        )
+        assert kv_cache_config.num_blocks == 32
+        assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (64, 64)
+        assert available_memory // padded_attention_bytes == 25
+
+        views = _bind(kv_cache_config, "BLHNC")
+        assert set(views) == set(specs)
+        for name, view in views.items():
+            assert view.shape[0] == 32, name
+
     def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
         assert _get_kv_cache_bytes_per_block(

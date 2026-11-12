@@ -556,26 +556,55 @@ def _make_gpu_ctx(
     )
 
 
-def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies():
-    mixer = _TestReplaySSMMixer()
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies(wrapped):
+    class ReplaySSMMixer(_TestReplaySSMMixer):
+        def get_state_shape(self):
+            conv = (8, 6) if is_conv_state_dim_first() else (6, 8)
+            return (conv, (1, 4, 4), (1, 20, 4), (1, 20), (1, 20, 4))
+
+    mixer = ReplaySSMMixer()
     spec = MambaSpec(
         block_size=16,
         shapes=mixer.get_state_shape(),
         dtypes=mixer.get_state_dtype(),
+        state_alignment=16,
+    )
+    name = "layers.0.mixer"
+    group_spec = (
+        UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={name: spec})
+        if wrapped
+        else spec
     )
     kv_config = KVCacheConfig(
         num_blocks=3,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["mixer"], spec)],
+        kv_cache_groups=[KVCacheGroupSpec([name], group_spec)],
     )
     cfg = _TestConfig(num_layers=1, max_num_reqs=2)
     device = torch.device("cpu")
+    mixer.bind_kv_cache(torch.zeros((3, 1, 1, spec.page_size_bytes), dtype=torch.int8))
+    mixer.A = -torch.ones(1)
+    mixer.replayssm_buffer_len = 16
+    forward_context = {name: mixer}
+    initialize_replayssm_ring_trackers(kv_config, forward_context)
     canonical = _make_copy_bufs(cfg, kv_config, device)
-    replay = _make_gpu_ctx(cfg, kv_config, device, {"mixer": mixer})
+    replay = _make_gpu_ctx(cfg, kv_config, device, forward_context)
+    block_table = torch.zeros((cfg.max_num_reqs, 2), dtype=torch.int32)
+    replay.initialize_from_forward_context(
+        kv_config, forward_context, _COPY_FUNCS, [block_table]
+    )
 
     assert canonical.src_ptrs.cpu.numel() == cfg.max_num_reqs * 2
     assert replay.num_states == 5
     assert replay.state_base_addrs.numel() == 5
+    assert replay.is_initialized
+    assert replay.replayssm is not None
+    assert replay.replayssm.mixers == [mixer]
+    assert replay.replayssm.mamba_block_size == spec.block_size
+    assert replay.state_base_addrs.tolist() == [
+        _reinterpret_u64_as_i64(state.data_ptr()) for state in mixer.kv_cache
+    ]
     assert _COPY_FUNCS[MambaAttentionBackendEnum.MAMBA2] == _DEFAULT_COPY_FUNCS
 
 
