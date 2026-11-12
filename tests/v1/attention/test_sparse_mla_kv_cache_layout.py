@@ -90,7 +90,7 @@ def test_allocation_and_warmup_follow_addressing_mode(
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
     spec = customize_attention_spec(
-        backend, MLAAttention.get_kv_cache_spec(layer, config)
+        backend, MLAAttention.get_kv_cache_spec(layer, config), "layer.0"
     )
     indexer = SimpleNamespace(
         cache_config=config.cache_config, head_dim=132, dtype=torch.uint8

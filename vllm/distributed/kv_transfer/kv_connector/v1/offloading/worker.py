@@ -102,6 +102,18 @@ class OffloadingConnectorWorker:
                 )
                 ref = group_kernel_blocks(kv_caches[layer_name], num_blocks)
                 page = layer_kv_cache_spec.page_size_bytes
+                # A padded page split into kernel blocks spreads its padding
+                # over them, but offloading copies the payload from page start.
+                if (
+                    isinstance(layer_kv_cache_spec, AttentionSpec)
+                    and page > layer_kv_cache_spec.unpadded_page_size_bytes
+                    and kv_caches[layer_name].shape[0] != num_blocks
+                ):
+                    raise NotImplementedError(
+                        "KV offloading does not support padded KV pages split "
+                        f"into kernel blocks (layer {layer_name}). Use an "
+                        "attention backend that takes the full block size."
+                    )
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size
                 # Packed layouts (e.g. DSv4) interleave layers per block, so the

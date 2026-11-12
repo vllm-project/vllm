@@ -149,7 +149,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             if isinstance(spec, AttentionSpec):
-                spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
+                spec = customize_attention_spec(
+                    attn_module.get_attn_backend(), spec, layer_name
+                )
             if attn_module.is_draft_layer:
                 spec = replace(spec, is_draft=True)
             kv_cache_spec[layer_name] = spec

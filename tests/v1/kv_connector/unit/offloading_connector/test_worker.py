@@ -669,6 +669,48 @@ def test_register_packed_kv_caches_skips_scratch_group():
     assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, 2 * page)]]
 
 
+def test_register_split_padded_pages_raises():
+    """Offloading reads each page's payload from its start, which a padded page
+    split into kernel blocks does not keep: its padding sits after every
+    kernel block."""
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    unpadded = FullAttentionSpec(
+        block_size=4 * BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    ).page_size_bytes
+    spec = FullAttentionSpec(
+        block_size=4 * BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+        page_size_padded=unpadded + 4 * 64,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes * NUM_BLOCKS,
+                layers=["layer0"],
+                layer_stride=spec.page_size_bytes * NUM_BLOCKS,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+    )
+    kv_caches = allocate_kv_cache(
+        kv_cache_config,
+        torch.device(f"{DEVICE_TYPE}:0"),
+        KVCacheLayout.LBNHC,
+        [BLOCK_SIZE],
+    )
+    worker, _ = _make_worker(kv_cache_config)
+    with pytest.raises(NotImplementedError, match="split into kernel blocks"):
+        worker.register_kv_caches(kv_caches)
+
+
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
 def test_register_kv_caches_uniform_type(backend):
     """Test register_kv_caches with UniformTypeKVCacheSpecs.

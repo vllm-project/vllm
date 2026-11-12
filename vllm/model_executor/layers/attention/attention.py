@@ -105,6 +105,7 @@ def _largest_kernel_block_within(
     fallback: int,
     kv_cache_spec: KVCacheSpec | None = None,
     divisor_of: int | None = None,
+    layer_name: str | None = None,
 ) -> int:
     """Largest supported kernel block size whose page fits in `page_budget`.
 
@@ -119,7 +120,13 @@ def _largest_kernel_block_within(
     """
     from vllm.v1.attention.backend import MultipleOf
 
-    sizes = attn_backend.get_supported_kernel_block_sizes(kv_cache_spec)
+    sizes = (
+        attn_backend.get_supported_kernel_block_sizes(kv_cache_spec)
+        if layer_name is None
+        else attn_backend.get_supported_kernel_block_sizes_for_layers(
+            kv_cache_spec, [layer_name]
+        )
+    )
     max_block_size = page_budget // per_token_bytes
     candidates = [s for s in sizes if isinstance(s, int)]
     candidates.extend(
@@ -690,6 +697,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 kv_cache_spec,
                 divisor_of=None if shared_page else block_size,
+                layer_name=self.layer_name,
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
