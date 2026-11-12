@@ -610,6 +610,27 @@ def test_bench_packed_kv_blocks():
     assert (storage[:, 1] == 1).all()
 
 
+def test_padded_page_spreads_kernel_blocks():
+    """A padded page's kernel blocks sit evenly spaced, and its manager block
+    spans all of them."""
+    spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+        tokens_per_state=4,
+        page_size_padded=4 * 48,
+    )
+    group = AttentionGroup(CPUMLABackend, ["cache"], spec, 0, kernel_block_size=4)
+    storage = torch.arange(4 * 60.0).view(4, 60)
+    manager_view = storage.as_strided((4, 1, 4, 8), (60, 32, 8, 1))
+    kernel_view = group.map_kv_cache_to_kernel_blocks(manager_view)
+    assert kernel_view[:, 0, 0, 0].tolist() == list(range(0, 4 * 60 - 12, 12))
+    manager_view = group.map_kv_cache_to_manager_blocks(kernel_view, 4)
+    assert manager_view[:, 0, 0, 0].tolist() == [0, 60, 120, 180]
+    assert manager_view[0].numel() >= 3 * 12 + 8
+
+
 def test_bench_speculative_mamba_blocks():
     """Verify requests own and restore every recurrent scratch state."""
     spec = MambaSpec(

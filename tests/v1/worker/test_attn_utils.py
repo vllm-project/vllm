@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -58,17 +59,18 @@ from vllm.v1.worker.utils import (
 
 
 @pytest.mark.parametrize(
-    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected"),
+    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
     [
-        (True, 256, [64], [64], 64),
-        (True, 64, [32, 64], [16, 32], 32),
-        (True, 64, [MultipleOf(16)], [32], 32),
-        (True, 64, [64], [32], None),
-        (False, 256, [64], [64], 256),
+        (True, 256, [64], [64], 64, 64),
+        (True, 64, [32, 64], [16, 32], 32, 32),
+        (True, 64, [MultipleOf(16)], [32], 32, 32),
+        (True, 64, [64], [32], None, None),
+        (False, 256, [64], [64], 256, 256),
+        (True, 384, [MultipleOf(32)], [128, 256], 128, 256),
     ],
 )
 def test_get_kv_cache_spec_resolves_hisparse_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected
+    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected, indexer
 ):
     """Resolve shared MLA geometry before planning; leave other specs alone."""
     specs = {
@@ -103,6 +105,15 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     monkeypatch.setattr(
         attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
     )
+    mamba_fit_inputs: list[dict[str, KVCacheSpec]] = []
+
+    def fit_mamba_blocks(_, kv_cache_spec, __):
+        mamba_fit_inputs.append(kv_cache_spec)
+        return kv_cache_spec
+
+    monkeypatch.setattr(
+        attn_utils_module, "fit_mamba_blocks_to_attention", fit_mamba_blocks
+    )
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
     )
@@ -112,7 +123,11 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         return
 
     resolved = attn_utils.get_kv_cache_spec(config)
-    assert resolved["main"].block_size == resolved["indexer"].block_size == expected
+    assert resolved["main"].block_size == expected
+    assert resolved["indexer"].block_size == indexer
+    assert [specs["indexer"].block_size for specs in mamba_fit_inputs] == (
+        [indexer] if enabled else []
+    )
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
