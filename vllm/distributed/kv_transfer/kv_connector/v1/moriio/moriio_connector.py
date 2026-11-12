@@ -3,7 +3,9 @@
 import contextlib
 import logging
 import math
+import os
 import queue
+import re
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -3219,10 +3221,16 @@ class MoRIIOConnectorWorker:
         """
         if any(self._is_post_failure_status(status) for status in statuses):
             return False
-        return (
-            self.moriio_config.backend == "xgmi"
-            or self.moriio_config.qp_per_transfer == 1
-        )
+        return self.moriio_config.backend == "xgmi" or self._qp_per_transfer == 1
+
+    @property
+    def _qp_per_transfer(self) -> int:
+        """QPs per transfer as MoRI-IO runs them: MORI_IO_QP_PER_TRANSFER, when
+        it parses as a positive integer, overrides the configured value."""
+        raw = os.environ.get("MORI_IO_QP_PER_TRANSFER", "")
+        if re.fullmatch(r"\s*[+-]?\d+", raw) and int(raw) > 0:
+            return int(raw)
+        return self.moriio_config.qp_per_transfer
 
     @staticmethod
     def _is_post_failure_status(status) -> bool:

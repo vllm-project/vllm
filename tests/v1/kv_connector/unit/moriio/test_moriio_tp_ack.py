@@ -531,6 +531,44 @@ def test_terminal_read_failure_fails_the_step_only_while_dma_may_continue(
     assert worker._reads_issued_this_step == []
 
 
+@pytest.mark.parametrize(
+    ("env", "config_qps", "fails_step"),
+    [
+        ("4", 1, True),  # MoRI-IO runs 4 QPs whatever the config says
+        (" +4", 1, True),
+        ("1", 4, False),
+        ("4x", 1, False),  # invalid: MoRI-IO keeps the config value
+        ("0", 1, False),
+    ],
+)
+def test_read_failure_gate_uses_the_qp_count_mori_runs(
+    monkeypatch, env, config_qps, fails_step
+):
+    """MORI_IO_QP_PER_TRANSFER overrides qp_per_transfer inside MoRI-IO, so the
+    gate must count the QPs MoRI-IO actually runs."""
+
+    class FailingWrapper:
+        def waiting_for_transfer_complete(self, _statuses, fail_fast=True):
+            raise TransferError("failed")
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setenv("MORI_IO_QP_PER_TRANSFER", env)
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = True
+    worker._single_kv_cache_group = False
+    worker.moriio_config = SimpleNamespace(backend="rdma", qp_per_transfer=config_qps)
+    worker._reads_issued_this_step = [_ReadStatus("failed", _COMPLETION_ERROR)]
+    worker.moriio_wrapper = FailingWrapper()
+
+    if fails_step:
+        with pytest.raises(TransferError, match="failed"):
+            worker._await_reads_issued_this_step()
+    else:
+        worker._await_reads_issued_this_step()
+
+
 def test_step_barrier_awaits_every_read_before_forward():
     class RecordingWrapper:
         def __init__(self):
