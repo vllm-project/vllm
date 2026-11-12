@@ -1924,8 +1924,7 @@ class SupportsEncoderCudaGraph(Protocol):
         specified by the user.
         """
         # Min: about one small image (224x224, patch_size=14, 2x2 merge ->
-        # 64 tokens). It also caps the auto-inferred max_batch_size at 64,
-        # since max_batch_size <= min_budget.
+        # 64 tokens).
         return (
             64,
             min(
