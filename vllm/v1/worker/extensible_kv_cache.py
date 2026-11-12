@@ -59,8 +59,12 @@ logger = init_logger(__name__)
 # first prefill of an 8B model needed over 25% beyond its allocated peak before
 # the allocator could serve it, and adversarial workloads reached up to 45%.
 # ROCr also maps kernel scratch outside the allocator when a kernel first needs
-# it, so ROCm keeps a larger floor.
-KV_CACHE_MARGIN_FLOOR_BYTES = (3 if current_platform.is_rocm() else 1) << 30
+# it. On CUDA, large per-call workspaces fragment the allocator: on 8xH200,
+# Qwen3.5-397B-A17B-FP8 (TP8+EP) measured a 1.59 GiB peak, then its first
+# 8192-token step had 1.50 GiB reserved but unallocated and could not fit the
+# 1.26 GiB FlashInfer CUTLASS MoE workspace under a 1 GiB floor. Both
+# platforms keep 3 GiB.
+KV_CACHE_MARGIN_FLOOR_BYTES = 3 << 30
 KV_CACHE_MARGIN_FRACTION = 0.75
 # Part of the margin kept for allocations outside torch's caching allocator
 # (kernel scratch, NCCL/RCCL buffers, lazily loaded code objects); the
