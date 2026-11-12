@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar, cast
 
 import torch
@@ -41,6 +41,10 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+    SharedMooncakeTransferEngine,
+    get_shared_transfer_engine,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
@@ -747,6 +751,42 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
         return puts
 
+    def _check_keys_exist(self, req_id: str, keys: list[str]) -> list[int] | None:
+        start = time.perf_counter()
+        try:
+            results = self.store.batch_is_exist(keys)
+        except Exception as e:
+            self._record_operation(
+                "save_exists",
+                start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.warning(
+                "Mooncake existence check failed for request %s: %s", req_id, e
+            )
+            return None
+
+        failed = [result for result in results if result < 0]
+        status = "ok"
+        if failed:
+            status = "error" if len(failed) == len(keys) else "partial_failure"
+        self._record_operation(
+            "save_exists", start, len(keys), status=status, num_failed_keys=len(failed)
+        )
+        if failed:
+            logger.warning(
+                "Mooncake existence check failed for request %s: "
+                "%d/%d keys failed (codes=%s)",
+                req_id,
+                len(failed),
+                len(keys),
+                set(failed),
+            )
+            return None
+        return results
+
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist this job's boundary puts, deduped against the store.
 
@@ -775,24 +815,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if self.enable_group_semantics and self.supports_group_ids
             else None
         )
-        exists_start = time.perf_counter()
-        try:
-            exists = self.store.batch_is_exist(keys)
-        except Exception as e:
-            self._record_operation(
-                "save_exists",
-                exists_start,
-                len(keys),
-                status="error",
-                num_failed_keys=len(keys),
-            )
-            logger.error(
-                "Failed to check boundary-state keys for request %s: %s",
-                req_meta.req_id,
-                e,
-            )
+        exists = self._check_keys_exist(req_meta.req_id, keys)
+        if exists is None:
             return False
-        self._record_operation("save_exists", exists_start, len(keys))
         missing = [i for i, e in enumerate(exists) if e != 1]
         if not missing:
             return True
@@ -981,23 +1006,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             # Check which blocks already exist (dedup)
-            save_exists_start = time.perf_counter()
-            try:
-                exists_states = self.store.batch_is_exist(keys)
-            except Exception:
-                self._record_operation(
-                    "save_exists",
-                    save_exists_start,
-                    len(keys),
-                    status="error",
-                    num_failed_keys=len(keys),
-                )
-                raise
-            self._record_operation(
-                "save_exists",
-                save_exists_start,
-                len(keys),
-            )
+            exists_states = self._check_keys_exist(req_id, keys)
+            if exists_states is None:
+                return
             missing_indices = [
                 i for i, exists in enumerate(exists_states) if exists != 1
             ]
@@ -1494,8 +1505,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 # ============================================================
 
 
+def _reused_transfer_engine() -> SharedMooncakeTransferEngine:
+    """Return the PD TransferEngine this store client should attach to."""
+    shared = get_shared_transfer_engine()
+    if shared is None:
+        raise RuntimeError(
+            "reuse_pd_transfer_engine is set, but this process has no "
+            "MooncakeConnector TransferEngine. List MooncakeConnector before "
+            "MooncakeStoreConnector in MultiConnector."
+        )
+    return shared
+
+
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
+
+    # Bare workers built with __new__ in tests read this default.
+    _reuse_pd_transfer_engine: bool = False
 
     @staticmethod
     def _create_mem_pool(
@@ -1593,16 +1619,36 @@ class MooncakeStoreWorker:
 
         self.num_kv_head = model_config.get_total_num_kv_heads()
 
-        # Initialize MooncakeDistributedStore with its own TransferEngine
+        # Initialize MooncakeDistributedStore. reuse_pd_transfer_engine attaches
+        # this client to the MooncakeConnector TransferEngine in this process
+        # instead of creating a second one inside setup().
         store_config = MooncakeStoreConfig.load_from_config()
         # Validate and create the custom memory pool before initializing the
         # store so failures cannot leak a partially initialized store handle.
         self._mem_pool = self._create_mem_pool(extra_config, model_config)
+        self._reuse_pd_transfer_engine = (
+            extra_config.get("reuse_pd_transfer_engine") is True
+        )
+        shared_engine: Any | None = None
+        if self._reuse_pd_transfer_engine:
+            shared = _reused_transfer_engine()
+            shared_engine = shared.engine.get_engine()
+            local_hostname = f"{shared.hostname}:{shared.rpc_port}"
+            store_config = replace(
+                store_config, metadata_server="", protocol=shared.protocol
+            )
+            logger.info(
+                "Mooncake store reusing MooncakeConnector TransferEngine at %s (%s)",
+                local_hostname,
+                shared.protocol,
+            )
+        else:
+            local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
-        local_ip = get_ip()
-        local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
-        setup_mooncake_store(self.store, store_config, local_hostname)
+        setup_mooncake_store(
+            self.store, store_config, local_hostname, engine=shared_engine
+        )
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
@@ -2066,6 +2112,12 @@ class MooncakeStoreWorker:
 
         self.num_blocks = self._kv_cache_config.num_blocks
         use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
+        register_kv = not self._reuse_pd_transfer_engine
+        if not register_kv:
+            logger.info(
+                "Mooncake store skipping KV registration; "
+                "MooncakeConnector already registered the device buffers."
+            )
 
         if not use_group_regions:
             store_layer_names = {
@@ -2092,16 +2144,17 @@ class MooncakeStoreWorker:
                     continue
                 seen_storage_ptrs.add(base_addr)
                 region_len = cache_storage.nbytes()
-                ret = self.store.register_buffer(base_addr, region_len)
-                if ret != 0:
-                    logger.error(
-                        "register_buffer failed for addr %#x len %d: %d",
-                        base_addr,
-                        region_len,
-                        ret,
-                    )
-                else:
-                    self._device_regions[base_addr] = region_len
+                if register_kv:
+                    ret = self.store.register_buffer(base_addr, region_len)
+                    if ret != 0:
+                        logger.error(
+                            "register_buffer failed for addr %#x len %d: %d",
+                            base_addr,
+                            region_len,
+                            ret,
+                        )
+                    else:
+                        self._device_regions[base_addr] = region_len
             for group_id, (group, db) in enumerate(
                 zip(self._kv_cache_groups, self.token_dbs, strict=True)
             ):
@@ -2170,16 +2223,17 @@ class MooncakeStoreWorker:
 
                 registered_len = registered_buffers.get(base_addr)
                 if registered_len is None:
-                    ret = self.store.register_buffer(base_addr, region_len)
-                    if ret != 0:
-                        mem_kind = "host" if is_host_resident else "device"
-                        raise RuntimeError(
-                            "Mooncake register_buffer failed for addr "
-                            f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
-                        )
+                    if register_kv:
+                        ret = self.store.register_buffer(base_addr, region_len)
+                        if ret != 0:
+                            mem_kind = "host" if is_host_resident else "device"
+                            raise RuntimeError(
+                                "Mooncake register_buffer failed for addr "
+                                f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
+                            )
+                        if not is_host_resident:
+                            self._device_regions[base_addr] = region_len
                     registered_buffers[base_addr] = region_len
-                    if not is_host_resident:
-                        self._device_regions[base_addr] = region_len
                 elif registered_len != region_len:
                     raise ValueError(
                         f"KV cache views at {base_addr:#x} expose inconsistent "
@@ -2322,6 +2376,11 @@ class MooncakeStoreWorker:
         if self._capacity_only or not self.can_put:
             return
 
+        # A request may be re-admitted in the step reporting its preemption.
+        assert self.kv_send_thread is not None
+        for req_id in metadata.preempted_req_ids:
+            self.kv_send_thread.delete_finished_stored_request(req_id)
+
         current_event = None
         for request in metadata.requests:
             if request.can_save:
@@ -2333,7 +2392,6 @@ class MooncakeStoreWorker:
             if not request.can_save:
                 continue
             request.current_event = current_event
-            assert self.kv_send_thread is not None
             self.kv_send_thread.add_request(request)
 
     def get_finished(
@@ -2425,16 +2483,12 @@ class MooncakeStoreWorker:
         finished_req_ids: set[str],
         meta: MooncakeStoreConnectorMetadata,
     ) -> None:
-        """Retire the ledger entries of requests that finished or were preempted.
+        """Retire the ledger entries of finished requests.
 
         An entry may only go once its jobs have drained, because they still read
-        the resume offset it owns; a request that comes back after preemption
-        then saves from the start rather than from where the last attempt got to.
+        the resume offset it owns.
         """
         assert self.kv_send_thread is not None
-
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(req_id)
 
         pending_save_req_ids = {
             request.req_id for request in meta.requests if request.can_save
@@ -2664,9 +2718,12 @@ class MooncakeStoreWorker:
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
 
-        Closing the store frees its TransferEngine, the registered RDMA
-        buffers, and the connection to the master server. Idempotent so it is
-        safe to call from both the explicit shutdown path and `__del__`.
+        Closing the store frees a TransferEngine it created, the RDMA buffers
+        it registered, and the connection to the master server. An engine
+        borrowed from MooncakeConnector stays owned by that connector; closing
+        the store drops the store client's reference and unmounts the segments
+        the store itself mounted. Idempotent so it is safe to call from both
+        the explicit shutdown path and `__del__`.
         """
         store = getattr(self, "store", None)
         if store is None:
