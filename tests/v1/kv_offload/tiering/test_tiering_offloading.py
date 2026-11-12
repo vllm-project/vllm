@@ -2514,15 +2514,22 @@ class TestTieringOffloadingManagerWithFsTier:
 
     @staticmethod
     def _gate_fs_load_materialization(fs_tier, monkeypatch) -> threading.Event:
-        """Park the fs tier's next load before load_task runs: a gate task is
-        prepended in the thread pool so the job is in flight (wait_idle()
-        blocks on it) while materialize() has not happened yet. Release by
-        setting the returned event."""
+        """Hold back every task of the fs tier's next load job: each task
+        waits on the gate before running, so the job is in flight
+        (wait_idle() blocks on it) while load_task has not reached
+        materialize() yet. Release by setting the returned event."""
         load_gate = threading.Event()
         real_enqueue_load = fs_tier._pool.enqueue_load
 
         def gated_enqueue_load(job_id, n_tasks, tasks):
-            real_enqueue_load(job_id, n_tasks + 1, [load_gate.wait] + list(tasks))
+            def with_gate(task):
+                def run() -> None:
+                    load_gate.wait()
+                    task()
+
+                return run
+
+            real_enqueue_load(job_id, n_tasks, [with_gate(t) for t in tasks])
 
         monkeypatch.setattr(fs_tier._pool, "enqueue_load", gated_enqueue_load)
         return load_gate
