@@ -716,6 +716,7 @@ def owned_head_model(monkeypatch):
                 draft_load_config=None,
                 attention_backend=None,
                 kv_cache_dtype=None,
+                draft_lm_head_quantization=None,
             ),
             model_config=SimpleNamespace(
                 get_total_num_hidden_layers=lambda: 0,
@@ -799,6 +800,56 @@ def test_selected_lm_head_survives_dflash_and_lilicorr_sharing(
     if owned:
         target.lm_head = None
         assert spec.load_draft_model(target, set()).lm_head is own_head
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_draft_lm_head_quantization_quantizes_shared_target_head(
+    monkeypatch, owned_head_model, owned
+):
+    """Candidates read the quantized copy of the target head; an owned head
+    is not a copy of the target, so the option is rejected."""
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+    from vllm.v1.worker.gpu.spec_decode.dflash import utils as dflash_utils
+    from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
+    from vllm.v1.worker.gpu.spec_decode.lilicorr import speculator
+
+    model, config = owned_head_model(owned)
+    config.speculative_config.draft_lm_head_quantization = "nvfp4"
+    target_head = owned_head_model(False)[0].lm_head
+    embedding = VocabParallelEmbedding(64, 16)
+    target = SimpleNamespace(
+        model=SimpleNamespace(embed_tokens=embedding), lm_head=target_head
+    )
+    monkeypatch.setattr(
+        eagle_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1)
+    )
+    monkeypatch.setattr(
+        dflash_utils, "replace", lambda obj, **kw: SimpleNamespace(**(vars(obj) | kw))
+    )
+    monkeypatch.setattr(dflash_utils, "get_pp_safe_draft_load_config", lambda c: c)
+    monkeypatch.setattr(dflash_utils, "get_model", lambda **kw: model)
+    copies = []
+
+    def quantized_copy(lm_head, quantization):
+        copy = VocabParallelEmbedding(64, 16)
+        copies.append((lm_head, quantization, copy))
+        return copy
+
+    monkeypatch.setattr(speculator, "quantized_lm_head_copy", quantized_copy)
+    spec = LiLiCorrSpeculator.__new__(LiLiCorrSpeculator)
+    spec.vllm_config = config
+    if owned:
+        with pytest.raises(ValueError, match="shares the target lm_head"):
+            spec.load_draft_model(target, set())
+        assert not copies
+        return
+    assert spec.load_draft_model(target, set()) is model
+    [(source, quantization, copy)] = copies
+    assert source is target_head and quantization == "nvfp4"
+    assert model.lm_head is copy
+    assert target.lm_head is target_head
 
 
 def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch):
