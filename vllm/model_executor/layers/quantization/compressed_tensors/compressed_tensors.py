@@ -1271,7 +1271,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             2.0
             if current_platform.is_fp8_fnuz()
             and is_quantized_kv_cache(layer.kv_cache_dtype)
-            and self.quant_config.kv_cache_scheme is not None
+            and getattr(self.quant_config, "kv_cache_scheme", None) is not None
             else 1.0
         )
         q_loaded = bool((layer.q_scale > 0).all())
