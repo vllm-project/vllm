@@ -751,6 +751,42 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
         return puts
 
+    def _check_keys_exist(self, req_id: str, keys: list[str]) -> list[int] | None:
+        start = time.perf_counter()
+        try:
+            results = self.store.batch_is_exist(keys)
+        except Exception as e:
+            self._record_operation(
+                "save_exists",
+                start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.warning(
+                "Mooncake existence check failed for request %s: %s", req_id, e
+            )
+            return None
+
+        failed = [result for result in results if result < 0]
+        status = "ok"
+        if failed:
+            status = "error" if len(failed) == len(keys) else "partial_failure"
+        self._record_operation(
+            "save_exists", start, len(keys), status=status, num_failed_keys=len(failed)
+        )
+        if failed:
+            logger.warning(
+                "Mooncake existence check failed for request %s: "
+                "%d/%d keys failed (codes=%s)",
+                req_id,
+                len(failed),
+                len(keys),
+                set(failed),
+            )
+            return None
+        return results
+
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist this job's boundary puts, deduped against the store.
 
@@ -779,24 +815,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if self.enable_group_semantics and self.supports_group_ids
             else None
         )
-        exists_start = time.perf_counter()
-        try:
-            exists = self.store.batch_is_exist(keys)
-        except Exception as e:
-            self._record_operation(
-                "save_exists",
-                exists_start,
-                len(keys),
-                status="error",
-                num_failed_keys=len(keys),
-            )
-            logger.error(
-                "Failed to check boundary-state keys for request %s: %s",
-                req_meta.req_id,
-                e,
-            )
+        exists = self._check_keys_exist(req_meta.req_id, keys)
+        if exists is None:
             return False
-        self._record_operation("save_exists", exists_start, len(keys))
         missing = [i for i, e in enumerate(exists) if e != 1]
         if not missing:
             return True
@@ -985,23 +1006,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             # Check which blocks already exist (dedup)
-            save_exists_start = time.perf_counter()
-            try:
-                exists_states = self.store.batch_is_exist(keys)
-            except Exception:
-                self._record_operation(
-                    "save_exists",
-                    save_exists_start,
-                    len(keys),
-                    status="error",
-                    num_failed_keys=len(keys),
-                )
-                raise
-            self._record_operation(
-                "save_exists",
-                save_exists_start,
-                len(keys),
-            )
+            exists_states = self._check_keys_exist(req_id, keys)
+            if exists_states is None:
+                return
             missing_indices = [
                 i for i, exists in enumerate(exists_states) if exists != 1
             ]
@@ -2369,6 +2376,11 @@ class MooncakeStoreWorker:
         if self._capacity_only or not self.can_put:
             return
 
+        # A request may be re-admitted in the step reporting its preemption.
+        assert self.kv_send_thread is not None
+        for req_id in metadata.preempted_req_ids:
+            self.kv_send_thread.delete_finished_stored_request(req_id)
+
         current_event = None
         for request in metadata.requests:
             if request.can_save:
@@ -2380,7 +2392,6 @@ class MooncakeStoreWorker:
             if not request.can_save:
                 continue
             request.current_event = current_event
-            assert self.kv_send_thread is not None
             self.kv_send_thread.add_request(request)
 
     def get_finished(
@@ -2472,16 +2483,12 @@ class MooncakeStoreWorker:
         finished_req_ids: set[str],
         meta: MooncakeStoreConnectorMetadata,
     ) -> None:
-        """Retire the ledger entries of requests that finished or were preempted.
+        """Retire the ledger entries of finished requests.
 
         An entry may only go once its jobs have drained, because they still read
-        the resume offset it owns; a request that comes back after preemption
-        then saves from the start rather than from where the last attempt got to.
+        the resume offset it owns.
         """
         assert self.kv_send_thread is not None
-
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(req_id)
 
         pending_save_req_ids = {
             request.req_id for request in meta.requests if request.can_save
