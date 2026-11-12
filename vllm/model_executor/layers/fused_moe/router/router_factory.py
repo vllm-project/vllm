@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.router.cpu_router import CPURouter
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_gate_router import (
+    FusedGateRouter,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -66,6 +69,7 @@ def create_fused_moe_router(
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
     skip_padding: bool = False,
+    gate: torch.nn.Module | None = None,
 ) -> FusedMoERouter:
     """Factory function to create the appropriate FusedMoERouter subclass based on
     the provided parameters.
@@ -76,8 +80,8 @@ def create_fused_moe_router(
     3. GroupedTopKRouter - if use_grouped_topk is True and the grouped routing
        cannot fall through while preserving routing and scaling semantics
     4. CustomRoutingRouter - if custom_routing_function is not None
-    5. FusedTopKBiasRouter - if e_score_correction_bias or hash_indices_table
-       is not None
+    5. FusedGateRouter / FusedTopKBiasRouter - if e_score_correction_bias or
+       hash_indices_table is not None, using FusedGateRouter when a gate is provided
     6. AiterSharedRoutedFusedMoERouter - if num_fused_shared_experts > 0,
        scoring_func is softmax, and AITER shared-expert fusion is enabled
     7. FusedTopKRouter - default fallback
@@ -90,6 +94,7 @@ def create_fused_moe_router(
         top_k: Number of experts to select per token
         global_num_experts: Total number of experts in the model
         renormalize: Whether to renormalize the routing weights
+        gate: Gate projection available for fused routing
         routing_method_type: Optional explicit routing method type
 
     Grouped topk arguments:
@@ -227,7 +232,8 @@ def create_fused_moe_router(
             )
 
         elif e_score_correction_bias is not None or hash_indices_table is not None:
-            router = FusedTopKBiasRouter(
+            router_cls = FusedGateRouter if gate is not None else FusedTopKBiasRouter
+            router = router_cls(
                 top_k=top_k,
                 global_num_experts=global_num_experts,
                 eplb_state=eplb_state,
@@ -272,4 +278,5 @@ def create_fused_moe_router(
             kernel_routing_method_type=router.routing_method_type,
             eplb_state=eplb_state,
         )
+    router.set_gate(gate)
     return router
