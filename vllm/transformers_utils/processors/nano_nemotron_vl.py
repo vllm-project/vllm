@@ -764,8 +764,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 raise ValueError("device_resize requires mm_device_do_normalize=True")
             if not _cvcuda_available():
                 raise ValueError(
-                    "device_resize requires CUDA and CV-CUDA: install "
-                    "cvcuda-cu13 (CUDA 13) or cvcuda-cu12 (CUDA 12)"
+                    "device_resize requires CUDA and CV-CUDA: pip install vllm[cvcuda]"
                 )
             logger.info_once(
                 "Resizing Nemotron VL images and video frames on the GPU with "

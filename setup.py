@@ -1528,6 +1528,15 @@ def get_requirements() -> list[str]:
     return requirements
 
 
+def get_cvcuda_requirements() -> list[str]:
+    """CV-CUDA for Nemotron VL `device_resize`, built for this wheel's CUDA."""
+    if not _is_cuda():
+        return []
+    if torch.version.cuda.startswith("12."):
+        return ["cvcuda-cu12==0.19.0"]
+    return ["cvcuda-cu13==0.19.0"]
+
+
 def get_rocm_device_requirements() -> list[str]:
     """GPU kernel packages for TheRock builds.
 
@@ -1733,6 +1742,8 @@ setup(
         # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
         # only; also needs system GStreamer + libv4l (see docs).
         "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
+        # Nemotron VL image and video frame resize on the GPU (device_resize)
+        "cvcuda": get_cvcuda_requirements(),
         "flashinfer": [],  # Kept for backwards compatibility
         "b12x": ["b12x==1.5.1"],
         # Optional deps for Helion kernel development
