@@ -15,7 +15,6 @@ the language model, MTP integration, bidirectional attention helpers,
 embedding/forward path, and LoRA support are all inherited unchanged.
 """
 
-import math
 from collections.abc import Iterable, Mapping
 
 import torch
@@ -194,23 +193,16 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         image_width: int,
         image_height: int,
         max_soft_tokens: int | None = None,
+        do_resize: bool = True,
     ) -> int:
-        vision_cfg = self.get_hf_config().vision_config
-        patch_size = vision_cfg.patch_size
-        pooling_kernel_size = vision_cfg.pooling_kernel_size
-
         if max_soft_tokens is None:
-            max_soft_tokens = vision_cfg.num_soft_tokens
-
-        unit = patch_size * pooling_kernel_size
-        max_patches = max_soft_tokens * pooling_kernel_size**2
-        num_patches_orig = (image_height / patch_size) * (image_width / patch_size)
-        scale = math.sqrt(max_patches / num_patches_orig)
-        target_h = max(unit, int(math.floor(image_height * scale / unit)) * unit)
-        target_w = max(unit, int(math.floor(image_width * scale / unit)) * unit)
-        num_patches = (target_h // patch_size) * (target_w // patch_size)
-        num_soft_tokens = num_patches // (pooling_kernel_size**2)
-        return min(num_soft_tokens, max_soft_tokens)
+            max_soft_tokens = self.get_hf_config().vision_config.num_soft_tokens
+        return super()._compute_num_soft_tokens(
+            image_width,
+            image_height,
+            max_soft_tokens=max_soft_tokens,
+            do_resize=do_resize,
+        )
 
 
 # ---------------------------------------------------------------------------

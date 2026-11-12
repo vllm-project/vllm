@@ -34,6 +34,9 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4AudioConfig,
     Gemma4TextConfig,
 )
+from transformers.models.gemma4.image_processing_gemma4 import (
+    get_aspect_ratio_preserving_size,
+)
 
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
@@ -319,6 +322,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         max_soft_tokens: int | None = None,
+        do_resize: bool = True,
     ) -> int:
         """Compute the number of soft tokens the vision tower produces
         for an image of the given dimensions, after padding is stripped.
@@ -329,6 +333,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             max_soft_tokens: Override for the vision config's
                 `default_output_length`.  When *None*, the value from
                 the model config is used.
+            do_resize: Whether the image processor resizes the image.
 
         """
         vision_cfg = self.get_hf_config().vision_config
@@ -339,20 +344,21 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             max_soft_tokens = vision_cfg.default_output_length
 
         unit = patch_size * pooling_kernel_size
-        max_patches = max_soft_tokens * pooling_kernel_size**2
-        num_patches_orig = (image_height / patch_size) * (image_width / patch_size)
-        scale = math.sqrt(max_patches / num_patches_orig)
-        target_h = max(unit, int(math.floor(image_height * scale / unit)) * unit)
-        target_w = max(unit, int(math.floor(image_width * scale / unit)) * unit)
-        num_patches = (target_h // patch_size) * (target_w // patch_size)
-        # Clamp to ``max_soft_tokens``: extreme aspect ratios (e.g. 3x900)
-        # cause the floor() above to round one dim up to ``unit`` while the
-        # other scales freely, which over-shoots ``max_patches``. The HF
-        # Gemma 4 image processor caps its vision-tower output at
-        # ``max_soft_tokens``, so without this clamp the prompt-side
-        # placeholder count exceeds the encoder output and
-        # ``_merge_multimodal_embeddings`` crashes.
-        return min(num_patches // (pooling_kernel_size**2), max_soft_tokens)
+        if do_resize:
+            image_height, image_width = get_aspect_ratio_preserving_size(
+                height=image_height,
+                width=image_width,
+                patch_size=patch_size,
+                max_patches=max_soft_tokens * pooling_kernel_size**2,
+                pooling_kernel_size=pooling_kernel_size,
+            )
+        elif image_width % unit or image_height % unit:
+            raise ValueError(
+                f"With do_resize=False, image dimensions must be multiples "
+                f"of patch_size * pooling_kernel_size ({unit}), "
+                f"got {image_width}x{image_height}."
+            )
+        return (image_height // unit) * (image_width // unit)
 
     def get_image_repl(
         self,
@@ -361,6 +367,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Gemma4Processor | None,
         max_soft_tokens: int | None = None,
+        do_resize: bool = True,
     ) -> PromptUpdateDetails:
         """Return the dynamic image token sequence for this image.
 
@@ -373,6 +380,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             processor: The Gemma4 processor, when already constructed.
             max_soft_tokens: Override for the default token budget.
                 When *None*, falls back to the model config value.
+            do_resize: Whether the image processor resizes the image.
 
         """
         if processor is None:
@@ -382,6 +390,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             image_width,
             image_height,
             max_soft_tokens=max_soft_tokens,
+            do_resize=do_resize,
         )
         config = self.get_hf_config()
         token_ids = (
@@ -533,13 +542,16 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         num_videos = mm_counts.get("video", 0)
         processor = self.info.get_hf_processor()
         image_processor = processor.image_processor
-        # Use processor's configured image size for dummies.
-        # Gemma4ImageProcessor sets size=None (it uses patch_size /
-        # max_soft_tokens instead of the standard size dict), so we
-        # guard against None with `or {}`.
+        # Keep profiling images valid even when resizing is disabled.
         size = getattr(image_processor, "size", None) or {}
-        img_width = size.get("width", 224)
-        img_height = size.get("height", 224)
+        unit = image_processor.patch_size * image_processor.pooling_kernel_size
+        max_soft_tokens, _ = _get_max_soft_tokens(
+            self.info.ctx.get_merged_mm_kwargs({})
+        )
+        if max_soft_tokens is None:
+            max_soft_tokens = image_processor.max_soft_tokens
+        img_width = size.get("width", unit)
+        img_height = size.get("height", max_soft_tokens * unit)
 
         data: dict[str, Any] = {
             "image": self._get_dummy_images(
@@ -889,11 +901,18 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS
                     else None
                 )
+                image_kwargs = merged_kwargs.get("images_kwargs")
+                do_resize = merged_kwargs.get(
+                    "do_resize", hf_processor.image_processor.do_resize
+                )
+                if isinstance(image_kwargs, dict):
+                    do_resize = image_kwargs.get("do_resize", do_resize)
                 return self.info.get_image_repl(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     processor=hf_processor,
                     max_soft_tokens=max_soft_tokens,
+                    do_resize=do_resize,
                 )
 
             prompt_updates.append(

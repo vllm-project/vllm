@@ -543,3 +543,99 @@ def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
 
     config = model.get_encoder_cudagraph_config()
     assert config.capture_axes == ((70, 140, 280, 560),)
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, "google/gemma-4-12B-it"])
+@pytest.mark.parametrize("image_size", [(528, 1104), (1104, 528), (48, 48)])
+@pytest.mark.parametrize(
+    "config_kwargs,request_kwargs",
+    [
+        ({}, {"do_resize": False}),
+        ({}, {"images_kwargs": {"do_resize": False}}),
+        ({"do_resize": False}, {}),
+        ({"images_kwargs": {"do_resize": False}}, {}),
+        ({"do_resize": True}, {"images_kwargs": {"do_resize": False}}),
+        ({"images_kwargs": {"do_resize": False}}, {"do_resize": True}),
+        ({}, {"images_kwargs": {"do_resize": False, "max_soft_tokens": 560}}),
+    ],
+)
+def test_image_placeholders_match_unresized_processor_output(
+    model_id, image_size, config_kwargs, request_kwargs
+):
+    """Resize overrides must keep placeholders aligned with real image features."""
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=config_kwargs,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor(**request_kwargs)
+    image = PILImage.new("RGB", image_size, color=(200, 30, 30))
+    reference = ctx.call_hf_processor(
+        hf_processor,
+        {"text": hf_processor.image_token, "images": [image]},
+        request_kwargs,
+    )
+    result = processor(
+        hf_processor.image_token,
+        mm_items=processor.info.parse_mm_data({"image": image}),
+        hf_processor_mm_kwargs=request_kwargs,
+    )
+    placeholder = result["mm_placeholders"]["image"][0]
+    assert (
+        placeholder.get_num_embeds()
+        == (reference["input_ids"] == hf_processor.image_token_id).sum().item()
+    )
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, "google/gemma-4-12B-it"])
+@pytest.mark.parametrize("image_size", [(17, 4760), (4760, 17), (34, 9520), (9520, 34)])
+def test_image_placeholders_match_processor_resize_rounding(model_id, image_size):
+    """The 280:1 resize boundary must not lose a soft token to rounding."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+    image = PILImage.new("RGB", image_size)
+    result = processor(
+        hf_processor.image_token,
+        mm_items=processor.info.parse_mm_data({"image": image}),
+    )
+    reference = hf_processor.image_processor(images=[image], return_tensors="pt")
+    assert (
+        result["mm_placeholders"]["image"][0].get_num_embeds()
+        == (reference["num_soft_tokens_per_image"][0])
+    )
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, "google/gemma-4-12B-it"])
+@pytest.mark.parametrize("image_size", [(64, 48), (48, 64), (47, 48)])
+def test_unresized_image_requires_complete_pooling_blocks(model_id, image_size):
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4ProcessingInfo)
+    with pytest.raises(ValueError, match="dimensions must be multiples"):
+        processor.info.get_image_repl(
+            image_width=image_size[0],
+            image_height=image_size[1],
+            processor=processor.info.get_hf_processor(),
+            do_resize=False,
+        )
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID, "google/gemma-4-12B-it"])
+@pytest.mark.parametrize("max_soft_tokens", [70, 280, 1120])
+def test_unresized_profiling_images_match_token_budget(model_id, max_soft_tokens):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs={
+            "images_kwargs": {"do_resize": False, "max_soft_tokens": max_soft_tokens}
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    data = processor.dummy_inputs.get_dummy_mm_data(4096, {"image": 1}, None)
+    result = processor(
+        processor.info.get_hf_processor().image_token,
+        mm_items=processor.info.parse_mm_data(data),
+    )
+    assert result["mm_placeholders"]["image"][0].get_num_embeds() == max_soft_tokens

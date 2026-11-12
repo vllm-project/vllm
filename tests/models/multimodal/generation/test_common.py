@@ -1442,3 +1442,43 @@ def test_custom_inputs_models_heavy(
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
     )
+
+
+@pytest.mark.core_model
+def test_gemma4_generate_without_image_resize(vllm_runner, monkeypatch):
+    """Pre-resized pixels must generate the same tokens as processor resizing."""
+    from PIL import Image
+
+    from vllm import SamplingParams
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    prompt = "<|turn>user\n<|image|>Describe the image.<turn|>\n<|turn>model\n"
+    params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
+    with vllm_runner(
+        "google/gemma-4-E2B-it",
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=1024,
+        max_num_seqs=1,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        limit_mm_per_prompt={"image": 1},
+    ) as model:
+
+        def generate(size, do_resize):
+            return model.llm.generate(
+                {
+                    "prompt": prompt,
+                    "multi_modal_data": {
+                        "image": Image.new("RGB", size, (200, 30, 30))
+                    },
+                    "mm_processor_kwargs": {"do_resize": do_resize},
+                },
+                params,
+            )[0]
+
+        reference = generate((40, 80), True)
+        unresized = generate((528, 1104), False)
+        assert len(unresized.outputs[0].token_ids) == 8
+        assert unresized.prompt_token_ids == reference.prompt_token_ids
+        assert unresized.outputs[0].token_ids == reference.outputs[0].token_ids
