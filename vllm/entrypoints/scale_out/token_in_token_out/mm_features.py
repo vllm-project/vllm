@@ -120,6 +120,8 @@ def mm_kwargs_from_features(
                 kwargs_items, metadata_items, strict=True
             )
         ]
+        if any(item is not None and "self" in item for item in mm_kwargs[modality]):
+            raise ValueError("Multimodal features must not contain reserved key 'self'")
     return mm_kwargs
 
 
@@ -159,7 +161,7 @@ def validate_qwen_image_features(
                 "image_grid_thw must be a batched integer tensor of size 3"
             )
         t, h, w = grid.tolist()
-        if min(t, h, w) <= 0 or h % merge_size or w % merge_size:
+        if t != 1 or min(h, w) <= 0 or h % merge_size or w % merge_size:
             raise ValueError("image_grid_thw has invalid patch dimensions")
 
         patches = t * h * w

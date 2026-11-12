@@ -345,7 +345,10 @@ class ServingTokens(GenerateBaseServing):
 
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
-            mm_kwargs = mm_kwargs_from_features(features)
+            try:
+                mm_kwargs = mm_kwargs_from_features(features)
+            except ValueError as exc:
+                return self.create_error_response(exc, param="features")
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
 

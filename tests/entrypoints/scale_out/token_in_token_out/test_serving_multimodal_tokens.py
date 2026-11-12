@@ -20,7 +20,12 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
     encode_mm_kwargs_item,
 )
-from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFieldElem,
+    MultiModalFlatField,
+    MultiModalKwargsItem,
+)
 from vllm.multimodal.utils import encode_image_url
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
@@ -98,28 +103,86 @@ def test_generate_rejects_malformed_qwen_image_features(test_image):
         valid["sampling_params"] = {"max_tokens": 1, "temperature": 0}
         assert client.post(GEN_ENDPOINT, json=valid).status_code == 200
 
-        for variant in ("grid", "empty", "rank"):
+        for variant in ("grid", "empty", "rank", "self", "frames"):
             features = response.json()["features"]
             features["mm_hashes"]["image"][0] = f"malformed-{variant}"
+            token_ids = valid["token_ids"]
             if variant == "grid":
                 metadata = decode_mm_kwargs_item(features["mm_metadata"]["image"][0])
                 metadata["image_grid_thw"].data = torch.tensor([1, 2, 2])
                 features["mm_metadata"]["image"][0] = encode_mm_kwargs_item(metadata)
             else:
                 item = MultiModalKwargsItem({})
-                if variant == "rank":
+                if variant in ("rank", "self", "frames"):
                     item = decode_mm_kwargs_item(features["kwargs_data"]["image"][0])
-                    item["pixel_values"].data = torch.zeros(1, 1, 1)
+                    if variant == "rank":
+                        item["pixel_values"].data = torch.zeros(1, 1, 1)
+                    elif variant == "self":
+                        item["self"] = item["image_grid_thw"]
+                    else:
+                        metadata = decode_mm_kwargs_item(
+                            features["mm_metadata"]["image"][0]
+                        )
+                        grid = metadata["image_grid_thw"].data.clone()
+                        grid[0] = 2
+                        metadata["image_grid_thw"].data = grid
+                        features["mm_metadata"]["image"][0] = encode_mm_kwargs_item(
+                            metadata
+                        )
+                        pixels = item["pixel_values"]
+                        pixels.data = torch.cat([pixels.data, pixels.data])
+                        pixels.field = MultiModalFlatField(
+                            slices=[slice(0, pixels.data.shape[0])]
+                        )
+                        placeholder = features["mm_placeholders"]["image"][0]
+                        offset, length = placeholder["offset"], placeholder["length"]
+                        token_ids = list(token_ids)
+                        token_ids[offset : offset + length] *= 2
+                        placeholder["length"] *= 2
                 features["kwargs_data"]["image"][0] = encode_mm_kwargs_item(item)
 
             for stream in (False, True):
                 rejected = client.post(
                     GEN_ENDPOINT,
-                    json={**valid, "features": features, "stream": stream},
+                    json={
+                        **valid,
+                        "token_ids": token_ids,
+                        "features": features,
+                        "stream": stream,
+                    },
                 )
                 assert rejected.status_code == 400, rejected.text
                 assert rejected.json()["error"]["param"] == "features"
             assert client.post(GEN_ENDPOINT, json=valid).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "video", "audio"])
+@pytest.mark.parametrize("source", ["kwargs_data", "mm_metadata"])
+async def test_generate_rejects_reserved_multimodal_key(client, modality, source):
+    item = MultiModalKwargsItem(
+        {"self": MultiModalFieldElem(torch.zeros(1), MultiModalBatchedField())}
+    )
+    valid = {
+        "token_ids": [1],
+        "sampling_params": {"max_tokens": 1, "temperature": 0},
+    }
+    features = {
+        "mm_hashes": {modality: [f"reserved-{modality}-{source}"]},
+        "mm_placeholders": {modality: [{"offset": 0, "length": 1}]},
+        source: {modality: [encode_mm_kwargs_item(item)]},
+    }
+    for stream in (False, True):
+        rejected = await client.post(
+            GEN_ENDPOINT, json={**valid, "features": features, "stream": stream}
+        )
+        assert rejected.status_code == 400, rejected.text
+        error = rejected.json()["error"]
+        assert error["param"] == "features"
+        assert "self" in error["message"]
+    response = await client.post(GEN_ENDPOINT, json=valid)
+    assert response.status_code == 200, response.text
+    assert response.json()["choices"][0]["token_ids"]
 
 
 @pytest.mark.asyncio

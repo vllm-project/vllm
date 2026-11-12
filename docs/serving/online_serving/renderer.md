@@ -253,7 +253,10 @@ Single-process clients can keep passing the full render response to
 `/inference/v1/generate` unchanged. If both payloads contain the same field,
 `mm_metadata` supplies the effective value. For Qwen2-VL and Qwen2.5-VL images,
 generation rejects malformed decoded tensors or grid and placeholder mismatches
-with HTTP 400 before submitting the request to the engine.
+with HTTP 400 before submitting the request to the engine. Image grids must
+describe exactly one frame. Across all models and modalities, decoded fields
+named `self` in either `kwargs_data` or `mm_metadata` are reserved and rejected
+with HTTP 400.
 
 ### Payload shape
 
