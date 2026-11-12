@@ -1149,6 +1149,107 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1, 2, 2]
 
 
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_compressor_inserts_main_cache_in_compression_launch(compress_ratio):
+    """Given the RoPE, the compression launch inserts what insert_cache would."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadata,
+        DeepseekCompressor,
+    )
+
+    torch.manual_seed(0)
+    device = "cuda"
+    capacity = 8
+    lengths, starts = (7, 7, 33, 0, 1, 7), (4095, 4096, 0, 9, 71, 1001)
+    num_reqs, actual = len(lengths), sum(lengths)
+    cache_block = 256 // compress_ratio
+    positions = torch.zeros(actual + 3, dtype=torch.int64)
+    req_ids = torch.zeros(actual + 3, dtype=torch.int32)
+    ring_slots = torch.full_like(positions, -1)
+    cache_slots = torch.full_like(positions, -1)
+    cursor = 0
+    for req, (start, length) in enumerate(zip(starts, lengths)):
+        pos = torch.arange(start, start + length)
+        rows = slice(cursor, cursor + length)
+        positions[rows] = pos
+        req_ids[rows] = req
+        ring_slots[rows] = (req + 1) * capacity + pos % capacity
+        slots = 2 * req * cache_block + pos // compress_ratio - start // compress_ratio
+        closing = (pos + 1) % compress_ratio == 0
+        cache_slots[rows] = torch.where(closing & (req != 1), slots, -1)
+        cursor += length
+    positions, req_ids, ring_slots, cache_slots = (
+        x.to(device) for x in (positions, req_ids, ring_slots, cache_slots)
+    )
+    main_slots = cache_slots[: actual - 4]
+    query_start_loc = torch.tensor(
+        [0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32
+    ).to(device)
+    raw = torch.randn(actual + 3, 512 * compress_ratio, device=device)
+    raw[16:44:9, 100] = torch.tensor([float("nan"), float("inf"), -float("inf"), 3e38])
+    norm = torch.randn(512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(max(starts) + max(lengths), 32, device=device) * 3
+    rotary = SimpleNamespace(cos_sin_cache=torch.cat((angles.cos(), angles.sin()), -1))
+    cache_stride = math.ceil(cache_block * 584 / 576) * 576
+    state = torch.randn(num_reqs + 1, capacity, 1024, device=device)
+    cache = torch.randint(
+        256, (2 * num_reqs, cache_stride), dtype=torch.uint8, device=device
+    )
+    metadata = {
+        "k_cache": SimpleNamespace(slot_mapping=main_slots),
+        "state": CompressorMetadata(
+            slot_mapping=ring_slots,
+            query_start_loc=query_start_loc,
+            token_to_req_indices=req_ids,
+        ),
+    }
+
+    def make_compressor(state_cache, kv_cache):
+        return SimpleNamespace(
+            compress_ratio=compress_ratio,
+            head_dim=512,
+            rms_norm_eps=1e-6,
+            norm=SimpleNamespace(weight=norm),
+            pcp_size=1,
+            k_cache_prefix="k_cache",
+            state_cache=SimpleNamespace(prefix="state", kv_cache=state_cache)
+            if compress_ratio == 2
+            else None,
+            _static_forward_context={
+                "k_cache": SimpleNamespace(
+                    kv_cache=kv_cache.as_strided(
+                        (2 * num_reqs, cache_block, 584), (cache_stride, 584, 1)
+                    )
+                )
+            },
+        )
+
+    separate = (state.clone(), cache.clone())
+    fused = (state.clone(), cache.clone())
+    with override_forward_context(ForwardContext({}, metadata, {})):
+        reference = make_compressor(*separate)
+        expected = DeepseekCompressor.forward(reference, raw, positions)
+        DeepseekCompressor.insert_cache(reference, expected, positions, rotary)
+        latent = DeepseekCompressor.forward(
+            make_compressor(*fused), raw, positions, rotary
+        )
+    assert latent is not None and expected is not None
+
+    slot_mapping = ring_slots if compress_ratio == 2 else main_slots
+    written = (slot_mapping >= 0) & (
+        (positions[: slot_mapping.numel()] + 1) % compress_ratio == 0
+    )
+    assert not torch.equal(separate[1], cache)
+    assert torch.equal(fused[1], separate[1])
+    assert torch.equal(fused[0].view(torch.uint8), separate[0].view(torch.uint8))
+    assert torch.equal(
+        latent[: written.numel()][written].view(torch.uint8),
+        expected[: written.numel()][written].view(torch.uint8),
+    )
+
+
 def test_v41_pcp_compressor_latent_is_gathered_for_cache_writes(monkeypatch):
     """PCP compresses locally and publishes the gathered latent to both caches."""
     from vllm.forward_context import ForwardContext, override_forward_context
@@ -2982,18 +3083,14 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
         weight=torch.randn(1024, 1024, device="cuda")
     )
 
-    def compressor_forward(kv_score, positions_):
+    def compressor_forward(kv_score, positions_, rotary_emb):
         order.append("compressor")
         streams["compressor"] = torch.cuda.current_stream()
+        assert rotary_emb is rotary
+        main_cache.fill_(5)
         return latent
 
-    def compressor_insert(latent_, positions_, rotary_emb):
-        order.append("insert_cache")
-        streams["insert_cache"] = torch.cuda.current_stream()
-        main_cache.fill_(5)
-
     monkeypatch.setattr(compressor, "forward", compressor_forward)
-    monkeypatch.setattr(compressor, "insert_cache", compressor_insert)
 
     def weights_proj(hidden_states_):
         order.append("weights_proj")
@@ -3065,7 +3162,6 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
         "wq_b",
         "qnorm_insert",
         "compressor",
-        "insert_cache",
         "weights_proj",
         "produce_k",
         "forward_q",
@@ -3073,8 +3169,7 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
     current = torch.cuda.current_stream()
     for name in ("wq_b", "qnorm_insert", "produce_k", "forward_q"):
         assert streams[name] == current, name
-    for name in ("compressor", "insert_cache"):
-        assert streams[name] == aux_streams[0], name
+    assert streams["compressor"] == aux_streams[0]
     assert streams["weights_proj"] == aux_streams[1]
 
 

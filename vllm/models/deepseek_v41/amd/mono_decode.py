@@ -283,8 +283,7 @@ def _select(
         kv_score = torch.mm(
             normed, comp.fused_wkv_wgate.weight.T, out_dtype=torch.float32
         )
-        latent = comp(kv_score, positions)
-        comp.insert_cache(latent, positions, attn.rotary_emb)
+        latent = comp(kv_score, positions, attn.rotary_emb)
         indexer._produce_k(latent, positions, attn.indexer_rotary_emb)
     weights, _ = indexer.weights_proj(normed)
     q, q_scale, weights = indexer.forward_q(

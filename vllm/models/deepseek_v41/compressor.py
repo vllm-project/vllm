@@ -12,6 +12,7 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
 from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
     fused_save_compress_norm,
@@ -354,6 +355,7 @@ class DeepseekCompressor(nn.Module):
         kv_score: torch.Tensor,
         # [num_tokens]
         positions: torch.Tensor,
+        rotary_emb: RotaryEmbedding | None = None,
     ) -> torch.Tensor | None:
         """Save states and return the BF16 latent for cache insertion and indexing.
 
@@ -387,6 +389,14 @@ class DeepseekCompressor(nn.Module):
                 prev_row_indices = state_metadata.prev_row_indices
                 ring_write_slots = state_metadata.ring_write_slots
 
+        kv_cache = kv_slot_mapping = cos_sin_cache = None
+        if rotary_emb is not None and self.pcp_size == 1:
+            main_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
+            main_slots = cast(Any, attn_metadata[self.k_cache_prefix]).slot_mapping
+            if main_cache.dtype == torch.uint8 and main_cache.shape[-1] == 584:
+                kv_cache, kv_slot_mapping = main_cache, main_slots
+                cos_sin_cache = rotary_emb.cos_sin_cache
+
         latent = torch.empty(
             kv_score.shape[0],
             self.head_dim,
@@ -406,10 +416,15 @@ class DeepseekCompressor(nn.Module):
             latent,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,
+            kv_cache=kv_cache,
+            kv_slot_mapping=kv_slot_mapping,
+            cos_sin_cache=cos_sin_cache,
         )
         if prev_rows is not None:
             assert state_cache is not None and ring_write_slots is not None
             save_ring_rows(prev_rows, ring_write_slots, state_cache)
+        if rotary_emb is not None and kv_cache is None:
+            self.insert_cache(latent, positions, rotary_emb)
         return latent
 
     def insert_cache(
