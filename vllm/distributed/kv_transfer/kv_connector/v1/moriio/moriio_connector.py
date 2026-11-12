@@ -626,18 +626,14 @@ class MoRIIOConnectorScheduler:
         self._num_ssm_scratch_blocks = (
             mamba_spec.num_speculative_blocks if mamba_spec is not None else 0
         )
+        self._mamba_block_size = mamba_spec.block_size if mamba_spec is not None else 0
         self.block_size = vllm_config.cache_config.block_size
         attn_block_size = self.block_size
         max_decode_tail_tokens = 1 + vllm_config.num_lookahead_tokens
-        # Per attention group: not prefix-cacheable, so read even on a full hit.
-        self._attn_group_is_state: list[bool] = []
         if self._has_mamba:
             attn_specs = [
                 kv_cache_config.transfer_groups[group_id].kv_cache_spec
                 for group_id in self._attn_group_ids
-            ]
-            self._attn_group_is_state = [
-                not spec.prefix_cacheable for spec in attn_specs
             ]
             dcp_size = vllm_config.parallel_config.decode_context_parallel_size
             # The smallest attention block bounds every group's local tail.
@@ -1113,8 +1109,9 @@ class MoRIIOConnectorScheduler:
                                 # destination blocks before this hook runs. Pair
                                 # the attention and recurrent-state suffixes
                                 # independently.
+                                block_ids = blocks.get_block_ids()
                                 attn_block_groups, mamba_block_groups = (
-                                    self.split_block_groups(blocks.get_block_ids())
+                                    self.split_block_groups(block_ids)
                                 )
                                 num_attn = len(attn_block_groups)
                                 if len(remote_block_ids) != num_attn + len(
@@ -1150,9 +1147,13 @@ class MoRIIOConnectorScheduler:
                                 # Scratch slots were removed by
                                 # split_block_groups, so only one local running
                                 # state tail can remain.
-                                for local_group, remote_group in zip(
+                                cached_state_blocks = self._cached_prompt_state_blocks(
+                                    request, block_ids
+                                )
+                                for local_group, remote_group, cached_state in zip(
                                     mamba_block_groups,
                                     remote_mamba_groups,
+                                    cached_state_blocks,
                                     strict=True,
                                 ):
                                     aligned_local, aligned_remote = (
@@ -1162,6 +1163,18 @@ class MoRIIOConnectorScheduler:
                                             _MAX_LOCAL_MAMBA_TAIL_BLOCKS,
                                         )
                                     )
+                                    # A later full local hit resumes from
+                                    # the block cached for N-1 tokens.
+                                    if (
+                                        aligned_remote
+                                        and cached_state is not None
+                                        and cached_state not in aligned_local
+                                    ):
+                                        aligned_local = [cached_state, *aligned_local]
+                                        aligned_remote = [
+                                            aligned_remote[-1],
+                                            *aligned_remote,
+                                        ]
                                     aligned_local_mamba.append(aligned_local)
                                     aligned_remote_mamba.append(aligned_remote)
                                 local_block_ids = [
@@ -1197,25 +1210,9 @@ class MoRIIOConnectorScheduler:
                                     adjusted_remote_block_ids.append(aligned_remote)
                                 local_block_ids = aligned_local_block_ids
                         else:
-                            if self._has_mamba:
-                                # Attention can be a complete local hit, but the
-                                # recurrent state is never prefix-cacheable.
-                                attn_block_groups, mamba_block_groups = (
-                                    self.split_block_groups(blocks.get_block_ids())
-                                )
-                                local_block_ids = [
-                                    group if is_state else []
-                                    for group, is_state in zip(
-                                        attn_block_groups,
-                                        self._attn_group_is_state,
-                                        strict=True,
-                                    )
-                                ]
-                                local_block_ids.extend(mamba_block_groups)
-                            else:
-                                # Nothing to pull, but retain one empty list per
-                                # cache group so the worker can notify P.
-                                local_block_ids = [[] for _ in remote_block_ids]
+                            # A read here would race the forward. One empty
+                            # list per group still lets the worker release P.
+                            local_block_ids = [[] for _ in remote_block_ids]
 
                         self._reqs_need_recv[request.request_id] = (
                             request,
@@ -1583,6 +1580,19 @@ class MoRIIOConnectorScheduler:
             for group_id in self._mamba_group_ids
         ]
         return attn, mamba_groups
+
+    def _cached_prompt_state_blocks(
+        self, request: "Request", block_ids: BlockIds
+    ) -> list[int | None]:
+        """Per Mamba group, the block cached for the state after the first N-1
+        prompt tokens, or None when N-1 does not end a block."""
+        num_state_tokens = request.num_prompt_tokens - 1
+        if num_state_tokens <= 0 or num_state_tokens % self._mamba_block_size:
+            return [None] * len(self._mamba_group_ids)
+        state_idx = num_state_tokens // self._mamba_block_size - 1
+        transfer_block_ids = self.get_exchange_clipped_blocks(block_ids)
+        groups = [transfer_block_ids[group_id] for group_id in self._mamba_group_ids]
+        return [g[state_idx] if state_idx < len(g) else None for g in groups]
 
     @staticmethod
     def _align_read_blocks(
