@@ -747,6 +747,10 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         extra_args=case.daemon_args,
     ) as d:
         d.wait_until_ready()
+        if "speculative_config" in case.llm_kwargs:
+            # Draft daemons serve only the GPUs of the last pipeline stage.
+            num_draft_sockets = len(list(Path(d.socket_dir).glob("*_draft.sock")))
+            assert num_draft_sockets == case.llm_kwargs.get("tensor_parallel_size", 1)
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         if case.check_flashinfer_cache:
             # Each daemon tunes before its ready report; exactly one new file

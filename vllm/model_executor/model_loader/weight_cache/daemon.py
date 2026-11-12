@@ -73,7 +73,8 @@ starts a draft daemon group that caches the draft model. It uses its own cache
 key, Unix sockets (`*_draft.sock`) and rendezvous port
 (`--weight-cache-draft-master-port`, default `--weight-cache-master-port +
 1`), so each process serves exactly one model role. Other draft types are not
-cached and keep loading from disk in the engine.
+cached and keep loading from disk in the engine. With pipeline parallelism only
+the draft daemons of the last stage serve the draft model.
 """
 
 import contextlib
@@ -277,6 +278,7 @@ class WeightCacheDaemon:
         self.socket_dir = socket_dir
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
+        self.serves_model = daemon_serves_model(is_draft, self.pp_rank, self.pp_size)
         self.model: torch.nn.Module | None = None
         # Engine watch connections, held open for the daemon's lifetime.
         self._watchers: list[socket.socket] = []
@@ -317,6 +319,11 @@ class WeightCacheDaemon:
             local_rank=self.local_rank,
             backend=current_platform.dist_backend,
         )
+        if not self.serves_model:
+            # Model parallel groups are created collectively by every rank.
+            with set_current_vllm_config(self.vllm_config):
+                ensure_model_parallel_initialized(self.tp_size, self.pp_size)
+            return
         for cache in self.warmup_caches:
             cache.adopt_before_load(self, self.d2d)
         with set_current_vllm_config(self.vllm_config):
@@ -606,6 +613,9 @@ def _run_daemon(
         warmup_cache_stores=warmup_cache_stores,
     )
     daemon.load_model()
+    if not daemon.serves_model:
+        daemon.release_distributed()
+        return
     daemon.warmup()
     # FlashInfer warmup has populated the compiler caches before the source
     # listener becomes available to target daemons.
@@ -644,6 +654,15 @@ def plan_local_ranks(
         pp_rank, tp_rank = divmod(rank_in_dp, tp_size)
         placements.append((local_rank, dp_rank, pp_rank, tp_rank))
     return placements
+
+
+def daemon_serves_model(is_draft: bool, pp_rank: int, pp_size: int) -> bool:
+    """Whether the daemon at this placement loads and serves a model.
+
+    The engine runs the draft model only on the last pipeline stage. Draft
+    daemons on other stages join the group's rendezvous and then exit.
+    """
+    return not is_draft or pp_rank == pp_size - 1
 
 
 def get_engine_dp_placement(vllm_config: VllmConfig, dp_rank: int) -> tuple[int, int]:
