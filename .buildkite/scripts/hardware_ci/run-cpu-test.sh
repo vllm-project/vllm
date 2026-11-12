@@ -104,15 +104,16 @@ OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|Offline
 OTEL_DOCKER_ARGS=()
 OTEL_SETUP=""
 if [ -n "${CI_INFRA_TRACE_ID:-}" ]; then
-    for var in CI_INFRA_TRACE_ID CI_INFRA_COMMAND_SPAN_ID \
-            BUILDKITE BUILDKITE_AGENT_ACCESS_TOKEN BUILDKITE_AGENT_ENDPOINT \
-            BUILDKITE_JOB_ID BUILDKITE_BUILD_ID BUILDKITE_BUILD_NUMBER BUILDKITE_BUILD_URL \
-            BUILDKITE_BRANCH BUILDKITE_COMMIT BUILDKITE_LABEL BUILDKITE_PIPELINE_SLUG \
-            BUILDKITE_ORGANIZATION_SLUG BUILDKITE_AGENT_META_DATA_QUEUE; do
-        OTEL_DOCKER_ARGS+=(-e "$var")
-    done
+    OTEL_DOCKER_ARGS=(-e CI_INFRA_TRACE_ID -e CI_INFRA_COMMAND_SPAN_ID
+        -e BUILDKITE -e BUILDKITE_AGENT_ACCESS_TOKEN -e BUILDKITE_AGENT_ENDPOINT
+        -e BUILDKITE_JOB_ID -e BUILDKITE_BUILD_ID -e BUILDKITE_BUILD_NUMBER
+        -e BUILDKITE_BUILD_URL -e BUILDKITE_BRANCH -e BUILDKITE_COMMIT
+        -e BUILDKITE_LABEL -e BUILDKITE_PIPELINE_SLUG
+        -e BUILDKITE_ORGANIZATION_SLUG -e BUILDKITE_AGENT_META_DATA_QUEUE)
+    # Inside `if`, so a missing or broken helper skips tracing instead of
+    # failing the job.
     # shellcheck disable=SC2016  # expanded by the container's shell, not here
-    OTEL_SETUP='CI_INFRA_OTEL_DIR=/vllm-workspace/.buildkite/scripts/ci-otel; . "$CI_INFRA_OTEL_DIR/ci_otel.sh";'
+    OTEL_SETUP='CI_INFRA_OTEL_DIR=/vllm-workspace/.buildkite/scripts/ci-otel; if [ -f "$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && sh -n "$CI_INFRA_OTEL_DIR/ci_otel.sh" && . "$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else echo "vLLM CI OTel: tracing setup skipped" >&2; fi;'
 fi
 
 run_test() {
