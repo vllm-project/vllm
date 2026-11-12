@@ -308,7 +308,7 @@ def load_audio_torchcodec(
         # and remember it: the missing libraries cannot appear without a
         # restart, and retrying the load is costly on every call.
         if "Could not load libtorchcodec" in str(e):
-            AudioDecoder = None
+            AudioDecoder = None  # type: ignore[assignment]
             _torchcodec_import_exc = e
             raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from e
         raise ValueError(
