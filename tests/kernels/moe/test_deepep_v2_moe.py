@@ -4,7 +4,7 @@
 Compares against a pure-PyTorch reference MoE implementation.
 
 DeepEP v2 emits a padded contiguous layout (PaddedStandard), so it can only be
-paired with padding-aware experts. All experts exercised here are TRTLLM-Gen
+paired with padding-aware experts. The matrix covers TRTLLM-Gen and DeepGEMM
 kernels, which skip padding rows at tile granularity.
 """
 
@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.torch_utils import set_random_seed
@@ -576,7 +577,6 @@ def test_deep_ep_v2_moe(
 @pytest.mark.parametrize("do_cpu_sync", [False, True])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
-@requires_flashinfer_sm100
 def test_deep_ep_v2_moe_backends(
     m: int,
     n: int,
@@ -589,6 +589,19 @@ def test_deep_ep_v2_moe_backends(
     do_cpu_sync: bool,
     workspace_init,
 ):
+    if experts_backend in ("flashinfer_trtllm", "trtllm_fp8") and (
+        not has_flashinfer() or not current_platform.has_device_capability(100)
+    ):
+        pytest.skip("Requires FlashInfer TRTLLM fused MoE (SM100)")
+    if experts_backend in ("deep_gemm", "deep_gemm_fp4") and (
+        not is_deep_gemm_supported()
+    ):
+        pytest.skip("Requires DeepGEMM")
+    if experts_backend == "deep_gemm_fp4" and not (
+        current_platform.has_device_capability(100)
+    ):
+        pytest.skip("Requires DeepGEMM FP4 on SM100")
+
     set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(

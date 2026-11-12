@@ -111,6 +111,78 @@ def test_expanded_metadata_masks_alignment_gaps_and_unused_capacity(
 
 
 @requires_deep_ep_v2
+def test_expanded_receiver_masks_tensor_wide_scale_by_valid_rows(monkeypatch):
+    pf = _make_pf(torch.empty(0, dtype=torch.bfloat16))
+    pf.do_expand = True
+    x = torch.arange(32, dtype=torch.float32).view(8, 4)
+    handle = SimpleNamespace(
+        psum_num_recv_tokens_per_expert=torch.tensor([3, 7], dtype=torch.int32),
+        expert_alignment=4,
+    )
+    row_valid_calls: list[torch.Tensor | None] = []
+    num_valid_calls: list[torch.Tensor | None] = []
+
+    def masked_amax_scale(expert_x, quant_dtype, *, row_valid=None, num_valid=None):
+        row_valid_calls.append(row_valid)
+        num_valid_calls.append(num_valid)
+        return torch.ones(1)
+
+    def quantize_input(expert_x, scale, **kwargs):
+        return expert_x, None
+
+    monkeypatch.setattr(_dv2, "masked_amax_scale", masked_amax_scale)
+    monkeypatch.setattr(_dv2, "moe_kernel_quantize_input", quantize_input)
+
+    pf._receiver(
+        _FakeEvent(False),
+        x,
+        None,
+        None,
+        handle,
+        None,
+        FusedMoEQuantConfig.make(torch.float8_e4m3fn),
+        False,
+    )
+
+    assert num_valid_calls == [None]
+    row_valid = row_valid_calls[0]
+    assert row_valid is not None
+    assert row_valid.tolist() == [
+        True,
+        True,
+        True,
+        False,
+        True,
+        True,
+        True,
+        False,
+    ]
+
+
+@requires_deep_ep_v2
+def test_expanded_receiver_clears_all_padding():
+    pf = _make_pf(torch.empty(0, dtype=torch.bfloat16))
+    pf.do_expand = True
+    x = torch.full((4, 4), float("nan"))
+    scales = torch.full((4, 1), float("nan"))
+    weights = torch.full((4,), float("nan"))
+    handle = SimpleNamespace(
+        psum_num_recv_tokens_per_expert=torch.tensor([0, 0], dtype=torch.int32),
+        expert_alignment=4,
+    )
+
+    prepared_x, prepared_scales, meta, ids, prepared_weights = pf._receiver(
+        _FakeEvent(False), (x, scales), None, weights, handle, None, None, True
+    )
+
+    assert ids[:, 0].tolist() == [-1] * 4
+    assert meta.expert_num_tokens.tolist() == [0, 0]
+    for tensor in (prepared_x.float(), prepared_scales, prepared_weights):
+        assert torch.isfinite(tensor).all()
+        assert torch.count_nonzero(tensor) == 0
+
+
+@requires_deep_ep_v2
 def test_cpu_sync_rejects_capture_before_dispatch(monkeypatch):
     pf = _make_pf(torch.empty(0, dtype=torch.bfloat16))
     pf.do_cpu_sync = True

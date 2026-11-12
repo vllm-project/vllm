@@ -249,6 +249,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         psum_recv_per_rank = None
         num_valid_recv = None
+        row_valid_recv = None
         if self.do_expand:
             recv_topk_idx, counts = _expanded_recv_metadata(
                 handle.psum_num_recv_tokens_per_expert,
@@ -257,7 +258,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 self.rank_expert_offset,
             )
             valid = recv_topk_idx >= 0
-            num_valid_recv = counts.sum().reshape(1)
+            row_valid_recv = valid[:, 0]
             # Quantizers read padding; already quantized rows are skipped by
             # expert routing and can retain the dispatch allocation directly.
             if not _quantize_before_dispatch(quant_config, defer_input_quant):
@@ -306,12 +307,19 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             if expert_x.numel() != 0:
                 scale = a1_scale
                 if quant_config.act_scale_is_tensor_wide(a1_scale):
-                    assert num_valid_recv is not None
-                    scale = masked_amax_scale(
-                        expert_x,
-                        quant_config.quant_dtype,
-                        num_valid=num_valid_recv,
-                    )
+                    if row_valid_recv is not None:
+                        scale = masked_amax_scale(
+                            expert_x,
+                            quant_config.quant_dtype,
+                            row_valid=row_valid_recv,
+                        )
+                    else:
+                        assert num_valid_recv is not None
+                        scale = masked_amax_scale(
+                            expert_x,
+                            quant_config.quant_dtype,
+                            num_valid=num_valid_recv,
+                        )
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
                     scale,
