@@ -3,11 +3,11 @@
 """Kimi-K3 specialization of GDN attention metadata.
 
 The request classification and cudagraph staging intentionally mirror
-``GDNAttentionMetadataBuilder``. Kimi-K3 builds the metadata required by its
+`GDNAttentionMetadataBuilder`. Kimi-K3 builds the metadata required by its
 prefill KDA kernel internally, so this builder omits the shared FLA chunk
 metadata construction.
 
-For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
+For Kimi-K3 speculative decoding, `--use-replayssm` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 

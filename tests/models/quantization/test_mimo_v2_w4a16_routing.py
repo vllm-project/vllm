@@ -3,14 +3,14 @@
 """Routing support for the AITER Triton MXFP4 W4A16 MoE backend.
 
 MiMo-V2.6 uses an ungrouped sigmoid router with a per-expert correction bias
-(``scoring_func=sigmoid``, ``topk_method=noaux_tc``, ``n_group == 1``), which
-``get_routing_method_type`` classifies as ``RoutingMethodType.DeepSeekV3``.
-``AiterW4A16ExpertsMonolithic`` used to reject that router ("kernel does not
+(`scoring_func=sigmoid`, `topk_method=noaux_tc`, `n_group == 1`), which
+`get_routing_method_type` classifies as `RoutingMethodType.DeepSeekV3`.
+`AiterW4A16ExpertsMonolithic` used to reject that router ("kernel does not
 support routing method ..."), and on gfx942 it is the only MXFP4 kernel whose
 device gate accepts the card, so the checkpoint could not be served natively at
 all.
 
-aiter's *flat* top-k handles that router natively (``score_mode="sigmoid"`` plus
+aiter's *flat* top-k handles that router natively (`score_mode="sigmoid"` plus
 a correction bias), so the backend only has to ask for it. This module covers
 both halves: the gate accepts the router family, and the routing the wrapper
 requests reproduces the model's own math.
@@ -111,10 +111,10 @@ def test_flat_sigmoid_routing_matches_mimo_reference(num_experts: int) -> None:
     """The routing the wrapper requests must equal MiMo's own router math.
 
     MiMo's router is ungrouped: sigmoid scores, selection on
-    ``sigmoid(logits) + bias``, weights = the *unbiased* sigmoid scores, then
+    `sigmoid(logits) + bias`, weights = the *unbiased* sigmoid scores, then
     renormalized. Both checkpoints use it — 256 experts is Flash, 384 is Pro.
 
-    The ``sigmoid`` score mode comes from ROCm/aiter#4688 (aiter >= 0.1.20).
+    The `sigmoid` score mode comes from ROCm/aiter#4688 (aiter >= 0.1.20).
     """
     aiter_routing = pytest.importorskip(
         "aiter.ops.triton.moe.moe_routing.routing"

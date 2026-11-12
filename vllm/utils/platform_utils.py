@@ -50,11 +50,15 @@ def is_pin_memory_available() -> bool:
 @cache
 def is_uva_available() -> bool:
     """Check if Unified Virtual Addressing (UVA) is available."""
-    # UVA requires pinned memory.
     from vllm.platforms import current_platform
 
-    # TODO: Add more requirements for UVA if needed.
-    return is_pin_memory_available() or current_platform.is_cpu()
+    if current_platform.is_cpu():
+        return True
+    # UVA requires pinned memory. Under NVIDIA Confidential Computing the
+    # device-side view of pinned host memory is not coherent (the GPU reads a
+    # stale snapshot), so treat UVA as unavailable and fall back to explicit
+    # copies (see vllm.v1.conf_compute_utils).
+    return is_pin_memory_available() and not current_platform.is_confidential_compute()
 
 
 @cache

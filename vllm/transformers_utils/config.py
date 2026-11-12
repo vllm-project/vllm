@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -144,7 +143,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_vl="KimiVLConfig",
     kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
     muse_spark_dspark="MuseSparkDSparkConfig",
-    musespark1x_text="MuseSpark1xTextConfig",
     muse_spark_text="MuseSparkTextConfig",
     muse_spark_vision="MuseSparkVisionConfig",
     muse_spark_audio="MuseSparkAudioConfig",
@@ -252,13 +250,13 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
 def _install_hf_config_validator(
     name: str, validator: Callable, supersedes: Callable
 ) -> None:
-    """Replace a ``PreTrainedConfig`` validator on every ``@strict`` snapshot.
+    """Replace a `PreTrainedConfig` validator on every `@strict` snapshot.
 
-    ``@strict`` snapshots each ``validate_*`` method into ``__class_validators__``
-    at class creation and automatic post-``__init__`` validation dispatches off
+    `@strict` snapshots each `validate_*` method into `__class_validators__`
+    at class creation and automatic post-`__init__` validation dispatches off
     that frozen list, so assigning the class attribute alone only affects
-    explicit ``config.validate_*()`` calls. Every ``@strict``-decorated config
-    class owns a snapshot, so rewrite them all, matching ``supersedes`` by
+    explicit `config.validate_*()` calls. Every `@strict`-decorated config
+    class owns a snapshot, so rewrite them all, matching `supersedes` by
     identity to leave a genuine per-model override in place.
     """
     setattr(PreTrainedConfig, name, validator)
@@ -310,11 +308,11 @@ def _patch_hf_transformers_validate_rope():
 
 
 def _patch_hf_transformers_nested_rope_validation() -> None:
-    """Drop shared entries sitting alongside a nested ``rope_parameters`` dict.
+    """Drop shared entries sitting alongside a nested `rope_parameters` dict.
 
     Transformers validates a dict with any layer-type key by iterating all of
     its values, so a shared entry next to the per-layer dicts raises an
-    ``AttributeError``. The per-layer dicts already carry their own defaults by
+    `AttributeError`. The per-layer dicts already carry their own defaults by
     the time validation runs, so the shared entries can be dropped.
     """
     if hasattr(PreTrainedConfig.validate_rope, "__vllm_nested_rope_patched__"):
@@ -681,14 +679,6 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
                 )
             rope_parameters["rope_type"] = "default"
             logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
-        elif rope_parameters["rope_type"] == "telechat3-yarn":
-            # TeleChat3 is YaRN with 0.07 in place of YaRN's 0.1 attention
-            # scaling coefficient. Precompute it so the config is plain YaRN.
-            factor = rope_parameters["factor"]
-            rope_parameters["rope_type"] = "yarn"
-            rope_parameters["attention_factor"] = 0.07 * math.log(factor) + 1.0
-            rope_parameters.pop("type", None)
-            logger.warning("Replacing rope_type 'telechat3-yarn' with 'yarn'")
 
     # Handle nested rope_parameters in interleaved sliding attention models
     if is_rope_parameters_nested(rope_parameters):

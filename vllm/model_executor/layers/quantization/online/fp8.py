@@ -114,7 +114,7 @@ def _fp8_quant_per_channel(weight: torch.Tensor, scale: torch.Tensor) -> torch.T
 
 
 def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
-    """Whether the weight is sharded along a dim its ``amax`` reduces over.
+    """Whether the weight is sharded along a dim its `amax` reduces over.
 
     Row parallel shards the input dim, column parallel the output dim.
     Per-output-channel scales only reduce the input dim, so they are already
@@ -619,6 +619,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
             self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.2 decode GEMM selection for unquantized BF16 on SM100/SM103/SM107.
 
-Dispatch is by local ``(N, K)`` weight shape and token count ``M``.
-:data:`GLM52_PROJECTIONS` was measured on B300 (SM103),
-:data:`GLM52_PROJECTIONS_SM107` on VRNVL72 (SM107) and
-:data:`GLM52_PROJECTIONS_SM100` on B200 (SM100). The SM107 table also covers
+Dispatch is by local `(N, K)` weight shape and token count `M`.
+`GLM52_PROJECTIONS` was measured on B300 (SM103),
+`GLM52_PROJECTIONS_SM107` on VRNVL72 (SM107) and
+`GLM52_PROJECTIONS_SM100` on B200 (SM100). The SM107 table also covers
 the TP4 projections (q_b, o_proj, shared expert) and the replicated indexer
 projections, which run as BF16 GEMMs at decode batch sizes.
 """
@@ -394,7 +394,7 @@ def _request_warmup(dtype: torch.dtype, configs: set[SkinnyGemmConfig]) -> None:
 def build_glm52_plan(
     weight: torch.Tensor | None, dtype: torch.dtype
 ) -> dict[int, ResolvedCall] | None:
-    """Plan for a weight the walk below cannot reach (a plain ``nn.Linear``)."""
+    """Plan for a weight the walk below cannot reach (a plain `nn.Linear`)."""
     if dtype != torch.bfloat16:
         return None
     table = _low_latency_table()

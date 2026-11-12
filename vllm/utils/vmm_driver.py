@@ -1,24 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ctypes bindings for the CUDA (`cuMem*`) and HIP (`hipMem*`) virtual memory
-management APIs, used by :class:`vllm.utils.extensible_tensor.ExtensibleTensor`.
+management APIs, used by `vllm.utils.extensible_tensor.ExtensibleTensor`.
 """
 
 from __future__ import annotations
 
 import ctypes
+import glob
 import os
 from collections.abc import Iterable
+from contextlib import suppress
 from functools import cache
 from typing import Any
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _SUCCESS = 0
+_ERROR_NOT_PERMITTED = 800
+_ERROR_NOT_SUPPORTED = 801
 _MEM_ALLOCATION_TYPE_PINNED = 1
 _MEM_LOCATION_TYPE_DEVICE = 1
 _MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
+MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1
 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED = 110
+_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED = 128
+MEM_HANDLE_TYPE_FABRIC = 0x8
+_IMEX_CHANNELS = "/dev/nvidia-caps-imex-channels/channel*"
 
 DevicePtr = ctypes.c_ulonglong
 MemHandle = ctypes.c_ulonglong
@@ -53,6 +65,16 @@ class _MemAllocationProp(ctypes.Structure):
 
 class _MemAccessDesc(ctypes.Structure):
     _fields_ = [("location", _MemLocation), ("flags", ctypes.c_int)]
+
+
+def imex_channel_available() -> bool:
+    """Whether this process can open an IMEX channel, which FABRIC handles take.
+    The file alone does not tell: a container's device cgroup can still deny it."""
+    for path in glob.glob(_IMEX_CHANNELS):
+        with suppress(OSError):
+            os.close(os.open(path, os.O_RDONLY))
+            return True
+    return False
 
 
 def _find_loaded_library(
@@ -168,12 +190,17 @@ class VmmDriver:
             return
         raise RuntimeError(f"GPU driver error {result}: {self.error_string(result)}")
 
-    def _make_alloc_prop(self, device_index: int) -> _MemAllocationProp:
+    def _make_alloc_prop(
+        self, device_index: int, export_handle_types: int = 0
+    ) -> _MemAllocationProp:
         prop = _MemAllocationProp()
         prop.type = _MEM_ALLOCATION_TYPE_PINNED
         prop.location.type = _MEM_LOCATION_TYPE_DEVICE
         prop.location.id = device_index
         prop.allocFlags.compressionType = _MEM_ALLOCATION_COMP_NONE
+        prop.requestedHandleTypes = (
+            export_handle_types & MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+        )
         return prop
 
     def granularity(self, device_index: int) -> int:
@@ -197,9 +224,18 @@ class VmmDriver:
     def free_reserved(self, ptr: int, size: int) -> None:
         self._check(self._fns["address_free"](ptr, size))
 
-    def create(self, size: int, device_index: int) -> int:
-        """Create a physical memory handle of `size` bytes."""
-        prop = self._make_alloc_prop(device_index)
+    def create(self, size: int, device_index: int, export_handle_types: int = 0) -> int:
+        """Create a physical memory handle of `size` bytes.
+
+        Args:
+            size: Bytes to allocate.
+            device_index: Device to allocate on.
+            export_handle_types: Handle types other processes import the memory
+                through: POSIX file descriptors and/or FABRIC. Both together
+                get a FABRIC handle only, where FABRIC is available.
+
+        """
+        prop = self._make_alloc_prop(device_index, export_handle_types)
         handle = MemHandle()
         self._check(
             self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
@@ -266,23 +302,72 @@ class CudaVmmDriver(VmmDriver):
         ]
         lib.cuDeviceGetAttribute.restype = ctypes.c_int
         self._rdma_capable: dict[int, bool] = {}
+        self._fabric_capable: dict[int, bool] = {}
 
-    def _make_alloc_prop(self, device_index: int) -> _MemAllocationProp:
+    def _device_attribute(self, attribute: int, device_index: int) -> bool:
+        flag = ctypes.c_int()
+        result = self._lib.cuDeviceGetAttribute(
+            ctypes.byref(flag), attribute, device_index
+        )
+        return result == _SUCCESS and bool(flag.value)
+
+    def _make_alloc_prop(
+        self, device_index: int, export_handle_types: int = 0
+    ) -> _MemAllocationProp:
         # Request GPUDirect RDMA support where available, as the sleep-mode
         # allocator does: without it, KV connectors cannot register the
         # memory with RDMA NICs (ibv_reg_mr fails with EFAULT).
-        prop = super()._make_alloc_prop(device_index)
+        prop = super()._make_alloc_prop(device_index, export_handle_types)
         if (capable := self._rdma_capable.get(device_index)) is None:
-            flag = ctypes.c_int()
-            result = self._lib.cuDeviceGetAttribute(
-                ctypes.byref(flag),
-                _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
-                device_index,
+            capable = self._device_attribute(
+                _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device_index
             )
-            capable = result == _SUCCESS and bool(flag.value)
             self._rdma_capable[device_index] = capable
         prop.allocFlags.gpuDirectRDMACapable = int(capable)
+        # UCX's cuda_ipc can only map driver-mapped memory through a FABRIC handle.
+        if (fabric := self._fabric_capable.get(device_index)) is None:
+            fabric = (
+                self._device_attribute(
+                    _DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device_index
+                )
+                and imex_channel_available()
+            )
+            self._fabric_capable[device_index] = fabric
+        # POSIX file descriptors with FABRIC are unverified, so they are only
+        # requested alone: importers that take fds (LMCache) also take FABRIC.
+        if fabric and export_handle_types != MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR:
+            if export_handle_types & MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR:
+                logger.warning_once(
+                    "KV connectors import the KV cache through both POSIX file "
+                    "descriptors (e.g. LMCacheMPConnector with "
+                    "lmcache.mp.use_vmm_api) and FABRIC handles (e.g. NIXL). It "
+                    "gets a FABRIC handle only, which the LMCache server then "
+                    "imports instead: not verified yet, and it needs an IMEX "
+                    "channel in the server's process."
+                )
+            prop.requestedHandleTypes = MEM_HANDLE_TYPE_FABRIC
         return prop
+
+    def create(self, size: int, device_index: int, export_handle_types: int = 0) -> int:
+        prop = self._make_alloc_prop(device_index, export_handle_types)
+        handle = MemHandle()
+        result = self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
+        # Device support and an open channel do not guarantee a FABRIC allocation.
+        if prop.requestedHandleTypes == MEM_HANDLE_TYPE_FABRIC and result in (
+            _ERROR_NOT_PERMITTED,
+            _ERROR_NOT_SUPPORTED,
+        ):
+            logger.warning(
+                "Device %d cannot allocate with a FABRIC handle (%s); allocating "
+                "without one. With the extensible KV cache, NIXL then loses NVLink "
+                "and falls back to RDMA or TCP.",
+                device_index,
+                self.error_string(result),
+            )
+            self._fabric_capable[device_index] = False
+            return super().create(size, device_index, export_handle_types)
+        self._check(result)
+        return handle.value
 
     def error_string(self, code: int) -> str:
         msg = ctypes.c_char_p()
@@ -425,12 +510,13 @@ def get_vmm_driver() -> VmmDriver:
 
 
 @cache
-def vmm_unavailable_reason() -> str | None:
+def vmm_unavailable_reason(export_handle_types: int = 0) -> str | None:
     """Why VMM cannot be used on the current device, or None if it can.
 
     Checks library load, entry points, known runtime defects (by probing), and
     one reserve/create/map/set-access/unmap/release round trip of a single
-    granule. Covers WSL2 and non-CUDA/ROCm builds.
+    granule, created with `export_handle_types` (see `VmmDriver.create`).
+    Covers WSL2 and non-CUDA/ROCm builds.
     """
     try:
         import torch
@@ -445,7 +531,7 @@ def vmm_unavailable_reason() -> str | None:
         granularity = driver.granularity(device_index)
         ptr = driver.reserve(granularity)
         try:
-            handle = driver.create(granularity, device_index)
+            handle = driver.create(granularity, device_index, export_handle_types)
             try:
                 driver.map(ptr, granularity, handle)
                 try:
