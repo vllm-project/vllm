@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from contextlib import nullcontext
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -1572,6 +1573,70 @@ def test_engram_thp_rejects_explicit_shared_memory():
         EngramConfig(use_thp=True, dp_shared_memory=True)
 
 
+_PEER_GROUP = {
+    "cpu_offload": False,
+    "peer_group_size": 4,
+    "peer_group_store": "/shared/peers",
+}
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "options,parallel,error",
+    [
+        ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
+        ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, "requires cpu_offload=False"),
+        (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
+        (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
+        (_PEER_GROUP, {"data_parallel_size": 8}, "cannot hold an engine of 8"),
+        (_PEER_GROUP, {"data_parallel_size": 4}, None),
+    ],
+)
+def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = ParallelConfig(
+        **({"data_parallel_size": 2} | parallel), distributed_executor_backend="mp"
+    )
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
+        EngramConfig(**options).verify_parallel_config(config)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "architecture,layer_field,supported",
+    [
+        ("DeepseekV41ForCausalLM", "engram_layer_ids", True),
+        ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
+    ],
+)
+def test_engram_peer_group_requires_deepseek_v41(architecture, layer_field, supported):
+    """Qwen4Exp's tables ignore peer groups, so they would not be split."""
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture=architecture,
+            hf_text_config=SimpleNamespace(**{layer_field: [1]}),
+        ),
+    )
+    config = EngramConfig(**_PEER_GROUP)
+    with nullcontext() if supported else pytest.raises(ValueError, match="V4.1"):
+        config.verify_model_config(model)
+
+
+@pytest.mark.skip_global_cleanup
+def test_engram_peer_group_store_path_does_not_change_compile_hash():
+    """Launches pick fresh store paths; their compiled graphs stay reusable."""
+
+    def factors(size, path):
+        return EngramConfig(
+            cpu_offload=False, peer_group_size=size, peer_group_store=path
+        ).compile_factors()
+
+    assert factors(4, "/job1/peers") == factors(4, "/job2/peers")
+    assert factors(4, "/job1/peers") != factors(8, "/job1/peers")
+
+
 @pytest.mark.parametrize(
     "dp_size,load_format,multithread,error",
     [
@@ -2068,6 +2133,31 @@ def test_draft_parallel_config_preserves_ep_without_model(
     assert draft_parallel_config.enable_expert_parallel is target_ep
     assert draft_parallel_config.tensor_parallel_size == 2
     assert target_parallel_config.enable_expert_parallel is target_ep
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [(None, 4), (1, 1), (4, 4), (2, ValueError)],
+)
+def test_draft_decode_context_parallel_size(configured, expected):
+    """The draft defaults to the target's DCP; an explicit value must be 1 or
+    the target's."""
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=4,
+        decode_context_parallel_size=4,
+        distributed_executor_backend="mp",
+    )
+    if expected is ValueError:
+        with pytest.raises(ValueError, match="draft_dcp"):
+            SpeculativeConfig._verify_and_get_draft_dcp(
+                target_parallel_config, configured
+            )
+        return
+    assert (
+        SpeculativeConfig._verify_and_get_draft_dcp(target_parallel_config, configured)
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
