@@ -3,6 +3,7 @@
 import filecmp
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -21,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     SupportsHMA,
     supports_hma,
 )
@@ -161,6 +163,24 @@ class LookaheadHashingTestConnector(ExampleConnector):
 
 class MockDivergentHMAConnector(MockHMAConnector):
     _supports_divergent_local_hybrid_hits = True
+
+
+@dataclass
+class HandshakeTestMetadata(KVConnectorHandshakeMetadata):
+    agent: str
+
+
+class HandshakeTestConnector(ExampleConnector):
+    """Real connector that exchanges handshake metadata with every PP stage, as
+    NixlConnector does."""
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        return HandshakeTestMetadata(agent="worker")
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        self.received_handshake_metadata = metadata
 
 
 # Register mock connectors
@@ -1269,6 +1289,50 @@ def test_multi_connector_worker_metadata(mc):
     mc.update_connector_output(kv_connector_output)
     assert_update_connector_output_called(mc)
     assert kv_connector_output.kv_connector_worker_meta == mc_worker_meta_01a_01b
+
+
+@pytest.mark.cpu_test
+def test_handshake_metadata_reaches_only_its_connector():
+    """With PP, the engine core gives the scheduler side the handshake metadata
+    of every stage. A sibling that exchanges none, such as a KV store next to
+    NIXL on a PP prefill instance, must not receive it: the base class rejects
+    pp_rank > 0 and the engine fails to start."""
+    children = [
+        {
+            "kv_connector": "HandshakeTestConnector",
+            "kv_role": "kv_both",
+            "kv_connector_module_path": __name__,
+        },
+        {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+    ]
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": children},
+        kv_role="kv_both",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    worker = KVConnectorFactory.create_connector(
+        vllm_config, KVConnectorRole.WORKER, kv_cache_config
+    )
+    scheduler = KVConnectorFactory.create_connector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    assert isinstance(scheduler, MultiConnector)
+
+    # What the engine core merges from the workers of two PP stages.
+    scheduler.set_xfer_handshake_metadata_pp_aware(
+        {(pp_rank, 0): worker.get_handshake_metadata() for pp_rank in range(2)}
+    )
+
+    expected = HandshakeTestMetadata(agent="worker")
+    handshake_connector = scheduler.sub_connectors[0]
+    assert isinstance(handshake_connector, HandshakeTestConnector)
+    assert handshake_connector.received_handshake_metadata == {
+        (0, 0): expected,
+        (1, 0): expected,
+    }
 
 
 def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
