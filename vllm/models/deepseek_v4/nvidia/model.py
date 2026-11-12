@@ -16,6 +16,11 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.pp_transport.schema import (
+    PPTransportDataType,
+    PPTransportSchema,
+    PPTransportTensor,
+)
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -861,6 +866,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
+        self.pp_transport_schema = PPTransportSchema(
+            {
+                PPTransportDataType.HIDDEN_STATES: PPTransportTensor(
+                    (self.hc_mult, config.hidden_size)
+                ),
+            },
+            tp_size=get_tensor_model_parallel_world_size(),
+        )
+
         # Three aux streams: one per non-default input GEMM in
         # DeepseekV4Attention._run_parallel_input_projections
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
@@ -957,14 +971,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # of shape (num_tokens, hc_mult, hidden_size) — V4 expands the
         # token embedding to hc_mult streams before the first decoder
         # layer and keeps that shape until hc_head() collapses it.
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.hc_mult, self.config.hidden_size),
-                    dtype=dtype,
-                    device=device,
-                ),
-            }
+        return self.pp_transport_schema.make_empty_intermediate_tensors(
+            batch_size, dtype, device
         )
 
     def forward(
@@ -1359,6 +1367,7 @@ class DeepseekV4ForCausalLM(
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        self.pp_transport_schema = self.model.pp_transport_schema
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

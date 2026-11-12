@@ -116,11 +116,12 @@ def test_pp2_tp2_tensor_dict_transport(tmp_path):
 
 @pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("sharded_field", ["hidden_states", "residual"])
-def test_mixed_views_keep_capture_shapes_and_addresses(compiled, sharded_field):
+@pytest.mark.parametrize("shape", [(4,), (4, 8)])
+def test_mixed_views_keep_capture_shapes_and_addresses(compiled, sharded_field, shape):
     transport = PPTransportSchema(
         {
             field: PPTransportTensor(
-                (4,), sequence_parallel=field.value == sharded_field
+                shape, sequence_parallel=field.value == sharded_field
             )
             for field in PPTransportDataType
         },
@@ -148,7 +149,7 @@ def test_mixed_views_keep_capture_shapes_and_addresses(compiled, sharded_field):
                     (num_tokens + 1) // 2
                     if field.value == sharded_field
                     else num_tokens,
-                    4,
+                    *shape,
                 ),
                 num_tokens,
                 dtype=torch.float32,
@@ -161,8 +162,8 @@ def test_mixed_views_keep_capture_shapes_and_addresses(compiled, sharded_field):
         for key, expected in values.items():
             torch.testing.assert_close(captured[key], expected, rtol=0, atol=0)
             assert captured[key].data_ptr() == addresses[key]
-    assert captures[0][sharded_field].shape == (3, 4)
-    assert captures[1][sharded_field].shape == (1, 4)
+    assert captures[0][sharded_field].shape == (3, *shape)
+    assert captures[1][sharded_field].shape == (1, *shape)
 
 
 def test_receive_preserves_padding_and_legacy_dtype_conversion():

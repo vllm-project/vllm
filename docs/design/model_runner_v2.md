@@ -246,6 +246,10 @@ SP-sharded bindings use NCCL when `VLLM_PP_TRANSPORT=auto`; forcing
 Models without a schema retain full-tensor behavior, including arbitrary legacy
 intermediate keys and dtype-converting receive copies.
 
+The NVIDIA DeepSeek V4 implementation declares its multi-stream hidden state
+with shape `(hc_mult, hidden_size)`. It retains its existing full-tensor PP
+boundary; this declaration does not enable a new SP mode for DeepSeek V4.
+
 ## Development Philosophy
 
 MRV2 changes should meet a higher code quality bar. As feature gaps with V1 are filled, features should be reconsidered from first principles in the MRV2 design context instead of quickly porting V1 behavior.
