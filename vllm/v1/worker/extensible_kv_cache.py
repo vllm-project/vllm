@@ -169,15 +169,16 @@ class ExtensibleKVCache:
             raise ValueError("KV cache tensors do not tile the allocation.")
         return offsets, strides
 
-    def allocate(self, size: int) -> torch.Tensor:
-        """Allocator hook for allocate_kv_cache; commits the null block.
+    @property
+    def min_committed_blocks(self) -> int:
+        """The null block, plus one under block-outermost layouts, whose views
+        start inside block 0 and read past it (see `pad_kv_cache_segments`)."""
+        return 2 if self._is_block_outermost else 1
 
-        Under block-outermost layouts layers' views start inside block 0, so a
-        second block keeps at least half a granule mapped past each view's start
-        (see `pad_kv_cache_segments` for what reads it).
-        """
+    def allocate(self, size: int) -> torch.Tensor:
+        """Allocator hook for allocate_kv_cache; commits the minimum."""
         assert size == self.size, f"Expected {self.size} bytes, got {size}."
-        self.commit(2 if self._is_block_outermost else 1)
+        self.commit(self.min_committed_blocks)
         return self.buffer.full_view()
 
     def commit(

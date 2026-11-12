@@ -770,7 +770,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model_state,
                     block_tables,
                     input_block_tables,
-                    kv_cache_config,
                 )
                 ubatch_state = self.ubatch_runner.prepare(
                     input_batch,
@@ -868,7 +867,6 @@ def set_dcp_capture_context(
     model_state: ModelState,
     block_tables: BlockTables,
     input_block_tables: Sequence[torch.Tensor],
-    kv_cache_config: KVCacheConfig,
 ) -> None:
     # Capture FULL graphs with KV context so a host-side skip of DCP context
     # attention is not baked into the graph.
@@ -878,7 +876,9 @@ def set_dcp_capture_context(
         input_batch,
         block_tables,
         block_tables.cp_size * block_tables.cp_interleave,
-        kv_cache_config.num_blocks,
+        # Replays read the real block tables, so the context can sit in the
+        # null block: the one an extensible KV cache keeps mapped for capture.
+        1,
         model_state.max_model_len,
         input_block_tables=input_block_tables,
     )
@@ -928,7 +928,6 @@ def prepare_inputs_to_capture(
                 model_state,
                 block_tables,
                 input_block_tables,
-                kv_cache_config,
             )
         input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
             input_buffers.dcp_local_seq_lens,
