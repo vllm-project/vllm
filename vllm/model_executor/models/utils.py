@@ -993,7 +993,7 @@ def pp_input_embedding(module: nn.Module, vllm_config: VllmConfig, *, tied: bool
             condition the model uses to call `tie_weights`.
 
     """
-    from vllm.distributed import get_pp_group
+    from vllm.distributed.parallel_state import get_pp_group
 
     pp_group = get_pp_group()
     keep = (
@@ -1009,7 +1009,7 @@ def pp_input_embedding(module: nn.Module, vllm_config: VllmConfig, *, tied: bool
 def pp_last_stage(module: nn.Module):
     """Within this context, build the modules assigned to `module`, such as the
     final norm and `lm_head`, only on the last pipeline stage."""
-    from vllm.distributed import get_pp_group
+    from vllm.distributed.parallel_state import get_pp_group
 
     with pp_stage(module, keep=get_pp_group().is_last_rank):
         yield

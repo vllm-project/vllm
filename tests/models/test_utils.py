@@ -175,7 +175,6 @@ def set_pp_rank(monkeypatch: pytest.MonkeyPatch, rank: int, world_size: int):
         is_first_rank=rank == 0,
         is_last_rank=rank == world_size - 1,
     )
-    monkeypatch.setattr("vllm.distributed.get_pp_group", lambda: pp_group)
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_pp_group", lambda: pp_group
     )
