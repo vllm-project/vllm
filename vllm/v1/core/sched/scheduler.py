@@ -2275,8 +2275,7 @@ class Scheduler(SchedulerInterface):
         `PREFILL_PROGRESS_UPDATES_PER_REQUEST` times, evenly spaced over the
         work it had left when it first reported.
         """
-        computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
-        remaining = request.num_tokens - computed
+        remaining = max(0, request.num_tokens - request.num_computed_tokens)
         state = self._prefill_progress.get(request.request_id)
         if remaining <= 0:
             if state is None:
@@ -2295,10 +2294,14 @@ class Scheduler(SchedulerInterface):
             return
         if state is None:
             state = _PrefillProgressState(client_index=request.client_index)
-            state.step = max(1, remaining // PREFILL_PROGRESS_UPDATES_PER_REQUEST)
+            state.step = max(
+                1,
+                -(-remaining // PREFILL_PROGRESS_UPDATES_PER_REQUEST),
+            )
             self._prefill_progress[request.request_id] = state
         elif (
             state.last_remaining is not None
+            and remaining <= state.last_remaining
             and state.last_remaining - remaining < state.step
         ):
             return
@@ -2657,10 +2660,7 @@ class Scheduler(SchedulerInterface):
                     request = self.requests.get(request_id)
                     if request is None:
                         continue
-                    computed = max(
-                        0, request.num_computed_tokens - request.num_in_flight_tokens
-                    )
-                    remaining = max(0, request.num_tokens - computed)
+                    remaining = max(0, request.num_tokens - request.num_computed_tokens)
                     prefill_progress.setdefault(state.client_index, []).append(
                         PrefillProgress(
                             request_id=request_id, remaining_prefill_tokens=remaining
