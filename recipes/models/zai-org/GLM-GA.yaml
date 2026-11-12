@@ -151,7 +151,7 @@ guide: |
   ## Troubleshooting
 
   - **Long-context memory:** At 128K context, tune `--max-num-batched-tokens` and
-    `--gpu-memory-utilization` to prevent OOM.
+    `--max-num-seqs` to prevent OOM.
   - **Video loading errors:** Ensure OpenCV or PyAV is installed for video decoding.
 
   ## References

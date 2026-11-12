@@ -43,8 +43,6 @@ model:
     - "--trust-remote-code"
     # Canonical Inferact serve uses fastsafetensors for much faster weight load.
     # Leave --moe-backend unset so vLLM selects its default automatic backend.
-    - "--gpu-memory-utilization"
-    - "0.95"
 
 features:
   tool_calling:
@@ -178,8 +176,6 @@ strategy_min_gpus:
 hardware_overrides:
   hopper:
     extra_args:
-      - "--gpu-memory-utilization"
-      - "0.97"
       - "--max-num-seqs"
       - "5"
       - "--max-model-len"
@@ -235,8 +231,6 @@ hardware_overrides:
     extra_args:
       - "--load-format"
       - "auto"
-      - "--gpu-memory-utilization"
-      - "0.95"
       - "--mm-encoder-tp-mode"
       - "data"
       - "--max-num-seqs"
@@ -276,16 +270,10 @@ strategy_overrides:
   # the 1M max-model-len, fp8 KV and prefix caching. These are plain strategy
   # args instead: they emit before hardware overrides, so on Blackwell the
   # baseline layers on top and the two flags below survive (the baseline sets
-  # neither), while Hopper/AMD keep their own memory-utilization and
-  # batched-token tuning by last-wins dedupe.
+  # neither), while Hopper/AMD keep their own batched-token tuning by
+  # last-wins dedupe.
   multi_node_tp_pp:
     extra_args:
-      # 0.90, not the 0.95 baseline: the flashinfer TRTLLM MXFP4 MoE kernel
-      # allocates a ~1.6 GiB runtime workspace outside vLLM's pool on the first
-      # forward, and at 0.95 a 180 GB B200 OOMs on the first warmup pass. B300
-      # has the headroom to spare, so the pair shares one value.
-      - "--gpu-memory-utilization"
-      - "0.90"
       # Cap prefill chunks so one long request cannot OOM a pipeline stage.
       - "--max-num-batched-tokens"
       - "8192"
