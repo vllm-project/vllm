@@ -542,21 +542,25 @@ def test_sync_load_failure_of_a_request_preempted_before_its_output(policy: str)
         assert failed.status == RequestStatus.FINISHED_ERROR
 
 
-def test_sync_load_bad_blocks_skip_earlier_recurrent_state_checkpoints():
+@pytest.mark.parametrize(("dcp", "expected"), [(1, ([3], [9])), (2, ([2, 3], [9]))])
+def test_sync_load_bad_blocks_skip_earlier_recurrent_state_checkpoints(dcp, expected):
     """A recurrent-state block before the load start is a prefix-cache
-    checkpoint the load did not write, so it is not reported as bad."""
-    kv_cache_config = make_kv_cache_config(
-        block_size=16, mamba_enabled=True, mamba_cache_mode="align"
-    )
+    checkpoint the load did not write, so it is not reported as bad. Blocks are
+    indexed by each manager's block size, which DCP scales for attention."""
 
     def block(block_id: int) -> KVCacheBlock:
         return KVCacheBlock(block_id)
 
     manager = SimpleNamespace(
-        kv_cache_config=kv_cache_config,
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                SimpleNamespace(block_size=16 * dcp),
+                SimpleNamespace(block_size=16),
+            ]
+        ),
         get_blocks=lambda _: SimpleNamespace(
             blocks=([block(1), block(2), block(3)], [block(7), block(8), block(9)])
         ),
     )
 
-    assert KVCacheManager.get_block_ids_from_token(manager, "req", 32) == ([3], [9])
+    assert KVCacheManager.get_block_ids_from_token(manager, "req", 32) == expected

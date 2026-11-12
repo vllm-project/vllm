@@ -779,13 +779,13 @@ class KVCacheManager:
         ``start_token`` on, in every KV cache group. Recurrent-state blocks
         before ``start_token`` are prefix-cache checkpoints, not later state."""
         block_ids: list[list[int]] = []
-        for group, blocks in zip(
-            self.kv_cache_config.kv_cache_groups,
+        for manager, blocks in zip(
+            self.coordinator.single_type_managers,
             self.get_blocks(request_id).blocks,
         ):
-            spec = group.kv_cache_spec
-            if not isinstance(spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)):
-                blocks = blocks[start_token // spec.block_size :]
+            if not isinstance(manager, CrossAttentionManager):
+                # The manager's block size includes DCP sharding.
+                blocks = blocks[start_token // manager.block_size :]
             block_ids.append([b.block_id for b in blocks if not b.is_null])
         return tuple(block_ids)
 
