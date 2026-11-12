@@ -7,10 +7,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     BoundaryPut,
     LoadSpec,
     MooncakeLookupResult,
@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ReqMeta,
     RequestTracker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
     MooncakeStoreScheduler,
     _partial_tail_non_mamba_puts,
 )
@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.request import RequestStatus
 
 
 def _make_bare_scheduler(
@@ -48,6 +49,7 @@ def _make_bare_scheduler(
     scheduler.save_decode_cache = save_decode_cache
     scheduler.enable_kv_events = False
     scheduler.lookup_async = False
+    scheduler.client = _StubLookupClient(hit_tokens=0)
     scheduler.enable_lookup = True
     scheduler._capacity_only = False
     scheduler._block_size = 16
@@ -118,7 +120,6 @@ def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
             req_ids=["req-0"],
             new_block_ids=[([2],)],
             num_computed_tokens=[44],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": 4},
         scheduled_spec_decode_tokens=(
@@ -140,7 +141,6 @@ def _make_decode_scheduler_output(
             # The block that becomes full was allocated on an earlier step.
             new_block_ids=[()],
             num_computed_tokens=[num_computed_tokens],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
@@ -154,7 +154,7 @@ def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
         num_computed_tokens=0,
         prompt_token_ids=list(range(32)),
         num_prompt_tokens=32,
-        prefill_token_ids=None,
+        prefill_token_ids=list(range(32)),
         block_ids=([0, 1],),
         block_hashes=[f"h{i}".encode() for i in range(32 // hash_block_size)],
     )
@@ -167,7 +167,6 @@ def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": 32},
         scheduled_spec_decode_tokens={},
@@ -227,11 +226,15 @@ def _make_preemption_scheduler_output():
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
     )
+
+
+def _preempt(scheduler: MooncakeStoreScheduler):
+    scheduler._unfinished_requests["req-0"][0].status = RequestStatus.PREEMPTED
+    return scheduler.build_connector_meta(_make_preemption_scheduler_output())
 
 
 def _make_worker_output(completed_saves: dict[int, int]) -> SimpleNamespace:
@@ -334,7 +337,7 @@ def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(vllm_config, _make_qsa_hybrid_cache_config())
@@ -542,7 +545,7 @@ def test_preemption_removes_tracker():
     )
     scheduler._request_trackers["req-0"].has_pending_offload = True
 
-    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    _preempt(scheduler)
 
     assert "req-0" not in scheduler._request_trackers
 
@@ -561,7 +564,7 @@ def test_preemption_clears_stale_load_state():
         can_load=True,
     )
 
-    meta = scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    meta = _preempt(scheduler)
 
     assert meta.requests == []
     assert "req-0" not in scheduler.load_specs
@@ -595,7 +598,6 @@ def _make_pending_load_scheduler_output() -> SimpleNamespace:
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -653,16 +655,24 @@ def _make_resumed_unfinished_request(
 
 def _make_resumed_scheduler_output(*, num_scheduled_tokens: int) -> SimpleNamespace:
     # A resumed-from-preemption step: the scheduler lists the request in
-    # resumed_req_ids and sends the FULL block table (replace semantics).
+    # scheduled_new_reqs with the FULL block table and its prompt + previously
+    # generated tokens as prefill_token_ids.
     return SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
-        scheduled_new_reqs=[],
+        scheduled_new_reqs=[
+            SimpleNamespace(
+                req_id="req-0",
+                num_computed_tokens=0,
+                prompt_token_ids=list(range(32)),
+                prefill_token_ids=list(range(48)),
+                block_ids=([0, 1, 2],),
+            )
+        ],
         scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["req-0"],
-            new_block_ids=[([0, 1, 2],)],
-            num_computed_tokens=[0],
-            resumed_req_ids={"req-0"},
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
@@ -672,8 +682,8 @@ def _make_resumed_scheduler_output(*, num_scheduled_tokens: int) -> SimpleNamesp
 
 def test_resumed_from_preemption_with_load_skips_save():
     # On resume-from-preemption with a cache hit, the same co-queueing race
-    # applies: the resumed-from-preemption branch in build_connector_meta also
-    # passes load_spec.can_load=True. Skip save in this step; subsequent
+    # applies: the new-request path in build_connector_meta also passes
+    # load_spec.can_load=True. Skip save in this step; subsequent
     # cached_reqs steps will save new tokens normally.
     scheduler = _make_bare_scheduler()
     _make_resumed_unfinished_request(
@@ -725,12 +735,9 @@ def test_resumed_from_preemption_without_load_still_saves():
     assert tracker.num_saved_tokens == 48
 
 
-def test_running_request_not_in_resumed_req_ids_appends_blocks():
-    """Regression: the replace-vs-append choice must follow the scheduler's
-    cached_reqs.resumed_req_ids, NOT connector-local preemption history.
-
-    A running request that is not resumed this step carries a *delta*
-    new_block_ids and must be APPENDED to the tracker's existing blocks.
+def test_running_request_appends_blocks():
+    """Regression: a running request carries a *delta* new_block_ids and must be
+    APPENDED to the tracker's existing blocks.
     Treating it as resumed would replace allocated_block_ids with just the
     delta while token_len stays at the full computed length, so the store
     path's block_ids[start // block_size] runs off the end (the
@@ -744,10 +751,9 @@ def test_running_request_not_in_resumed_req_ids_appends_blocks():
         prefill_end_tokens=48,
     )
 
-    out = _make_scheduler_output(scheduled_spec_tokens=None)
-    assert "req-0" not in out.scheduled_cached_reqs.resumed_req_ids
-
-    meta = scheduler.build_connector_meta(out)
+    meta = scheduler.build_connector_meta(
+        _make_scheduler_output(scheduled_spec_tokens=None)
+    )
 
     tracker = scheduler._request_trackers["req-0"]
     # Delta [2] appended to existing [0, 1] (decode path), not replaced by [2].
@@ -759,10 +765,10 @@ def test_running_request_not_in_resumed_req_ids_appends_blocks():
     assert meta.requests[0].token_len_chunk == 48
 
 
-def test_resumed_request_in_resumed_req_ids_replaces_blocks():
-    """A request the scheduler marks resumed gets the FULL block table in
-    new_block_ids and must REPLACE the tracker's blocks (not append), even if
-    a stale tracker from before preemption is still present."""
+def test_resumed_request_replaces_blocks():
+    """A resumed request gets the FULL block table in scheduled_new_reqs and must
+    REPLACE the tracker's blocks (not append), even if a stale tracker from
+    before preemption is still present."""
     scheduler = _make_bare_scheduler()
     _make_resumed_unfinished_request(
         scheduler,
@@ -783,7 +789,7 @@ def test_resumed_request_in_resumed_req_ids_replaces_blocks():
     )
 
     tracker = scheduler._request_trackers["req-0"]
-    # Replaced with the full table from new_block_ids, not appended to [7,8,9].
+    # Replaced with the full table from block_ids, not appended to [7,8,9].
     assert tracker.allocated_block_ids == ([0, 1, 2],)
     assert tracker.token_len == 48
     blocks_held = sum(len(g) for g in tracker.allocated_block_ids)
@@ -921,7 +927,6 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
                     req_ids=["req-0"],
                     new_block_ids=[()],
                     num_computed_tokens=[num_computed_tokens],
-                    resumed_req_ids=set(),
                 ),
                 num_scheduled_tokens={"req-0": num_scheduled_tokens},
                 scheduled_spec_decode_tokens={},
@@ -981,6 +986,15 @@ class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
         self.num_tokens: list[int] = []
+        self.prefetched: list[tuple[str, int]] = []
+        self.discarded: list[str] = []
+
+    def discard(self, req_id):
+        self.discarded.append(req_id)
+
+    def prefetch(self, req_id: str, num_tokens: int, block_hashes: list[bytes]):
+        self.prefetched.append((req_id, num_tokens))
+        return True
 
     def lookup(
         self,
@@ -991,6 +1005,67 @@ class _StubLookupClient:
     ) -> MooncakeLookupResult:
         self.num_tokens.append(num_tokens)
         return MooncakeLookupResult(self._hit_tokens)
+
+
+def _make_admission_request(request_id="req-0"):
+    return SimpleNamespace(
+        request_id=request_id,
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        skip_reading_external_kv=False,
+    )
+
+
+def test_admission_lookup_waits_to_create_load_until_local_hit_is_known():
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+
+    scheduler.start_lookup_prefetch(request)
+
+    assert scheduler.client.prefetched == [(request.request_id, 48)]
+    assert scheduler.load_specs == {}
+    assert scheduler._unfinished_requests == {}
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (16, True)
+    assert scheduler.load_specs[request.request_id].vllm_cached_tokens == 16
+    assert scheduler.load_specs[request.request_id].can_load is False
+
+
+@pytest.mark.parametrize(
+    "option", ["sync", "disabled", "skip_cache", "short", "no_hash"]
+)
+def test_admission_lookup_skips_ineligible_requests(option):
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+    if option == "sync":
+        scheduler.lookup_async = False
+    elif option == "disabled":
+        scheduler.enable_lookup = False
+    elif option == "skip_cache":
+        request.skip_reading_external_kv = True
+    elif option == "short":
+        request.num_tokens = 12
+    else:
+        request.block_hashes = []
+
+    scheduler.start_lookup_prefetch(request)
+    assert scheduler.client.prefetched == []
+
+
+def test_admission_lookup_is_discarded_on_preemption():
+    """Finished requests are released in request_finished; preempted ones
+    are not finished, so build_connector_meta discards their lookup."""
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+
+    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+
+    assert scheduler.client.discarded == [request.request_id]
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
@@ -1196,7 +1271,6 @@ def _add_pending_partial_tail_request(
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -1314,7 +1388,6 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -1461,7 +1534,7 @@ def test_partial_tail_follows_lookahead_checkpoint(
 def test_shared_prefix_junction_handoff_adds_no_attention_tail(
     completed, mamba_tails, publish, expected
 ):
-    """``--enable-mamba-shared-prefix-checkpoint`` also hands off a sub-block
+    """`--enable-mamba-shared-prefix-checkpoint` also hands off a sub-block
     Mamba state at the shared-prefix junction, below the prompt checkpoint."""
     groups = [
         KVCacheGroupSpec(
@@ -1528,7 +1601,6 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -1571,7 +1643,6 @@ def _make_offload_only_output(entries, block_ids=([0],)):
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -1674,7 +1745,6 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
             req_ids=["req-0"],
             new_block_ids=[([5], [23])],
             num_computed_tokens=[44],
-            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": 4},
         scheduled_spec_decode_tokens={},
@@ -1731,7 +1801,7 @@ def test_preemption_and_request_id_reuse_do_not_release_inflight_job():
     first = scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
     first_job_id = first.requests[0].store_job_id
 
-    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    _preempt(scheduler)
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     assert first_job_id in scheduler._pinned_saves
 

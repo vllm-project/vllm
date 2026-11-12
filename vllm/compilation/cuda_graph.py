@@ -14,7 +14,6 @@ import torch
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cudagraph_pool import capture_pool
-from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import (
     BatchDescriptor,
@@ -275,9 +274,6 @@ class CUDAGraphWrapper:
                     self.runtime_mode.name,
                     entry.batch_descriptor,
                 )
-            # validate that cudagraph capturing is legal at this point.
-            validate_cudagraph_capturing_enabled()
-
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]

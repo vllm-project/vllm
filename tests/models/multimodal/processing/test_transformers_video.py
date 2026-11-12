@@ -222,7 +222,9 @@ def test_video_unsupported_when_processor_cannot_count_tokens(monkeypatch):
 def test_merged_token_fields_split_per_video():
     """VideoLLaMA3's compression mask has one row per merged token, not per patch."""
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
-        ModelConfig(model="lkhl/VideoLLaMA3-2B-Image-HF", model_impl="transformers")
+        ModelConfig(
+            model="vllm-project/VideoLLaMA3-2B-Image-HF", model_impl="transformers"
+        )
     )
 
     result = mm_processor(
@@ -287,7 +289,7 @@ def test_dummy_video_has_the_most_tokens(model_id):
     max_tokens = info.get_max_video_tokens(seq_len, {"video": 1})
     assert placeholder.get_num_embeds() == max_tokens
     # Shrinking the dummy frames must never cost tokens
-    num_frames = info.get_num_frames_with_most_features(seq_len, {"video": 1})
+    num_frames = info.get_num_frames_with_most_features(seq_len, 1)
     (huge_frame_tokens,) = info.get_hf_processor()._get_num_multimodal_tokens(
         video_sizes=[[num_frames, 10_000, 10_000]]
     )["num_video_tokens"]
