@@ -133,6 +133,23 @@ async def test_bad_requests(mary_had_lamb, whisper_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "priority_kwargs",
+    [
+        {"extra_headers": {"X-Vllm-Priority": str(2**31)}},
+        {"extra_body": {"priority": 2**31}},
+    ],
+    ids=["header", "body"],
+)
+async def test_out_of_range_priority(mary_had_lamb, whisper_client, priority_kwargs):
+    """Transcription requests read priority instead of silently dropping it."""
+    with pytest.raises(openai.BadRequestError):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME, file=mary_had_lamb, language="en", **priority_kwargs
+        )
+
+
+@pytest.mark.asyncio
 async def test_long_audio_request(mary_had_lamb, whisper_client):
     mary_had_lamb.seek(0)
     audio, sr = load_audio(mary_had_lamb)

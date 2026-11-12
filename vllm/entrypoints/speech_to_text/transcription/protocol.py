@@ -13,7 +13,11 @@ from pydantic import (
 )
 
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
+    DeltaMessage,
+)
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -120,6 +124,10 @@ class TranscriptionRequest(OpenAIBaseModel):
             "numeric values, used by custom extensions."
         ),
     )
+
+    priority: int = Field(default=0, ge=PRIORITY_MIN, le=PRIORITY_MAX)
+    """The priority of the request (lower means earlier handling; default: 0).
+    Any priority other than 0 requires the server to use priority scheduling."""
     # --8<-- [end:transcription-extra-params]
 
     to_language: str | None = None

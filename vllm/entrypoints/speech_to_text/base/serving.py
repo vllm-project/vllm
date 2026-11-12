@@ -217,6 +217,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self,
         audio_chunk: np.ndarray,
         request_id: str,
+        priority: int = 0,
     ) -> str:
         """Auto-detect the spoken language from an audio chunk.
 
@@ -242,6 +243,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             prompt,
             sampling_params,
             request_id,
+            priority=priority,
         )
 
         try:
@@ -270,6 +272,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
+        priority: int = 0,
     ) -> tuple[list[EngineInput], float, list[float]]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
@@ -294,7 +297,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         ):
             # Auto-detect language from the first chunk.
             request.language = await self._detect_language(
-                chunks[0], f"{request_id}-lang_detect"
+                chunks[0], f"{request_id}-lang_detect", priority
             )
 
         parsed_prompts: list[DictPrompt] = []
@@ -489,6 +492,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             raw_request.state.request_metadata = request_metadata
 
         lora_request = self._maybe_get_adapters(request)
+        priority = self._get_priority(request, raw_request)
 
         (
             engine_inputs,
@@ -498,6 +502,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             request=request,
             audio_data=audio_data,
             request_id=request_id,
+            priority=priority,
         )
 
         # Schedule the request and get the result generator.
@@ -563,6 +568,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         request_id=request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
+                        priority=priority,
                     )
                 else:
                     generator = self.engine_client.generate(
@@ -571,6 +577,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
+                        priority=priority,
                     )
 
                 list_result_generator.append(generator)
