@@ -1541,3 +1541,82 @@ class TestParameterWhitespace:
                     streamed += tool_call.function.arguments
 
         assert json.loads(streamed)["content"] == EXPECTED_CONTENT
+
+
+class TestJsonToolBody:
+    """Qwen3 base models emit hermes-style JSON bodies in <tool_call>.
+
+    Regression tests for https://github.com/vllm-project/vllm/issues/67157:
+    a body like {"name": ..., "arguments": ...} was dropped entirely,
+    returning content=None and no tool calls.
+    """
+
+    JSON_OUTPUT = (
+        "<tool_call>\n"
+        '{"name": "get_current_weather", '
+        '"arguments": {"city": "Dallas", "state": "TX"}}\n'
+        "</tool_call>"
+    )
+
+    def test_json_body(self, qwen3_tool_parser):
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+        extracted = qwen3_tool_parser.extract_tool_calls(
+            self.JSON_OUTPUT, request=request
+        )
+
+        assert extracted.tools_called
+        assert len(extracted.tool_calls) == 1
+        assert extracted.tool_calls[0].function.name == "get_current_weather"
+        assert json.loads(extracted.tool_calls[0].function.arguments) == {
+            "city": "Dallas",
+            "state": "TX",
+        }
+        assert extracted.content is None
+
+    def test_json_body_with_content(self, qwen3_tool_parser):
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+        extracted = qwen3_tool_parser.extract_tool_calls(
+            "Checking the weather.\n" + self.JSON_OUTPUT, request=request
+        )
+
+        assert extracted.tools_called
+        assert len(extracted.tool_calls) == 1
+        assert extracted.content == "Checking the weather."
+
+    def test_json_body_multiple(self, qwen3_tool_parser):
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+        extracted = qwen3_tool_parser.extract_tool_calls(
+            self.JSON_OUTPUT + "\n" + self.JSON_OUTPUT, request=request
+        )
+
+        assert extracted.tools_called
+        assert len(extracted.tool_calls) == 2
+        for tool_call in extracted.tool_calls:
+            assert tool_call.function.name == "get_current_weather"
+
+    def test_json_body_empty_call_still_dropped(self, qwen3_tool_parser):
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+        extracted = qwen3_tool_parser.extract_tool_calls(
+            "<tool_call>\n</tool_call>", request=request
+        )
+
+        assert not extracted.tools_called
+        assert extracted.tool_calls == []
+
+    def test_json_body_streaming(self, qwen3_tool_parser, qwen3_tokenizer):
+        """Arguments may arrive only when the tool call closes."""
+        request = ChatCompletionRequest(model=MODEL, messages=[])
+
+        streamed = ""
+        names = []
+        for delta_message in stream_delta_message_generator(
+            qwen3_tool_parser, qwen3_tokenizer, self.JSON_OUTPUT, request
+        ):
+            for tool_call in delta_message.tool_calls or []:
+                if tool_call.function and tool_call.function.name:
+                    names.append(tool_call.function.name)
+                if tool_call.function and tool_call.function.arguments:
+                    streamed += tool_call.function.arguments
+
+        assert names == ["get_current_weather"]
+        assert json.loads(streamed) == {"city": "Dallas", "state": "TX"}

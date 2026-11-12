@@ -116,9 +116,39 @@ def _qwen3_parse_params(
     return params, open_param
 
 
+def _qwen3_json_body_args(raw_args: str, partial: bool) -> str | None:
+    """Extract the arguments JSON from a hermes-style JSON tool body.
+
+    Qwen3 base models emit ``{"name": ..., "arguments": ...}`` inside
+    ``<tool_call>`` instead of the Qwen3-Coder XML parameter format.
+    Returns None when the body is not JSON, so the caller falls back to
+    XML parameter parsing. An incomplete JSON body during streaming
+    yields "", so no partial arguments are emitted; the complete body
+    is converted when the tool call closes.
+    """
+    stripped = raw_args.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return "" if partial else None
+    if not isinstance(parsed, dict):
+        return "" if partial else None
+    args = parsed.get("arguments", parsed.get("parameters"))
+    if args is None:
+        args = {k: v for k, v in parsed.items() if k != "name"}
+    if isinstance(args, str):
+        return args
+    return json.dumps(args, ensure_ascii=False)
+
+
 def _qwen3_arg_converter(
     raw_args: str, partial: bool, closed: _ClosedParams | None = None
 ) -> str:
+    json_args = _qwen3_json_body_args(raw_args, partial)
+    if json_args is not None:
+        return json_args
     params, open_param = _qwen3_parse_params(raw_args, partial, closed)
     if open_param is not None and open_param.group(1):
         params[open_param.group(1)] = _trim_wrapping_newlines(open_param.group(2))
@@ -321,6 +351,16 @@ def qwen3_config(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+        },
+        content_events={
+            ParserState.CONTENT: EventType.TEXT_CHUNK,
+            ParserState.REASONING: EventType.REASONING_CHUNK,
+            ParserState.TOOL_NAME: EventType.TOOL_NAME,
+            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            # Qwen3 base models put a hermes-style JSON body directly in
+            # <tool_call>; capture it as raw args so the name/arguments
+            # can be recovered from the JSON.
+            ParserState.TOOL_PREAMBLE: EventType.ARG_VALUE_CHUNK,
         },
         arg_converter=_qwen3_arg_converter,
         arg_value_extender=_qwen3_arg_value_extender,
