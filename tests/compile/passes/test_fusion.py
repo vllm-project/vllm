@@ -62,6 +62,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
+from vllm.utils.torch_utils import set_random_seed
 
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels
@@ -988,7 +989,7 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
 
         torch.set_default_device("cuda")
         torch.set_default_dtype(dtype)
-        torch.manual_seed(1)
+        set_random_seed(1)
 
         model = TestGatedMxfp4Model(
             num_heads,
