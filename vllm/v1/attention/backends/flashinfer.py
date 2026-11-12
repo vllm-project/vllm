@@ -105,9 +105,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
-FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
-FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
-
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
@@ -1363,26 +1360,35 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
-            buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if envs.VLLM_BATCH_INVARIANT:
-                buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-            else:
-                # FlashInfer prefill temp buffers (batch_prefill_tmp_v, ...)
-                # scale with the prefill chunk and query-head footprint, NOT
-                # context length. The fixed ~394 MiB default is too small for
-                # wide-head models at the default 8192-token chunk on some
-                # archs (e.g. sm_120), where FlashInfer hard-errors instead of
-                # growing. Size to the batch's head footprint; never shrink
-                # below the configured default.
-                est = (
-                    self.max_num_batched_tokens
-                    * self.num_qo_heads
-                    * self.head_dim
-                    * FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
-                )
-                buffer_size = max(buffer_size, est)
-            self._workspace_buffer = torch.zeros(
-                buffer_size, dtype=torch.uint8, device=self.device
+            # Imported lazily: this module is the FlashInfer backend, and the
+            # sizing helper must not import it while collecting attention layers.
+            from vllm.v1.attention.backends.flashinfer_workspace import (
+                native_workspace_bytes,
+                prefill_workspace_floor,
+                reserved_flashinfer_workspace,
+            )
+
+            # Prefill temp buffers scale with the chunk and query-head footprint,
+            # not context length. The ~394 MiB default is too small for wide-head
+            # models, so the native path grows to that floor and never shrinks.
+            # Opt-in startup sizing may reuse a smaller buffer reserved earlier.
+            native = native_workspace_bytes(
+                envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                max_num_batched_tokens=self.max_num_batched_tokens,
+                num_qo_heads=self.num_qo_heads,
+                head_dim=self.head_dim,
+                batch_invariant=bool(envs.VLLM_BATCH_INVARIANT),
+            )
+            reserved = reserved_flashinfer_workspace(
+                self.device,
+                prefill_workspace_floor(
+                    self.max_num_batched_tokens, self.num_qo_heads, self.head_dim
+                ),
+            )
+            self._workspace_buffer = (
+                reserved
+                if reserved is not None
+                else torch.zeros(native, dtype=torch.uint8, device=self.device)
             )
         return self._workspace_buffer
 
