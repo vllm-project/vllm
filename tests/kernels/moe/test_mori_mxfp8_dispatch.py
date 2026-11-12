@@ -158,9 +158,10 @@ DSV41_FLASH_QUANT_CONFIG = {
 }
 
 
-def _dsv41_flash_experts_quant_config(monkeypatch, moe_spec):
+def _dsv41_flash_experts_quant_config(monkeypatch, moe_spec, a4w4=False):
     """The quant config DeepSeek-V4.1-Flash's routed experts build, with
-    quantization_config.moe set to `moe_spec` (or unset)."""
+    quantization_config.moe set to `moe_spec` (or unset), and with
+    VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 in effect if `a4w4`."""
     from vllm.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
@@ -203,6 +204,7 @@ def _dsv41_flash_experts_quant_config(monkeypatch, moe_spec):
     # get_quant_method() reads nothing from the layer but its moe_config.
     layer = RoutedExperts.__new__(RoutedExperts)
     layer.__dict__["moe_config"] = _mori_moe()
+    layer.moe_config.use_mxfp4_w4a4_dsv4 = a4w4
     method = quant_config.get_quant_method(layer, prefix="model.layers.3.ffn.experts")
     assert isinstance(method, mxfp4_quant.Mxfp4MoEMethod)
     return method.get_fused_moe_quant_config(
@@ -234,6 +236,39 @@ def test_dsv41_flash_dispatch_dtype(
 
     assert args["quant_dtype"] == dispatch_dtype
     assert prepare_finalize.use_mxfp8_dispatch is (dispatch_dtype != torch.bfloat16)
+
+
+@requires_aiter_on_gfx950
+@requires_mori
+@pytest.mark.parametrize(
+    "moe_spec,warns",
+    [
+        # The MXFP8 default yields to the a4w4 opt-in without a warning.
+        pytest.param(None, False, id="checkpoint-default"),
+        # What the a4w4 experts run anyway.
+        pytest.param({"activation": "mxfp4"}, False, id="user-mxfp4"),
+        # A user request the a4w4 experts cannot honor.
+        pytest.param({"activation": "mxfp8"}, True, id="user-mxfp8"),
+    ],
+)
+def test_dsv41_flash_a4w4_dispatch_stays_bf16(
+    aiter_moe_env, monkeypatch, moe_spec, warns
+):
+    """The a4w4 opt-in quantizes its BF16 input itself, so there is no MXFP8
+    dispatch, and only an unsatisfiable user override is warned about."""
+    from vllm.model_executor.layers.quantization import mxfp4 as mxfp4_quant
+
+    warnings = []
+    monkeypatch.setattr(
+        mxfp4_quant.logger, "warning_once", lambda *args, **kw: warnings.append(args)
+    )
+    quant_config = _dsv41_flash_experts_quant_config(monkeypatch, moe_spec, a4w4=True)
+    prepare_finalize, args = _make_mori_dispatch(quant_config)
+
+    assert quant_config.deferred_activation_key is None
+    assert args["quant_dtype"] == torch.bfloat16
+    assert not prepare_finalize.use_mxfp8_dispatch
+    assert bool(warnings) is warns
 
 
 @requires_aiter_on_gfx950

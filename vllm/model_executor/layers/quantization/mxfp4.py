@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    _user_moe_activation_override_is_set,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -42,6 +43,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     is_layer_skipped,
+    kMxfp4Dynamic,
     kMxfp8Dynamic,
 )
 from vllm.model_executor.utils import (
@@ -719,12 +721,17 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             and rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
         ):
             return kMxfp8Dynamic
-        logger.warning_once(
-            "%s experts cannot run MoE activation=%s in this configuration; "
-            "it is ignored and their inputs are not quantized before dispatch.",
-            self.mxfp4_backend.value,
-            self.activation_key,
-        )
+        if self.moe.use_mxfp4_w4a4_dsv4 and self.activation_key == kMxfp4Dynamic:
+            # What the a4w4 experts quantize their BF16 input to anyway.
+            return None
+        if _user_moe_activation_override_is_set():
+            logger.warning_once(
+                "%s experts cannot run MoE activation=%s in this configuration; "
+                "it is ignored and their inputs are not quantized before "
+                "dispatch.",
+                self.mxfp4_backend.value,
+                self.activation_key,
+            )
         return None
 
     @property
