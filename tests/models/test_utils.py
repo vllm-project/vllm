@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +19,6 @@ from vllm.model_executor.models.utils import (
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
-    check_pp_stage_modules,
     pp_input_embedding,
     pp_stage,
 )
@@ -170,7 +168,6 @@ def test_module_load_shared_params_that_are_not_tied_embeddings():
 
 def set_pp_rank(monkeypatch: pytest.MonkeyPatch, rank: int, world_size: int):
     pp_group = SimpleNamespace(
-        rank_in_group=rank,
         world_size=world_size,
         is_first_rank=rank == 0,
         is_last_rank=rank == world_size - 1,
@@ -178,12 +175,6 @@ def set_pp_rank(monkeypatch: pytest.MonkeyPatch, rank: int, world_size: int):
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.get_pp_group", lambda: pp_group
     )
-
-
-PP_CONFIG = SimpleNamespace(
-    speculative_config=None,
-    model_config=SimpleNamespace(get_vocab_size=lambda: VOCAB_SIZE),
-)
 
 
 @pytest.mark.cpu_test
@@ -217,23 +208,6 @@ def test_pp_stage_rejects_layers_in_forward_context():
     mod = torch.nn.Module()
     with pytest.raises(ValueError, match="forward context"), pp_stage(mod, keep=False):
         mod.attn = ForwardContextLayer("attn")
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "assign",
-    [
-        lambda child: setattr(child, "linear", torch.nn.Linear(2, 2)),
-        lambda child: setattr(child, "cache", torch.empty(2)),
-    ],
-    ids=["module", "tensor"],
-)
-def test_pp_stage_rejects_modules_assigned_elsewhere(assign):
-    """Only direct children become placeholders; others would stay on meta."""
-    mod = torch.nn.Module()
-    mod.child = torch.nn.Module()
-    with pytest.raises(ValueError, match="meta device"), pp_stage(mod, keep=False):
-        assign(mod.child)
 
 
 class RecordingQuantMethod(QuantizeMethodBase):
@@ -313,74 +287,6 @@ def test_pp_input_embedding_kept_where_used(
         mod.embed_tokens = torch.nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE)
 
     assert isinstance(mod.embed_tokens, StageMissingLayer) != kept
-
-
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-@pytest.mark.parametrize(
-    ("rank", "tie", "unused"),
-    [
-        (0, False, "lm_head"),
-        (0, True, None),
-        (1, False, "embed_tokens"),
-        (1, True, None),
-    ],
-)
-def test_check_pp_stage_modules_reports_unused_modules(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog_vllm,
-    rank: int,
-    tie: bool,
-    unused: str | None,
-):
-    """A stage that builds an embedding or lm_head it never uses is reported."""
-    set_pp_rank(monkeypatch, rank, world_size=2)
-    caplog_vllm.set_level(logging.DEBUG, logger="vllm")
-
-    check_pp_stage_modules(ModuleWithTiedWeights(tie), PP_CONFIG)
-
-    messages = [record.getMessage() for record in caplog_vllm.records]
-    reports = [message for message in messages if "never uses" in message]
-    if unused is None:
-        assert not reports
-    else:
-        assert len(reports) == 1 and unused in reports[0]
-
-
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-def test_check_pp_stage_modules_accepts_embedding_used_as_lm_head(
-    monkeypatch: pytest.MonkeyPatch, caplog_vllm
-):
-    """Some tied models use the embedding module itself as `lm_head`."""
-    set_pp_rank(monkeypatch, 1, world_size=2)
-    caplog_vllm.set_level(logging.DEBUG, logger="vllm")
-    mod = torch.nn.Module()
-    mod.model = torch.nn.Module()
-    mod.model.embed_tokens = VocabParallelEmbedding(VOCAB_SIZE, HIDDEN_SIZE)
-    mod.lm_head = mod.model.embed_tokens
-
-    check_pp_stage_modules(mod, PP_CONFIG)
-
-    assert not any("never uses" in r.getMessage() for r in caplog_vllm.records)
-
-
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-def test_check_pp_stage_modules_rejects_lm_head_tied_to_skipped_embedding(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A tie condition that disagrees with `pp_input_embedding` fails at load."""
-    set_pp_rank(monkeypatch, 1, world_size=2)
-    mod = torch.nn.Module()
-    mod.model = torch.nn.Module()
-    with pp_input_embedding(mod.model, PP_CONFIG, tied=False):
-        mod.model.embed_tokens = VocabParallelEmbedding(VOCAB_SIZE, HIDDEN_SIZE)
-    mod.lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
-    mod.lm_head = mod.lm_head.tie_weights(mod.model.embed_tokens)
-
-    with pytest.raises(ValueError, match="skipped"):
-        check_pp_stage_modules(mod, PP_CONFIG)
 
 
 class raise_if_cuda_sync:

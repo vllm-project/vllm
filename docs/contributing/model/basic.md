@@ -182,6 +182,6 @@ class MyModelForCausalLM(nn.Module, SupportsPP):
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 ```
 
-On the other stages, each module assigned in these contexts is replaced by a placeholder that uses no device memory and that weight loading skips. Assign the modules directly to the module passed to the context. Layers that register in the forward context, such as attention, cannot be skipped this way; build them with `make_layers`. With pipeline parallelism and `VLLM_LOGGING_LEVEL=DEBUG`, vLLM reports at startup any input embedding or `lm_head` that a stage builds but never uses.
+On the other stages, each module assigned in these contexts is replaced by a placeholder that uses no device memory and that weight loading skips. Assign the modules directly to the module passed to the context. Layers that register in the forward context, such as attention, cannot be skipped this way; build them with `make_layers`.
 
 The forward pass still checks `get_pp_group().is_first_rank` to choose between the input embedding and the `IntermediateTensors` from the previous stage, and `get_pp_group().is_last_rank` to choose between applying the final norm and returning `IntermediateTensors`. See [`Qwen3MoeModel`](../../../vllm/model_executor/models/qwen3_moe.py) for an example.
