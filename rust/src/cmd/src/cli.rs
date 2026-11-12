@@ -7,6 +7,7 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+mod logging;
 mod model;
 mod ssl;
 mod unsupported;
@@ -30,6 +31,7 @@ use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -42,7 +44,9 @@ use vllm_server::{
     RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
+use vllm_tracing::{LogFormatter, LogLevel};
 
+use crate::cli::logging::LoggingConfig;
 use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
@@ -60,6 +64,26 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// The level of the Rust frontend's own logs for this command.
+    pub fn log_level(&self) -> LogLevel {
+        self.runtime()
+            .map_or_else(LogLevel::from_env, SharedRuntimeArgs::effective_log_level)
+    }
+
+    /// The formatter of the Rust frontend's own logs for this command.
+    pub fn log_formatter(&self) -> LogFormatter {
+        self.runtime()
+            .map_or_else(LogFormatter::default, SharedRuntimeArgs::log_formatter)
+    }
+
+    fn runtime(&self) -> Option<&SharedRuntimeArgs> {
+        match &self.command {
+            Command::Serve(args) => Some(&args.runtime),
+            Command::Frontend(args) => Some(&args.runtime),
+            _ => None,
+        }
+    }
+
     pub fn parse() -> Self {
         Self::try_parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit())
     }
@@ -192,11 +216,38 @@ pub struct RenderArgs {
     chat_template_content_format: ChatTemplateContentFormatOption,
     /// Maximum model context length used for request validation. When not set,
     /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
+    /// Set it to the engine's for multimodal models: some image processors size
+    /// images to fit it.
     #[arg(long)]
     max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// LoRA adapters whose names are accepted as the request model, each as
+    /// `name=path` or a JSON object: `{"name": "name", "path": "lora_path",
+    /// "base_model_name": "id"}`. Rendering does not load adapter weights.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    lora_modules: Vec<LoraModulePath>,
+    /// Disable multimodal preprocessing and treat the model as language-only.
+    #[arg(long)]
+    language_model_only: bool,
+    /// Dtype that multimodal inputs are preprocessed in; set it to the
+    /// engine's `--dtype`. `auto` follows the model config's dtype (or its
+    /// `text_config`'s), running float32 checkpoints in bfloat16 like vLLM; it
+    /// does not inspect weights or the GPU, so pass the engine's dtype when it
+    /// differs.
+    #[arg(long, value_enum, default_value_t)]
+    dtype: DtypeArg,
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
+    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities are
+    /// unlimited.
+    ///
+    /// Also accepts the engine's configurable form
+    /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
+    /// applies to rendering.
+    #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
+    limit_mm_per_prompt: MmLimitPerPrompt,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -236,7 +287,37 @@ impl RenderArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            lora_modules: self.lora_modules,
+            language_model_only: self.language_model_only,
+            dtype: self.dtype.model_dtype(),
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             tls,
+        }
+    }
+}
+
+/// `vllm-rs render --dtype` values: vLLM's `--dtype` choices.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DtypeArg {
+    /// Follow the model config.
+    #[default]
+    Auto,
+    #[value(name = "float16", alias = "half")]
+    Float16,
+    #[value(name = "bfloat16")]
+    BFloat16,
+    #[value(name = "float32", alias = "float")]
+    Float32,
+}
+
+impl DtypeArg {
+    /// The fixed model dtype, or `None` for `auto`.
+    fn model_dtype(self) -> Option<ModelDtype> {
+        match self {
+            Self::Auto => None,
+            Self::Float16 => Some(ModelDtype::Float16),
+            Self::BFloat16 => Some(ModelDtype::BFloat16),
+            Self::Float32 => Some(ModelDtype::Float32),
         }
     }
 }
@@ -490,14 +571,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub log_error_stack: Option<bool>,
 
-    /// Register the scale-out `/inference/v1/generate` endpoint.
+    /// Register the scale-out `/inference/v1/generate` endpoint. Defaults to
+    /// `VLLM_SERVER_DEV_MODE`.
     #[arg(
         long,
         default_missing_value = "true",
         num_args = 0..=1
     )]
     #[serde(default)]
-    pub enable_scale_out: bool,
+    pub enable_scale_out: Option<bool>,
 
     /// Enable the `/tokenizer_info` endpoint. May expose chat
     /// templates and other tokenizer configuration.
@@ -579,6 +661,20 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(skip)]
     pub disable_request_id_randomization: bool,
+
+    /// Keep the API server running after the engine becomes permanently
+    /// unhealthy. Like Python, it is set only through
+    /// `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub keep_alive_on_engine_death: bool,
 
     /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
     /// the limit, like the Python frontend, which has none. It is set only
@@ -700,6 +796,21 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub profiler_config: Option<ProfilerConfig>,
 
+    /// Log level of the Rust frontend and the managed Python engine, one of
+    /// Python's level names (CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET; any
+    /// case). Overrides `--logging-config.log_level` and `VLLM_LOGGING_LEVEL`.
+    #[arg(long)]
+    #[serde(default)]
+    pub log_level: Option<LogLevel>,
+
+    /// vLLM logging configuration as a JSON object. The Rust frontend's own
+    /// logs honor `log_level` and `formatter` (`text` or `json`); the
+    /// remaining fields apply to Python logging only. The Python supervisor
+    /// sends the resolved `log_level` and `formatter`.
+    #[arg(long, value_parser = parse_json::<LoggingConfig>, value_name = "JSON")]
+    #[serde(default)]
+    pub logging_config: Option<LoggingConfig>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -768,6 +879,39 @@ impl SharedRuntimeArgs {
         })
     }
 
+    /// The level of the Rust frontend's own logs, with Python's precedence:
+    /// `--log-level`, then `--logging-config.log_level`, then
+    /// `VLLM_LOGGING_LEVEL`, then `INFO`. `RUST_LOG` still refines it per
+    /// target (`vllm_tracing`).
+    pub fn effective_log_level(&self) -> LogLevel {
+        self.log_level
+            .or_else(|| self.logging_config.as_ref()?.log_level)
+            .unwrap_or_else(LogLevel::from_env)
+    }
+
+    /// The formatter of the Rust frontend's own logs,
+    /// `--logging-config.formatter`, `text` by default.
+    pub fn log_formatter(&self) -> LogFormatter {
+        self.logging_config
+            .as_ref()
+            .and_then(|config| config.formatter)
+            .unwrap_or_default()
+    }
+
+    /// Return the logging config as JSON for managed Python engine forwarding,
+    /// with the level resolved as for this frontend, or `None` when no logging
+    /// argument is given and the engine reads the env vars itself.
+    pub fn logging_config_json(&self) -> Option<String> {
+        if self.log_level.is_none() && self.logging_config.is_none() {
+            return None;
+        }
+        let config = LoggingConfig {
+            log_level: Some(self.effective_log_level()),
+            ..self.logging_config.clone().unwrap_or_default()
+        };
+        Some(serde_json::to_string(&config).expect("logging config serialization should not fail"))
+    }
+
     /// Return the per-modality limits as JSON for managed Python engine
     /// forwarding, or `None` when nothing is configured.
     ///
@@ -801,6 +945,10 @@ impl SharedRuntimeArgs {
             self.disable_request_id_randomization = parse_int_flag(&value).map_err(|error| {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
             })?;
+        }
+        if let Some(value) = lookup("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH") {
+            self.keep_alive_on_engine_death = parse_int_flag(&value)
+                .map_err(|error| format!("invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: {error}"))?;
         }
         if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
             let size = parse_byte_count(&value)
@@ -905,6 +1053,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             // The engine is launched and supervised by another process.
             manages_engine: false,
@@ -993,6 +1142,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             manages_engine,
             keep_alive_timeout,
@@ -1017,7 +1167,7 @@ impl SharedRuntimeArgs {
             force_include_usage: self.enable_force_include_usage,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
-            enable_scale_out: self.enable_scale_out,
+            enable_scale_out: self.enable_scale_out.unwrap_or(self.server_dev_mode),
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
@@ -1183,13 +1333,23 @@ fn parse_byte_count(value: &str) -> Result<usize, String> {
     value.trim().parse().map_err(|_| format!("`{value}` is not a number of bytes"))
 }
 
+/// Deserialize JSON, naming the path of a failing field, such as
+/// `logging_config.formatter` in `--args-json`.
+fn from_json_str<T: DeserializeOwned>(value: &str) -> Result<T, String> {
+    let mut deserializer = serde_json::Deserializer::from_str(value);
+    let value =
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|e| e.to_report_string())?;
+    deserializer.end().map_err(|e| e.to_report_string())?;
+    Ok(value)
+}
+
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
-    serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
+    from_json_str(value).map_err(|e| format!("invalid JSON object: {e}"))
 }
 
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
-    let mut args: SharedRuntimeArgs = serde_json::from_str(value)
-        .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
+    let mut args: SharedRuntimeArgs =
+        from_json_str(value).map_err(|e| format!("invalid JSON arguments: {e}"))?;
     // --args-json is parsed with serde, so clap's env support does not run for
     // the Python-supervised frontend path.
     args.apply_env_fallbacks(|name| std::env::var(name).ok())?;
@@ -1356,6 +1516,11 @@ impl ServeArgs {
 
         let mut managed_engine = self.managed_engine.clone();
         managed_engine.python_args.extend(self.runtime.model.python_args());
+        if let Some(logging_config) = self.runtime.logging_config_json() {
+            managed_engine
+                .python_args
+                .extend(["--logging-config".to_string(), logging_config]);
+        }
         managed_engine.into_config(
             self.runtime.model.id.clone(),
             self.runtime.max_logprobs,

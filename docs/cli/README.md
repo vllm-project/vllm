@@ -136,7 +136,7 @@ vllm bench {forward, latency, serve, throughput}
 
 ### forward
 
-Benchmark the model forward of exact batches: each case lists its requests as `[N*]Q[@K][c][:D]` (query length Q, KV length K including the query, D draft tokens). A prefill's prefix is a prefix-cache hit unless `c` marks a chunked prefill; they differ only on models with SWA bounded replay, which recompute the last window of a hit. Each request's prefix length varies by ±50% by default (`--kv-len-jitter`), identically on every DP rank. Each forward is captured as a one-shot CUDA graph; target sampling, rejection sampling, and CPU overhead aren't measured. Use `torchrun`, one process per GPU, for DP/TP/EP/PCP/PP. CUDA only for now. Add `--profile-dir DIR` to write a Perfetto trace and a per-kernel GPU time summary of each case; `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]` prints a summary or compares two. Under Nsight Systems, `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat --cuda-graph-trace=node` records just those replays, one report per case.
+Benchmark the model forward of exact batches: each case lists its requests as `[N*]Q[@K][c][:D]` (query length Q, KV length K including the query, D draft tokens). A prefill's prefix is a prefix-cache hit unless `c` marks a chunked prefill; they differ only on models with SWA bounded replay, which recompute the last window of a hit. Each request's prefix length varies by ±50% by default (`--kv-len-jitter`), identically on every DP rank. Each step (forward and target sampling) is captured as a one-shot CUDA graph; CPU overhead isn't measured. Requests use the model's default sampling parameters from `generation_config.json` (`--generation-config`, `--override-generation-config`), or temperature 1.0 without top-p/top-k if it sets none. Use `--exclude-sampler` to drop target sampling and rejection sampling from the timing. Use `torchrun`, one process per GPU, for DP/TP/EP/PCP/PP. CUDA only for now. Add `--profile-dir DIR` to write a Perfetto trace and a per-kernel GPU time summary of each case; `python -m vllm.benchmarks.forward.profile A.kernels.json [B.kernels.json]` prints a summary or compares two. Under Nsight Systems, `nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat --cuda-graph-trace=node` records just those replays, one report per case.
 
 ```bash
 vllm bench forward \
@@ -177,12 +177,12 @@ torchrun --nproc-per-node=4 -m vllm.entrypoints.cli.main bench forward \
     --case prefill8x1k=8*1024 --case prefill1x8k=8192
 ```
 
-With `--speculative-config`, timing includes the target forward and the MTP,
-EAGLE, DSpark, or DFlash proposal, including the drafter's token sampling.
-Use `--exclude-drafter` to measure only the target forward. Verification assumes
-all draft tokens are accepted and uses a fixed bonus token; target sampling and
-rejection sampling are excluded. Both paths use CUDA graphs and restore the
-batch's state before each replay.
+With `--speculative-config`, timing includes the target forward, rejection
+sampling of verify rows, and the MTP, EAGLE, DSpark, or DFlash proposal,
+including the drafter's token sampling. Use `--exclude-drafter` to drop the
+proposal from the timing. The drafter assumes all draft tokens are accepted and
+uses a fixed bonus token, independent of the rejection sampler's result. All
+paths use CUDA graphs and restore the batch's state before each replay.
 Synthetic MoE routing fixtures (`--routing balanced` or `--routing zipf`) apply
 to the target model; the drafter uses its model routing, so use real weights
 when measuring a MoE drafter. For the Zipf distribution and its limitations,
