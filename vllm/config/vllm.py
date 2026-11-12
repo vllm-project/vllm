@@ -1484,7 +1484,6 @@ class VllmConfig:
         # Model hooks derive values from max_model_len, so apply the draft's
         # limit first.
         self._limit_max_model_len_to_draft()
-        mamba_block_size = self.cache_config.mamba_block_size
         self.try_verify_and_update_config()
         self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
@@ -1982,17 +1981,13 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        if (
-            self.model_config is not None
-            and self.model_config.is_hybrid
-            and not self.cache_config.enable_prefix_caching
-        ):
-            # Platform hooks can disable prefix caching after model hooks have
-            # derived align-mode defaults. Preserve explicit block sizes so
-            # incompatible user settings still fail validation.
-            self.cache_config.mamba_cache_mode = "none"
-            if mamba_block_size is None:
-                self.cache_config.mamba_block_size = self.model_config.max_model_len
+        if self.model_config is not None and self.model_config.is_hybrid:
+            from vllm.model_executor.models.config import (
+                HybridAttentionMambaModelConfig,
+            )
+
+            # Derive Mamba defaults from the platform's final cache settings.
+            HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
         # After the platform hook, which has the last word on async scheduling.
         if (
@@ -2854,7 +2849,6 @@ class VllmConfig:
         from vllm.model_executor.models import ModelRegistry
         from vllm.model_executor.models.config import (
             MODELS_CONFIG_MAP,
-            HybridAttentionMambaModelConfig,
         )
 
         cls = MODELS_CONFIG_MAP.get(architecture, None)
@@ -2868,9 +2862,6 @@ class VllmConfig:
             cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
-
-        if self.model_config.is_hybrid:
-            HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
         if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
