@@ -153,6 +153,27 @@ def test_speculators_keeps_custom_method_based_on_checkpoint_method(monkeypatch)
             )
 
 
+def test_speculators_selects_custom_method_named_by_checkpoint(monkeypatch):
+    monkeypatch.setattr(speculator_config_module, "_CUSTOM_CONFIGS", {})
+    speculator_config_module.register_speculative_method(
+        "my_eagle3", Eagle3SpeculatorConfig
+    )
+    config_dict = deepcopy(_SPECULATORS_CONFIG_DICT)
+    config_dict["speculators_model_type"] = "my_eagle3"
+    with _patched_get_config_dict(config_dict):
+        model, _, spec = maybe_override_with_speculators(
+            model="fake-org/fake-my-eagle3-spec",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=None,
+        )
+
+    assert model == "fake-org/fake-verifier"
+    assert spec is not None
+    assert spec["method"] == "my_eagle3"
+    assert spec["model"] == "fake-org/fake-my-eagle3-spec"
+
+
 def test_speculators_user_can_override_num_speculative_tokens():
     """Runtime knobs (num_speculative_tokens, moe_backend, etc.) take user value."""
     user_overrides = {

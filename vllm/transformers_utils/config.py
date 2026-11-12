@@ -858,11 +858,12 @@ def maybe_override_with_speculators(
         speculative_config.update(vllm_speculative_config)
 
     # Lock fields dictated by the speculators format, except for a custom
-    # method based on the checkpoint's.
-    custom_config_cls = get_custom_speculator_config_class(speculative_config["method"])
+    # method that is the checkpoint's or based on it.
+    method = speculative_config["method"]
+    custom_config_cls = get_custom_speculator_config_class(method)
     if custom_config_cls is None:
         speculative_config["method"] = speculators_method
-    elif custom_config_cls.base_method != speculators_method:
+    elif speculators_method not in (method, custom_config_cls.base_method):
         raise ValueError(
             f"Speculative method '{speculative_config['method']}' is based on "
             f"'{custom_config_cls.base_method}', but the speculators "
