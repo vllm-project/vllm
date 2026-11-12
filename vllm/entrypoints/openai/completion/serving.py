@@ -412,15 +412,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
-                        if request.return_token_ids:
-                            prompt_text = ""
-                        else:
-                            prompt_text = res.prompt
-                            if prompt_text is None:
-                                prompt_text = self._extract_prompt_text(
-                                    engine_inputs[prompt_idx]
-                                )
-                        assert prompt_text is not None
+                        prompt_text = "" if request.return_token_ids else res.prompt
+                        if prompt_text is None:
+                            prompt_text = self._extract_prompt_text(
+                                engine_inputs[prompt_idx]
+                            )
                         if request.max_tokens == 0:
                             # only return the prompt
                             delta_text = prompt_text
