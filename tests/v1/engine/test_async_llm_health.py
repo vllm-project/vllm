@@ -84,8 +84,8 @@ def test_engine_skips_probe_when_busy_or_sleeping(
 
 
 def make_async_engine(*rank_results) -> AsyncLLM:
-    """AsyncLLM whose engine rank ``i`` answers the probe with
-    ``rank_results[i]``: a health state, an exception, or ``None`` to hang."""
+    """AsyncLLM whose engine rank `i` answers the probe with
+    `rank_results[i]`: a health state, an exception, or `None` to hang."""
 
     async def probe(rank: int, *_args):
         result = rank_results[rank]

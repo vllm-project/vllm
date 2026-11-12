@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Routed-expert capture on the monolithic (fused router + experts) MoE path.
 
-A monolithic kernel that ``supports_routing_replay_capture`` must write, into
-the leading rows of ``routing_replay_out``, exactly the experts it routed each
+A monolithic kernel that `supports_routing_replay_capture` must write, into
+the leading rows of `routing_replay_out`, exactly the experts it routed each
 token to. The router logits plant an unambiguous top-k per token, so the test
 checks the reported experts against that answer and not just their range.
 """
@@ -34,6 +34,9 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsMonolithic,
+)
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
 )
 from vllm.platforms import current_platform
 
@@ -68,7 +71,7 @@ Kernel = tuple[FusedMoEExpertsMonolithic, Callable[[torch.Tensor, torch.Tensor],
 def _planted_routing(num_tokens: int, top_k: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Router logits with one unambiguous answer under every routing method.
 
-    Each token gives +4 to ``top_k`` experts drawn from at most two expert
+    Each token gives +4 to `top_k` experts drawn from at most two expert
     groups and -4 to the rest, so softmax top-k, sigmoid top-k and DeepSeekV3
     grouped top-k all pick the same experts, with margins no rounding can flip.
     Returns the logits and the planted experts of each token, sorted.
@@ -119,7 +122,7 @@ def _bf16_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     from flashinfer.fused_moe import convert_to_block_layout
 
     def block_major_k(w: torch.Tensor) -> torch.Tensor:
-        """(E, M, K) -> the BlockMajorK layout ``trtllm_bf16_moe`` expects."""
+        """(E, M, K) -> the BlockMajorK layout `trtllm_bf16_moe` expects."""
         return torch.stack(
             [
                 convert_to_block_layout(shuffle_matrix_a(e.view(torch.uint8), 64), 128)
@@ -282,10 +285,16 @@ KERNELS = {"bf16": _bf16_kernel, "fp8_block": _fp8_block_kernel, "nvfp4": _nvfp4
 @pytest.mark.parametrize(
     "routing_method", [RoutingMethodType.Renormalize, RoutingMethodType.DeepSeekV3]
 )
+@pytest.mark.parametrize("simulated", [False, True])
 @pytest.mark.parametrize("top_k", [2, 4])
 @pytest.mark.parametrize("num_tokens", [2, 7, 16])
 def test_routing_replay_reports_the_routed_experts(
-    kernel: str, routing_method: RoutingMethodType, top_k: int, num_tokens: int
+    kernel: str,
+    routing_method: RoutingMethodType,
+    top_k: int,
+    num_tokens: int,
+    simulated: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(0)
     experts, forward = KERNELS[kernel](top_k, routing_method)
@@ -296,8 +305,25 @@ def test_routing_replay_reports_the_routed_experts(
         (num_tokens + 1, top_k), -1, dtype=torch.int16, device=DEVICE
     )
 
+    if simulated:
+        import vllm.envs as envs
+
+        monkeypatch.setitem(
+            envs.environment_variables,
+            "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
+            lambda: "uniform_random",
+        )
+        router = RoutingSimulatorRouter(top_k, NUM_EXPERTS, routing_method)
+        router_logits = router.prepare_monolithic_logits(router_logits)
+
     forward(router_logits, routing_replay_out)
 
     reported = routing_replay_out[:num_tokens].long().sort(dim=-1).values
-    assert torch.equal(reported, planted), (reported, planted)
+    if simulated:
+        assert not torch.equal(reported, planted), (reported, planted)
+        assert (reported >= 0).all()
+        assert (reported < NUM_EXPERTS).all()
+        assert (reported[:, 1:] != reported[:, :-1]).all()
+    else:
+        assert torch.equal(reported, planted), (reported, planted)
     assert (routing_replay_out[num_tokens:] == -1).all()

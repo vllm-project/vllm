@@ -37,7 +37,7 @@ class ReadyProbeServer:
         return resp.json() if resp.status_code != 200 else {}
 
     def wait_until_unready(self) -> float | None:
-        """Return seconds until ``/health_generate`` stops returning 200, or None."""
+        """Return seconds until `/health_generate` stops returning 200, or None."""
         start = time.monotonic()
         while time.monotonic() - start < DETECT_DEADLINE_S:
             if self.status() != 200:
@@ -101,7 +101,7 @@ class ReadyProbeServer:
             self.generate(max_tokens, dp_rank)
 
     def rpc(self, method: str, *args: str, background: bool = False) -> None:
-        """Call a worker method through the dev ``/collective_rpc`` endpoint."""
+        """Call a worker method through the dev `/collective_rpc` endpoint."""
 
         def call():
             with suppress(requests.RequestException):

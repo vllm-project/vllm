@@ -13,13 +13,15 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, get_current_vllm_config_or_none
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import StackedColumnParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
+    compute_eplb_local_expert_ids,
     compute_local_expert_ids,
 )
 from vllm.model_executor.model_loader.weight_utils import (
@@ -247,9 +249,11 @@ class DefaultModelLoader(BaseModelLoader):
                     subfolder=subfolder,
                     revision=revision,
                 )
-            hf_weights_files = filter_duplicate_safetensors_files(
-                hf_weights_files, hf_folder, index_file
-            )
+            # only filter the weights from index without explicit allow patterns
+            if allow_patterns_overrides is None:
+                hf_weights_files = filter_duplicate_safetensors_files(
+                    hf_weights_files, hf_folder, index_file
+                )
         else:
             hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 
@@ -313,9 +317,15 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                 )
             elif self.load_config.load_format == "instanttensor":
+                vllm_config = get_current_vllm_config_or_none()
+                engram_config = vllm_config.engram_config if vllm_config else None
                 weights_iterator = instanttensor_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
+                    local_expert_ids=self.local_expert_ids,
+                    load_engram_on_cpu=bool(
+                        engram_config and engram_config.cpu_offload
+                    ),
                 )
             else:
                 if extra_config.get("enable_multithread_load"):
@@ -324,6 +334,9 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
+                        ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
                         ),
                     )
                 else:
@@ -337,6 +350,9 @@ class DefaultModelLoader(BaseModelLoader):
                         ),
                         safetensors_prefetch_block_size=(
                             self.load_config.safetensors_prefetch_block_size
+                        ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
                         ),
                     )
         else:
@@ -415,7 +431,9 @@ class DefaultModelLoader(BaseModelLoader):
             weights_mapper if self._encoder_only_lm_prefixes is not None else None
         )
 
-    def _init_ep_weight_filter(self, model_config: ModelConfig) -> None:
+    def _init_ep_weight_filter(
+        self, model: nn.Module, model_config: ModelConfig
+    ) -> None:
         """Compute local expert ids for EP weight filtering.
 
         When expert parallelism is active, each rank only needs a subset of
@@ -432,13 +450,6 @@ class DefaultModelLoader(BaseModelLoader):
             and parallel_config.enable_expert_parallel
             and parallel_config.enable_ep_weight_filter
         ):
-            return
-
-        # When EPLB is enabled, redundant physical expert slots may map to
-        # logical experts that belong to other ranks in the default partition.
-        # The weight loader needs to see ALL logical expert weights so it can
-        # populate these redundant slots.  Skip the filter entirely.
-        if parallel_config.enable_eplb:
             return
 
         num_experts = model_config.get_num_experts()
@@ -463,12 +474,46 @@ class DefaultModelLoader(BaseModelLoader):
         ep_size = dp_size * pcp_size * tp_size
         ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
 
-        self.local_expert_ids = compute_local_expert_ids(
-            num_experts,
-            ep_size,
-            ep_rank,
-            placement=parallel_config.expert_placement_strategy,
-        )
+        if parallel_config.enable_eplb:
+            # Redundant slots replicate experts from other ranks' shards, so
+            # filter by the initial EPLB placement instead of the EP shard.
+            if parallel_config.enable_elastic_ep:
+                # Padded capacity and a placement that evolves at runtime.
+                return
+            num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+            # The set comes from the config; skipping is only safe when the
+            # model allocated exactly that layout.
+            from vllm.model_executor.models.interfaces import (
+                get_mixture_of_experts_model,
+            )
+
+            moe_model = get_mixture_of_experts_model(model)
+            layout = (
+                getattr(moe_model, "num_logical_experts", None),
+                getattr(moe_model, "num_physical_experts", None),
+            )
+            expected_layout = (num_experts, num_experts + num_redundant_experts)
+            if layout != expected_layout:
+                logger.warning_once(
+                    "EP weight filter disabled: EPLB expert layout "
+                    "(logical, physical)=%s does not match the expected %s.",
+                    layout,
+                    expected_layout,
+                )
+                return
+            self.local_expert_ids = compute_eplb_local_expert_ids(
+                num_experts,
+                num_redundant_experts,
+                ep_size,
+                ep_rank,
+            )
+        else:
+            self.local_expert_ids = compute_local_expert_ids(
+                num_experts,
+                ep_size,
+                ep_rank,
+                placement=parallel_config.expert_placement_strategy,
+            )
         if self.local_expert_ids is not None:
             logger.info_once(
                 "EP weight filter: ep_size=%d, ep_rank=%d, loading %d/%d experts",
@@ -489,7 +534,7 @@ class DefaultModelLoader(BaseModelLoader):
             ):
                 self.load_config.safetensors_load_strategy = "torchao"
 
-        self._init_ep_weight_filter(model_config)
+        self._init_ep_weight_filter(model, model_config)
         self._init_mm_encoder_only_weight_filter(model, model_config)
 
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
@@ -522,8 +567,12 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
-            # ignore online quantization scales
             for name, module in model.named_modules():
+                if isinstance(module, StackedColumnParallelLinear):
+                    weights_to_load.update(
+                        f"{name}.{shard_id}" for shard_id in module.pop_missing_shards()
+                    )
+                # ignore online quantization scales
                 quant_method = getattr(module, "quant_method", None)
                 has_online_quant = getattr(quant_method, "uses_meta_device", False)
                 has_postprocess_quant = getattr(

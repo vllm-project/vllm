@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Runtime fault injection for `/health_generate` end-to-end tests.
 
-Loaded into the server via ``--worker-extension-cls``. Worker faults are
-triggered through the dev ``/collective_rpc`` endpoint, which only forwards
+Loaded into the server via `--worker-extension-cls`. Worker faults are
+triggered through the dev `/collective_rpc` endpoint, which only forwards
 strings.
 """
 
@@ -47,7 +47,7 @@ class FaultInjectionWorkerExtension:
         _launch_illegal_memory_access()
 
     def fault_ima_now_on_worker(self, worker_rank: str) -> None:
-        """Like ``fault_ima_now``, on one TP/PP worker of the engine."""
+        """Like `fault_ima_now`, on one TP/PP worker of the engine."""
         if self.rank == int(worker_rank):
             _launch_illegal_memory_access()
 

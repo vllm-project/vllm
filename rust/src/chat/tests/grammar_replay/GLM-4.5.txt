@@ -1,0 +1,7 @@
+# none_schema, auto_schema_content (from_token_zero)
+sequence
+  optional
+    sequence
+      tag `\n<think>` text `</think>`
+      `\n`
+  json({ answer: string })

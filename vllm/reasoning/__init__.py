@@ -84,6 +84,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "response_template_reasoning_parser",
         "ResponseTemplateReasoningParser",
     ),
+    "beam": (
+        "beam_reasoning_parser",
+        "BeamReasoningParser",
+    ),
     "holo2": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
@@ -116,6 +120,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "mimo_engine_reasoning_parser",
         "MiMoParserReasoningAdapter",
     ),
+    "minicpmv": (
+        "minicpmv_reasoning_parser",
+        "MiniCPMVParserReasoningAdapter",
+    ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
         "MiniMaxM2ReasoningParser",
@@ -144,13 +152,26 @@ _REASONING_PARSERS_TO_REGISTER = {
         "plamo3_engine_reasoning_parser",
         "Plamo3ParserReasoningAdapter",
     ),
+    "muse": (
+        "muse_reasoning_parser",
+        "MuseReasoningParser",
+    ),
     "muse_glimmer": (
         "muse_glimmer_reasoning_parser",
         "MuseGlimmerReasoningParser",
     ),
+    # Alias of "muse".
+    "musespark": (
+        "muse_reasoning_parser",
+        "MuseReasoningParser",
+    ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",
+    ),
+    "ripple": (
+        "ripple_engine_reasoning_parser",
+        "RippleParserReasoningAdapter",
     ),
     "seed_oss": (
         "seed_oss_engine_reasoning_parser",
@@ -164,9 +185,17 @@ _REASONING_PARSERS_TO_REGISTER = {
         "step3p5_engine_reasoning_parser",
         "Step3p5ParserReasoningAdapter",
     ),
+    "step5": (
+        "deepseek_r1_reasoning_parser",
+        "DeepSeekR1ReasoningParser",
+    ),
     "inkling": (
         "inkling_reasoning_parser",
         "InklingParserReasoningAdapter",
+    ),
+    "zaya": (
+        "zaya_engine_reasoning_parser",
+        "ZayaParserReasoningAdapter",
     ),
 }
 

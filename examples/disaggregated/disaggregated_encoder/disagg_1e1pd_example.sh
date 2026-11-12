@@ -108,7 +108,7 @@ env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
     --port "$ENCODE_PORT" \
     --enforce-eager \
     --enable-request-id-headers \
-    --no-enable-prefix-caching \
+    --disable-prefix-caching \
     --max-num-batched-tokens 114688 \
     --max-num-seqs "$MAX_NUM_SEQS" \
     --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
