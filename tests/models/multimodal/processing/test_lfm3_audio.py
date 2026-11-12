@@ -9,6 +9,7 @@ from vllm.config import ModelConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.lfm3_audio import (
+    MAX_AUDIO_SECONDS,
     Lfm3AudioForConditionalGeneration,
     Lfm3AudioProcessingInfo,
 )
@@ -154,7 +155,7 @@ def test_speech_to_text_config(model_config):
         model_config, "transcribe"
     )
     assert config.sample_rate == 16000
-    assert config.max_audio_clip_s == 30
+    assert config.max_audio_clip_s == MAX_AUDIO_SECONDS
 
 
 @pytest.mark.parametrize("num_samples", [16000, 16160, 480000])

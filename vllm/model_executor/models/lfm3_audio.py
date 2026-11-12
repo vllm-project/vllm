@@ -67,10 +67,6 @@ from .utils import (
 # encoder itself is causal with a bounded window, so any length runs.
 MAX_AUDIO_SECONDS = 600
 
-# Transcription requests are split into chunks of this length, matching the
-# ASR evaluation setting of the model card.
-MAX_TRANSCRIPTION_CLIP_SECONDS = 30
-
 # Languages the model card lists for ASR; the system prompt names the language.
 ISO639_1_SUPPORTED_LANGS = {
     "ar": "Arabic",
@@ -419,7 +415,7 @@ class Lfm3AudioForConditionalGeneration(
         )
         return SpeechToTextConfig(
             sample_rate=processor.feature_extractor.sampling_rate,
-            max_audio_clip_s=MAX_TRANSCRIPTION_CLIP_SECONDS,
+            max_audio_clip_s=MAX_AUDIO_SECONDS,
         )
 
     @classmethod
