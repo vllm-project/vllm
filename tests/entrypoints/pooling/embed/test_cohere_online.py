@@ -19,7 +19,7 @@ from tests.utils import RemoteOpenAIServer
 DTYPE = "bfloat16"
 
 MODELS: list[tuple[str, list[str]]] = [
-    ("intfloat/multilingual-e5-small", []),
+    ("vllm-project/multilingual-e5-small", []),
     (
         "Snowflake/snowflake-arctic-embed-m-v1.5",
         [

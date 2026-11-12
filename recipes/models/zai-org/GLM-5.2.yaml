@@ -309,7 +309,6 @@ guide: |
     --trust-remote-code \
     --kv-cache-dtype fp8_e4m3 \
     --tensor-parallel-size 8 \
-    --gpu-memory-utilization 0.90 \
     --max-model-len 32768 \
     --tool-call-parser glm47 \
     --enable-auto-tool-choice \
