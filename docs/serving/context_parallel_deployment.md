@@ -51,6 +51,11 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+For full-attention models with learned attention sinks, FlashAttention 3 includes
+the sink contribution once when combining DCP attention partitions, including
+chunked prefill and decode. Other DCP restrictions, such as backend support for
+sliding-window attention, still apply.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).
