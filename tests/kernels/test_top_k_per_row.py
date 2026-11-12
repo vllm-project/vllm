@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 # Test parameters
-NUM_ROWS = [1, 32, 2050]
+NUM_ROWS = [1, 32, 2050, 3200]
 TOP_K_VALUES = [2048, 3000]
 BATCH_SIZE = [1, 2, 2048]
 NEXT_N = [1, 8]
@@ -315,6 +315,162 @@ def test_top_k_per_row(
     assert compare_top_k_results(
         logits, indices, torch_indices, row_starts, row_ends, top_k
     ), "CUDA top_k_per_row_prefill results don't match torch.topk"
+
+    # Verify deterministic monotonic ordering of selected indices per row
+    for i in range(num_rows):
+        row_length = int(row_ends[i] - row_starts[i])
+        num_valid = min(top_k, row_length)
+        if num_valid > 1:
+            row_idx = indices[i, :num_valid]
+            assert torch.all(row_idx[:-1] <= row_idx[1:]), (
+                f"Row {i} indices not monotonically ordered: {row_idx[:10].tolist()}"
+            )
+
+
+@pytest.mark.parametrize("top_k", [2048, 3000])
+@pytest.mark.parametrize("clean_logits", [True, False])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_dense(
+    top_k: int,
+    clean_logits: bool,
+) -> None:
+    """Test top_k_per_row with dense rows where row_length > top_k."""
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+
+    num_rows = 64
+    num_columns = 8192
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    row_ends = torch.full((num_rows,), num_columns, dtype=torch.int32, device="cuda")
+    logits = create_random_logits(
+        row_starts, row_ends, torch.float32, 42, clean_logits, "random"
+    )
+
+    # Create output tensors
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    # Run CUDA implementation
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    # Run reference implementation
+    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+    for i in range(num_rows):
+        k_i = min(top_k, num_columns)
+        idx = logits[i, :num_columns].topk(k_i, dim=-1)[1]
+        torch_indices[i, :k_i] = idx
+
+    # Compare results
+    assert compare_top_k_results(
+        logits, indices, torch_indices, row_starts, row_ends, top_k
+    ), "CUDA top_k_per_row_prefill results don't match torch.topk"
+
+    # Verify deterministic monotonic ordering of selected indices per row
+    for i in range(num_rows):
+        row_idx = indices[i]
+        assert torch.all(row_idx[:-1] <= row_idx[1:]), (
+            f"Row {i} indices not monotonically ordered: {row_idx[:10].tolist()}"
+        )
+
+    # Verify bitwise repeatability across repeated calls
+    repeat_indices = torch.empty_like(indices)
+    for _ in range(20):
+        torch.ops._C.top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            repeat_indices,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+            top_k,
+        )
+        assert torch.equal(indices, repeat_indices), (
+            "CUDA top_k_per_row_prefill results not bitwise repeatable across calls"
+        )
+
+
+@pytest.mark.parametrize("top_k", [512, 2048, 3000, 4096])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_boundary_ties(top_k: int) -> None:
+    """Test top_k_per_row with exact float ties at the k-th boundary."""
+    set_random_seed(0)
+    torch.set_default_device("cuda:0")
+
+    num_rows = 32
+    num_columns = 8192
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    row_ends = torch.full((num_rows,), num_columns, dtype=torch.int32, device="cuda")
+
+    # Generate logits with a flat boundary tie region
+    logits = torch.randn((num_rows, num_columns), dtype=torch.float32, device="cuda")
+    # Clamp boundary elements around top_k to identical values to force ties
+    for i in range(num_rows):
+        k_val = torch.kthvalue(logits[i], num_columns - top_k + 1).values.item()
+        # Create a cluster of exact ties around the k-th value
+        mask = (logits[i] >= k_val - 0.05) & (logits[i] <= k_val + 0.05)
+        logits[i, mask] = k_val
+
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    # Compare set equivalence against torch.topk
+    torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+    for i in range(num_rows):
+        torch_indices[i] = logits[i].topk(top_k, dim=-1)[1]
+
+    assert compare_top_k_results(
+        logits, indices, torch_indices, row_starts, row_ends, top_k
+    ), "CUDA top_k_per_row_prefill results don't match torch.topk under ties"
+
+    # Verify monotonic ordering
+    for i in range(num_rows):
+        row_idx = indices[i]
+        assert torch.all(row_idx[:-1] <= row_idx[1:]), (
+            f"Row {i} indices not monotonically ordered under ties: "
+            f"{row_idx[:10].tolist()}"
+        )
+
+    # Verify bitwise repeatability across repeated calls
+    repeat_indices = torch.empty_like(indices)
+    for _ in range(20):
+        torch.ops._C.top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            repeat_indices,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+            top_k,
+        )
+        assert torch.equal(indices, repeat_indices), (
+            "CUDA top_k_per_row_prefill results not bitwise repeatable "
+            "under boundary ties"
+        )
 
 
 def _run_top_k_per_row_decode_test(
