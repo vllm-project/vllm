@@ -741,9 +741,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         # --- core attention: non-spec path (prefill or plain decode) ---
         core_attn_out_non_spec = None
-        # Only the plain-decode recurrent kernel can write straight into the
-        # layer output buffer; the chunked prefill kernel cannot, so this
-        # stays None there and the merge copy below runs as before.
+        # The plain-decode recurrent kernel and the FlashKDA prefill kernels (steps
+        # without spec tokens) write straight into the layer output buffer; the
+        # Triton chunk path cannot, so this stays None there and the merge copy
+        # below runs as before.
         ns_out = None
         if attn_metadata_narrowed.num_prefills > 0 and _aiter_flashkda_runs_prefill(
             self.kda_prefill_backend, attn_metadata_narrowed
