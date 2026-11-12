@@ -229,6 +229,7 @@ steps:
     v1/kv_connector/unit/test_umbp_embedded.py
     v1/kv_connector/unit/test_umbp_events.py
     v1/kv_connector/unit/test_umbp_hybrid.py
+    v1/kv_connector/unit/test_umbp_lazy.py
     v1/kv_connector/unit/test_umbp_standalone.py
 
 - label: ":amd: (MI355 DPX) UMBP Connector Integration"

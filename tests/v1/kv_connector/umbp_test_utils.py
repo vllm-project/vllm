@@ -2,11 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU byte-copy runtime for UMBP connector contract tests."""
 
+import contextlib
 import ctypes
 import multiprocessing as mp
+import os
+import signal
+import subprocess
 import threading
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -237,6 +242,47 @@ def mori_has_umbp() -> bool:
     except ImportError:
         return False
     return True
+
+
+class StandaloneServer:
+    def __init__(self, address: str, process: subprocess.Popen):
+        self.address = address
+        self.process = process
+
+    def kill(self) -> None:
+        self.process.kill()
+        self.process.wait(10)
+
+
+@contextlib.contextmanager
+def standalone_server(
+    log_dir: Path, socket_dir: str, capacity_bytes: int
+) -> Iterator[StandaloneServer]:
+    """Run a `umbp_standalone_server` with a DRAM pool of `capacity_bytes`."""
+    import mori
+
+    binary = Path(mori.__file__).with_name("umbp_standalone_server")
+    assert binary.is_file(), f"MORI was built without UMBP: no {binary}"
+    address = f"unix://{socket_dir}/umbp.grpc.sock"
+    env = dict(
+        os.environ,
+        UMBP_STANDALONE_ADDRESS=address,
+        UMBP_DRAM_CAPACITY=str(capacity_bytes),
+    )
+    with open(log_dir / "server.log", "w") as log:
+        process = subprocess.Popen(
+            [binary], env=env, stdout=log, stderr=subprocess.STDOUT
+        )
+        try:
+            yield StandaloneServer(address, process)
+        finally:
+            process.send_signal(signal.SIGCONT)
+            process.terminate()
+            try:
+                process.wait(10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(10)
 
 
 def _report(errors, target: Callable, *args) -> None:
