@@ -10,7 +10,6 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
-from functools import partial
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
@@ -692,17 +691,17 @@ class Worker(WorkerBase):
     def _profile_attention_for_pinned_kv(self) -> None:
         """Extend the profile with attention, for a pinned KV size only.
 
-        ``profile_run`` forwards with ``skip_attn=True``: there is no KV cache
+        `profile_run` forwards with `skip_attn=True`: there is no KV cache
         yet, so the attention kernels never run and neither their activations
         nor the device memory their first launch takes reach the profile. Under
-        ``gpu_memory_utilization`` that is harmless -- what the profile missed
+        `gpu_memory_utilization` that is harmless -- what the profile missed
         lands in the slice the utilization fraction left unallocated. A pinned
-        ``kv_cache_memory_bytes`` has no such slice, so the same bytes are
+        `kv_cache_memory_bytes` has no such slice, so the same bytes are
         spent twice and the rank OOMs in the middle of a request.
 
         Build the same minimal KV cache the CUDA graph profiling uses and run a
         ladder of batch widths through it, so the surrounding
-        ``memory_profiling`` block sees the attention path. The ladder is not
+        `memory_profiling` block sees the attention path. The ladder is not
         redundant with its widest rung: the caching allocator keeps whole
         segments per size class, so a served mix of widths costs more than the
         widest one alone.
@@ -717,24 +716,15 @@ class Worker(WorkerBase):
         widths = sorted(
             {max(1, max_tokens * n // 8) for n in range(1, 9)} | {1}, reverse=True
         )
-        runner = cast(Any, self.model_runner)
-        build_kv_cache: Callable[[], None]
-        teardown: Callable[[], None]
-        if self.use_v2_model_runner:
-            from vllm.v1.worker.gpu.cudagraph_utils import (
-                _init_minimal_kv_cache_for_profiling,
-                _teardown_profiling_state,
-            )
+        from vllm.v1.worker.gpu.cudagraph_utils import (
+            _init_minimal_kv_cache_for_profiling,
+            _teardown_profiling_state,
+        )
 
-            build_kv_cache = partial(_init_minimal_kv_cache_for_profiling, runner)
-            teardown = partial(_teardown_profiling_state, runner)
-        else:
-            build_kv_cache = runner._init_minimal_kv_cache_for_profiling
-            teardown = runner._cleanup_profiling_kv_cache
-
+        runner = self.model_runner
         try:
             with set_current_vllm_config(self.vllm_config):
-                build_kv_cache()
+                _init_minimal_kv_cache_for_profiling(runner)
         except Exception:
             logger.warning(
                 "Could not build a profiling KV cache to forward attention "
@@ -783,13 +773,13 @@ class Worker(WorkerBase):
                 ),
             )
         finally:
-            teardown()
+            _teardown_profiling_state(runner)
 
     def _apply_pinned_kv_cache_memory(
         self,
         kv_cache_memory_bytes: int,
         profile_result: Any,
-        cudagraph_memory_estimate_applied: int,
+        cudagraph_memory_estimate: int,
     ) -> int:
         """Check a pinned KV size against the profile and report it."""
         allocator_overhead = getattr(self, "_pinned_allocator_overhead_bytes", 0)
@@ -805,7 +795,7 @@ class Worker(WorkerBase):
         fits_kv_cache_memory_bytes = (
             self.init_snapshot.free_memory
             - non_kv_cache_memory
-            - cudagraph_memory_estimate_applied
+            - cudagraph_memory_estimate
             - allocator_overhead
         )
         if kv_cache_memory_bytes > fits_kv_cache_memory_bytes:
@@ -823,9 +813,8 @@ class Worker(WorkerBase):
                 f"{format_gib(non_kv_cache_memory)} GiB for "
                 f"weights, workspaces and its activation peak"
                 + (
-                    f", {format_gib(cudagraph_memory_estimate_applied)} GiB for "
-                    f"CUDA graphs"
-                    if cudagraph_memory_estimate_applied
+                    f", {format_gib(cudagraph_memory_estimate)} GiB for CUDA graphs"
+                    if cudagraph_memory_estimate
                     else ""
                 )
                 + (
@@ -934,9 +923,7 @@ class Worker(WorkerBase):
             # counted as consumed and taken from the KV cache. Blocks above the
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
-            with self._scoped_allocator_max_split(
-                max_split_size_mb=_MAX_SPLIT_SIZE_MB
-            ):
+            with self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
@@ -997,7 +984,7 @@ class Worker(WorkerBase):
             return self._apply_pinned_kv_cache_memory(
                 kv_cache_memory_bytes,
                 profile_result,
-                cudagraph_memory_estimate_applied,
+                cudagraph_memory_estimate,
             )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
