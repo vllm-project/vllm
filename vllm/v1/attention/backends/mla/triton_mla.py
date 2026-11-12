@@ -306,18 +306,20 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         num_heads = self.num_heads * self.dcp_world_size
         dtype = self._vllm_config.model_config.dtype
         sliding_window = self.decode_sliding_window or 0
-        _decode_grouped_att_m_fwd.register_warmup(
-            q_dtype=dtype,
-            kv_dtype=kv_cache.dtype,
-            num_heads=num_heads,
-            head_size=kv_cache.shape[-1],
-            kv_lora_rank=self.kv_lora_rank,
-            page_size=kv_cache.shape[1],
-            kv_block_stride=kv_cache.stride(0),
-            kv_token_stride=kv_cache.stride(1),
-            num_kv_splits=num_kv_splits,
-            sliding_window=sliding_window,
-        )
+        for write_direct in (False, True):
+            _decode_grouped_att_m_fwd.register_warmup(
+                q_dtype=dtype,
+                kv_dtype=kv_cache.dtype,
+                num_heads=num_heads,
+                head_size=kv_cache.shape[-1],
+                kv_lora_rank=self.kv_lora_rank,
+                page_size=kv_cache.shape[1],
+                kv_block_stride=kv_cache.stride(0),
+                kv_token_stride=kv_cache.stride(1),
+                num_kv_splits=(1,) if write_direct else num_kv_splits,
+                sliding_window=sliding_window,
+                write_direct=write_direct,
+            )
         _decode_softmax_reducev_fwd.register_warmup(
             dtype=dtype,
             num_heads=num_heads,
@@ -355,6 +357,14 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             if self.decode_sliding_window is not None:
                 max_kv_len = min(max_kv_len, self.decode_sliding_window)
             num_kv_splits = _compute_num_kv_splits(max_kv_len, self._sm_count)
+        # Direct output removes an identity second-stage reduction, but only
+        # helps when the regular performance heuristic also selects one split.
+        # Batch invariance may force one split for much longer contexts where
+        # the direct specialization is not faster.
+        write_direct = (
+            num_kv_splits == 1
+            and _compute_num_kv_splits(attn_metadata.max_seq_len, self._sm_count) == 1
+        )
 
         # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
         # merge partial attention outputs across splits. The scratch is served
@@ -425,6 +435,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             v_scale=layer._k_scale,
             is_mla=True,
             sliding_window=self.decode_sliding_window,
+            write_direct=write_direct,
         )
 
         return o, lse
