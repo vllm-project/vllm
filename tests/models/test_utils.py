@@ -240,7 +240,8 @@ class PostLoadHookModule(torch.nn.Module):
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("keep", [True, False])
 def test_pp_stage_skipped_modules_are_not_post_processed(keep: bool):
-    """Skipped modules keep their weights on meta, so post-loading skips them."""
+    """Skipped modules keep their weights on the meta device, so weight
+    post-processing skips them."""
     calls: list[str] = []
     head = torch.nn.Linear(2, 2)
     head.quant_method = RecordingQuantMethod(calls)
@@ -272,8 +273,8 @@ def test_pp_stage_skipped_modules_are_not_post_processed(keep: bool):
 def test_pp_input_embedding_kept_where_used(
     monkeypatch: pytest.MonkeyPatch, rank: int, tied: bool, drafter: bool, kept: bool
 ):
-    """The first stage embeds tokens; the last one keeps it as tied lm_head or
-    for a drafter that reuses it."""
+    """The first stage embeds tokens; the last stage keeps the embedding for a
+    tied `lm_head` or for a drafter that reuses it."""
     set_pp_rank(monkeypatch, rank, world_size=3)
     speculative_config = SimpleNamespace(
         uses_target_hidden_states=True,

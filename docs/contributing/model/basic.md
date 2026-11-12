@@ -151,7 +151,7 @@ The new custom op should then be added to the list `_attention_ops` in [vllm/con
 
 ### How to support pipeline parallelism?
 
-With pipeline parallelism, each stage builds only the part of the model it runs. Build the decoder layers with `make_layers`, which returns the range of layers this stage runs and fills the rest with placeholders. Build the modules outside the layer stack in these contexts from [vllm/model_executor/models/utils.py](../../../vllm/model_executor/models/utils.py):
+With pipeline parallelism, each stage builds only the part of the model it runs. Build the decoder layers with `make_layers`, which returns the range of layers this stage runs and fills the rest with placeholders. Build the modules outside the layer stack with these context managers from [vllm/model_executor/models/utils.py](../../../vllm/model_executor/models/utils.py):
 
 - `pp_input_embedding(self, vllm_config, tied=...)` for the input embedding. It is kept on the first stage, and on the last stage when `lm_head` is tied to it or a drafter reuses it. Pass the condition your model uses to call `tie_weights` as `tied`.
 - `pp_last_stage(self)` for the final norm and `lm_head`.
@@ -182,6 +182,6 @@ class MyModelForCausalLM(nn.Module, SupportsPP):
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 ```
 
-On the other stages, each module assigned in these contexts is replaced by a placeholder that uses no device memory and that weight loading skips. Assign the modules directly to the module passed to the context. Layers that register in the forward context, such as attention, cannot be skipped this way; build them with `make_layers`.
+On the stages that do not use a module, it is replaced by a placeholder that takes no device memory and whose weights are not loaded. Assign each module directly to the module passed to the context manager; other assignments are not replaced. Layers that register in the forward context, such as attention, cannot be skipped this way; build them with `make_layers`.
 
 The forward pass still checks `get_pp_group().is_first_rank` to choose between the input embedding and the `IntermediateTensors` from the previous stage, and `get_pp_group().is_last_rank` to choose between applying the final norm and returning `IntermediateTensors`. See [`Qwen3MoeModel`](../../../vllm/model_executor/models/qwen3_moe.py) for an example.

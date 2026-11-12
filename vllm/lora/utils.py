@@ -251,8 +251,9 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
 
     supported_lora_modules: set[str] = set()
     for name, module in model.named_modules():
-        # A module this stage does not build, such as the classification head
-        # before the last PP stage, is still a module of the model.
+        # Check the module a placeholder stands for, such as the classification
+        # head before the last PP stage, so that all stages accept the same
+        # adapters.
         if isinstance(module, StageMissingLayer) and module.module is not None:
             module = module.module
         # get the embedding modules if the module's embedding_modules

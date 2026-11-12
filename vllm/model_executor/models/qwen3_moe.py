@@ -459,8 +459,8 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         self.vocab_size = config.vocab_size
         self.config = config
         self.quant_config = quant_config
-        # Tie as the causal LM does: in a multimodal model, `with_hf_config` sets
-        # `tie_word_embeddings` on the new `hf_config` but not on `hf_text_config`.
+        # Read the config the causal LMs tie by: in multimodal models,
+        # `with_hf_config` updates `hf_config` but not `hf_text_config`.
         tied = vllm_config.model_config.hf_config.get_text_config().tie_word_embeddings
         with pp_input_embedding(self, vllm_config, tied=tied):
             self.embed_tokens = VocabParallelEmbedding(

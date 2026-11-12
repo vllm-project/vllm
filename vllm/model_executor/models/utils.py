@@ -821,7 +821,7 @@ def _merge_multimodal_embeddings(
 
 
 class StageMissingLayer(nn.Module):
-    # Omitted layers have no loaded weights for a quantization method to process.
+    # Not forwarded to the omitted module, whose weights are never loaded.
     quant_method = None
 
     def __init__(self, stage_name: str, module: nn.Module | None = None) -> None:
@@ -925,12 +925,12 @@ def no_init_weights(
 @contextmanager
 def pp_stage(module: nn.Module, *, keep: bool):
     """Within this context, build the direct children assigned to `module` only
-    if `keep` is true on this pipeline stage.
+    if `keep` is true, i.e. on the pipeline stages that use them.
 
-    Otherwise each child is replaced with a `StageMissingLayer`, its weights stay
-    on the meta device, and weight loading skips it. Layers that register in the
-    forward context, such as attention, cannot be skipped this way; build them
-    with `make_layers`.
+    Otherwise each child is replaced with a `StageMissingLayer`: its weights stay
+    on the meta device and are not loaded. Layers that register in the forward
+    context, such as attention, cannot be skipped this way; build them with
+    `make_layers`.
     """
     if keep:
         yield

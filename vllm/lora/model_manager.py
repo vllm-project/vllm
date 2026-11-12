@@ -487,7 +487,7 @@ class LoRAModelManager:
         self.unsupported_lora_modules: set[str] = set()
         # Placeholders for modules this stage does not build, such as the
         # classification head before the last PP stage. Adapter weights for
-        # them do not apply here.
+        # them are ignored.
         self.placeholder_modules: set[str] = set()
 
         named_modules = list(self.model.named_modules(remove_duplicate=False))
