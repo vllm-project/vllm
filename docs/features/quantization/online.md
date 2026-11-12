@@ -70,6 +70,9 @@ uv pip install "vllm[nf12]"
 NF12 requires BF16 weights and activations. For BF16 checkpoints such as
 Qwen3, the default `--dtype auto` already selects BF16.
 
+NF12-encoded linear layers do not support checkpoint weight reloads.
+Restart the engine to load new weights.
+
 ## Advanced Configuration
 
 For fine-grained control, use a `quantization_config` dictionary.
