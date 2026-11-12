@@ -19,7 +19,6 @@
 # tests/distributed/ - multi-GPU / multi-node suites, launched via torchrun or a
 # custom runner rather than a directory-level pytest invocation.
 tests/distributed/aux_output_connector/test_store.py  # added by #45635 (2026-09-21), no job collects this path
-tests/distributed/test_dcp_a2a.py  # multi-GPU DCP all-to-all; no dir-level pytest job
 tests/distributed/test_eplb_events.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_eplb_fused_moe_layer.py  # multi-GPU EPLB; no dir-level pytest job
 tests/distributed/test_eplb_fused_moe_layer_dep_nvfp4.py  # multi-GPU EPLB nvfp4; no dir-level pytest job
@@ -32,7 +31,6 @@ tests/distributed/test_kimi_linear_context_parallel.py  # multi-GPU context para
 tests/distributed/test_kv_cache_events.py  # needs multi-proc KV-events setup; no job
 tests/distributed/test_kvlayout.py  # no distributed.yaml job collects this path
 tests/distributed/test_mq_connect_ip.py  # no distributed.yaml job collects this path
-tests/distributed/test_pipeline_partition.py  # no distributed.yaml job collects this path
 tests/distributed/test_split_group.py  # no distributed.yaml job collects this path
 tests/distributed/test_weight_transfer_nccl_uid.py  # sibling test_weight_transfer.py is tethered; not added to that job (#53784)
 
@@ -179,7 +177,6 @@ tests/test_version.py  # CI jobs disabled pending locked cmake installation
 tests/test_zen_cpu_platform_detection.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_basic.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_deepseek_v4.py  # CI jobs disabled pending locked cmake installation
-tests/tokenizers_/test_deepseek_v41.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_detokenize.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_hf.py  # CI jobs disabled pending locked cmake installation
 tests/tokenizers_/test_mistral.py  # CI jobs disabled pending locked cmake installation

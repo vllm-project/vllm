@@ -7,6 +7,7 @@ from typing import Any
 
 from transformers import TokenizersBackend
 
+from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 from .deepseek_v41_encoding import (
@@ -17,13 +18,11 @@ from .deepseek_v41_encoding import (
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
+logger = init_logger(__name__)
 
-def _reject_image_placeholder(text: Any) -> None:
-    if isinstance(text, str) and IMAGE_PLACEHOLDER in text:
-        raise ValueError(
-            f"Message text contains image special token {IMAGE_PLACEHOLDER!r}; "
-            "provide images as image content parts."
-        )
+
+def _contains_image_placeholder(text: Any) -> bool:
+    return isinstance(text, str) and IMAGE_PLACEHOLDER in text
 
 
 def _normalize_messages(
@@ -38,6 +37,7 @@ def _normalize_messages(
             original_message["content"] = list(content)
         result.append(dict(copy.deepcopy(original_message)))
     image_idx = 0
+    has_image_placeholder = False
     for message in result:
         image_indices = message["_image_indices"] = []
         role = message.get("role")
@@ -45,16 +45,20 @@ def _normalize_messages(
             raise ValueError(f"Invalid role: {role}")
         if "reasoning" in message:
             message["reasoning_content"] = message["reasoning"]
-        _reject_image_placeholder(message.get("reasoning_content"))
+        has_image_placeholder |= _contains_image_placeholder(
+            message.get("reasoning_content")
+        )
         content = message.get("content")
         if isinstance(content, str):
-            _reject_image_placeholder(content)
+            has_image_placeholder |= _contains_image_placeholder(content)
         elif isinstance(content, list):
             parts = []
             for block in content:
                 part_type = block.get("type")
                 if part_type in ("text", "input_text", "output_text"):
-                    _reject_image_placeholder(block.get("text"))
+                    has_image_placeholder |= _contains_image_placeholder(
+                        block.get("text")
+                    )
                     parts.append(block.get("text", ""))
                 elif part_type in (
                     "image_url",
@@ -68,7 +72,9 @@ def _normalize_messages(
                 elif part_type == "tool_reference":
                     # The system prompt already lists every tool, deferred
                     # ones included, so the name is all the model needs.
-                    _reject_image_placeholder(block.get("name"))
+                    has_image_placeholder |= _contains_image_placeholder(
+                        block.get("name")
+                    )
                     parts.append(block.get("name", ""))
                 else:
                     raise ValueError(
@@ -76,6 +82,18 @@ def _normalize_messages(
                         f"got {part_type!r}"
                     )
             message["content"] = "\n\n".join(parts)
+
+    if image_idx and has_image_placeholder:
+        raise ValueError(
+            f"Message text contains image special token {IMAGE_PLACEHOLDER!r}; "
+            "provide images as image content parts."
+        )
+    if has_image_placeholder:
+        logger.warning_once(
+            "Message text contains image special token %r but no image content "
+            "parts were provided; rendering it as text.",
+            IMAGE_PLACEHOLDER,
+        )
 
     return result
 
