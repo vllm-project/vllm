@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
-from enum import Enum
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
@@ -47,6 +47,9 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.lut_b import (
+    LutBOnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
@@ -74,6 +77,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp4Static,
     kMxfp8Static,
     kNvfp4Static,
@@ -82,7 +86,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 logger = init_logger(__name__)
 
 
-class OnlineQuantizationSource(str, Enum):
+class OnlineQuantizationSource(StrEnum):
     """Supported online quantization configuration sources."""
 
     linear = "linear"  # LinearBase
@@ -110,6 +114,7 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kMxfp4Static: Mxfp4OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
+    kLutBStatic: LutBOnlineMoEMethod,
 }
 
 # Quantizers for full-precision fused shared-expert weights, keyed by the routed
@@ -283,7 +288,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             layer_cls: Type of the layer that will use the resolved method.
 
         Returns:
-            The matching method class, or None when ``spec`` has no weight
+            The matching method class, or None when `spec` has no weight
             quantization.
 
         """

@@ -25,8 +25,11 @@ from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import (
     VitMropeSetup,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+)
 from vllm.model_executor.models.vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
@@ -42,8 +45,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
 
     def __init__(self, config: PreTrainedConfig) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        temporal_patch_size = compression.get("temporal_patch_size", 2)
+        temporal_patch_size = config.temporal_patch_size
         patch_size = config.patch_size
         num_channels = config.num_channels
 
@@ -79,7 +81,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
 class MiniMaxVLAttention(nn.Module):
     """Multi-head attention with MiniMax's partial 3D RoPE.
 
-    Partial means only the first ``rot_dim`` (< head_dim) dimensions of
+    Partial means only the first `rot_dim` (< head_dim) dimensions of
     Q and K are rotated; the remaining dims are passed through unchanged.
     """
 
@@ -295,7 +297,7 @@ class MiniMaxVLEncoder(nn.Module):
 class MiniMaxVLVisionTransformer(nn.Module):
     """CLIP-based ViT with 3D RoPE (t/h/w decomposed).
 
-    Faithfully mirrors the reference ``MiniMaxVLVisionTransformer``.
+    Faithfully mirrors the reference `MiniMaxVLVisionTransformer`.
     FLASHINFER backend is not supported; standard flash-attn is used.
     """
 
@@ -308,9 +310,8 @@ class MiniMaxVLVisionTransformer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        self.spatial_merge_size: int = compression.get("spatial_merge_size", 2)
-        self.temporal_patch_size: int = compression.get("temporal_patch_size", 2)
+        self.spatial_merge_size: int = config.spatial_merge_size
+        self.temporal_patch_size: int = config.temporal_patch_size
         self.vision_segment_max_frames: int | None = getattr(
             config, "vision_segment_max_frames", None
         )
@@ -338,7 +339,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.w_dim = int(2 * ((rope_dims // 3) // 2))
         # rot_dim = t_dim + h_dim + w_dim (may be < head_dim)
 
-        rope_theta: float = getattr(config, "rope_theta", 10000.0)
+        rope_theta: float = config.rope_parameters["rope_theta"]
         inv_freq_t = 1.0 / (
             rope_theta
             ** (torch.arange(0, self.t_dim, 2, dtype=torch.float32) / self.t_dim)
@@ -611,6 +612,14 @@ class MiniMaxVLPatchMerger(nn.Module):
 
 
 class MiniMaxVLVisionModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj.": (".qkv_proj.", "q"),
+            ".k_proj.": (".qkv_proj.", "k"),
+            ".v_proj.": (".qkv_proj.", "v"),
+        }
+    )
+
     """Full vision model: ViT → projector → patch merger."""
 
     def __init__(
@@ -622,8 +631,7 @@ class MiniMaxVLVisionModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        compression = config.img_token_compression_config
-        spatial_merge_size: int = compression.get("spatial_merge_size", 2)
+        spatial_merge_size: int = config.spatial_merge_size
         self.spatial_merge_size = spatial_merge_size
         self.use_data_parallel = is_vit_use_data_parallel()
 
@@ -683,28 +691,5 @@ class MiniMaxVLVisionModel(nn.Module):
         return hidden
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj.", "q_proj.", "q"),
-            ("qkv_proj.", "k_proj.", "k"),
-            ("qkv_proj.", "v_proj.", "v"),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
