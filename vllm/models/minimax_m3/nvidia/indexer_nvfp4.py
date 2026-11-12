@@ -411,7 +411,7 @@ class MiniMaxM3IndexerNvfp4Impl(MiniMaxM3IndexerImpl):
         )
 
     def reserve_workspace(self) -> None:
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             ((self.max_gather_pages, PAGE_SIZE, HEAD_DIM), torch.float8_e4m3fn)
         )
 

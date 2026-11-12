@@ -864,13 +864,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # KV cache is sized. Layers share the manager's grow-only allocation.
         if is_workspace_manager_initialized():
             if self._flashkda_buffer_specs is not None:
-                current_workspace_manager().get_simultaneous(
-                    *self._flashkda_buffer_specs
-                )
+                current_workspace_manager().reserve(*self._flashkda_buffer_specs)
             elif self._flashinfer_kda_output_spec is not None:
-                current_workspace_manager().get_simultaneous(
-                    self._flashinfer_kda_output_spec
-                )
+                current_workspace_manager().reserve(self._flashinfer_kda_output_spec)
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None

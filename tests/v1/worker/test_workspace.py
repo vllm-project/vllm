@@ -357,3 +357,42 @@ def test_reserve_growth_invalidates_retained_spans_in_all_slots(monkeypatch) -> 
     for active_ubatch in range(2):
         _, intact = manager.get_retained("kv", (256,), torch.int32)
         assert not intact
+
+
+@pytest.mark.parametrize("dcp", [False, True])
+def test_aiter_verify_reservation_covers_unwarmed_lane(dcp) -> None:
+    """Both Triton verify routes must reserve scratch before a lane is used."""
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+        _reserve_triton_dcp_verify_workspace,
+        _reserve_triton_verify_workspace,
+        _triton_dcp_verify_num_kv_splits,
+        _triton_verify_num_kv_splits,
+    )
+
+    workspace.init_workspace_manager(torch.device("cpu"), num_lanes=2)
+    try:
+        max_reqs, qlen, heads, max_seq_len, rank, sms = 2, 5, 16, 16384, 8, 304
+        if dcp:
+            rows = max_reqs * qlen
+            _reserve_triton_dcp_verify_workspace(rows, heads, max_seq_len, rank, sms)
+            splits = _triton_dcp_verify_num_kv_splits(max_seq_len, rows, heads, sms)
+        else:
+            _reserve_triton_verify_workspace(
+                max_reqs, (qlen,), heads, max_seq_len, rank, sms
+            )
+            splits = _triton_verify_num_kv_splits(
+                max_seq_len, max_reqs, qlen, heads, sms
+            )
+        assert splits > 1
+        spec = ((max_reqs * qlen * splits, heads, rank + 1), torch.float32)
+        manager = workspace.current_workspace_manager()
+        manager.lock()
+        (original,) = manager.get_simultaneous(spec)
+        original.fill_(23)
+        with workspace.use_workspace_lane(1):
+            (peer,) = manager.get_simultaneous(spec)
+            peer.fill_(17)
+            assert peer.data_ptr() != original.data_ptr()
+        torch.testing.assert_close(original, torch.full_like(original, 23))
+    finally:
+        workspace.reset_workspace_manager()

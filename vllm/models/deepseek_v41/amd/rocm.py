@@ -997,7 +997,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 shapes = self._prefill_workspace_shapes(
                     M, self.max_num_batched_tokens, q
                 )
-                current_workspace_manager().get_simultaneous(*shapes)
+                current_workspace_manager().reserve(*shapes)
             if mxfp8_out is None:
                 output.zero_()
             else:

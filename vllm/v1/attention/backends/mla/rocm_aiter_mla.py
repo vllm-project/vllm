@@ -553,7 +553,7 @@ def _reserve_triton_verify_workspace(
             if splits > 1:
                 max_rows = max(max_rows, reqs * splits * qlen)
     if max_rows:
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             ((max_rows, num_heads, kv_lora_rank + 1), torch.float32),
         )
 

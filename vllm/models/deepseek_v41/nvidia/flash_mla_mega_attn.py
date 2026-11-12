@@ -390,7 +390,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             top_k = self.topk_indices_buffer.shape[-1]
         # One request covers the KV chunk (retained at the tail at runtime) and
         # the index scratch (taken from the head) side by side.
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             ((self.PREFILL_CHUNK_SIZE, m, q.shape[-1]), torch.bfloat16),
             *self._prefill_index_workspace_specs(top_k),
         )

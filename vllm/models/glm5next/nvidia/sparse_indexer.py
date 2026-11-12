@@ -165,7 +165,7 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        current_workspace_manager().get_simultaneous(
+        current_workspace_manager().reserve(
             values_spec,
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),

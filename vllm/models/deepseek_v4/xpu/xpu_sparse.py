@@ -148,7 +148,7 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
                 // self.compress_ratio
             )
             M = N + self.window_size + self.max_num_batched_tokens
-            current_workspace_manager().get_simultaneous(
+            current_workspace_manager().reserve(
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
             )
             output.zero_()

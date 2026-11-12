@@ -1538,7 +1538,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._prefill_kernels_warmed_up = True
         if self._exports_checkpoints:
             # Size the workspace while profiling; it is locked afterwards.
-            current_workspace_manager().get_simultaneous(self._checkpoint_buffer_spec)
+            current_workspace_manager().reserve(self._checkpoint_buffer_spec)
 
         device = qkv_or_qkvz.device
         dtype = qkv_or_qkvz.dtype

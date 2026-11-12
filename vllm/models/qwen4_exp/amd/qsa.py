@@ -97,7 +97,7 @@ class Qwen4ExpROCmQSAMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
                 * num_heads
                 * (kv_cache_spec.head_size + 2)
             )
-            current_workspace_manager().get_simultaneous(((numel,), torch.float32))
+            current_workspace_manager().reserve(((numel,), torch.float32))
 
 
 _OCTAVE_CACHE_DTYPES: tuple[CacheDType, ...] = (

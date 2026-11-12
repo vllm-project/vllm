@@ -1362,7 +1362,7 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Prefill k_fp8 and k_scale buffers, used by
         # rocm_aiter_sparse_attn_indexer's prefill path
-        workspace_manager.get_simultaneous(
+        workspace_manager.reserve(
             ((total_seq_lens, head_dim), FP8_DTYPE),
             ((total_seq_lens, 4), torch.uint8),
         )
@@ -1370,11 +1370,11 @@ def rocm_aiter_sparse_attn_indexer(
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
-            workspace_manager.get_simultaneous(
+            workspace_manager.reserve(
                 ((decode_rows, max_model_len), torch.float32),
             )
         else:
-            workspace_manager.get_simultaneous(
+            workspace_manager.reserve(
                 (
                     (q_fp8.shape[1], decode_rows, max_model_len),
                     torch.float32,

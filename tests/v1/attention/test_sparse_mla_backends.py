@@ -187,6 +187,98 @@ DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.mark.parametrize(
+    ("version", "compress_ratio", "max_image_tokens"),
+    [
+        ("v4", 1, 0),
+        ("v4", 128, 0),
+        ("v4", 1, 128),
+        ("v4", 128, 128),
+        ("v41", 0, 0),
+        ("v41", 2, 0),
+    ],
+)
+def test_deepseek_flashmla_profile_reserves_unwarmed_lane(
+    dist_init, workspace_init, version, compress_ratio, max_image_tokens
+):
+    """Profiling one lane must reserve prefill scratch for an unwarmed peer."""
+    from transformers import DeepseekV4Config
+
+    from vllm.v1.worker.workspace import (
+        current_workspace_manager,
+        init_workspace_manager,
+        use_workspace_lane,
+    )
+
+    config = create_vllm_config(
+        max_model_len=256, max_num_seqs=2, max_num_batched_tokens=16
+    )
+    config.model_config.hf_config = DeepseekV4Config(
+        hidden_size=128,
+        num_attention_heads=8,
+        num_hidden_layers=1,
+        q_lora_rank=128,
+        o_lora_rank=128,
+        o_groups=8,
+        head_dim=512,
+        qk_rope_head_dim=64,
+        sliding_window=8,
+        max_position_embeddings=256,
+        layer_types=["sliding_attention"],
+        compress_rates={"sliding_attention": compress_ratio},
+        vision_n_layers=1 if max_image_tokens else 0,
+        vision_max_n_token=max_image_tokens,
+    )
+    if version == "v4":
+        from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
+    else:
+        from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
+        from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+
+        config.model_config.hf_config = DeepseekV41Config(
+            text_config=config.model_config.hf_config.to_dict()
+            | {
+                "compress_ratios": [compress_ratio],
+                "mlp_layer_types": ["dense"],
+                "kv_source_layer_ids": [0] if compress_ratio else [],
+                "index_source_layer_ids": [0] if compress_ratio else [],
+            }
+        )
+    config.kernel_config.enable_jit_warmup = False
+    init_workspace_manager(torch.device("cuda"), num_lanes=2)
+    with set_current_vllm_config(config), torch.device("cuda"):
+        layer = DeepseekV4FlashMLAAttention(
+            config,
+            prefix="model.layers.0.attn",
+            topk_indices_buffer=torch.empty((16, 128), dtype=torch.int32),
+        )
+        q = torch.empty((1, layer.padded_heads, layer.head_dim), dtype=torch.bfloat16)
+        output = torch.full_like(q, float("nan"))
+        with set_forward_context(None, config):
+            layer.forward_mqa(q, q, torch.zeros(1, dtype=torch.long), output)
+        assert torch.count_nonzero(output).item() == 0
+
+        manager = current_workspace_manager()
+        manager.lock()
+        compressed_len = 0 if compress_ratio <= 1 else cdiv(256, compress_ratio)
+        topk = 0 if compress_ratio <= 1 else 128
+        index_width = cdiv(topk + 8 + max_image_tokens, 128) * 128
+        specs = (
+            ((layer.PREFILL_CHUNK_SIZE, compressed_len + 8 + 16, 512), torch.bfloat16),
+            ((16, index_width), torch.int32),
+            ((16,), torch.int32),
+        )
+        with use_workspace_lane(0):
+            original = manager.get_simultaneous(*specs)
+            original[0].fill_(23)
+        with use_workspace_lane(1):
+            peer = manager.get_simultaneous(*specs)
+            peer[0].fill_(17)
+            assert peer[0].data_ptr() != original[0].data_ptr()
+        torch.testing.assert_close(original[0], torch.full_like(original[0], 23))
+        torch.testing.assert_close(peer[0], torch.full_like(peer[0], 17))
+
+
+@pytest.mark.parametrize(
     ("batch_name", "tensor_parallel_size"),
     [
         ("large_q_prefill", 2),

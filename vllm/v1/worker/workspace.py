@@ -195,7 +195,7 @@ class WorkspaceManager:
         get_simultaneous so growth only affects the requesting slot.
         """
         required_bytes = sum(
-            round_up(_compute_bytes(shape, dtype), 256)
+            round_up(_compute_bytes(shape, dtype), _VIEW_ALIGNMENT)
             for shape, dtype in shapes_and_dtypes
         )
         for workspace_id in range(len(self._current_workspaces)):

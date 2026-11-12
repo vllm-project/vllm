@@ -285,7 +285,7 @@ def reserve_rocm_mxfp4_indexer_workspace(
                 dtype=torch.uint8,
                 device=hidden_states.device,
             )
-    current_workspace_manager().get_simultaneous(*specs)
+    current_workspace_manager().reserve(*specs)
     torch.empty(budget, dtype=torch.uint8, device=hidden_states.device)
 
 

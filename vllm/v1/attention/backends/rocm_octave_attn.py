@@ -203,7 +203,7 @@ class RocmOctaveMetadataBuilder(AttentionMetadataBuilder[RocmOctaveMetadata]):
                 vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph,
                 capture_size,
             )
-            current_workspace_manager().get_simultaneous((shape, torch.float32))
+            current_workspace_manager().reserve((shape, torch.float32))
 
     def build(
         self,

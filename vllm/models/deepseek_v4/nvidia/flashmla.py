@@ -118,7 +118,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             combined_topk = round_up(
                 top_k + self.window_size + self.max_image_tokens, 128
             )
-            current_workspace_manager().get_simultaneous(
+            current_workspace_manager().reserve(
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
                 ((self.max_num_batched_tokens,), torch.int32),

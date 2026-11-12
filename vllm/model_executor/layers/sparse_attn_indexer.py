@@ -574,7 +574,7 @@ def sparse_attn_indexer(
                 total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
             )
             profile_specs.extend(gather_spec * 2)
-        current_workspace_manager().get_simultaneous(*profile_specs)
+        current_workspace_manager().reserve(*profile_specs)
         if fused_mqa_topk:
             # Allocate the largest fused_mqa_topk workspaces so they are
             # accounted for (freed again, they overlap the dense logits below).
