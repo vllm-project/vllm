@@ -12,6 +12,7 @@ from vllm import PoolingParams, SamplingParams
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -439,10 +440,11 @@ def warmup_kernels(
     )
     if acceptance_estimator is not None:
         acceptance_estimator.warmup()
-    if not model_runner.is_encoder_decoder:
-        # A chunked-prefill continuation or prefix-cache hit attends over
-        # cached context, which can select attention kernels (e.g. AITER's
-        # causal+LSE varlen MHA) that the fresh prompts above never reach.
+    # ROCm only. ROCM_AITER_FA compiles a causal+LSE varlen kernel for a
+    # prefill over cached context, and the fresh prompts above never reach
+    # it. Other platforms do not build that kernel, so the extra forward
+    # would only add startup time there.
+    if not model_runner.is_encoder_decoder and current_platform.is_rocm():
         run_context_prefill_warmup(
             model_runner,
             worker_execute_model,

@@ -197,9 +197,16 @@ def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahea
     assert set(recorder.num_spec_tokens_to_schedule) == {num_spec_steps}
 
 
-def test_warmup_kernels_prefills_over_cached_context():
-    """Chunked-prefill continuations attend over cached context, which some
-    attention backends serve with kernels fresh prompts never select."""
+@pytest.mark.parametrize("on_rocm", [True, False])
+def test_warmup_kernels_prefills_over_cached_context(monkeypatch, on_rocm):
+    """The cached-context prefill is a ROCm warmup, not a general one.
+
+    ROCM_AITER_FA compiles kernels when a prefill attends over tokens already
+    in the KV cache, such as its causal+LSE varlen kernel. Fresh prompts never
+    take those paths. Other platforms do not select a kernel based on cached
+    context, so the step is skipped there.
+    """
+    monkeypatch.setattr(warmup.current_platform, "is_rocm", lambda: on_rocm)
     recorder = _StepRecorder()
 
     warmup_kernels(
@@ -208,10 +215,11 @@ def test_warmup_kernels_prefills_over_cached_context():
         recorder.sample_tokens,
     )
 
-    assert any(
+    saw_cached_prefill = any(
         num_computed > 0 and num_scheduled > 1
         for _, num_computed, num_scheduled in recorder.steps
     )
+    assert saw_cached_prefill is on_rocm
 
 
 def test_mixed_warmup_reserves_lookahead_blocks():
