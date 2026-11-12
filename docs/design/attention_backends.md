@@ -187,6 +187,25 @@ uv pip install "vllm[b12x]"
 vllm serve <model> --attention-backend b12x
 ```
 
+### ROCM_AITER_FA GQA decode kernel
+
+On ROCm gfx950 (MI355X), `ROCM_AITER_FA` runs decode and speculative-decode verify
+with a dedicated FlyDSL kernel (full-attention and sliding-window layers) instead of
+AITER paged or unified attention when all of these hold:
+
+- FP8 KV cache (`--kv-cache-dtype fp8`) in the default (unshuffled) layout;
+- an attention layer with head size 64, 8 query heads per KV head, at most 16 KV
+  heads on each rank and no attention sinks, logit soft cap or ALiBi;
+- a decode batch in which every request has the same number of query tokens, 1 to 8
+  (plain decode, or 1 to 7 draft tokens; for full-attention layers, fewer than two
+  requests per compute unit).
+
+The kernel is enabled automatically and needs FlyDSL (`flydsl`, installed with
+recent `aiter`). It reads the KV cache in the backend's 16- or 32-token kernel
+blocks. Other layers and
+batches use the AITER kernels. Muse Spark (128 / 16 heads of 64) is one model with
+this shape. The entry point is `vllm/v1/attention/ops/rocm_gqa_verify.py`.
+
 ## MiniMax M3 Sparse Attention Backends
 
 Block-sparse GQA backend used by MiniMax M3 sparse ("lightning indexer")
