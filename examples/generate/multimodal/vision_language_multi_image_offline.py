@@ -1061,7 +1061,6 @@ def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_num_batched_tokens=4096,
-        gpu_memory_utilization=0.85,
         tensor_parallel_size=8,
         limit_mm_per_prompt={"image": len(image_urls)},
         reasoning_parser="step3",
