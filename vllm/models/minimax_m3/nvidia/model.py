@@ -139,6 +139,7 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.models.minimax_m3.nvidia.indexer_msa import IndexKShardComm
 
 logger = init_logger(__name__)
 
@@ -858,6 +859,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         cache_config: CacheConfig | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        index_k_comm: "IndexKShardComm | None" = None,
         use_sequence_parallel: bool = False,
         run_gemm_rs: bool = False,
     ) -> None:
@@ -885,7 +887,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.total_idx_heads = config.index_n_heads
         self.num_idx_heads = self.num_kv_heads
         self.idx_head_dim = config.index_head_dim
-        self.index_q_size = self.num_idx_heads * self.idx_head_dim
+        index_k_shard = index_k_comm.world if index_k_comm is not None else 1
 
         # Single fused projection: q, k, v, index_q, index_k in one GEMM.
         self.qkv_proj = MinimaxM3QKVParallelLinearWithIndexer(
@@ -898,7 +900,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            replicate_index_q=index_k_shard > 1,
         )
+        self.index_q_size = self.qkv_proj.num_index_heads * self.idx_head_dim
+        self.index_k_rank = get_tensor_model_parallel_rank() if index_k_shard > 1 else 0
         # reduce_results=False: under sequence parallelism o_proj reduce-scatters
         # in forward; otherwise the all-reduce is fused with the following
         # post_attention_layernorm via fused_allreduce_gemma_rms_norm.
@@ -994,7 +999,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            index_k_shard=index_k_shard,
         )
+
+        if index_k_comm is not None:
+            from vllm.models.minimax_m3.nvidia.indexer_msa import (
+                MiniMaxM3IndexerMSAImpl,
+            )
+
+            assert isinstance(self.indexer.impl, MiniMaxM3IndexerMSAImpl)
+            self.indexer.impl.set_shard_comm(index_k_comm)
 
         # Register the main K/V cache so the KV-cache manager allocates it.
         compilation_config = vllm_config.compilation_config
@@ -1172,7 +1186,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 eps,
                 self.index_q_norm.weight,
                 self.index_k_norm.weight,
-                self.num_idx_heads,
+                self.qkv_proj.num_index_heads,
                 main_slot_mapping,
                 index_slot_mapping,
                 self.kv_cache,
@@ -1186,6 +1200,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 kv_k_scale=self._k_scale if self.use_nvfp4_kv else None,
                 kv_v_scale=self._v_scale if self.use_nvfp4_kv else None,
                 write_qkv=not q_is_fp8,
+                index_k_tp=self.indexer.index_cache.tp_shard,
+                index_k_rank=self.index_k_rank,
             )
 
         output = torch.empty((num_tokens, self.q_size), dtype=dtype, device=device)
@@ -1219,6 +1235,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         force_moe: bool = False,
         is_mtp_block: bool = False,
         topk_indices_buffer: torch.Tensor | None = None,
+        index_k_comm: "IndexKShardComm | None" = None,
         run_gemm_rs: bool = False,
     ) -> None:
         super().__init__()
@@ -1255,6 +1272,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 cache_config=cache_config,
                 topk_indices_buffer=topk_indices_buffer,
+                index_k_comm=index_k_comm,
                 use_sequence_parallel=self.use_sequence_parallel,
                 run_gemm_rs=run_gemm_rs,
             )
@@ -1447,12 +1465,34 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         else:
             self.topk_indices_buffer = None
 
+        self.index_k_comm = None
+        if (
+            self.topk_indices_buffer is not None
+            and vllm_config.attention_config.indexer_cache_sharding
+        ):
+            from vllm.models.minimax_m3.nvidia.indexer_msa import (
+                IndexKShardComm,
+                resolve_index_k_shard,
+            )
+
+            if (
+                resolve_index_k_shard(
+                    vllm_config,
+                    config.index_n_heads,
+                    vllm_config.attention_config.resolve_indexer_kv_dtype("bf16"),
+                    config.index_topk_blocks,
+                )
+                > 1
+            ):
+                self.index_k_comm = IndexKShardComm(vllm_config, config.index_n_heads)
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniMaxM3DecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
+                index_k_comm=self.index_k_comm,
                 run_gemm_rs=run_gemm_rs,
             ),
             prefix=f"{prefix}.layers",

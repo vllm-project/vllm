@@ -118,6 +118,11 @@ class AttentionConfig:
     ignored with a warning where it does not apply. It pays off from about 4
     concurrent decodes at 128K context and grows with batch and context."""
 
+    indexer_cache_sharding: bool = False
+    """Shard the indexer cache across TP ranks on supported backends.
+    Layout is fixed at startup. MSA supports P128 FP8 index K on single-node
+    NVLink TP2/TP4; unsupported configurations retain replicated storage."""
+
     indexer_sparse_logits: bool | None = None
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
     DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over

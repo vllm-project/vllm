@@ -3041,26 +3041,32 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_in
         assert not index_cache_t128
 
 
-def test_indexer_cache_squeezes_to_contiguous_3d():
-    """The indexer side cache is standardized 4D with H=1: under both layouts
-    the allocator's logical view stays contiguous and squeezes (as
-    `MiniMaxM3IndexerCache.bind_kv_cache` does) to the 3-dim
-    [num_blocks, block_size, head_dim] cache the kernels consume."""
+@pytest.mark.parametrize("tp_shard", [1, 2, 4])
+@pytest.mark.parametrize("index_dtype", ["bf16", "fp8"])
+def test_indexer_cache_squeezes_to_contiguous_3d(tp_shard, index_dtype):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
+
     nb = 5
-    ispec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
-    )
+    config = VllmConfig(cache_config=CacheConfig(block_size=BLOCK_SIZE))
+    with set_current_vllm_config(config):
+        cache = MiniMaxM3IndexerCache(
+            HEAD_DIM, "index_cache", indexer_kv_dtype=index_dtype, tp_shard=tp_shard
+        )
+    ispec = cache.get_kv_cache_spec(config)
     shape_bytes = compute_layer_kv_cache_shape_bytes(ispec, nb)
-    assert shape_bytes == (nb, 1, BLOCK_SIZE, HEAD_DIM * DTYPE.itemsize)
+    content = HEAD_DIM * cache.dtype.itemsize // tp_shard
+    assert shape_bytes == (nb, 1, BLOCK_SIZE, content)
+    assert ispec.page_size_bytes == BLOCK_SIZE * content
     assert _layer_stride_order(KVCacheLayout.LBNHC, 3) == (0, 1, 2)
 
     for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
         iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
         view = dense_kv_cache_views(iraw, ispec, nb, 1, layout, BLOCK_SIZE)[0]
-        assert tuple(view.shape) == (nb, 1, BLOCK_SIZE, HEAD_DIM)
-        indexer_cache = view.squeeze(1)
-        assert tuple(indexer_cache.shape) == (nb, BLOCK_SIZE, HEAD_DIM)
-        assert indexer_cache.is_contiguous()
+        cache.bind_kv_cache(view)
+        assert tuple(cache.kv_cache.shape) == (nb, BLOCK_SIZE // tp_shard, HEAD_DIM)
+        assert cache.kv_cache.is_contiguous()
+        assert cache.kv_cache.data_ptr() == iraw.data_ptr()
 
 
 def test_hnd_allocation_is_packed_head_major():
