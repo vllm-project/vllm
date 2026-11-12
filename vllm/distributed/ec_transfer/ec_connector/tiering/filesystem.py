@@ -136,6 +136,8 @@ class ECFileSystemTierManager:
         self._namespace_digest = namespace_digest
         self._capacity_bytes = capacity_bytes
         self._used_bytes = 0
+        self._reserved_write_bytes = 0
+        self._pending_delete_bytes = 0
         self._fsync = fsync
         self._executor = executor
         self._backpressure_detector: BackpressureDetector | None = None
@@ -161,8 +163,10 @@ class ECFileSystemTierManager:
 
     @property
     def used_bytes(self) -> int:
-        """Return bytes owned by entries in the in-memory index."""
-        return self._used_bytes
+        """Return indexed bytes, write reservations and unconfirmed deletions."""
+        return (
+            self._used_bytes + self._reserved_write_bytes + self._pending_delete_bytes
+        )
 
     @property
     def capacity_bytes(self) -> int:
@@ -270,6 +274,8 @@ class ECFileSystemTierManager:
             self._backpressure_detector.should_store(len(sources))
         ):
             return False
+        if not self._evict_to_capacity(file_size_bytes):
+            return False
 
         entry_path = get_ec_entry_path(
             self._root_dir,
@@ -290,6 +296,7 @@ class ECFileSystemTierManager:
             return False
         self._pending_writes[job_id] = entry
         self._pending_write_keys.add(cache_key)
+        self._reserved_write_bytes += file_size_bytes
         return True
 
     def poll_completed_reads(self) -> list[ECReadResult]:
@@ -366,6 +373,7 @@ class ECFileSystemTierManager:
     def _complete_write(self, completion: ECFileIOCompletion) -> None:
         entry = self._pending_writes.pop(completion.job_id)
         self._pending_write_keys.remove(completion.cache_key)
+        self._reserved_write_bytes -= entry.file_size_bytes
         if completion.success:
             if self._backpressure_detector is not None:
                 self._backpressure_detector.on_store_completed(
@@ -392,7 +400,11 @@ class ECFileSystemTierManager:
     def _complete_delete(self, completion: ECFileIOCompletion) -> None:
         indexed_entry = self._pending_deletes.pop(completion.job_id)
         self._deleting_keys.remove(indexed_entry.cache_key)
+        self._pending_delete_bytes -= indexed_entry.file_size_bytes
         if not completion.success:
+            self._entries[indexed_entry.cache_key] = indexed_entry
+            self._entries.move_to_end(indexed_entry.cache_key, last=False)
+            self._used_bytes += indexed_entry.file_size_bytes
             logger.warning(
                 "Failed to delete evicted encoder-cache entry %s: %s",
                 indexed_entry.path,
@@ -434,8 +446,10 @@ class ECFileSystemTierManager:
             self._entries[cache_key] = entry
             self._used_bytes += entry.file_size_bytes
 
-    def _evict_to_capacity(self) -> None:
-        while self._used_bytes > self._capacity_bytes:
+    def _evict_to_capacity(self, required_bytes: int = 0) -> bool:
+        target_bytes = self._capacity_bytes - required_bytes
+        # Pending deletes will free space, but cannot fund a write until confirmed.
+        while self._used_bytes + self._reserved_write_bytes > target_bytes:
             victim: tuple[str, ECFileEntry] | None = None
             for cache_key, indexed_entry in self._entries.items():
                 if (
@@ -445,26 +459,25 @@ class ECFileSystemTierManager:
                     victim = (cache_key, indexed_entry)
                     break
             if victim is None:
-                return
+                return False
 
             cache_key, indexed_entry = victim
-            del self._entries[cache_key]
-            self._used_bytes -= indexed_entry.file_size_bytes
             job_id = self._executor.submit_delete(
                 cache_key,
                 indexed_entry.path,
                 indexed_entry.file_size_bytes,
             )
             if job_id is None:
-                self._entries[cache_key] = indexed_entry
-                self._entries.move_to_end(cache_key, last=False)
-                self._used_bytes += indexed_entry.file_size_bytes
-                return
+                return False
+            del self._entries[cache_key]
+            self._used_bytes -= indexed_entry.file_size_bytes
             self._pending_deletes[job_id] = indexed_entry
+            self._pending_delete_bytes += indexed_entry.file_size_bytes
             self._deleting_keys.add(cache_key)
             self._lookup.mark_miss(
                 [self._lookup.key(cache_key, indexed_entry.file_size_bytes)]
             )
+        return self.used_bytes <= target_bytes
 
 
 @runtime_checkable

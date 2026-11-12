@@ -24,8 +24,35 @@ def test_tiering_factory_registered():
 
 
 def _vllm_config(extra_config: object) -> SimpleNamespace:
-    ec_config = SimpleNamespace(ec_connector_extra_config=extra_config)
+    ec_config = SimpleNamespace(
+        ec_role="ec_both", ec_connector_extra_config=extra_config
+    )
     return SimpleNamespace(ec_transfer_config=ec_config)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("role", ["ec_consumer", "ec_producer"])
+def test_tiering_rejects_separate_producer_and_consumer_roles(role, tmp_path):
+    from transformers import LlavaConfig
+
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.ec_transfer import ECTransferConfig
+
+    LlavaConfig(architectures=["LlavaForConditionalGeneration"]).save_pretrained(
+        tmp_path
+    )
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+        ),
+        ec_transfer_config=ECTransferConfig(
+            ec_connector="ECTieringConnector", ec_role=role
+        ),
+    )
+    with pytest.raises(
+        ValueError, match="ECTieringConnector requires ec_role='ec_both'"
+    ):
+        ECTieringConfig.from_vllm_config(config)
 
 
 @pytest.mark.parametrize("secondary_tiers", [None, []])

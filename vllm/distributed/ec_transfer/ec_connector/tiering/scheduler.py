@@ -50,9 +50,9 @@ class ECTieringScheduler(ECCPUScheduler):
     def __init__(self, vllm_config: VllmConfig) -> None:
         self._tiering_manager: ECTieringManager | None = None
         self._filesystem: ECFileSystemTierManager | None = None
+        tiering_config = ECTieringConfig.from_vllm_config(vllm_config)
         super().__init__(vllm_config)
         self._primary = ECCPUPrimaryAdapter(self._region, self._cache)
-        tiering_config = ECTieringConfig.from_vllm_config(vllm_config)
         fs_config = tiering_config.filesystem_tier
         if fs_config is None:
             return

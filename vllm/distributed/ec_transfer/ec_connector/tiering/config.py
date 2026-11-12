@@ -185,6 +185,8 @@ class ECTieringConfig:
         ec_config = vllm_config.ec_transfer_config
         if ec_config is None:
             raise ValueError("ECTieringConnector requires ec_transfer_config")
+        if ec_config.ec_role != "ec_both":
+            raise ValueError("ECTieringConnector requires ec_role='ec_both'")
 
         extra_config = ec_config.ec_connector_extra_config
         if not isinstance(extra_config, dict):

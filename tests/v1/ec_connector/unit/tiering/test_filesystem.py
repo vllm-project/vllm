@@ -250,22 +250,24 @@ def test_manager_evicts_least_recently_used_entry_in_background(
 
     assert manager.used_bytes == 8
     assert manager.contains(first_key)
-    assert manager.submit_write(third_key, [memoryview(b"data")], 4)
-    executor.finish(2, success=True)
-    assert len(manager.poll_completed_writes()) == 1
+    assert not manager.submit_write(third_key, [memoryview(b"data")], 4)
 
     assert manager.used_bytes == 8
     assert manager.contains(first_key)
     assert not manager.contains(second_key)
-    assert manager.contains(third_key)
-    deletion = executor.submissions[3]
+    assert not manager.contains(third_key)
+    deletion = executor.submissions[2]
     assert deletion.operation == "delete"
     assert deletion.cache_key == second_key
     assert not manager.submit_write(second_key, [memoryview(b"data")], 4)
 
     executor.finish(deletion.job_id, success=True)
     assert manager.poll_completed_reads() == []
-    assert manager.submit_write(second_key, [memoryview(b"data")], 4)
+    assert manager.used_bytes == 4
+    assert manager.submit_write(third_key, [memoryview(b"data")], 4)
+    executor.finish(3, success=True)
+    assert manager.poll_completed_writes()[0].success
+    assert manager.contains(first_key) and manager.contains(third_key)
 
 
 def test_manager_does_not_evict_an_entry_with_an_active_read(
@@ -288,18 +290,39 @@ def test_manager_does_not_evict_an_entry_with_an_active_read(
     manager.poll_completed_writes()
     assert manager.submit_read(first_key, [memoryview(bytearray(4))])
 
-    assert manager.submit_write(second_key, [memoryview(b"data")], 4)
-    executor.finish(2, success=True)
-    manager.poll_completed_writes()
+    assert not manager.submit_write(second_key, [memoryview(b"data")], 4)
 
     assert manager.contains(first_key)
     assert not manager.contains(second_key)
-    assert executor.submissions[3].operation == "delete"
-    assert executor.submissions[3].cache_key == second_key
+    assert len(executor.submissions) == 2
 
     executor.finish(1, success=True)
-    executor.finish(3, success=True)
     assert len(manager.poll_completed_reads()) == 1
+    assert not manager.submit_write(second_key, [memoryview(b"data")], 4)
+    assert executor.submissions[2].operation == "delete"
+    assert executor.submissions[2].cache_key == first_key
+    executor.finish(2, success=True)
+    manager.poll_completed_reads()
+    assert manager.submit_write(second_key, [memoryview(b"data")], 4)
+
+
+def test_pending_writes_reserve_capacity_and_failure_releases_it(tmp_path):
+    executor = _FakeExecutor()
+    manager = ECFileSystemTierManager(
+        tmp_path, _NAMESPACE_DIGEST, 4, 1, 1, executor=executor
+    )
+    first, second = (f"{number:064x}" for number in range(2))
+    assert manager.submit_write(first, [memoryview(b"data")], 4)
+    assert manager.used_bytes == 4
+    assert not manager.submit_write(second, [memoryview(b"data")], 4)
+    assert len(executor.submissions) == 1
+    executor.finish(0, success=False)
+    assert not manager.poll_completed_writes()[0].success
+    assert manager.used_bytes == 0
+    assert manager.submit_write(second, [memoryview(b"data")], 4)
+    executor.finish(1, success=True)
+    assert manager.poll_completed_writes()[0].success
+    assert manager.used_bytes == 4
 
 
 def test_manager_rejects_entry_larger_than_capacity(tmp_path: Path) -> None:
@@ -316,6 +339,52 @@ def test_manager_rejects_entry_larger_than_capacity(tmp_path: Path) -> None:
     assert not manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
     assert executor.submissions == []
     assert manager.used_bytes == 0
+
+
+@pytest.mark.parametrize("failures", [1, 3])
+def test_failed_eviction_retains_capacity_and_resumes_stores_after_retry(
+    tmp_path, monkeypatch, failures
+):
+    from vllm.distributed.ec_transfer.ec_connector.tiering import executor
+
+    remove_entry = executor.remove_entry
+
+    def fail_unlink(path):
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise PermissionError("temporary unlink failure")
+        remove_entry(path)
+
+    monkeypatch.setattr(executor, "remove_entry", fail_unlink)
+    manager = ECFileSystemTierManager(
+        tmp_path, _NAMESPACE_DIGEST, 4, n_read_threads=1, n_write_threads=1
+    )
+    first, second, third = (f"{number:064x}" for number in range(3))
+    try:
+        assert manager.submit_write(first, [memoryview(b"data")], 4)
+        manager.drain()
+        assert manager.poll_completed_writes()[0].success
+        for _ in range(failures):
+            assert not manager.submit_write(second, [memoryview(b"data")], 4)
+            manager.drain()
+            assert manager.used_bytes == 4
+            assert manager.contains(first)
+            assert not manager.contains(second)
+            assert sum(path.stat().st_size for path in tmp_path.rglob("*.ec")) == 4
+        assert not manager.submit_write(second, [memoryview(b"data")], 4)
+        # The retry is in flight; another store must still be rejected.
+        assert not manager.submit_write(third, [memoryview(b"data")], 4)
+        manager.drain()
+        assert manager.used_bytes == 0
+        assert not manager.contains(first)
+        assert manager.submit_write(second, [memoryview(b"data")], 4)
+        assert not manager.submit_write(third, [memoryview(b"data")], 4)
+        manager.drain()
+        assert manager.poll_completed_writes()[0].success
+        assert sum(path.stat().st_size for path in tmp_path.rglob("*.ec")) == 4
+    finally:
+        manager.shutdown()
 
 
 def test_manager_recovers_published_entries_from_current_namespace(
@@ -380,10 +449,13 @@ def test_manager_evicts_oldest_recovered_entry_over_capacity(
 
     assert not manager.contains(old_key)
     assert manager.contains(new_key)
-    assert manager.used_bytes == 4
+    assert manager.used_bytes == 8
     assert len(executor.submissions) == 1
     assert executor.submissions[0].operation == "delete"
     assert executor.submissions[0].cache_key == old_key
+    executor.finish(0, success=True)
+    manager.poll_completed_reads()
+    assert manager.used_bytes == 4
 
 
 def test_manager_shutdown_drains_completions_and_rejects_submission(

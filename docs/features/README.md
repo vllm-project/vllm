@@ -4,6 +4,10 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
+## Encoder Cache Offloading
+
+- [ECTieringConnector: CPU and filesystem tiers](ec_tiering_connector.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.
