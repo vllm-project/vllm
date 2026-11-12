@@ -821,8 +821,8 @@ class Base(
                 # Already a vLLM parameter, nothing to do
                 if hasattr(param, "weight_loader"):
                     continue
-                dtype = dtype or param.dtype
-                data = torch.empty_like(param.data, dtype=dtype, device=device)
+                param_dtype = dtype or param.dtype
+                data = torch.empty_like(param.data, dtype=param_dtype, device=device)
                 param = nn.Parameter(data, requires_grad=param.requires_grad)
                 setattr(module, name, param)
             for child in module.children():
