@@ -120,8 +120,8 @@ steps:
   device: intel_gpu
   agent_tags:
     label: production
-    gpu: 2+
-    mem: 16+
+    gpu: 4+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
