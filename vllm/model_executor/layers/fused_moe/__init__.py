@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutedScaleMode,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
@@ -79,6 +80,7 @@ __all__ = [
     "FusedMoEPrepareAndFinalizeModular",
     "GateLinear",
     "MoERunner",
+    "RoutedScaleMode",
     "RoutingMethodType",
     "RoutedExperts",
     "SharedExperts",

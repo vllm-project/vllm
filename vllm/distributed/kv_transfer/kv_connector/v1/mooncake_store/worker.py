@@ -751,6 +751,42 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
         return puts
 
+    def _check_keys_exist(self, req_id: str, keys: list[str]) -> list[int] | None:
+        start = time.perf_counter()
+        try:
+            results = self.store.batch_is_exist(keys)
+        except Exception as e:
+            self._record_operation(
+                "save_exists",
+                start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.warning(
+                "Mooncake existence check failed for request %s: %s", req_id, e
+            )
+            return None
+
+        failed = [result for result in results if result < 0]
+        status = "ok"
+        if failed:
+            status = "error" if len(failed) == len(keys) else "partial_failure"
+        self._record_operation(
+            "save_exists", start, len(keys), status=status, num_failed_keys=len(failed)
+        )
+        if failed:
+            logger.warning(
+                "Mooncake existence check failed for request %s: "
+                "%d/%d keys failed (codes=%s)",
+                req_id,
+                len(failed),
+                len(keys),
+                set(failed),
+            )
+            return None
+        return results
+
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist this job's boundary puts, deduped against the store.
 
@@ -779,24 +815,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if self.enable_group_semantics and self.supports_group_ids
             else None
         )
-        exists_start = time.perf_counter()
-        try:
-            exists = self.store.batch_is_exist(keys)
-        except Exception as e:
-            self._record_operation(
-                "save_exists",
-                exists_start,
-                len(keys),
-                status="error",
-                num_failed_keys=len(keys),
-            )
-            logger.error(
-                "Failed to check boundary-state keys for request %s: %s",
-                req_meta.req_id,
-                e,
-            )
+        exists = self._check_keys_exist(req_meta.req_id, keys)
+        if exists is None:
             return False
-        self._record_operation("save_exists", exists_start, len(keys))
         missing = [i for i, e in enumerate(exists) if e != 1]
         if not missing:
             return True
@@ -985,23 +1006,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             # Check which blocks already exist (dedup)
-            save_exists_start = time.perf_counter()
-            try:
-                exists_states = self.store.batch_is_exist(keys)
-            except Exception:
-                self._record_operation(
-                    "save_exists",
-                    save_exists_start,
-                    len(keys),
-                    status="error",
-                    num_failed_keys=len(keys),
-                )
-                raise
-            self._record_operation(
-                "save_exists",
-                save_exists_start,
-                len(keys),
-            )
+            exists_states = self._check_keys_exist(req_id, keys)
+            if exists_states is None:
+                return
             missing_indices = [
                 i for i, exists in enumerate(exists_states) if exists != 1
             ]
