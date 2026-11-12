@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Which MiniMax-M3.1 DSpark draft steps run on the drafter kernels
-(``VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1``).
+(`VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1`).
 
 A draft step of 1..MAX_REQS requests (7 query rows each) runs its 5 layers and
 final norm in launches of up to 8 requests; other steps run the stock layers.
@@ -54,7 +54,7 @@ def _config_refusal(vllm_config: VllmConfig) -> str | None:
 
 
 class DrafterDecode:
-    """Routes supported draft steps of one ``MiniMaxM3DSparkModel`` to the kernels."""
+    """Routes supported draft steps of one `MiniMaxM3DSparkModel` to the kernels."""
 
     def __init__(self, model, vllm_config: VllmConfig) -> None:
         self._model = model

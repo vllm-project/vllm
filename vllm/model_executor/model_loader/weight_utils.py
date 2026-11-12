@@ -337,7 +337,9 @@ def get_quant_config(
     # 1. composed online quantization, before `maybe_compose_online_quantization`,
     # 2. Ambiguous online shorthands as `"mxpf4"`, `"mxfp8"`, for which `online_args`
     # is not set yet.
-    if quant_cls is OnlineQuantizationConfig and online_args is not None:
+    # `quant_cls` is the class registered for this method name, which an
+    # out-of-tree platform may have overridden with its own subclass.
+    if issubclass(quant_cls, OnlineQuantizationConfig) and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
         # Activation-only overrides apply to pre-quantized checkpoints; without
         # a weight key, standalone online quantization would silently no-op.
@@ -349,7 +351,7 @@ def get_quant_config(
                     f"quantization_config.{name} = {spec} does not set a weight "
                     "quantization key, which online quantization requires."
                 )
-        return OnlineQuantizationConfig(args=online_args)
+        return quant_cls(args=online_args)
 
     model_name_or_path = (
         maybe_download_from_modelscope(
@@ -386,12 +388,16 @@ def get_quant_config(
             )
             fp8_args = resolve_quantization_config("fp8_per_tensor", online_args)
             assert fp8_args is not None
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=fp8_args)
             return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
             assert not isinstance(online_args, dict)
             args = merge_quantization_config(
                 _ONLINE_SHORTHANDS[model_config.quantization], online_args
             )
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=args)
             return OnlineQuantizationConfig(args=args)
         return maybe_compose_online_quantization(quant_cls())
 
@@ -406,6 +412,8 @@ def get_quant_config(
             args = merge_quantization_config(
                 _ONLINE_SHORTHANDS[model_config.quantization], online_args
             )
+            if issubclass(quant_cls, OnlineQuantizationConfig):
+                return quant_cls(args=args)
             return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
@@ -428,39 +436,6 @@ def get_quant_config(
                 )
 
     return make_checkpoint_config(config)
-
-
-def get_sparse_attention_config(
-    model_config: ModelConfig,
-    load_config: LoadConfig,
-    sparse_attention_config_filename: str = "sparse_attention_config.json",
-) -> dict[str, Any]:
-    model_name_or_path = model_config.model
-    is_local = os.path.isdir(model_name_or_path)
-    if not is_local:
-        # Download the config files.
-        with get_lock(model_name_or_path, load_config.download_dir):
-            hf_folder = hf_api().snapshot_download(
-                model_name_or_path,
-                revision=model_config.revision,
-                allow_patterns="*.json",
-                cache_dir=load_config.download_dir,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                tqdm_class=DisabledTqdm,
-            )
-    else:
-        hf_folder = model_name_or_path
-
-    config_file = os.path.join(hf_folder, sparse_attention_config_filename)
-    if not os.path.exists(config_file):
-        return {}
-
-    # Load the sparse attention config.
-    with open(config_file) as f:
-        config = json.load(f)
-    logger.info("Loaded sparse attention config from %s", config_file)
-
-    return config
 
 
 @instrument(span_name="Download weights - HF")
@@ -672,7 +647,7 @@ def _normalize_module_prefixes(
 
 
 def _mapped_weight_name(weights_mapper: "WeightsMapper | None", key: str) -> str | None:
-    """Apply ``WeightsMapper.map_name`` when present; else identity."""
+    """Apply `WeightsMapper.map_name` when present; else identity."""
     if weights_mapper is None:
         return key
     return weights_mapper.map_name(key)
@@ -693,9 +668,9 @@ def _shared_hf_root_module_prefixes(
 ) -> tuple[str, ...]:
     """Module prefixes that are also an HF root for non-LM weights.
 
-    E.g. Molmo/Phi-4-MM/Muse mark LM as ``model`` while vision HF keys stay
-    under ``model.vision_*`` / ``model.embed_tokens_extend.*``. Detected via
-    ``WeightsMapper.orig_to_new_prefix`` (no hard-coded name list).
+    E.g. Molmo/Phi-4-MM/Muse mark LM as `model` while vision HF keys stay
+    under `model.vision_*` / `model.embed_tokens_extend.*`. Detected via
+    `WeightsMapper.orig_to_new_prefix` (no hard-coded name list).
     """
     if weights_mapper is None:
         return ()
@@ -725,15 +700,15 @@ def resolve_mm_encoder_only_lm_prefixes(
     *,
     weights_mapper: "WeightsMapper | None" = None,
 ) -> tuple[str, ...] | None:
-    """Resolve vLLM LM *module* prefixes for ``--mm-encoder-only`` shard skip.
+    """Resolve vLLM LM *module* prefixes for `--mm-encoder-only` shard skip.
 
-    Prefixes come from ``_language_model_names``. Classification of HF index
-    keys is done later via optional ``weights_mapper`` (see
-    ``filter_mm_encoder_only_safetensors_files``), so this helper does **not**
+    Prefixes come from `_language_model_names`. Classification of HF index
+    keys is done later via optional `weights_mapper` (see
+    `filter_mm_encoder_only_safetensors_files`), so this helper does **not**
     hard-code Qwen/HF nest lists.
 
-    Returns ``None`` (leave the safetensors file list unchanged) when
-    ``_language_model_names`` is empty/missing, or when a module prefix is a
+    Returns `None` (leave the safetensors file list unchanged) when
+    `_language_model_names` is empty/missing, or when a module prefix is a
     shared HF checkpoint root for both LM and non-LM weights — fail-closed so
     Molmo / Phi-4-MM / Muse cannot under-load the encoder.
     """
@@ -764,16 +739,16 @@ def filter_mm_encoder_only_safetensors_files(
 ) -> list[str]:
     """Drop safetensors shards that only contain language-model weights.
 
-    Used with ``--mm-encoder-only`` so Encoder-only EPD instances avoid reading
+    Used with `--mm-encoder-only` so Encoder-only EPD instances avoid reading
     pure LM shards from disk/DRAM.
 
-    Each HF index key is classified by mapping through ``weights_mapper`` (when
-    provided) and testing the *vLLM* name against ``language_model_prefixes``.
+    Each HF index key is classified by mapping through `weights_mapper` (when
+    provided) and testing the *vLLM* name against `language_model_prefixes`.
     Without a mapper, HF names are compared directly (identity checkpoint
-    layout, e.g. Kimi ``language_model.*``).
+    layout, e.g. Kimi `language_model.*`).
 
     A shard is kept if it contains any non-LM key. Without an index file,
-    returns ``hf_weights_files`` unchanged.
+    returns `hf_weights_files` unchanged.
     """
     prefixes = tuple(language_model_prefixes)
     if not prefixes:

@@ -45,6 +45,9 @@ ALLOWED_UNMET = {
     ("nixl", "nixl-cu12"),
     # The image pins NCCL itself (NCCL_VERSION + UV_OVERRIDE).
     ("torch", "nvidia-nccl-cu13"),
+    # Overridden to vLLM's security floors (kv_connectors_cuda.overrides).
+    ("lmcache", "opentelemetry-api"),
+    ("lmcache", "opentelemetry-exporter-prometheus"),
 }
 
 

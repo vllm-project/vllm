@@ -213,8 +213,8 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
         default_tokenizer
     )
     model_output_deltas = [
+        "[get_weather(city='San",
         (
-            "[get_weather(city='San"
             " Francisco', metric='celsius'), "
             f"{PARAMETERLESS_FUNCTION_OUTPUT}, "
             f"{EMPTY_LIST_FUNCTION_OUTPUT}]"
