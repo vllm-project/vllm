@@ -276,6 +276,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CircularBufferSpec(
             block_size=self.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.state_dim,
             head_size_v=0,
             dtype=self.dtype,
