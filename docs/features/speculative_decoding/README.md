@@ -148,6 +148,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. |
 | `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
 | `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
+| `draft_token_map` | `string` | `None` | Path to a list of target token ids the drafter may propose (`.pt` in SGLang's `--speculative-token-map` format, or a JSON list). Restricts a shared lm_head to those rows to cut drafting cost; verification is unchanged. Only for `mtp` drafters with an unquantized lm_head. See [Reduced draft vocabulary](mtp.md#reduced-draft-vocabulary). |
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not

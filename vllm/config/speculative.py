@@ -590,6 +590,21 @@ class SpeculativeConfig:
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
 
+    draft_token_map: str | None = None
+    """Path to a list of target token ids that the drafter may propose
+    (FR-Spec). The drafter's shared lm_head is restricted to these rows, which
+    cuts its cost per draft token; the target still verifies with the full
+    vocabulary, so outputs follow the usual speculative decoding guarantees.
+    Accepts SGLang's `--speculative-token-map` file (`.pt`) or a JSON list.
+    EOS ids are always included. Requires an MTP drafter that shares an
+    unquantized lm_head and tensor parallel size 1."""
+
+    draft_token_map_dynamic_rows: int = Field(default=0, ge=0)
+    """Extra draft tokens picked per draft token on top of `draft_token_map`.
+    Rows outside the list are scored with a low-rank projection of the lm_head
+    and the best ones get exact logits, which recovers acceptance on traffic the
+    static list misses (e.g. other languages). 0 disables it."""
+
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
     """Maximum size of ngram token window when using Ngram proposer. Defaults
@@ -1816,6 +1831,21 @@ class SpeculativeConfig:
                 "parallel_drafting is deprecated and has no effect: dflash and "
                 "dspark always draft in parallel, and no other method supports "
                 "it. It will be removed in a future release."
+            )
+
+        if self.draft_token_map is None and self.draft_token_map_dynamic_rows > 0:
+            raise ValueError("draft_token_map_dynamic_rows requires draft_token_map.")
+
+        if self.draft_token_map is not None and self.method != "mtp":
+            raise ValueError(
+                f"draft_token_map requires method 'mtp', got {self.method!r}."
+            )
+        if (
+            self.draft_token_map is not None
+            and self.draft_lm_head_quantization is not None
+        ):
+            raise ValueError(
+                "draft_token_map does not support draft_lm_head_quantization yet."
             )
 
         if self.rejection_sample_method == "fly":

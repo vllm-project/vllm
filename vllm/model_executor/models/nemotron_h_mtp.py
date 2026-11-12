@@ -12,6 +12,7 @@ from transformers import NemotronHConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.model_executor.layers.draft_vocab import DraftVocab
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -372,6 +373,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         self.lm_head: ParallelLMHead | None = None
 
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        self.draft_vocab = DraftVocab(self.logits_processor, self.config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -414,7 +416,11 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         assert self.lm_head is not None, (
             "lm_head not initialized - must be shared from target model"
         )
-        return self.logits_processor(self.lm_head, hidden_states)
+        return self.draft_vocab.compute_logits(self.lm_head, hidden_states)
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.lm_head is not None
+        return self.draft_vocab.get_top_tokens(self.lm_head, hidden_states)
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
         """Only MTP weights are loaded: the embedding and LM head are the
