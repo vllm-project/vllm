@@ -91,9 +91,6 @@ logger = init_logger(__name__)
 # request never exceeds this many updates.
 PREFILL_PROGRESS_UPDATES_PER_REQUEST = 32
 
-# Cap on per-request prefill progress reports; the final zero is always sent.
-PREFILL_PROGRESS_MAX_UPDATES = 100
-
 
 @dataclass
 class _PrefillProgressState:

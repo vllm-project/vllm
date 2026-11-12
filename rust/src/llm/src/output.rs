@@ -189,7 +189,8 @@ fn finish_reason_from_engine(
 pub struct GenerateOutput {
     /// Unique ID of the request that produced this output.
     pub request_id: String,
-    /// One-time prompt metadata emitted on the first ordinary output.
+    /// One-time prompt metadata emitted only on the first output for this
+    /// request.
     pub prompt_info: Option<Box<GeneratePromptInfo>>,
     /// Newly produced token IDs for this step.
     pub token_ids: Vec<u32>,
@@ -402,6 +403,7 @@ impl GenerateOutputStream {
 
         let raw = raw.output;
 
+        // Populate the one-time prompt info on the first output.
         let progress_only = raw.prefill_progress.is_some()
             && raw.new_token_ids.is_empty()
             && raw.finish_reason.is_none();
