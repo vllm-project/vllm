@@ -78,7 +78,6 @@ async fn monitor_llm_health(
     mut health: watch::Receiver<bool>,
     shutdown: CancellationToken,
     keep_alive: bool,
-    grpc_failure_published: Option<CancellationToken>,
 ) -> Result<()> {
     if keep_alive {
         shutdown.cancelled().await;
@@ -92,10 +91,6 @@ async fn monitor_llm_health(
         _ = shutdown.cancelled() => return Ok(()),
     };
     let health_channel_error = health_result.err();
-
-    if let Some(published) = grpc_failure_published {
-        published.cancelled().await;
-    }
 
     shutdown.cancel();
     match health_channel_error {
@@ -287,8 +282,6 @@ where
     // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
-    let grpc_failure_published =
-        config.grpc_listener_mode.as_ref().map(|_| CancellationToken::new());
     let grpc_setup = if let Some(grpc_listener_mode) = &config.grpc_listener_mode {
         let grpc_listener = Listener::bind(grpc_listener_mode)
             .await
@@ -303,14 +296,7 @@ where
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
-        let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health)
-            .await
-            .with_engine_failure_notification(
-                grpc_failure_published
-                    .as_ref()
-                    .expect("gRPC setup has an engine-failure notification")
-                    .clone(),
-            );
+        let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
         let control_service = grpc::ControlGrpcService::new(
             grpc::ControlServiceImpl::new(state.clone())
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
@@ -349,7 +335,6 @@ where
         state.llm().subscribe_health(),
         server_shutdown.clone(),
         config.keep_alive_on_engine_death,
-        grpc_failure_published,
     );
 
     // Spawn a task to trigger `force_shutdown` after shutdown deadline elapses.
@@ -551,7 +536,7 @@ mod tests {
     async fn unhealthy_llm_cancels_server_shutdown_and_returns_error() {
         let (health_tx, health) = watch::channel(true);
         let shutdown = CancellationToken::new();
-        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), false, None));
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), false));
 
         assert!(futures::poll!(&mut monitor).is_pending());
         health_tx.send(false).expect("publish unhealthy LLM");
@@ -574,7 +559,7 @@ mod tests {
         health_tx.send(false).expect("publish unhealthy LLM");
         shutdown.cancel();
 
-        let result = monitor_llm_health(health, shutdown, false, None).await;
+        let result = monitor_llm_health(health, shutdown, false).await;
         assert_eq!(
             result.unwrap_err().to_string(),
             "LLM became permanently unhealthy"
@@ -585,7 +570,7 @@ mod tests {
     async fn keep_alive_ignores_unhealthy_llm_until_shutdown() {
         let (health_tx, health) = watch::channel(true);
         let shutdown = CancellationToken::new();
-        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), true, None));
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), true));
 
         assert!(futures::poll!(&mut monitor).is_pending());
         health_tx.send(false).expect("publish unhealthy LLM");
@@ -597,30 +582,5 @@ mod tests {
             panic!("health monitor did not finish during shutdown");
         };
         result.expect("keep-alive shutdown is graceful");
-    }
-
-    #[tokio::test]
-    async fn unhealthy_llm_waits_for_grpc_health_before_shutdown() {
-        let (health_tx, health) = watch::channel(true);
-        let shutdown = CancellationToken::new();
-        let grpc_failure_published = CancellationToken::new();
-        let mut monitor = Box::pin(monitor_llm_health(
-            health,
-            shutdown.clone(),
-            false,
-            Some(grpc_failure_published.clone()),
-        ));
-
-        assert!(futures::poll!(&mut monitor).is_pending());
-        health_tx.send(false).expect("publish unhealthy LLM");
-        assert!(futures::poll!(&mut monitor).is_pending());
-        assert!(!shutdown.is_cancelled());
-
-        grpc_failure_published.cancel();
-        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
-            panic!("health monitor did not finish after gRPC health publication");
-        };
-        assert!(result.is_err());
-        assert!(shutdown.is_cancelled());
     }
 }
