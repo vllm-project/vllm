@@ -612,8 +612,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def set_xfer_handshake_metadata_pp_aware(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        # A sub-connector that exchanges no handshake metadata gets an empty
-        # dict, so non-PP-aware ones don't reject the PP stages of another.
         for i, c in enumerate(self._connectors):
             c.set_xfer_handshake_metadata_pp_aware(
                 self._sub_connector_handshake_metadata(metadata, i)
