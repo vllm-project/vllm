@@ -90,12 +90,6 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         # Peers within a host map it through UCX cuda_ipc.
         return KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
 
-    @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        return True
-
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True

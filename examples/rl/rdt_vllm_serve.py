@@ -29,6 +29,7 @@ def launch_vllm_serve(
     data_parallel_size: int = 1,
     enable_expert_parallel: bool = False,
     port: int = 8000,
+    # Leave headroom for the RDT receive buffers, which vLLM doesn't reserve.
     gpu_memory_utilization: float = 0.7,
     extra_args: list[str] | None = None,
 ) -> subprocess.Popen:
