@@ -938,6 +938,11 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """Whether this implementation supports fused QKNorm+MRoPE+KVCache."""
         return False
 
+    def fused_qk_norm_mrope_gated_kvcache_supported(self) -> bool:
+        """Whether this implementation supports the fused QKNorm+MRoPE+KVCache
+        prologue of gated attention ([q | gate] heads, GemmaRMSNorm)."""
+        return False
+
     def set_interleaved_v_cache(self):
         """Opt this implementation into the interleaved V-cache layout for all of
         its cache writers and readers. QkNormRopeKvCacheFusionPass calls this
@@ -995,6 +1000,28 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         layer_slot_mapping: torch.Tensor,
     ):
         """Apply QK-norm and MRoPE, then write K/V to the cache."""
+        raise NotImplementedError
+
+    def do_qk_norm_mrope_gated_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        mrope_section: tuple[int, int, int],
+        is_interleaved: bool,
+        rotary_dim: int,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """Gated-attention variant of do_qk_norm_mrope_kvcache_update: Q from the
+        [q | gate] heads to q_out, K to k_out, and K/V to the cache."""
         raise NotImplementedError
 
     def do_rope_and_kv_cache_update(

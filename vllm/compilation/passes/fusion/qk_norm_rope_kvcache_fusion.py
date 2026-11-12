@@ -30,7 +30,12 @@ from vllm.utils.torch_utils import (
 )
 
 from ..inductor_pass import enable_fake_mode
-from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from ..vllm_inductor_pass import (
+    VllmInductorPass,
+    VllmPatternMatcherPass,
+    fold_consecutive_reshapes,
+    remove_noop_reshapes,
+)
 from .matcher_utils import MROPE_OP, MatcherMRotaryEmbedding, MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
@@ -178,6 +183,78 @@ direct_register_custom_op(
 )
 
 
+def fused_qk_norm_mrope_gated_and_unified_kv_cache_update_impl(
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    is_interleaved: bool,
+    rotary_dim: int,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    layer_name = _resolve_layer_name(layer_name)
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    if layer_slot_mapping is not None:
+        attn_layer.impl.do_qk_norm_mrope_gated_kvcache_update(
+            attn_layer,
+            qkv,
+            q_out,
+            k_out,
+            positions,
+            q_weight,
+            k_weight,
+            rms_norm_eps,
+            cos_sin_cache,
+            is_neox,
+            (mrope_section_t, mrope_section_h, mrope_section_w),
+            is_interleaved,
+            rotary_dim,
+            kv_cache,
+            layer_slot_mapping,
+        )
+    else:
+        q_out.zero_()
+        k_out.zero_()
+
+    return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
+
+
+def fused_qk_norm_mrope_gated_and_unified_kv_cache_update_fake(
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    is_interleaved: bool,
+    rotary_dim: int,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
+
+
+direct_register_custom_op(
+    op_name="fused_qk_norm_mrope_gated_and_unified_kv_cache_update",
+    op_func=fused_qk_norm_mrope_gated_and_unified_kv_cache_update_impl,
+    mutates_args=["q_out", "k_out"],
+    fake_impl=fused_qk_norm_mrope_gated_and_unified_kv_cache_update_fake,
+)
+
+
 # ---------------------------------------------------------------------------
 # Pattern: QK-norm + RoPE + unified_kv_cache_update
 # ---------------------------------------------------------------------------
@@ -204,6 +281,7 @@ class QkNormRopeKvCachePattern:
     """
 
     FUSED_OP = torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default
+    EXTRA_TRACE_FX_FNS: tuple[Callable[[fx.GraphModule], None], ...] = ()
 
     def __init__(
         self,
@@ -471,6 +549,7 @@ class QkNormRopeKvCachePattern:
         trace_fn = QkNormRopeKvCachePattern.wrap_trace_fn(
             pm.fwd_only,
             QkNormRopeKvCachePattern.fx_view_to_reshape,
+            *self.EXTRA_TRACE_FX_FNS,
         )
 
         # Pre-build the search pattern with `ignore_types=(int, torch.SymInt)`
@@ -787,6 +866,127 @@ class QkNormMRopeKvCachePattern(QkNormRopeKvCachePattern):
         )
 
 
+class QkNormMRopeGatedKvCachePattern(QkNormMRopeKvCachePattern):
+    """Gated attention (Qwen3.5 family): each Q head of qkv is packed [q | gate] and
+    the q/k norms are GemmaRMSNorm. Fuses the model's split, norms, MRoPE and cache
+    update into AITER's Triton kernel; the gate stays an output, as a view of qkv.
+    """
+
+    FUSED_OP = (
+        torch.ops.vllm.fused_qk_norm_mrope_gated_and_unified_kv_cache_update.default
+    )
+    EXTRA_TRACE_FX_FNS = (fold_consecutive_reshapes, remove_noop_reshapes)
+
+    def __init__(
+        self,
+        layer: Attention,
+        eps: float,
+        is_neox: bool,
+        rotary_dim: int,
+        mrope_section: tuple[int, int, int],
+        is_interleaved: bool,
+    ) -> None:
+        super().__init__(
+            layer=layer,
+            eps=eps,
+            is_neox=is_neox,
+            quant_query=False,
+            rotary_dim=rotary_dim,
+            mrope_section=mrope_section,
+            is_interleaved=is_interleaved,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        inputs = super().get_inputs()
+        qkv = inputs[0]
+        inputs[0] = empty_bf16(
+            qkv.shape[0], 2 * self.q_size + self.k_size + self.v_size
+        )
+        return inputs
+
+    def _split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The model's split: (q, k, v, gate), q and gate flat."""
+        q_gate, k, v = qkv.split([2 * self.q_size, self.k_size, self.v_size], dim=-1)
+        orig_shape = q_gate.shape[:-1]
+        q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
+        q, gate = torch.chunk(q_gate, 2, dim=-1)
+        return q.reshape(*orig_shape, -1), k, v, gate.reshape(*orig_shape, -1)
+
+    def pattern_non_fp8_quant_query(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        layer_name: LayerNameType | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        q, k, v, gate = self._split_qkv(qkv)
+        q = vllm.ir.ops.rms_norm(
+            q.view(-1, self.num_heads, self.head_size), q_weight.float() + 1.0, self.eps
+        ).view(-1, self.q_size)
+        k = vllm.ir.ops.rms_norm(
+            k.view(-1, self.num_kv_heads, self.head_size),
+            k_weight.float() + 1.0,
+            self.eps,
+        ).view(-1, self.k_size)
+        q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+        q = q.view(-1, self.num_heads, self.head_size)
+        k = k.view(-1, self.num_kv_heads, self.head_size)
+        v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        dummy = torch.ops.vllm.unified_kv_cache_update(
+            k, v, self._get_layer_name(layer_name)
+        )
+        return dummy, q, k, v, gate
+
+    def replacement_non_fp8_quant_query(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        layer_name: LayerNameType | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        _, _, v, gate = self._split_qkv(qkv)
+        v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
+        q_out = torch.empty(
+            qkv.shape[0],
+            self.num_heads,
+            self.head_size,
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        k_out = torch.empty(
+            qkv.shape[0],
+            self.num_kv_heads,
+            self.head_size,
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        results = auto_functionalized(
+            self.FUSED_OP,
+            q_out=q_out,
+            k_out=k_out,
+            qkv=qkv,
+            positions=positions,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            rms_norm_eps=self.eps,
+            cos_sin_cache=cos_sin_cache,
+            is_neox=self.is_neox,
+            mrope_section_t=self.mrope_section[0],
+            mrope_section_h=self.mrope_section[1],
+            mrope_section_w=self.mrope_section[2],
+            is_interleaved=self.is_interleaved,
+            rotary_dim=self.rotary_dim,
+            layer_name=self._get_layer_name(layer_name),
+        )
+        return results[0], results[1], results[2], v, gate
+
+
 def _discover_mrope_configs(
     config: VllmConfig,
 ) -> tuple[tuple[tuple[int, int, int], bool], ...]:
@@ -824,6 +1024,12 @@ def _discover_mrope_configs(
     return tuple(sorted(configs))
 
 
+def _uses_attn_output_gate(config: VllmConfig) -> bool:
+    """Qwen3.5-family attention packs each Q head as [q | gate] in qkv."""
+    hf_config = getattr(config.model_config, "hf_text_config", None)
+    return bool(getattr(hf_config, "attn_output_gate", False))
+
+
 # ---------------------------------------------------------------------------
 # Pass class
 # ---------------------------------------------------------------------------
@@ -852,6 +1058,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             if cc.is_custom_op_enabled("rotary_embedding")
             else ()
         )
+        self.gated = _uses_attn_output_gate(config)
 
         dtype = config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
@@ -870,7 +1077,12 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                 bool(self.mrope_configs)
                 and layer.impl.fused_qk_norm_mrope_kvcache_supported()
             )
-            if not supports_rope and not supports_mrope:
+            supports_gated_mrope = (
+                self.gated
+                and bool(self.mrope_configs)
+                and layer.impl.fused_qk_norm_mrope_gated_kvcache_supported()
+            )
+            if not supports_rope and not supports_mrope and not supports_gated_mrope:
                 continue
             if layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS:
                 logger.warning_once(
@@ -913,7 +1125,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                 is_neox=neox,
                                 quant_query=quant_q,
                             ).register(self.patterns)
-            if supports_mrope:
+            if supports_mrope or supports_gated_mrope:
                 for section, is_interleaved in self.mrope_configs:
                     rotary_dim = 2 * sum(section)
                     if rotary_dim > layer.head_size:
@@ -942,6 +1154,17 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                     layer.head_size,
                                     neox,
                                 )
+                                continue
+                            if supports_gated_mrope:
+                                QkNormMRopeGatedKvCachePattern(
+                                    layer=layer,
+                                    eps=epsilon,
+                                    is_neox=neox,
+                                    rotary_dim=rotary_dim,
+                                    mrope_section=section,
+                                    is_interleaved=is_interleaved,
+                                ).register(self.patterns)
+                            if not supports_mrope:
                                 continue
                             for quant_q in [False, True]:
                                 QkNormMRopeKvCachePattern(
@@ -973,6 +1196,9 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             self,
             QkNormRopeKvCachePattern,
             QkNormMRopeKvCachePattern,
+            QkNormMRopeGatedKvCachePattern,
             _discover_mrope_configs,
+            _uses_attn_output_gate,
             repr(self.mrope_configs),
+            repr(self.gated),
         )

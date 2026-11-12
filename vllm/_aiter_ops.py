@@ -4,6 +4,7 @@ import ctypes
 import dataclasses
 import functools
 import importlib
+import inspect
 import itertools
 import os
 from collections.abc import Callable
@@ -2725,6 +2726,18 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    @functools.cache
+    def is_triton_qk_norm_mrope_cache_supported() -> bool:
+        try:
+            from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (
+                fused_qkv_split_qk_norm_rope_cache,
+            )
+        except ImportError:
+            return False
+        params = inspect.signature(fused_qkv_split_qk_norm_rope_cache).parameters
+        return "mrope_section" in params and "return_gate" in params
+
+    @staticmethod
     def _gdn_triton_kernels_importable() -> bool:
         try:
             import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
@@ -4465,6 +4478,63 @@ class rocm_aiter_ops:
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=rotary_dim,
+        )
+
+    @staticmethod
+    def do_qk_norm_mrope_gated_kvcache_update(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads_q: int,
+        num_heads_k: int,
+        head_dim: int,
+        is_neox: bool,
+        mrope_section: list[int],
+        is_interleaved: bool,
+        rms_norm_eps: float,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        rotary_dim: int,
+        use_shuffle_layout: bool,
+    ) -> None:
+        """Gated ([q | gate] heads, GemmaRMSNorm) QK-norm + MRoPE from packed qkv
+        on AITER's Triton kernel: Q to q_out, K to k_out and the cache, V to the cache."""
+        from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (
+            fused_qkv_split_qk_norm_rope_cache,
+        )
+
+        num_tokens = qkv.shape[0]
+        half = (rotary_dim or cos_sin_cache.shape[-1]) // 2
+        fused_qkv_split_qk_norm_rope_cache(
+            qkv,
+            q_weight,
+            k_weight,
+            cos_sin_cache[:, :half],
+            cos_sin_cache[:, half : 2 * half],
+            positions,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            num_heads_q,
+            num_heads_k,
+            head_dim,
+            is_neox=is_neox,
+            reuse_freqs_front_part=True,
+            attn_output_gate=True,
+            eps=rms_norm_eps,
+            gated_qkv_layout="interleaved",
+            kv_cache_layout="SHUFFLE" if use_shuffle_layout else "NHD",
+            mrope_section=tuple(mrope_section) if positions.ndim == 2 else None,
+            mrope_interleaved=is_interleaved,
+            return_gate=False,
+            return_v=False,
+            q_out=q_out.view(num_tokens, num_heads_q, head_dim),
+            k_out=k_out.view(num_tokens, num_heads_k, head_dim),
         )
 
     @staticmethod
