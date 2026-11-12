@@ -483,7 +483,13 @@ def customize_attention_spec(
     spec = backend.customize_spec(spec)
     sizes = backend.get_supported_kernel_block_sizes(spec)
     fixed_sizes = [s for s in sizes if isinstance(s, int)]
-    if spec.block_stride_alignment is None and sizes and fixed_sizes == sizes:
+    # Slot-mapped token caches are never split into kernel blocks.
+    if (
+        spec.block_stride_alignment is None
+        and sizes
+        and fixed_sizes == sizes
+        and not (spec.tokens_per_state <= 1 and spec.uses_slot_mapping)
+    ):
         spec = replace(spec, block_stride_alignment=MultipleOf(max(fixed_sizes)))
     return spec
 
