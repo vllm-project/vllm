@@ -200,6 +200,7 @@ steps:
   - vllm/models/glm5next/common/model.py
   - vllm/models/glm5next/common/sparse_indexer.py
   - vllm/models/glm5next/common/specialized_decode.py
+  - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
   - tests/kernels/models/amd/glm5next_mono/
   - tests/models/glm5next/amd_specialized_decode/
   commands:

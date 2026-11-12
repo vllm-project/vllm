@@ -151,10 +151,17 @@ def fp8_roundtrip(lhs, rhs):
 
 
 def div_rn(value, divisor, reciprocal):
-    """IEEE-rounded quotient from one exact reciprocal using Markstein refinement."""
+    """IEEE-rounded quotient from one exact reciprocal using Markstein refinement.
+
+    For an infinite divisor the reciprocal is 0 and the refinement gives NaN
+    (inf * 0), so the unrefined quotient (0) is kept there.
+    """
     quotient = value * reciprocal
     residual = fmath.fma(-quotient, divisor, value)
-    return fx.Float32(fmath.fma(fx.Float32(residual), reciprocal, quotient))
+    refined = fx.Float32(fmath.fma(fx.Float32(residual), reciprocal, quotient))
+    bits = fx.Float32(reciprocal).bitcast(fx.Int32)
+    zero = (bits & fx.Int32(0x7FFFFFFF)) == fx.Int32(0)
+    return zero.select(fx.Float32(quotient), refined)
 
 
 def fp8_pack4(a, b, c, d):

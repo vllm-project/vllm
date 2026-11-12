@@ -356,7 +356,9 @@ steps:
   - tests/models/glm5next/
   - vllm/model_executor/layers/mamba/checkpoint.py
   commands:
-    - pytest -v -s models/glm5next
+    # amd_specialized_decode/ is gated on gfx950 and run by the mi355_8 step
+    # :amd: (MI355) GLM-5.3-Flash Mono Decode Kernel.
+    - pytest -v -s models/glm5next --ignore=models/glm5next/amd_specialized_decode
   mirror:
     amd:
       automatic_shard: true
@@ -602,4 +604,7 @@ steps:
   commands:
   # decode_backend=latency_specialized is for GB300 (SM103); no CI agent has four of them.
   # B200 runs the kernels and the TP4 boundary, draft norm and logits gather tests.
-  - pytest -v -s models/glm5next -k specialized_decode
+  # -k specialized_decode also matches the AMD directory name; that one is gfx950-only.
+  - >-
+    pytest -v -s models/glm5next -k specialized_decode
+    --ignore=models/glm5next/amd_specialized_decode
