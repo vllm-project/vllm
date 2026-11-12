@@ -646,19 +646,30 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         read straight from generation_config.json at sampler-build time
         (see DiffusionGemma's custom_sampler), not injected here.
         """
-        # Inherit Gemma4's attention backend selection (FA4 on Hopper,
-        # TRITON_ATTN fallback for heterogeneous head dims).
-        Gemma4Config.verify_and_update_config(vllm_config)
-
+        from vllm.platforms import current_platform
+        from vllm.utils.flashinfer import has_flashinfer, supports_trtllm_attention
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         attention_config = vllm_config.attention_config
-        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
-            raise ValueError(
-                "FlashInfer does not support DiffusionGemma's mixed "
-                "causal/bidirectional attention. Use --attention-backend "
-                "FLASH_ATTN or TRITON_ATTN instead."
+        mm_config = vllm_config.model_config.multimodal_config
+        if (
+            attention_config.backend is None
+            and attention_config.use_trtllm_attention is not False
+            and (mm_config is None or mm_config.language_model_only)
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+            and has_flashinfer()
+            and supports_trtllm_attention(is_prefill=True)
+        ):
+            attention_config.backend = AttentionBackendEnum.FLASHINFER
+            attention_config.use_trtllm_attention = True
+            logger.info(
+                "DiffusionGemma: defaulting to FlashInfer TRTLLM-Gen attention "
+                "for text-only serving on an SM100-family GPU."
             )
+
+        Gemma4Config.verify_and_update_config(vllm_config)
+
         if attention_config.backend is None and not attention_config.use_non_causal:
             # Only the sm_100 default backend order reads this flag (it puts
             # FlashInfer first for causal models). Elsewhere Gemma4Config above
