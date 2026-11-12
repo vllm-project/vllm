@@ -38,7 +38,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-SUPPORTED_TILES = {1, 2, 4, 8, 16}  # moe_mxfp4_gemm_rdna3 instantiations
+SUPPORTED_TILES = {1, 2, 4, 8, 32, 64}  # moe_mxfp4_gemm_rdna3 instantiations
 BATCH_SIZES = [1, 2, 3, 4, 8, 15, 16, 17, 32, 64, 256, 512, 4096]
 TOP_KS = [1, 2, 4, 8]
 NUM_EXPERTS = [8, 32, 128, 256]
@@ -50,15 +50,20 @@ NUM_EXPERTS = [8, 32, 128, 256]
 def test_tile_in_supported_set(num_tokens, top_k, num_experts):
     bsm = _select_block_size_m(num_tokens, top_k, num_experts)
     assert bsm in SUPPORTED_TILES
-    # the WMMA-16 tile is only chosen once a step can fill it
-    if num_tokens < 16:
-        assert bsm != 16
+    # a WMMA tile is only chosen once experts average several rows each
+    if num_tokens * top_k < 8 * num_experts:
+        assert bsm < 32
 
 
-def test_large_batches_use_wmma_tile():
-    # >=16-row steps (prefill / high-concurrency decode) take the WMMA tile.
-    assert _select_block_size_m(16, 8, 256) == 16
-    assert _select_block_size_m(512, 8, 256) == 16
+def test_large_batches_use_wmma_tiles():
+    # gpt-oss-20b (32 experts, top-4) and a 256-expert top-8 model: decode
+    # batches stay on the scalar tiles, prefill takes the WMMA tiles.
+    assert _select_block_size_m(16, 4, 32) == 4
+    assert _select_block_size_m(64, 4, 32) == 32
+    assert _select_block_size_m(8192, 4, 32) == 64
+    assert _select_block_size_m(64, 8, 256) == 4
+    assert _select_block_size_m(512, 8, 256) == 32
+    assert _select_block_size_m(4096, 8, 256) == 64
 
 
 def test_degenerate_inputs_return_safe_tile():

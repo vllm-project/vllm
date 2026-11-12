@@ -39,19 +39,26 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 
+# Average tokens per expert from which the tiled kernels win (gpt-oss-20b
+# layer on a 7900 XTX: 32-token tiles from ~64 tokens, 64 from ~384).
+_TILED_32_MIN = 8
+_TILED_64_MIN = 48
+
 
 def _select_block_size_m(num_tokens: int, top_k: int, num_experts: int) -> int:
     """Pick the GEMM tile from expected occupancy (avg tokens/expert).
 
-    >=16-row steps fill the WMMA-16 tile (clustered routing fills it even on
-    256-expert models; also where prefill lives); sub-16 batches use a scalar
-    tile sized to occupancy (bsm=1 beats bsm=4 at low concurrency).
+    Batches that give each expert a few dozen rows run on the tiled WMMA
+    kernels; smaller ones use a scalar tile sized to occupancy (bsm=1 beats
+    bsm=4 at low concurrency).
     """
     if num_experts <= 0 or top_k <= 0:
         return 1
-    if num_tokens >= 16:
-        return 16
     tokens_per_expert = num_tokens * top_k / num_experts
+    if tokens_per_expert >= _TILED_64_MIN:
+        return 64
+    if tokens_per_expert >= _TILED_32_MIN:
+        return 32
     return 4 if tokens_per_expert >= 1.5 else 1
 
 
@@ -243,8 +250,19 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         w1_bias = qc.w1_bias
         w2_bias = qc.w2_bias
 
+        # The tiled kernels store every routed row instead of accumulating
+        # into it; only rows routed to another EP rank are left unwritten.
+        # They also add the expert bias before scaling by the router weight.
+        tiled = block_size_m >= 32
+        stores_rows = tiled and expert_map is None
+        fuse_w1_bias = (
+            tiled and w1_bias is not None and not apply_router_weight_on_input
+        )
+        fuse_w2_bias = tiled and w2_bias is not None
+
         # gate_up GEMM (no reduction); router weight optionally folded in here.
-        w1_out.zero_()
+        if not stores_rows:
+            w1_out.zero_()
         ops.moe_mxfp4_gemm_rdna3(
             hidden_states,
             w1_out,
@@ -258,8 +276,9 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
             block_size_m,
             apply_router_weight_on_input,
             0,
+            w1_bias.to(dtype).contiguous() if fuse_w1_bias else None,
         )
-        if w1_bias is not None:
+        if w1_bias is not None and not fuse_w1_bias:
             w1_out.add_(self._expert_bias_rows(w1_bias, topk_ids, expert_map, dtype))
 
         if activation == MoEActivation.SWIGLUOAI:
@@ -278,26 +297,29 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         unfused = w2_bias is not None or self.moe_config.moe_parallel_config.tp_size > 1
         if unfused:
             w2_out = gemm_out[: total * K].view(total, K)
-            w2_out.zero_()
+            if not stores_rows:
+                w2_out.zero_()
+            weigh_rows = fuse_w2_bias and not apply_router_weight_on_input
             ops.moe_mxfp4_gemm_rdna3(
                 act_out,
                 w2_out,
                 w2,
                 qc.w2_scale,
-                empty_tw,
+                topk_w_f32 if weigh_rows else empty_tw,
                 sti,
                 eid,
                 ntp,
                 1,
                 block_size_m,
-                False,
+                weigh_rows,
                 0,
+                w2_bias.to(dtype).contiguous() if fuse_w2_bias else None,
             )
-            if w2_bias is not None:
+            if w2_bias is not None and not fuse_w2_bias:
                 w2_out.add_(
                     self._expert_bias_rows(w2_bias, topk_ids, expert_map, dtype)
                 )
-            if not apply_router_weight_on_input:
+            if not apply_router_weight_on_input and not weigh_rows:
                 w2_out.mul_(topk_weights.reshape(-1, 1).to(dtype))
             torch.sum(w2_out.view(M, top_k, K), dim=1, out=output)
         else:

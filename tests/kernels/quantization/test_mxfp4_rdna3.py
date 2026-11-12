@@ -98,7 +98,7 @@ def _swigluoai_interleaved(h: torch.Tensor) -> torch.Tensor:
     return (up + 1.0) * gate * torch.sigmoid(1.702 * gate)
 
 
-@pytest.mark.parametrize("M", [1, 3, 16, 64])
+@pytest.mark.parametrize("M", [1, 3, 16, 64, 256])
 @pytest.mark.parametrize(
     "activation, with_bias",
     [

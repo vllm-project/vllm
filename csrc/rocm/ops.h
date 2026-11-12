@@ -54,7 +54,8 @@ void moe_mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                           torch::Tensor expert_ids,
                           torch::Tensor num_tokens_post_padded, int64_t top_k,
                           int64_t block_size_m, bool mul_topk_weight,
-                          int64_t output_topk);
+                          int64_t output_topk,
+                          const std::optional<torch::Tensor>& bias);
 
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,

@@ -90,7 +90,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor b_scales_e8m0, Tensor topk_weights, Tensor sorted_token_ids, "
       "Tensor expert_ids, Tensor num_tokens_post_padded, "
       "int top_k, int block_size_m, bool mul_topk_weight, "
-      "int output_topk) -> ()");
+      "int output_topk, Tensor? bias=None) -> ()");
   rocm_ops.impl("moe_mxfp4_gemm_rdna3", torch::kCUDA, &moe_mxfp4_gemm_rdna3);
 #endif
 
