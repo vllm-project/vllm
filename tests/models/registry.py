@@ -1009,6 +1009,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_model_len=4096,
     ),
+    "Inkling2ForConditionalGeneration": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Small",
+        tokenizer_mode="inkling",
+        max_model_len=4096,
+    ),
     "IsaacForConditionalGeneration": _HfExamplesInfo(
         "PerceptronAI/Isaac-0.1",
         trust_remote_code=True,
@@ -1623,6 +1628,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="deepseek-ai/DeepSeek-V4.1-Flash",  # draft in mtp.*
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
+    "Inkling2DSparkModel": _HfExamplesInfo(
+        "thinkingmachines/Inkling-2-Small",
+        speculative_model="thinkingmachines/Inkling-2-Small",  # mtp.safetensors
+        speculative_method="dspark",
+        tokenizer_mode="inkling",
+        use_original_num_layers=True,
     ),
     "DSparkMiniMaxDraftModel": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",

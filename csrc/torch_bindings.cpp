@@ -611,6 +611,47 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! flags, int multicast_ptr, int world, int rank) -> ()");
 #endif
 
+#ifdef VLLM_ENABLE_INKLING2_KERNELS
+  // Inkling2's MNNVL all-reduce fused with its short conv and AttnRes mix.
+  ops.def(
+      "inkling2_allreduce_conv_mix(Tensor? x, Tensor? down, Tensor? src2dst, "
+      "bool two_shot, int multicast_ptr, int local_ptr, int buffer_ptrs, "
+      "Tensor! flags, int rank, int world, Tensor! cache, Tensor conv_weight, "
+      "Tensor positions, Tensor seq_idx, Tensor slots, Tensor block_table, "
+      "Tensor query_start, int stream_offset, int stream_width, "
+      "float conv_scale, Tensor? residual, Tensor? addend, Tensor! conv_out, "
+      "Tensor stack, Tensor? last, Tensor queries, Tensor norm_weight, "
+      "float eps, float norm_eps, Tensor! out) -> ()");
+  // Its short conv and AttnRes mix on an already reduced input.
+  ops.def(
+      "inkling2_conv_mix(Tensor x, Tensor! cache, Tensor conv_weight, "
+      "Tensor positions, Tensor seq_idx, Tensor slots, Tensor block_table, "
+      "Tensor query_start, int stream_offset, int stream_width, "
+      "float conv_scale, Tensor? residual, Tensor? addend, Tensor! conv_out, "
+      "Tensor stack, Tensor? last, Tensor queries, Tensor norm_weight, "
+      "float eps, float norm_eps, Tensor! out) -> ()");
+  // Its sequence-parallel collectives: the reduce-scatter of the partial
+  // sums, and the conv + mix of a token shard that all-gathers the mixes.
+  ops.def(
+      "inkling2_seq_parallel_conv_mix(Tensor x, Tensor! cache, "
+      "Tensor conv_weight, Tensor positions, Tensor seq_idx, Tensor slots, "
+      "Tensor block_table, Tensor query_start, int stream_offset, "
+      "int stream_width, float conv_scale, Tensor? residual, Tensor? addend, "
+      "Tensor! conv_out, Tensor stack, Tensor? last, Tensor queries, "
+      "Tensor norm_weight, float eps, float norm_eps, int token_base, "
+      "int halo_rows, int out_bases, int out_offset, int world, "
+      "int out_tokens, int rank, int gather_slot, Tensor! epochs, "
+      "int staging_offset, int tail_rows, int align) -> ()");
+  ops.def(
+      "inkling2_reduce_scatter(int bases, Tensor! epochs, int rank, "
+      "int world, int src_offset, int first, Tensor! out) -> ()");
+  // The DSpark draft's greedy token over the TP-sharded softcapped logits.
+  ops.def(
+      "inkling2_dspark_argmax(Tensor base, Tensor bias, float softcap, "
+      "int valid, int offset, int multicast_ptr, int local_ptr, "
+      "Tensor! row_state, int rank, int world, Tensor! out) -> ()");
+#endif
+
 #ifdef VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX
   // SM100 only; impl registration is in csrc/qwen4_exp/hc_up_gate_mix.cu.
   ops.def(
@@ -924,6 +965,15 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_BEAM_KERNELS
   ops.impl("beam_allreduce_norm", TORCH_BOX(&beam_allreduce_norm));
   ops.impl("beam_allreduce", TORCH_BOX(&beam_allreduce));
+#endif
+#ifdef VLLM_ENABLE_INKLING2_KERNELS
+  ops.impl("inkling2_allreduce_conv_mix",
+           TORCH_BOX(&inkling2_allreduce_conv_mix));
+  ops.impl("inkling2_conv_mix", TORCH_BOX(&inkling2_conv_mix));
+  ops.impl("inkling2_seq_parallel_conv_mix",
+           TORCH_BOX(&inkling2_seq_parallel_conv_mix));
+  ops.impl("inkling2_reduce_scatter", TORCH_BOX(&inkling2_reduce_scatter));
+  ops.impl("inkling2_dspark_argmax", TORCH_BOX(&inkling2_dspark_argmax));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

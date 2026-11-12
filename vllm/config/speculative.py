@@ -1263,6 +1263,11 @@ class SpeculativeConfig:
                 }
             )
 
+        if hf_config.model_type == "inkling2":
+            from vllm.models.inkling2.configs import Inkling2DSparkConfig
+
+            hf_config = Inkling2DSparkConfig.from_target(hf_config)
+
         if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
             hf_config.model_type = "gemma4_mtp"
             text_config = getattr(hf_config, "text_config", hf_config)

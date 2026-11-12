@@ -16,6 +16,8 @@ else()
     GIT_REPOSITORY https://github.com/vllm-project/tml-fa4.git
     GIT_TAG 75765e76a9c2c012c1f6ecd64577eb646eb4d303
     GIT_PROGRESS TRUE
+    PATCH_COMMAND patch --batch --forward -p1
+      --input=${CMAKE_CURRENT_LIST_DIR}/../patches/tml_fa4_inkling2.patch
     CONFIGURE_COMMAND ""
     BUILD_COMMAND "")
 endif()

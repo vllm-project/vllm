@@ -483,6 +483,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
     ),
+    "Inkling2ForConditionalGeneration": (
+        "vllm.models.inkling2",
+        "Inkling2ForConditionalGeneration",
+    ),
     "KimiK31ForConditionalGeneration": (
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
@@ -712,6 +716,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "vllm.models.kimi_k3.nvidia.dspark_mla",
         "K3DSparkForCausalLM",
     ),
+    "Inkling2DSparkModel": ("vllm.models.inkling2.dspark", "Inkling2DSparkModel"),
     "MuseSparkDSparkModel": (
         "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",

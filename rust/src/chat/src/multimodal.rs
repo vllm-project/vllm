@@ -1164,7 +1164,7 @@ mod tests {
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
     }
 
-    fn test_info(
+    pub(super) fn test_info(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,

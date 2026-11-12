@@ -129,6 +129,7 @@ class InklingConvState(nn.Module, AttentionLayerBase):
         hidden_size: int,
         kernel_size: int,
         prefix: str,
+        replicate_hidden: bool = False,
     ) -> None:
         super().__init__()
         self.prefix = prefix
@@ -138,17 +139,20 @@ class InklingConvState(nn.Module, AttentionLayerBase):
         tp_size = get_tensor_model_parallel_world_size()
         # Guardrails for the conv-state layout below; only these are exercised.
         # tp_size <= num_kv_heads keeps >=1 whole KV head per rank (no
-        # replication/clamping), so the per-head width stays TP-invariant.
+        # replication/clamping).
         assert tp_size <= num_kv_heads, (
             f"sconv SWA cache supports tp_size <= num_kv_heads ({num_kv_heads}), "
             f"got {tp_size}"
         )
-        # Per-rank head count; D is TP-invariant (K/V heads and the hidden
-        # chunk both scale 1/TP together). The attn-/mlp-output sconv streams
-        # are hidden-sharded: each rank owns its H/tp chunk (the sublayer
-        # outputs are reduce-scattered / all-gathered around the conv).
+        # By default the attn-/mlp-output sconv streams are hidden-sharded:
+        # each rank owns its H/tp chunk (the sublayer outputs are
+        # reduce-scattered / all-gathered around the conv), so D is
+        # TP-invariant. With ``replicate_hidden``, each rank spreads the full
+        # hidden width over its local heads, so D grows with TP.
         self.num_kv_heads = num_kv_heads // tp_size
-        hidden_per_head = hidden_size // num_kv_heads
+        hidden_per_head = hidden_size // (
+            self.num_kv_heads if replicate_hidden else num_kv_heads
+        )
         # Packed per-head width: K + V + attn-output chunk + mlp-output chunk,
         # padded to a power of two so every layer's conv page is the same size.
         # The page unifier may still scale the logical conv block size up to

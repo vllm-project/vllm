@@ -151,6 +151,9 @@ pub enum OutputGrammarError {
         /// Builder whose output did not match the parser's known shape.
         builder: &'static str,
     },
+    /// The request asks for a grammar the model's protocol cannot express.
+    #[error("{0}")]
+    UnsupportedRequest(&'static str),
 }
 
 /// Build the visible (post-reasoning) language from a crate structural-tag

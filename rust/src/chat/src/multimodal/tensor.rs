@@ -191,13 +191,22 @@ impl KwargValue {
 /// Compute the first-axis range for one media item in a flat tensor.
 ///
 /// `sizes_key` names a companion tensor whose entries are cumulative slice
-/// sizes per media item.
+/// sizes per media item. A 2-D companion (e.g. a `[num_items, 3]` grid THW)
+/// sizes each item by the product of its row, like vLLM's
+/// `flat_from_sizes(grid_thw.prod(-1))`.
 pub(super) fn flat_range_for_index(
     sizes: &KwargValue,
     sizes_key: &str,
     index: usize,
 ) -> Result<(usize, usize)> {
-    let sizes = tensor_as_usize_vec(sizes)?;
+    let row_len = match sizes {
+        KwargValue::Tensor { wire } if wire.shape.len() == 2 => wire.shape[1].max(1),
+        _ => 1,
+    };
+    let sizes = tensor_as_usize_vec(sizes)?
+        .chunks(row_len)
+        .map(|row| row.iter().product())
+        .collect::<Vec<usize>>();
     let size = *sizes.get(index).ok_or_else(|| {
         multimodal!("flat tensor sizes key `{sizes_key}` has no entry for media item {index}")
     })?;
@@ -407,6 +416,18 @@ mod tests {
         assert_eq!(
             flat_range_for_index(&sizes, "image_grid_thw", 1).unwrap(),
             (2, 5)
+        );
+    }
+
+    #[test]
+    fn flat_range_for_index_uses_row_products_of_2d_size_tensor() {
+        let grid_thw = KwargValue::Tensor {
+            wire: WireTensor::from_i64(vec![2, 3], vec![1_i64, 2, 3, 1, 4, 5]).unwrap(),
+        };
+
+        assert_eq!(
+            flat_range_for_index(&grid_thw, "vision_grid_thw", 1).unwrap(),
+            (6, 26)
         );
     }
 

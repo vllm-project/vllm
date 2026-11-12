@@ -29,7 +29,18 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from xgrammar import StructuralTag
+from xgrammar.structural_tag import (
+    AnyTextFormat,
+    Format,
+    SequenceFormat,
+    StarFormat,
+    TokenFormat,
+)
+
 from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.abstract_parser import structured_outputs_to_format
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -38,20 +49,32 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.utils import extract_json_member_object
+from vllm.renderers.inkling_encoding import (
+    AUDIO_END,
+    CONTENT_AUDIO_INPUT,
+    CONTENT_IMAGE,
+    CONTENT_INVOKE_TOOL_JSON,
+    CONTENT_INVOKE_TOOL_TEXT,
+    CONTENT_MODEL_END_SAMPLING,
+    CONTENT_TEXT,
+    CONTENT_THINKING,
+    CONTENT_TOOL_ERROR,
+    CONTENT_XML,
+    END_MESSAGE,
+    END_OF_TEXT,
+    MESSAGE_MODEL,
+    MESSAGE_SYSTEM,
+    MESSAGE_TOOL,
+    MESSAGE_USER,
+    continuation_prefix,
+)
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
-
-MESSAGE_MODEL = "<|message_model|>"
-CONTENT_TEXT = "<|content_text|>"
-CONTENT_THINKING = "<|content_thinking|>"
-CONTENT_INVOKE_TOOL_JSON = "<|content_invoke_tool_json|>"
-CONTENT_INVOKE_TOOL_TEXT = "<|content_invoke_tool_text|>"
-CONTENT_TOOL_ERROR = "<|content_tool_error|>"
-CONTENT_MODEL_END_SAMPLING = "<|content_model_end_sampling|>"
-END_MESSAGE = "<|end_message|>"
 
 INKLING_SPECIAL_TOKENS = (
     MESSAGE_MODEL,
@@ -62,6 +85,19 @@ INKLING_SPECIAL_TOKENS = (
     CONTENT_TOOL_ERROR,
     CONTENT_MODEL_END_SAMPLING,
     END_MESSAGE,
+)
+
+# Every framing token; free text in a grammar never contains one.
+INKLING_CONTROL_TOKENS = (
+    END_OF_TEXT,
+    MESSAGE_USER,
+    MESSAGE_SYSTEM,
+    MESSAGE_TOOL,
+    CONTENT_IMAGE,
+    CONTENT_XML,
+    CONTENT_AUDIO_INPUT,
+    AUDIO_END,
+    *INKLING_SPECIAL_TOKENS,
 )
 
 
@@ -228,6 +264,74 @@ class InklingParser(ParserEngine):
     ) -> None:
         kwargs.setdefault("parser_engine_config", inkling_config())
         super().__init__(tokenizer, tools, **kwargs)
+        # Inkling2 spells <|content_xml|> natively and has no audio tokens.
+        # Its prompts end between messages: the model opens its own turn.
+        vocab = self.vocab
+        self._is_inkling2 = CONTENT_XML in vocab and CONTENT_AUDIO_INPUT not in vocab
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Frame an Inkling2 JSON response format with the block grammar.
+
+        As in the reference, any number of free thinking blocks precede the
+        final text block, whose payload alone must match the JSON constraint;
+        the API then returns that payload as the content.
+        """
+        request = super().adjust_request(request)
+        if not self._is_inkling2:
+            return request
+        structured_outputs = request.extract_structured_outputs()
+        if structured_outputs is None or (
+            structured_outputs.json is None and not structured_outputs.json_object
+        ):
+            return request
+        if request.tools and request.tool_choice not in ("auto", "none", None):
+            # TODO: constrain required and named tool choices to tool calls.
+            return request
+        json_format = structured_outputs_to_format(structured_outputs)
+
+        vocab = self.vocab
+        model, text, thinking, end = (
+            TokenFormat(token=vocab[token])
+            for token in (MESSAGE_MODEL, CONTENT_TEXT, CONTENT_THINKING, END_MESSAGE)
+        )
+        prefix = None
+        if isinstance(request, ChatCompletionRequest) and (
+            request.continue_final_message and request.messages
+        ):
+            prefix = continuation_prefix(request.messages[-1])
+        if prefix:
+            raise ValueError(
+                "Inkling JSON response formats cannot continue a nonempty "
+                "assistant message."
+            )
+        output_format: Format
+        if prefix is None:
+            excludes = [token for token in INKLING_CONTROL_TOKENS if token in vocab]
+            thinking_block = SequenceFormat(
+                elements=[model, thinking, AnyTextFormat(excludes=excludes), end]
+            )
+            output_format = SequenceFormat(
+                elements=[
+                    StarFormat(content=thinking_block),
+                    model,
+                    text,
+                    json_format,
+                    end,
+                ]
+            )
+        else:
+            output_format = SequenceFormat(elements=[json_format, end])
+        tag = StructuralTag(format=output_format)
+        grammar = StructuredOutputsParams(structural_tag=json.dumps(tag.model_dump()))
+        if isinstance(request, ChatCompletionRequest):
+            request.structured_outputs = grammar
+            request.response_format = None
+        else:
+            request._parser_structured_outputs = grammar
+        request._grammar_from_parser = True
+        return request
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """Seed the initial parsing state from the prompt tail.
@@ -259,11 +363,38 @@ class InklingParser(ParserEngine):
                 break
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        if self._is_inkling2:
+            return self._inkling2_is_reasoning_end(input_ids)
         vocab = self.vocab
         reasoning_ids = {vocab.get(CONTENT_THINKING), vocab.get(MESSAGE_MODEL)}
         ended_ids = {vocab.get(CONTENT_TEXT), vocab.get(CONTENT_MODEL_END_SAMPLING)}
         i = rfind_tokens(input_ids, reasoning_ids | ended_ids)
         return i >= 0 and input_ids[i] in ended_ids
+
+    def _inkling2_is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        """Whether the latest block is a text block of a model message.
+
+        A prompt that ends between messages has not ended reasoning: the
+        model may open a thinking block.
+        """
+        vocab = self.vocab
+        text_id = vocab[CONTENT_TEXT]
+        block_ids = {
+            text_id,
+            vocab[CONTENT_THINKING],
+            vocab[CONTENT_MODEL_END_SAMPLING],
+        }
+        role_ids = {
+            vocab[token]
+            for token in (MESSAGE_MODEL, MESSAGE_USER, MESSAGE_SYSTEM, MESSAGE_TOOL)
+        }
+        latest_block = None
+        for token_id in reversed(input_ids):
+            if token_id in role_ids:
+                return latest_block == text_id and token_id == vocab[MESSAGE_MODEL]
+            if latest_block is None and token_id in block_ids:
+                latest_block = token_id
+        return latest_block == text_id
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         vocab = self.vocab

@@ -24,6 +24,7 @@ system control block after the tool declarations and initial system messages.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Protocol
 
@@ -69,8 +70,22 @@ SPECIAL_TOKEN_SPELLINGS: dict[str, tuple[str, ...]] = {
     CONTENT_AUDIO_INPUT: (CONTENT_AUDIO_INPUT,),
     CONTENT_XML: (CONTENT_XML, "<|unused_200024|>"),
     CONTENT_INVOKE_TOOL_JSON: (CONTENT_INVOKE_TOOL_JSON,),
+    CONTENT_TOOL_ERROR: (CONTENT_TOOL_ERROR,),
     END_MESSAGE: (END_MESSAGE,),
     AUDIO_END: (AUDIO_END,),
+}
+
+# Tokens only some Inkling vocabularies define (Inkling2 has no audio).
+OPTIONAL_SPECIAL_TOKENS = frozenset(
+    {CONTENT_AUDIO_INPUT, AUDIO_END, CONTENT_TOOL_ERROR}
+)
+
+_CONTENT_KIND_TOKENS: dict[str, str] = {
+    "text": CONTENT_TEXT,
+    "thinking": CONTENT_THINKING,
+    "tool_error": CONTENT_TOOL_ERROR,
+    "xml": CONTENT_XML,
+    "invoke_tool_json": CONTENT_INVOKE_TOOL_JSON,
 }
 
 
@@ -87,6 +102,7 @@ class InklingTextTokenizer(Protocol):
 _IMAGE_PART_TYPES = frozenset({"image", "input_image", "image_url"})
 _AUDIO_PART_TYPES = frozenset({"audio", "input_audio", "audio_url"})
 
+DEFAULT_REASONING_EFFORT = 0.9
 _MAX_REASONING_EFFORT = 0.99
 
 
@@ -108,13 +124,7 @@ def render_inkling_messages(
     input_ids: list[int] = []
     tool_call_id_to_name: dict[str, str] = {}
 
-    # Request-level tools plus per-developer-message tools (Rust renderer
-    # semantics) are declared in a single leading system block.
-    all_tools = list(tools or [])
-    for message in messages:
-        if message.get("role") == "developer":
-            all_tools.extend(message.get("tools") or [])
-
+    all_tools = _collect_tools(messages, tools)
     if all_tools:
         _append_message(
             input_ids,
@@ -191,6 +201,19 @@ def render_inkling_messages(
     return input_ids
 
 
+def _collect_tools(
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+) -> list[Mapping[str, Any]]:
+    """Request-level plus per-developer-message tools (Rust renderer
+    semantics), declared in a single leading system block."""
+    all_tools = list(tools or [])
+    for message in messages:
+        if message.get("role") == "developer":
+            all_tools.extend(message.get("tools") or [])
+    return all_tools
+
+
 def _append_reasoning_effort(
     input_ids: list[int],
     tokenizer: InklingTextTokenizer,
@@ -238,24 +261,15 @@ def _append_message(
     if author_name:
         input_ids.extend(tokenizer.encode_text(author_name))
 
-    if kind == "text":
-        input_ids.append(tokenizer.encode_special(CONTENT_TEXT))
-        input_ids.extend(tokenizer.encode_text(text))
-    elif kind == "image":
+    if kind == "image":
         # Bare marker only: the MM processor replaces the marker with
         # `marker + placeholder * num_patches` (see mm_preprocess.py).
         input_ids.append(tokenizer.encode_special(CONTENT_IMAGE))
     elif kind == "audio":
         input_ids.append(tokenizer.encode_special(CONTENT_AUDIO_INPUT))
         input_ids.append(tokenizer.encode_special(AUDIO_END))
-    elif kind == "thinking":
-        input_ids.append(tokenizer.encode_special(CONTENT_THINKING))
-        input_ids.extend(tokenizer.encode_text(text))
-    elif kind == "xml":
-        input_ids.append(tokenizer.encode_special(CONTENT_XML))
-        input_ids.extend(tokenizer.encode_text(text))
-    elif kind == "invoke_tool_json":
-        input_ids.append(tokenizer.encode_special(CONTENT_INVOKE_TOOL_JSON))
+    elif kind in _CONTENT_KIND_TOKENS:
+        input_ids.append(tokenizer.encode_special(_CONTENT_KIND_TOKENS[kind]))
         input_ids.extend(tokenizer.encode_text(text))
     else:
         raise ValueError(f"unsupported Inkling render part kind: {kind!r}")
@@ -381,3 +395,250 @@ def _tool_call_name_and_args(tool_call_value: Any) -> tuple[str, Mapping[str, An
 def _tool_call_json(name: str, args: Mapping[str, Any]) -> str:
     name_json = json.dumps(name, ensure_ascii=False, allow_nan=False)
     return f'{{"name":{name_json},"args":{_canonical_json(args)}}}'
+
+
+# ── Inkling2 ──────────────────────────────────────────────────────────────
+#
+# Inkling2 keeps Inkling's block format but its reference renderer differs:
+# no generation prefix (the model emits its own ``<|message_model|>``), no
+# tool name in tool-call headers, tool results named only by an explicit
+# ``name``, empty string contents kept as empty blocks, effort quantized to
+# integer milli-effort, and its own canonical JSON spelling for floats.
+
+
+def render_inkling2_messages(
+    messages: Sequence[Mapping[str, Any]],
+    tokenizer: InklingTextTokenizer,
+    *,
+    tools: Sequence[Mapping[str, Any]] | None = None,
+    reasoning_effort: float = DEFAULT_REASONING_EFFORT,
+    continue_final_message: bool = False,
+) -> list[int]:
+    """Render chat messages to Inkling2 input ids.
+
+    With `continue_final_message`, a final assistant message holding only
+    a text string is left open so generation continues its text.
+    """
+    messages = list(messages)
+    assistant_prefix = None
+    if continue_final_message and messages:
+        assistant_prefix = continuation_prefix(messages[-1])
+        if assistant_prefix is not None:
+            messages.pop()
+
+    input_ids: list[int] = []
+    all_tools = _collect_tools(messages, tools)
+    if all_tools:
+        _append_message(
+            input_ids,
+            tokenizer,
+            "system",
+            "xml",
+            _inkling2_tool_declare_json(all_tools),
+            author_name="tool_declare",
+        )
+
+    effort_text: str | None = _inkling2_effort_text(reasoning_effort)
+    for message in messages:
+        role = _expect_role(message)
+        if effort_text is not None and role not in {"system", "developer"}:
+            _append_message(input_ids, tokenizer, "system", "text", effort_text)
+            effort_text = None
+
+        author_name = None
+        if role == "tool" and message.get("name") is not None:
+            author_name = str(message["name"])
+        blocks = _inkling2_blocks(message, role)
+        for kind, text in blocks:
+            _append_message(
+                input_ids, tokenizer, role, kind, text, author_name=author_name
+            )
+        if role == "assistant" and blocks:
+            input_ids.append(tokenizer.encode_special(CONTENT_MODEL_END_SAMPLING))
+
+    if effort_text is not None:
+        _append_message(input_ids, tokenizer, "system", "text", effort_text)
+
+    if assistant_prefix is not None:
+        input_ids.append(tokenizer.encode_special(MESSAGE_MODEL))
+        input_ids.append(tokenizer.encode_special(CONTENT_TEXT))
+        input_ids.extend(tokenizer.encode_text(assistant_prefix))
+    return input_ids
+
+
+def _assistant_reasoning(message: Mapping[str, Any]) -> Any:
+    reasoning = message.get("reasoning")
+    return message.get("reasoning_content") if reasoning is None else reasoning
+
+
+def continuation_prefix(message: Mapping[str, Any]) -> str | None:
+    """Return the text an Inkling2 `continue_final_message` request extends.
+
+    Only a plain-string assistant message with no tool calls or reasoning is
+    continued; `None` means the message renders as a closed turn.
+    """
+    content = message.get("content")
+    if (
+        message.get("role") != "assistant"
+        or not isinstance(content, str)
+        or message.get("tool_calls")
+        or _assistant_reasoning(message)
+    ):
+        return None
+    return content
+
+
+def _inkling2_blocks(message: Mapping[str, Any], role: str) -> list[tuple[str, str]]:
+    content = message.get("content")
+    if role != "assistant":
+        return list(_iter_inkling2_parts(content))
+
+    reasoning = _assistant_reasoning(message)
+    if reasoning is not None and not isinstance(reasoning, str):
+        raise TypeError("assistant reasoning_content must be a string")
+    tool_calls = message.get("tool_calls") or []
+    if content == "" and (tool_calls or reasoning):
+        content = None
+
+    blocks = [("thinking", reasoning)] if reasoning else []
+    blocks.extend(_iter_inkling2_parts(content))
+    for tool_call in tool_calls:
+        name, args = _tool_call_name_and_args(tool_call)
+        args = _tml_json_loads(json.dumps(args, allow_nan=False))
+        blocks.append(
+            (
+                "invoke_tool_json",
+                f'{{"name":{_tml_json_dumps(name)},"args":{_tml_json_dumps(args)}}}',
+            )
+        )
+    return blocks
+
+
+def _iter_inkling2_parts(content: Any) -> Iterator[tuple[str, str]]:
+    if content is None:
+        return
+    if isinstance(content, str):
+        yield ("text", content)
+        return
+    if not isinstance(content, Sequence) or isinstance(content, (bytes, bytearray)):
+        raise TypeError("message content must be a string or a sequence of parts")
+    for part in content:
+        if isinstance(part, str):
+            yield ("text", part)
+            continue
+        if not isinstance(part, Mapping):
+            raise TypeError(f"content part must be mapping, got {type(part).__name__}")
+        ptype = part.get("type")
+        if ptype in (None, "text", "input_text"):
+            yield ("text", part.get("text") or "")
+        elif ptype == "thinking":
+            yield ("thinking", part.get("thinking") or "")
+        elif ptype == "tool_error":
+            yield ("tool_error", part.get("text") or "")
+        elif ptype in _IMAGE_PART_TYPES:
+            yield ("image", "")
+        else:
+            raise ValueError(f"unsupported Inkling2 content part type: {ptype!r}")
+
+
+def _inkling2_effort_text(reasoning_effort: float) -> str:
+    if not 0.0 <= reasoning_effort <= _MAX_REASONING_EFFORT:
+        raise ValueError(
+            f"Inkling reasoning_effort must be in [0.0, 0.99], got {reasoning_effort!r}"
+        )
+    millieffort = round(reasoning_effort * 1000)
+    effort = round((millieffort / 1000) * 100) / 100
+    return f"Thinking effort level: {effort:g}"
+
+
+def _inkling2_tool_declare_json(tools: Sequence[Mapping[str, Any]]) -> str:
+    tool_specs = []
+    for tool_value in tools:
+        tool = _as_mapping(tool_value)
+        function = {
+            key: value
+            for key, value in _as_mapping(tool.get("function", {})).items()
+            if value is not None
+        }
+        parameters = function.get("parameters", {})
+        if not isinstance(parameters, Mapping):
+            raise TypeError("tool parameters must be a JSON object")
+        tool_specs.append(
+            {
+                "description": function.get("description", ""),
+                "name": function["name"],
+                "parameters": _tml_json_loads(
+                    json.dumps(parameters, ensure_ascii=False, allow_nan=False)
+                ),
+                "type": tool.get("type") or "function",
+            }
+        )
+    return _tml_json_dumps(tool_specs, legacy_floats=False)
+
+
+def _tml_json_loads(text: str) -> Any:
+    """Parse JSON as the Inkling2 reference does (64-bit ints, finite floats)."""
+
+    def invalid_constant(value: str) -> Any:
+        raise ValueError(f"Invalid JSON constant: {value}")
+
+    def finite_float(value: str) -> float:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("JSON number out of range")
+        return number
+
+    def bounded_int(value: str) -> int | float:
+        number = int(value)
+        if value == "-0" or not -(1 << 63) <= number < 1 << 64:
+            return finite_float(value)
+        return number
+
+    return json.loads(
+        text,
+        parse_constant=invalid_constant,
+        parse_float=finite_float,
+        parse_int=bounded_int,
+    )
+
+
+def _tml_json_dumps(value: Any, *, legacy_floats: bool = True) -> str:
+    """Compact, key-sorted JSON with the Inkling2 reference float spelling."""
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("JSON object keys must be strings")
+        return (
+            "{"
+            + ",".join(
+                _tml_json_dumps(key)
+                + ":"
+                + _tml_json_dumps(value[key], legacy_floats=legacy_floats)
+                for key in sorted(value)
+            )
+            + "}"
+        )
+    if isinstance(value, (list, tuple)):
+        items = (_tml_json_dumps(item, legacy_floats=legacy_floats) for item in value)
+        return "[" + ",".join(items) + "]"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        result = repr(value)
+        if "e" not in result:
+            return result
+        mantissa, exponent_text = result.split("e")
+        exponent = int(exponent_text)
+        if -5 <= exponent < 16:
+            negative = mantissa.startswith("-")
+            digits = mantissa.lstrip("-").replace(".", "")
+            decimal = exponent + 1
+            if decimal <= 0:
+                result = "0." + "0" * -decimal + digits
+            elif decimal >= len(digits):
+                result = digits + "0" * (decimal - len(digits)) + ".0"
+            else:
+                result = digits[:decimal] + "." + digits[decimal:]
+            return ("-" if negative else "") + result
+        sign = "+" if exponent >= 0 and not legacy_floats else ""
+        return mantissa + "e" + sign + str(exponent)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
