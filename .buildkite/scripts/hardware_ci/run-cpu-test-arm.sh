@@ -29,8 +29,28 @@ remove_docker_container
 
 docker pull "$IMAGE"
 
+# On main builds the pipeline generator traces this script's command on the
+# host and sets CI_INFRA_TRACE_ID. Pass that trace context into the container
+# and load the same helpers before pytest, so it records per-test timings
+# (.buildkite/scripts/ci-otel/README.md). Without a trace ID nothing changes.
+OTEL_DOCKER_ARGS=()
+OTEL_SETUP=""
+if [ -n "${CI_INFRA_TRACE_ID:-}" ]; then
+    OTEL_DOCKER_ARGS=(-e CI_INFRA_TRACE_ID -e CI_INFRA_COMMAND_SPAN_ID
+        -e BUILDKITE -e BUILDKITE_AGENT_ACCESS_TOKEN -e BUILDKITE_AGENT_ENDPOINT
+        -e BUILDKITE_JOB_ID -e BUILDKITE_BUILD_ID -e BUILDKITE_BUILD_NUMBER
+        -e BUILDKITE_BUILD_URL -e BUILDKITE_BRANCH -e BUILDKITE_COMMIT
+        -e BUILDKITE_LABEL -e BUILDKITE_PIPELINE_SLUG
+        -e BUILDKITE_ORGANIZATION_SLUG -e BUILDKITE_AGENT_META_DATA_QUEUE)
+    # Inside `if`, so a missing or broken helper skips tracing instead of
+    # failing the job.
+    # A shell snippet for the container's shell, not expanded or split here.
+    # shellcheck disable=SC2016,SC2089
+    OTEL_SETUP='CI_INFRA_OTEL_DIR=/vllm-workspace/.buildkite/scripts/ci-otel; if [ -f "$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && sh -n "$CI_INFRA_OTEL_DIR/ci_otel.sh" && . "$CI_INFRA_OTEL_DIR/ci_otel.sh"; then :; else echo "vLLM CI OTel: tracing setup skipped" >&2; fi'
+fi
+
 # Run the image
-docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" -e TERM=xterm-256color -e PY_COLORS=1 -e FORCE_COLOR=1 -e CLICOLOR_FORCE=1 --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
+docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" -e TERM=xterm-256color -e PY_COLORS=1 -e FORCE_COLOR=1 -e CLICOLOR_FORCE=1 ${OTEL_DOCKER_ARGS[@]+"${OTEL_DOCKER_ARGS[@]}"} --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
 
 print_packages() {
   docker exec "$CONTAINER_NAME" bash -c "
@@ -42,6 +62,7 @@ kernel_tests() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
+    ${OTEL_SETUP}
     pytest -x -v -s tests/kernels/test_onednn.py
     pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
@@ -68,12 +89,14 @@ model_tests() {
 
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
+    ${OTEL_SETUP}
     pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model
     pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
     pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'"
 
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
+    ${OTEL_SETUP}
     pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
 }
 
@@ -112,7 +135,8 @@ serving_tests() {
 }
 
 print_packages
-export CONTAINER_NAME
+# shellcheck disable=SC2090  # see OTEL_SETUP above
+export CONTAINER_NAME OTEL_SETUP
 export -f kernel_tests model_tests serving_tests
 case "$SHARD_ID" in
   # The kernel shard contains several large parametrized suites and can exceed
