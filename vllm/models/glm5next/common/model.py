@@ -23,6 +23,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClam
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
@@ -236,7 +237,7 @@ class Glm5NextMoE(nn.Module):
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        apply_routed_scale_to_output: bool = False,
+        routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -336,7 +337,7 @@ class Glm5NextMoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
+            routed_scale_mode=routed_scale_mode,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
