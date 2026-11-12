@@ -128,7 +128,7 @@ def _candidate_buffers(config: VllmConfig, compress_ratio: int, device: torch.de
             torch.zeros(rows, **i32),
             torch.zeros(rows, **i32),
             torch.zeros((rows, count), **i32),
-            torch.zeros((rows, count), device=device, dtype=torch.int64),
+            torch.zeros((rows, count), **i32),
             torch.zeros(rows, **i32),
             torch.zeros((logits_rows, topk), **i32),
             torch.empty(
@@ -384,6 +384,7 @@ class CandidateIndexer(SparseAttnIndexer):
                 q_quant[start:end],
                 self.k_cache.kv_cache,
                 weights[start:end],
+                plan.sparse_indices[start:end],
                 plan.physical_blocks[start:end],
                 plan.valid_end[start:end],
                 logits,
