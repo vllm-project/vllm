@@ -1852,6 +1852,17 @@ def use_fresh_inductor_cache():
         yield
 
 
+@pytest.fixture(autouse=True)
+def isolated_compile_cache(monkeypatch, use_fresh_inductor_cache):
+    """Give every test its own torch.compile cache.
+
+    Set through the environment so EngineCore and worker processes inherit it.
+    """
+    with tempfile.TemporaryDirectory() as compile_cache_root:
+        monkeypatch.setenv("VLLM_COMPILE_CACHE_ROOT", compile_cache_root)
+        yield compile_cache_root
+
+
 @pytest.fixture
 def disable_vllm_compile_cache(monkeypatch, use_fresh_inductor_cache):
     """
@@ -1873,6 +1884,7 @@ def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
     """Temporary VLLM_CACHE_ROOT combined with a fresh inductor cache."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         monkeypatch.setenv("VLLM_CACHE_ROOT", tmp_dir)
+        monkeypatch.delenv("VLLM_COMPILE_CACHE_ROOT")
         yield tmp_dir
 
 

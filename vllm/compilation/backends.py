@@ -1087,9 +1087,7 @@ class VllmBackend:
             # Use SHA-256 for cache key hashing to be consistent across
             # compile_factors functions. Truncate for a short cache dir name.
             hash_key = hash_factors(all_factors)[:10]
-            cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
-            )
+            cache_dir = os.path.join(envs.VLLM_COMPILE_CACHE_ROOT, hash_key)
             self.compilation_config.cache_dir = cache_dir
 
         cache_dir = self.compilation_config.cache_dir

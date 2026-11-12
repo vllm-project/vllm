@@ -557,7 +557,7 @@ def _support_torch_compile(
         if self._allow_aot_compile and envs.VLLM_USE_AOT_COMPILE:
             """
             When using torch.compile in AOT mode, we store the cache artifacts
-            under VLLM_CACHE_ROOT/torch_compile_cache/torch_aot_compile/{hash}
+            under VLLM_COMPILE_CACHE_ROOT/torch_aot_compile/{hash}
             The {hash} contains all of the factors except for the source files
             being traced through, because we don't actually know which source
             files to check at this point (before dynamo runs).
@@ -573,10 +573,7 @@ def _support_torch_compile(
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT,
-                "torch_compile_cache",
-                "torch_aot_compile",
-                hash_key,
+                envs.VLLM_COMPILE_CACHE_ROOT, "torch_aot_compile", hash_key
             )
 
             # Hash-level dir; shared across ranks on the same node.
