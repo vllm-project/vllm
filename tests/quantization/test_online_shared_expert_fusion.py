@@ -4,6 +4,7 @@
 
 import json
 import logging
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -59,6 +60,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.utils import get_model_architecture
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -1037,15 +1039,18 @@ def test_fse_online_quantization_bf16_routed_quantized_shared_raises(
 
 def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
     default_vllm_config,
-    monkeypatch,
     single_rank_parallel_state,
 ) -> None:
     """Routed NVFP4 and shared MXFP8 weights land in their MXFP4 expert slots.
 
-    The weights are loaded through `MiniMaxM3Model.load_weights` with checkpoint names
-    (`w1/w2/w3`, `shared_experts.*`, `weight_scale_inv`), as the model loader does.
+    The weights are loaded with the `MiniMaxM3SparseForCausalLM` weights mapper and
+    checkpoint names (`w1/w2/w3`, `shared_experts.*`, `weight_scale_inv`), as the
+    model loader does.
     """
-    from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
+    from vllm.models.minimax_m3.amd.model import (
+        MiniMaxM3SparseForCausalLM,
+        _redirect_fused_shared_experts,
+    )
 
     default_vllm_config.model_config = ModelConfig()
     hidden_size = intermediate_size = 64
@@ -1090,6 +1095,7 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
             shared_expert_prefix="model.layers.0.block_sparse_moe.shared_experts",
             prefix="model.layers.0.block_sparse_moe.experts",
             quant_config=quant_config,
+            ckpt_names=("w1", "w2", "w3"),
         )
         layer = runner.routed_experts
         assert isinstance(layer.quant_method, Mxfp4OnlineMoEMethod)
@@ -1131,12 +1137,8 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
                 (f"{prefix}.weight_scale_inv", scale),
             ]
 
-        # Only the parts of `MiniMaxM3Model` that `load_weights` uses.
-        class ModelStub(torch.nn.Module):
-            get_expert_mapping = MiniMaxM3Model.get_expert_mapping
-            load_weights = MiniMaxM3Model.load_weights
-
-        model = ModelStub()
+        # Only the parts of `MiniMaxM3Model` that loading uses.
+        model = torch.nn.Module()
         model.config = SimpleNamespace(
             num_local_experts=num_routed_experts, n_shared_experts=1
         )
@@ -1146,15 +1148,10 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
         decoder_layer.block_sparse_moe = torch.nn.Module()
         decoder_layer.block_sparse_moe.experts = runner
         model.layers = torch.nn.ModuleList([decoder_layer])
-        # `load_weights` only redirects the shared expert of the layers in
-        # `fused_shared_expert_layers` when AITER fused shared experts are
-        # enabled. Enable that gate only for loading, so the expert kernels
-        # selected above stay unchanged.
-        with monkeypatch.context() as m:
-            m.setattr(
-                rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: True
-            )
-            model.load_weights(weights)
+        redirect = partial(_redirect_fused_shared_experts, model=model)
+        mapper = MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
+        mapper = mapper | WeightsMapper(weights_transforms=[redirect])
+        AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
         layer.quant_method.process_weights_after_loading(layer)
 
     def check_slot(slot: int, gate, up, down) -> None:

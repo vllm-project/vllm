@@ -1500,7 +1500,6 @@ class VllmConfig:
             )
 
             self.model_config.verify_with_parallel_config(self.parallel_config)
-            self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
@@ -3249,16 +3248,23 @@ class VllmConfig:
                 "which connectors that register the KV cache (e.g. NIXL, Mooncake, "
                 "MoRIIO, UMBP) require"
             )
+        exports_fd = KVCacheAccess.EXPORTS_FD in kv_cache_access
+        if exports_fd and (requested is False or unsupported is not None):
+            raise ValueError(
+                "enable_extensible_kv_cache: a KV connector (e.g. "
+                "LMCacheMPConnector with lmcache.mp.use_vmm_api) imports the KV "
+                "cache through POSIX file descriptors, which needs it, but "
+                f"{unsupported or 'it is disabled'}."
+            )
         # FABRIC handles to driver-mapped memory need an IMEX channel.
         fabric_unavailable = (
             KVCacheAccess.EXPORTS_FABRIC in kv_cache_access
             and not imex_channel_available()
         )
         if requested is None:
-            cache_config.enable_extensible_kv_cache = (
-                unsupported is None and not fabric_unavailable
-            )
-            if unsupported is None and fabric_unavailable:
+            enabled = unsupported is None and (exports_fd or not fabric_unavailable)
+            cache_config.enable_extensible_kv_cache = enabled
+            if unsupported is None and not enabled:
                 logger.info(
                     "Extensible KV cache off: without an IMEX channel, KV transfers "
                     "within a host (e.g. NIXL) would lose NVLink and fall back to "
@@ -3267,7 +3273,7 @@ class VllmConfig:
                 )
         elif requested and unsupported is not None:
             raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
-        elif requested and fabric_unavailable:
+        if cache_config.enable_extensible_kv_cache and fabric_unavailable:
             logger.warning(
                 "No IMEX channel: with the extensible KV cache, KV transfers within "
                 "a host (e.g. NIXL) fall back to TCP. Transfers across hosts use "
