@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Block-size dispatch tests for the RDNA3 (gfx1100) MXFP4 MoE experts backend.
 
-``RDNA3Mxfp4Experts`` (the ``Mxfp4MoeBackend.RDNA3_MXFP4`` kernel) picks a GEMM
-tile from expected occupancy: the WMMA-16 tile once a step has >=16 rows, else a
-scalar tile (1/4). The ``moe_mxfp4_gemm_rdna3`` kernel only instantiates tiles
-{1,2,4,8,16}, so the selector must never return anything else. Pure-Python (no
+`RDNA3Mxfp4Experts` (the `Mxfp4MoeBackend.RDNA3_MXFP4` kernel) picks a GEMM
+tile from expected occupancy: a WMMA tile (32/64) once experts average several
+rows each, else a scalar tile (1/4). The `moe_mxfp4_gemm_rdna3` kernel only
+instantiates tiles {1,2,4,8,32,64}, so the selector must never return anything
+else. Pure-Python (no
 GPU), so this runs on any CI host.
 
 The oracle tests at the bottom run on real gfx1100 hardware: which backend a

@@ -18,7 +18,7 @@ _MXFP4_GROUP_SIZE = 32
 
 class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
     """Weight-only MXFP4 GEMM for RDNA3 (gfx1100) via the native HIP kernel
-    ``_rocm_C.mxfp4_gemm_rdna3`` (scalar GEMV for decode, WMMA for prefill).
+    `_rocm_C.mxfp4_gemm_rdna3` (scalar GEMV for decode, WMMA for prefill).
     RDNA3 has no native FP4 matmul, so E2M1 weights are dequantized on the fly
     into the f16/bf16 pipeline (W4A16).
     """

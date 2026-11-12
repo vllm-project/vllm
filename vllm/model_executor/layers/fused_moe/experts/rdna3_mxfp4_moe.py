@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Native RDNA3 (gfx1100) MXFP4 fused-MoE experts backend.
 
-A modular ``FusedMoEExperts`` that drives the ``moe_mxfp4_gemm_rdna3`` HIP kernel
+A modular `FusedMoEExperts` that drives the `moe_mxfp4_gemm_rdna3` HIP kernel
 (E2M1 weights + E8M0 group-32 scale, no zero point). Standard activation format:
-``apply`` receives the full hidden states + topk ids/weights and does its own
+`apply` receives the full hidden states + topk ids/weights and does its own
 expert routing (moe_align_block_size), the two GEMMs, the activation, the
 per-expert bias and the weighted reduction — so it covers both the
 compressed-tensors MXFP4 MoE (no bias, SiLU) and GPT-OSS native-mxfp4 (per-expert
-bias + clamped SwiGLU-OAI) by reading everything from ``quant_config``.
+bias + clamped SwiGLU-OAI) by reading everything from `quant_config`.
 
-Registered as ``Mxfp4MoeBackend.RDNA3_MXFP4`` in the oracle and gated on gfx1100.
+Registered as `Mxfp4MoeBackend.RDNA3_MXFP4` in the oracle and gated on gfx1100.
 """
 
 import dataclasses
@@ -70,7 +70,7 @@ def repack_experts_rdna3(
     The kernel reads weights as [E, K/8, N] uint32 (4 consecutive packed bytes
     little-endian = a uint32 of 8 E2M1 codes along K). Per-expert into
     pre-allocated outputs so a multi-GB repack fits next to the loaded weights.
-    ``deinterleave`` splits GPT-OSS's gate/up rows ([g0,u0,...] -> [g...,u...]).
+    `deinterleave` splits GPT-OSS's gate/up rows ([g0,u0,...] -> [g...,u...]).
     """
     E, N, kh = packed.shape
     dev = packed.device
@@ -197,8 +197,8 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
     ) -> torch.Tensor:
         """Per-row expert bias, [M * top_k, N].
 
-        ``topk_ids`` are global expert ids; the bias is stored per *local*
-        expert, so under EP they have to go through ``expert_map`` first. Rows
+        `topk_ids` are global expert ids; the bias is stored per *local*
+        expert, so under EP they have to go through `expert_map` first. Rows
         routed to another rank map to -1: the GEMM skips them, so their bias
         must be zero rather than a wrapped-around lookup.
         """
@@ -255,10 +255,12 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         # They also add the expert bias before scaling by the router weight.
         tiled = block_size_m >= 32
         stores_rows = tiled and expert_map is None
-        fuse_w1_bias = (
-            tiled and w1_bias is not None and not apply_router_weight_on_input
-        )
-        fuse_w2_bias = tiled and w2_bias is not None
+        fused_w1_bias = None
+        if tiled and w1_bias is not None and not apply_router_weight_on_input:
+            fused_w1_bias = w1_bias.to(dtype).contiguous()
+        fused_w2_bias = None
+        if tiled and w2_bias is not None:
+            fused_w2_bias = w2_bias.to(dtype).contiguous()
 
         # gate_up GEMM (no reduction); router weight optionally folded in here.
         if not stores_rows:
@@ -276,9 +278,9 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
             block_size_m,
             apply_router_weight_on_input,
             0,
-            w1_bias.to(dtype).contiguous() if fuse_w1_bias else None,
+            fused_w1_bias,
         )
-        if w1_bias is not None and not fuse_w1_bias:
+        if w1_bias is not None and fused_w1_bias is None:
             w1_out.add_(self._expert_bias_rows(w1_bias, topk_ids, expert_map, dtype))
 
         if activation == MoEActivation.SWIGLUOAI:
@@ -299,7 +301,7 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
             w2_out = gemm_out[: total * K].view(total, K)
             if not stores_rows:
                 w2_out.zero_()
-            weigh_rows = fuse_w2_bias and not apply_router_weight_on_input
+            weigh_rows = fused_w2_bias is not None and not apply_router_weight_on_input
             ops.moe_mxfp4_gemm_rdna3(
                 act_out,
                 w2_out,
@@ -313,9 +315,9 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
                 block_size_m,
                 weigh_rows,
                 0,
-                w2_bias.to(dtype).contiguous() if fuse_w2_bias else None,
+                fused_w2_bias,
             )
-            if w2_bias is not None and not fuse_w2_bias:
+            if w2_bias is not None and fused_w2_bias is None:
                 w2_out.add_(
                     self._expert_bias_rows(w2_bias, topk_ids, expert_map, dtype)
                 )

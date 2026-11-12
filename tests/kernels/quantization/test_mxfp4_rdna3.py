@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for the RDNA3 (gfx1100) MXFP4 weight-only kernels: the
-dense GEMM and the ``RDNA3Mxfp4Experts`` fused-MoE backend.
+dense GEMM and the `RDNA3Mxfp4Experts` fused-MoE backend.
 
 Run inside the ROCm container after building _rocm_C:
     .venv/bin/python -m pytest tests/kernels/quantization/test_mxfp4_rdna3.py -v
@@ -110,7 +110,7 @@ def _swigluoai_interleaved(h: torch.Tensor) -> torch.Tensor:
     ],
 )
 def test_rdna3_mxfp4_experts_match_dequant_reference(M, activation, with_bias):
-    """``RDNA3Mxfp4Experts.apply`` against a dequantize-then-matmul MoE."""
+    """`RDNA3Mxfp4Experts.apply` against a dequantize-then-matmul MoE."""
     E, K, N, top_k = 8, 256, 128, 4
     dtype = torch.bfloat16
     dev = "cuda"
