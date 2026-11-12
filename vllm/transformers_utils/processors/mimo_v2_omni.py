@@ -220,8 +220,8 @@ class MiMoVLProcessor:
     Ported from SGLang's MiMoVLProcessor.
 
     Media strings (URL / path / data:) are resolved upstream in vLLM's media
-    pipeline; this processor accepts only already-decoded inputs (``PIL.Image``
-    for images, ``(waveform, sr)`` tuples for audio).
+    pipeline; this processor accepts only already-decoded inputs (`PIL.Image`
+    for images, `(waveform, sr)` tuples for audio).
     """
 
     def __init__(
@@ -414,7 +414,7 @@ class MiMoVLProcessor:
         return kw
 
     def preprocess_audio(self, audio: Any) -> tuple[torch.Tensor, int]:
-        """Convert a pre-loaded ``(waveform, sr)`` tuple into (mel_spec, token_len)."""
+        """Convert a pre-loaded `(waveform, sr)` tuple into (mel_spec, token_len)."""
         if not isinstance(audio, tuple):
             raise ValueError(
                 f"Unsupported audio source type: {type(audio)}. Audio must be a "
@@ -1063,24 +1063,24 @@ class MiMoOmniProcessor(ProcessorMixin):
 
         Args:
             text: Prompt string(s) containing multimodal placeholders
-                  ``<|vision_start|><|image_pad|><|vision_end|>``,
-                  ``<|vision_start|><|video_pad|><|vision_end|>``, or
-                  ``<|mimo_audio_start|><|audio_pad|><|mimo_audio_end|>``.
+                  `<|vision_start|><|image_pad|><|vision_end|>`,
+                  `<|vision_start|><|video_pad|><|vision_end|>`, or
+                  `<|mimo_audio_start|><|audio_pad|><|mimo_audio_end|>`.
             images: PIL.Image or list[PIL.Image].
-            videos: list of ``(frames_TCHW: torch.Tensor, timestamps_T: torch.Tensor)``
+            videos: list of `(frames_TCHW: torch.Tensor, timestamps_T: torch.Tensor)`
                     tuples (pre-decoded).
-            audio: list of ``str`` (path/url/base64), ``bytes``,
-                   ``(waveform_1D, sample_rate)`` tuples, or ``np.ndarray``.
-            video_audio: audio track extracted from ``videos``, in the same
-                   formats accepted by ``audio``.
-            return_tensors: Passed to :class:`BatchFeature`.
+            audio: list of `str` (path/url/base64), `bytes`,
+                   `(waveform_1D, sample_rate)` tuples, or `np.ndarray`.
+            video_audio: audio track extracted from `videos`, in the same
+                   formats accepted by `audio`.
+            return_tensors: Passed to `BatchFeature`.
 
         Returns:
-            :class:`BatchFeature` with keys:
-            - ``input_ids``
-            - ``pixel_values`` + ``image_grid_thw``
-            - ``pixel_values_videos`` + ``video_grid_thw`` + ``second_per_grid_ts``
-            - ``audio_features``
+            `BatchFeature` with keys:
+            - `input_ids`
+            - `pixel_values` + `image_grid_thw`
+            - `pixel_values_videos` + `video_grid_thw` + `second_per_grid_ts`
+            - `audio_features`
 
         """
         if isinstance(text, list):
