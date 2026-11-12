@@ -66,9 +66,10 @@ def twoshot_batches(tp):
 
 
 def engine(batch, tp):
-    """Producer engine above B8 (GB300): grouped mma.sync for TP8 up to B16, else
-    tcgen05."""
-    default = "mma" if tp == 8 and batch <= 16 else "umma"
+    """Producer engine above B8 (GB300): grouped mma.sync for TP8 up to B24, else
+    tcgen05. TP8 verify steps at k = 4, decode-step A/B at 131K context, per token:
+    mma.sync -2.3% at 20 rows (four requests), +2.1% at 25-30 rows."""
+    default = "mma" if tp == 8 and batch <= 24 else "umma"
     return default
 
 
