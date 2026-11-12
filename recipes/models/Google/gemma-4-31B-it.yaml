@@ -229,15 +229,13 @@ guide: |
   ```bash
   vllm serve google/gemma-4-31B-it \
     --tensor-parallel-size 2 \
-    --max-model-len 32768 \
-    --gpu-memory-utilization 0.90
+    --max-model-len 32768
   ```
 
   ### 26B MoE on 1xA100/H100 (BF16)
   ```bash
   vllm serve google/gemma-4-26B-A4B-it \
-    --max-model-len 32768 \
-    --gpu-memory-utilization 0.90
+    --max-model-len 32768
   ```
 
   ### Full-Featured Server Launch
@@ -246,7 +244,6 @@ guide: |
   vllm serve google/gemma-4-31B-it \
     --tensor-parallel-size 2 \
     --max-model-len 16384 \
-    --gpu-memory-utilization 0.90 \
     --enable-auto-tool-choice \
     --reasoning-parser gemma4 \
     --tool-call-parser gemma4 \
@@ -266,7 +263,6 @@ guide: |
       --model google/gemma-4-31B-it \
       --tensor-parallel-size 2 \
       --max-model-len 32768 \
-      --gpu-memory-utilization 0.90 \
       --host 0.0.0.0 --port 8000
   ```
   Swap `vllm/vllm-openai:gemma4-0505-cu129` for `vllm/vllm-openai:gemma4-0505-cu130` on Blackwell (B200/B300).
@@ -385,7 +381,7 @@ guide: |
   ## Configuration Tips
 
   - Set `--max-model-len` to match your workload.
-  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache.
+  - On CUDA and ROCm, leave `--gpu-memory-utilization` unset: vLLM sizes the KV cache from the memory free after warmup, and the setting defaults to 1.0. Set it only when the GPU is shared ([details](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization)).
   - Image-only workloads: pass `--limit-mm-per-prompt.audio 0`.
   - Text-only workloads: pass `--limit-mm-per-prompt '{"image": 0, "audio": 0}'` to skip MM profiling.
   - `--async-scheduling` improves throughput.

@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_group_gemm_supported,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -378,9 +379,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         if expert_tokens_meta is not None:
             expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        use_batched_format = (
-            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        )
+        use_batched_format = self.activation_format().is_batched
 
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
@@ -709,6 +708,8 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            return
         # Fuse activation scales into w_scale_2 in-place so that
         # g1/g2_alphas (which reference the same tensor) stay in sync
         # when EPLB rearranges the parameter.
@@ -1468,9 +1469,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
         expert_num_tokens = None
 
-        use_batched_format = (
-            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        )
+        use_batched_format = self.activation_format().is_batched
         assert not use_batched_format, "batched format not supported"
 
         in_dtype = hidden_states.dtype

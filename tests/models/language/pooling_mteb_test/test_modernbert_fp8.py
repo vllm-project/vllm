@@ -13,7 +13,7 @@ from .mteb_embed_utils import mteb_test_embed_models
 def _fp8_scaled_mm_unsupported() -> bool:
     """Whether the ModernBERT online FP8 test should be skipped.
 
-    ``is_quant_method_supported("fp8")`` returns True on MI250 (gfx90a), but
+    `is_quant_method_supported("fp8")` returns True on MI250 (gfx90a), but
     serving a per-tensor FP8 linear layer on ROCm requires CDNA3+ or RDNA4,
     so treat it as unsupported here.
     """
