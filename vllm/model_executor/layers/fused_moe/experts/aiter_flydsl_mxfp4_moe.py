@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MXFP4 SiTU MoE via AITER's FlyDSL grouped GEMM (gfx1250). Routes through
-``aiter.fused_moe`` with gate/up-interleaved w13; weights are preshuffled in
-``convert_weight_to_mxfp4_moe_kernel_format``.
+`aiter.fused_moe` with gate/up-interleaved w13; weights are preshuffled in
+`convert_weight_to_mxfp4_moe_kernel_format`.
 """
 
 import torch
@@ -12,7 +12,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterExperts,
-    QuantMethod,
+    AiterQuantType,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -102,7 +102,7 @@ class AiterFlydslMxfp4Experts(AiterExperts):
             topk_ids.to(torch.int32),
             # RoutedExperts hands AITER experts the 0/1 expert_mask here.
             expert_mask=expert_map,
-            quant_method=QuantMethod.BLOCK_1X32.value,
+            quant_method=AiterQuantType.BLOCK_1X32.value,
             activation_method=activation_method,
             w1_scale=quant_config.w1_scale,
             w2_scale=quant_config.w2_scale,

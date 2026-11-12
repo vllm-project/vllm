@@ -1463,16 +1463,16 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
-        gfx1250_scale_kwidth = _gfx1250_mx_scale_kwidth(mxfp4_backend, activation)
+        scale_kwidth = _gfx1250_mx_scale_kwidth(mxfp4_backend, activation)
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
-            gfx1250_scale_kwidth=gfx1250_scale_kwidth,
+            scale_kwidth=scale_kwidth,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
-            gfx1250_scale_kwidth=gfx1250_scale_kwidth,
+            scale_kwidth=scale_kwidth,
         )
 
         w13_precision_config = PrecisionConfig(
@@ -1966,16 +1966,16 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
-        gfx1250_scale_kwidth = _gfx1250_mx_scale_kwidth(mxfp4_backend, activation)
+        scale_kwidth = _gfx1250_mx_scale_kwidth(mxfp4_backend, activation)
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
-            gfx1250_scale_kwidth=gfx1250_scale_kwidth,
+            scale_kwidth=scale_kwidth,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
-            gfx1250_scale_kwidth=gfx1250_scale_kwidth,
+            scale_kwidth=scale_kwidth,
         )
 
         w13_precision_config = PrecisionConfig(

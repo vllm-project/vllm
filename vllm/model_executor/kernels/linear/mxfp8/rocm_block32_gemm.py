@@ -69,11 +69,11 @@ _XCD_STRIDE = 8
 # One arrival counter per output tile of an in-launch split-K GEMM.
 _SPLIT_COUNTERS = 1 << 16
 
-_FUSED_SPLITS_SUPPORTED = False
+_FUSED_SPLITS_SUPPORTED = True
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx1250
 
-    _FUSED_SPLITS_SUPPORTED = on_gfx950()
+    _FUSED_SPLITS_SUPPORTED = not on_gfx1250()
 
 
 @triton.jit

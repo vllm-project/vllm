@@ -152,7 +152,7 @@ def _aiter_w4a4_gemms(
 ) -> torch.Tensor:
     """GEMM1 + activation + GEMM2 on MXFP4 activations, given AITER routing.
 
-    ``gate_valid`` (from ``ep_sort_routing``) makes GEMM2's top-k reduce skip
+    `gate_valid` (from `ep_sort_routing`) makes GEMM2's top-k reduce skip
     gate slots owned by other EP ranks.
     """
     from aiter.ops.triton.moe.moe_op_gemm_a4w4 import moe_gemm_a4w4, mxfp4_quant
@@ -269,7 +269,7 @@ def _aiter_ep_sort(
     num_valid_tokens: torch.Tensor | None,
 ):
     """Expert-sort already-chosen top-k (global expert ids) onto the local
-    experts. ``num_valid_tokens`` masks rows past the live tokens, e.g. the
+    experts. `num_valid_tokens` masks rows past the live tokens, e.g. the
     padding in a MoRI dispatch buffer."""
     from aiter.ops.triton.moe.moe_routing.routing import (
         ExptData,
@@ -461,10 +461,10 @@ class AiterW4A4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 class AiterW4A4Experts(mk.FusedMoEExpertsModular):
     """Modular MXFP4 W4A4 experts on the AITER Triton/Gluon kernels (gfx1250).
 
-    The modular counterpart of ``AiterW4A4ExpertsMonolithic`` for DP+EP over
+    The modular counterpart of `AiterW4A4ExpertsMonolithic` for DP+EP over
     MoRI: routing is done before the all-to-all, so this takes the dispatched
     top-k (global expert ids) and expert-sorts it onto the local experts with
-    AITER's ``ep_sort_routing``. MoRI dispatches packed MXFP4 activations with
+    AITER's `ep_sort_routing`. MoRI dispatches packed MXFP4 activations with
     their e8m0 scales, which feed GEMM1 directly. GEMM2 applies the router
     weights and reduces over this rank's experts per token; MoRI's combine
     then sums across ranks.

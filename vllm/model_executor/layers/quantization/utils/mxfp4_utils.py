@@ -62,7 +62,7 @@ def mx_scale_kwargs(scale):
     return {"weight_scale": scale}
 
 
-def _swizzle_mxfp4(quant_tensor, scale, num_warps=8, gfx1250_scale_kwidth=4):
+def _swizzle_mxfp4(quant_tensor, scale, num_warps=8, scale_kwidth=4):
     """Weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel."""
     assert has_triton_kernels()
     if get_triton_kernels_version() == "3.8":
@@ -161,16 +161,16 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8, gfx1250_scale_kwidth=4):
         assert (
             scale.dim() == 3
             and scale.shape[-1] % 32 == 0
-            and scale.shape[-2] % gfx1250_scale_kwidth == 0
+            and scale.shape[-2] % scale_kwidth == 0
         ), (
-            f"GFX1250 scale swizzle needs (E,K_SCALE%{gfx1250_scale_kwidth},N%32);"
+            f"GFX1250 scale swizzle needs (E,K_SCALE%{scale_kwidth},N%32);"
             f"got {tuple(scale.shape)}"
         )
         scale = shuffle_scale_moe(
             scale,
             arch="gfx1250",
             preshuffle_factor=32,
-            scale_kwidth=gfx1250_scale_kwidth,
+            scale_kwidth=scale_kwidth,
         )
 
     quant_tensor = convert_layout(
