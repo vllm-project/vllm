@@ -19,7 +19,4 @@ def free_before_shutdown(vllm_config: VllmConfig) -> None:
 
     _ROPE_DICT.clear()
     reset_workspace_manager()
-
-    # Outputs can outlive their graphs, leaving a retired pool allocated.
-    # A later engine must capture into a new pool.
     current_platform.reset_global_graph_pool()

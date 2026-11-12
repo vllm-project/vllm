@@ -323,6 +323,7 @@ def test_shutdown_allows_recapture_with_live_outputs(cuda_capture_stream):
     from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 
     vllm_config = VllmConfig()
+    free_before_shutdown(vllm_config)
     x = torch.ones(4, device=DEVICE_TYPE)
     first = BreakableCUDAGraphCapture(pool=current_platform.get_global_graph_pool())
     with first:

@@ -42,13 +42,11 @@ steps:
   - vllm/config/compilation.py
   - vllm/config/vllm.py
   - vllm/compilation
-  - vllm/platforms/interface.py
   - vllm/v1/worker/gpu/cudagraph_utils.py
   - vllm/v1/worker/gpu/dp_utils.py
   - vllm/v1/worker/encoder_cudagraph.py
   - vllm/v1/worker/encoder_cudagraph_defs.py
   - vllm/v1/worker/gpu/model_runner.py
-  - vllm/v1/worker/gpu/shutdown.py
   - vllm/v1/worker/gpu/ubatch_utils.py
   commands:
     - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
@@ -69,6 +67,4 @@ steps:
       - tests/v1/cudagraph
       - vllm/config/compilation.py
       - vllm/compilation
-      - vllm/platforms/interface.py
       - vllm/platforms/rocm.py
-      - vllm/v1/worker/gpu/shutdown.py

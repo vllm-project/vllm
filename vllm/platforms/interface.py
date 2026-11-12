@@ -1381,7 +1381,11 @@ class Platform:
 
     @classmethod
     def reset_global_graph_pool(cls) -> None:
-        """Clear the cached handle so the next lookup creates a new graph pool."""
+        """Make the next `get_global_graph_pool` call create a new pool.
+
+        Call this once all graphs in the pool are destroyed. Their outputs can
+        keep the old pool allocated, and capturing into it would fail.
+        """
         cls._global_graph_pool = None
 
     @classmethod
