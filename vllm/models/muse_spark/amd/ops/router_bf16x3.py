@@ -95,15 +95,18 @@ def _reduce_splits_kernel(
     tl.store(out_ptr + offs, acc, mask=mask)
 
 
-def router_bf16x3_gemm(x: torch.Tensor, planes: torch.Tensor) -> torch.Tensor:
-    """`x @ (planes[0] + planes[1] + planes[2]).T` in fp32."""
+def router_bf16x3_gemm(
+    x: torch.Tensor, planes: torch.Tensor, reduce_splits: bool = True
+) -> torch.Tensor:
+    """`x @ (planes[0] + planes[1] + planes[2]).T` in fp32. Without
+    `reduce_splits`, the `[splits, M, N]` split-K partials, for a consumer that
+    sums them itself."""
     assert x.dtype == torch.bfloat16 and x.is_contiguous()
     m, k = x.shape
     n = planes.shape[1]
     assert planes.shape == (3, n, k)
-    out = torch.empty((m, n), dtype=torch.float32, device=x.device)
     if m == 0:
-        return out
+        return torch.empty((m, n), dtype=torch.float32, device=x.device)
     block_m, block_n, block_k, splits, num_warps = _config(m)
     part = torch.empty((splits, m, n), dtype=torch.float32, device=x.device)
     _router_bf16x3_kernel[(n // block_n, splits, triton.cdiv(m, block_m))](
@@ -119,6 +122,9 @@ def router_bf16x3_gemm(x: torch.Tensor, planes: torch.Tensor) -> torch.Tensor:
         BLOCK_K=block_k,
         num_warps=num_warps,
     )
+    if not reduce_splits:
+        return part
+    out = torch.empty((m, n), dtype=torch.float32, device=x.device)
     block = 1024
     _reduce_splits_kernel[(triton.cdiv(m * n, block),)](
         part, out, m * n, SPLITS=splits, BLOCK=block, num_warps=4

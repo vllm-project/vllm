@@ -73,6 +73,7 @@ from vllm.transformers_utils.configs.muse_spark import (
     MuseSparkTextConfig,
 )
 
+from .decode_moe import MuseSparkDecodeMoE
 from .mono import MuseSparkMono, maybe_attach_mono
 from .muse_moe_runner import (
     MuseMoERunner,
@@ -335,6 +336,7 @@ class MuseSparkMoE(nn.Module):
             moe_config_cls=MuseSparkMoEConfig,
             reduce_results=not self.defer_reduce,
         )
+        self.decode_moe = MuseSparkDecodeMoE.create(self)
 
     def _load_router_weight(
         self, param: nn.Parameter, loaded_weight: torch.Tensor
@@ -365,7 +367,9 @@ class MuseSparkMoE(nn.Module):
             else:
                 self._router_planes.copy_(planes)
 
-    def _router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _router_logits(
+        self, hidden_states: torch.Tensor, reduce_splits: bool = True
+    ) -> torch.Tensor:
         planes = getattr(self, "_router_planes", None)
         if (
             planes is not None
@@ -373,7 +377,7 @@ class MuseSparkMoE(nn.Module):
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.is_contiguous()
         ):
-            return router_bf16x3_gemm(hidden_states, planes)
+            return router_bf16x3_gemm(hidden_states, planes, reduce_splits)
         router_logits, _ = self.router(hidden_states)
         return router_logits
 
@@ -414,6 +418,12 @@ class MuseSparkMoE(nn.Module):
         self, hidden_states: torch.Tensor, shard: TokenShard | None = None
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
+        if self.decode_moe is not None:
+            kernels = self.decode_moe.kernels(
+                self, num_tokens if shard is None else shard.num_tokens
+            )
+            if kernels is not None:
+                return self.decode_moe(self, hidden_states, kernels, shard)
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 

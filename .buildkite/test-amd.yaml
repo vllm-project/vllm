@@ -3072,6 +3072,9 @@ steps:
   - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
   - vllm/v1/attention/ops/dcp.py
   - tests/distributed/test_dcp_a2a.py
+  - tests/distributed/test_muse_spark_decode_moe.py
+  - tests/models/test_muse_spark_rocm_mono.py
+  - vllm/models/muse_spark/amd/
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
@@ -3086,6 +3089,7 @@ steps:
   - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
+  - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
 
 - label: ":amd: (MI355) Distributed AgRs All2All"
   timeout_in_minutes: 30
@@ -4412,6 +4416,7 @@ steps:
       kernels/test_kpool_decode_update_batched.py
       kernels/test_minimax_m3_amd_ops.py
       kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+      kernels/test_muse_spark_rocm_decode_moe.py
       kernels/test_muse_spark_router_bf16x3.py
       kernels/test_onednn.py
       kernels/test_relu2_fp8_quant.py
