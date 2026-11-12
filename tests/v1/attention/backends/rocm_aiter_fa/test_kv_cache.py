@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-cache write and read paths of ROCM_AITER_FA.
 
-``do_kv_cache_update`` must store exactly the (quantized) K/V at each slot for
-every layout and cache dtype, skip ``-1`` padding slots, and the attention
+`do_kv_cache_update` must store exactly the (quantized) K/V at each slot for
+every layout and cache dtype, skip `-1` padding slots, and the attention
 read paths must see the same values. The fused RoPE+cache hooks are covered by
 tests/compile/passes/test_rope_kvcache_fusion.py and
 test_rocm_aiter_qk_norm_rope_kvcache_fusion.py.
@@ -31,7 +31,7 @@ KV_DTYPES = ["auto", "bfloat16", "fp8", "fp8_e4m3"]
 
 
 def _read_back(case: FaCase, slots: torch.Tensor):
-    """K/V at ``slots``, dequantized, through the backend's own gather kernel
+    """K/V at `slots`, dequantized, through the backend's own gather kernel
     (the only reader that understands the shuffle layout)."""
     impl = case.layer.impl
     key_cache, value_cache = impl._split_kv_cache(case.kv_cache)
