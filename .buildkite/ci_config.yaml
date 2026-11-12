@@ -14,11 +14,20 @@ run_all_patterns:
   - "setup.py"
   - "cmake/"
   - ".buildkite/check-torch-abi.py"
-# csrc/ is decided by ci-selector on CUDA, from the kernel recordings. AMD is
-# not selected yet, so a csrc/ change still runs every AMD step (ROCm compiles
-# these sources through HIPify). Uses run_all_exclude_patterns below.
+# Run every AMD step (ci-selector does not pick AMD steps). csrc/ is also built for ROCm.
 amd_run_all_patterns:
   - "csrc/"
+  - "cmake/hipify.py"
+  - "docker/Dockerfile.rocm$"
+  - "docker/docker-bake-rocm.hcl"
+  - ".buildkite/scripts/rocm/build.sh"
+  - "requirements/rocm.txt"
+  - "requirements/test/rocm.txt"
+  - "tools/install_torchcodec_rocm.sh"
+  - "tools/vllm-rocm/therock_wheels.py"
+# Separate from run_all_exclude_patterns, which skips AMD files like csrc/rocm/.
+amd_run_all_exclude_patterns:
+  - "csrc/cpu/"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"
