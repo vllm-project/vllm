@@ -12,6 +12,9 @@ from torch.nn import Module
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+    ModelOptBlockQuantLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineLinearMethod,
     OnlineLinearBase,
@@ -86,21 +89,28 @@ _LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
 }
 
 
+def _source_weight(lm_head: ParallelLMHead) -> torch.Tensor:
+    method = lm_head.quant_method
+    if getattr(lm_head, "bias", None) is None:
+        if isinstance(
+            method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+        ) and lm_head.weight.dtype in (torch.float16, torch.bfloat16):
+            return lm_head.weight.data
+        if (
+            isinstance(method, ModelOptBlockQuantLinearMethod)
+            and method.codec == "q8_0"
+        ):
+            return method.dequantize_weight(lm_head)
+    raise ValueError(
+        "Quantizing an lm_head copy needs an fp16/bf16 or Q8_0 lm_head without bias."
+    )
+
+
 def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead:
-    if (
-        not isinstance(
-            lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
-        )
-        or getattr(lm_head, "bias", None) is not None
-        or lm_head.weight.dtype not in (torch.float16, torch.bfloat16)
-    ):
-        raise ValueError(
-            "Quantizing an lm_head copy needs an unquantized fp16/bf16 lm_head "
-            "without bias."
-        )
+    weight = _source_weight(lm_head)
     # Online methods take their output dtype from the default dtype, which is
     # only the model dtype while the model itself is being built.
-    dtype = lm_head.weight.dtype
+    dtype = weight.dtype
     with set_default_torch_dtype(dtype):
         head = ParallelLMHead(
             lm_head.num_embeddings,
@@ -112,8 +122,8 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             disable_tp=lm_head.disable_tp,
             quant_method=_LM_HEAD_METHODS[quantization](),
         )
-    # Never loaded: a new param sharing the source storage, never a copy of it.
-    head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
+    # Never loaded. An unquantized source shares its storage, never a copy of it.
+    head.weight = torch.nn.Parameter(weight, requires_grad=False)
     head.quant_method.process_weights_after_loading(head)
     # The copy is never loaded. The online loader wrapper captures the layer,
     # so keeping it would leave each copy to the cycle collector.
@@ -134,10 +144,10 @@ def quantized_lm_head_copy(
     """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
 
     "fp8" uses per-row weight and per-token activation scales on the platform's
-    FP8 linear kernel; "nvfp4" is weight-only on the
-    platform's W4A16 kernel. `lm_head` is left
-    unchanged and no bf16 copy of its weight is made. The copy is derived state:
-    `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
+    FP8 linear kernel; "nvfp4" is weight-only on the platform's W4A16 kernel.
+    `lm_head` is left unchanged. No bf16 copy of an fp16/bf16 weight is made; a
+    Q8_0 weight is dequantized to bf16 only while quantizing. The copy is derived
+    state: `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
     """
     head = _quantize_copy(lm_head, quantization)
     # Keep it out of layerwise reload, which would re-run

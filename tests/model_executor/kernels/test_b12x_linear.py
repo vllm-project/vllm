@@ -1035,6 +1035,32 @@ def test_b12x_block_quant_dense_compiled_graph(
         graph.reset()
 
 
+@pytest.mark.parametrize("n", [128, 136])
+@torch.inference_mode()
+def test_b12x_q8_dense_dequantize_weight(default_vllm_config, n):
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    from b12x.testing.q8_0_reference import dequantize_blocks
+
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+    )
+
+    method = ModelOptBlockQuantLinearMethod("q8_0")
+    raw = _block_weights(n, 256, "q8_0")
+    raw[..., :2] = (torch.rand(n, 8, 1) + 0.5).div(128).half().view(torch.uint8)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(raw.cuda(), requires_grad=False)
+    method.process_weights_after_loading(layer)
+    torch.testing.assert_close(
+        method.dequantize_weight(layer, chunk_rows=64),
+        dequantize_blocks(raw).bfloat16().cuda(),
+        rtol=0,
+        atol=0,
+    )
+
+
 @pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("profile_first", [False, True])
 @torch.inference_mode()
