@@ -16,6 +16,8 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
 )
 from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.gemma4_mm import (
+    _VIDEO_MAX_FRAMES,
+    _VIDEO_MAX_SOFT_TOKENS,
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
     Gemma4ProcessingInfo,
@@ -187,6 +189,42 @@ def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
     assert tokens is not None
     assert tokens["image"] == 280
     assert tokens["video"] == expected_video_tokens
+
+
+@pytest.mark.parametrize(
+    "mm_processor_kwargs", [None, {"max_soft_tokens": 70}, {"max_soft_tokens": 1120}]
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_dummy_image_reaches_image_budget(
+    model_id: str, mm_processor_kwargs: dict[str, object] | None
+):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"image": 1},
+    )
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["image"])
+
+    assert tokens is not None
+    assert num_embeds == tokens["image"]
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_dummy_video_frames_reach_frame_budget(model_id: str):
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    num_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
+
+    assert num_embeds == _VIDEO_MAX_FRAMES * _VIDEO_MAX_SOFT_TOKENS
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
