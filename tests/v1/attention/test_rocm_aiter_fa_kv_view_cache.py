@@ -83,7 +83,7 @@ def test_fp8_views_are_cached_next_to_raw_views(
     fp8 = kv_cache_dtype == "fp8"
 
     raw = impl._split_kv_cache(kv_cache)
-    typed = impl._split_kv_cache(kv_cache, fp8=True)
+    typed = impl._split_kv_cache(kv_cache, use_typed=True)
     for raw_view, typed_view in zip(raw, typed, strict=True):
         assert raw_view.dtype == storage_dtype
         assert typed_view.dtype == (
@@ -94,7 +94,7 @@ def test_fp8_views_are_cached_next_to_raw_views(
             raw_view.shape,
             raw_view.stride(),
         )
-    k, v = impl._split_kv_cache(kv_cache, fp8=True)
+    k, v = impl._split_kv_cache(kv_cache, use_typed=True)
     assert k is typed[0] and v is typed[1]
 
 
@@ -119,7 +119,7 @@ def test_new_tensor_or_storage_rebuilds_views(monkeypatch):
 def test_clear_layer_kv_caches_drops_view_cache(monkeypatch):
     impl = _make_impl(monkeypatch, kv_cache_dtype="fp8")
     kv_cache = _make_kv_cache(dtype=torch.uint8)
-    impl._split_kv_cache(kv_cache, fp8=True)
+    impl._split_kv_cache(kv_cache, use_typed=True)
     layer = SimpleNamespace(kv_cache=kv_cache, impl=impl)
     kv_cache_ref = weakref.ref(kv_cache)
     del kv_cache

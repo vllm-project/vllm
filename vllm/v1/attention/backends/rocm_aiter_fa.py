@@ -1270,7 +1270,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        key_cache, value_cache = self._split_kv_cache(kv_cache, fp8=True)
+        key_cache, value_cache = self._split_kv_cache(kv_cache, use_typed=True)
 
         # decode:extend:prefill
         query = query[:num_actual_tokens]
@@ -1622,7 +1622,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         return output
 
     def _split_kv_cache(
-        self, kv_cache: torch.Tensor, fp8: bool = False
+        self, kv_cache: torch.Tensor, use_typed: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cache = self._kv_view_cache
         if (
@@ -1630,7 +1630,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and cache[0] is kv_cache
             and cache[1] == kv_cache.data_ptr()
         ):
-            return cache[3] if fp8 else cache[2]
+            return cache[3] if use_typed else cache[2]
         if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
             # (B, 2, N, H*hs) -> one (B, N, H, hs) per side, which is what the
             # shuffle read/write kernels reinterpret in place. The heads are
@@ -1649,7 +1649,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             fp8_dtype = current_platform.fp8_dtype()
             typed = (key_cache.view(fp8_dtype), value_cache.view(fp8_dtype))
         self._kv_view_cache = (kv_cache, kv_cache.data_ptr(), raw, typed)
-        return typed if fp8 else raw
+        return typed if use_typed else raw
 
     def do_kv_cache_update(
         self,
@@ -1659,7 +1659,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = self._split_kv_cache(kv_cache, fp8=True)
+        key_cache, value_cache = self._split_kv_cache(kv_cache, use_typed=True)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
@@ -1762,7 +1762,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
     ):
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = self._split_kv_cache(kv_cache, fp8=True)
+        key_cache, value_cache = self._split_kv_cache(kv_cache, use_typed=True)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
