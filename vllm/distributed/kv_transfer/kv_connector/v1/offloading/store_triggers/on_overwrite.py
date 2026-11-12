@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
+    TransferJobStatus,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventsTracker,
@@ -140,6 +141,8 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
         self._overwrite_map = OverwriteMap()
         # req_id -> per group, the first chunk not recorded in the map yet.
         self._first_unrecorded_chunk_idxs: dict[ReqId, list[int]] = {}
+        # req_id -> the chunks of the scheduled load, added at its completion.
+        self._pending_loads: dict[ReqId, list[GpuChunk]] = {}
         # block_id -> the key that the new owner expects in the block, or None
         # for new data, for the blocks given out in this step. Rebuilt every
         # step, in on_request_blocks_allocated and on_blocks_allocated.
@@ -197,7 +200,26 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
         load_chunk_ranges: Sequence[tuple[int, int]],
         load_block_ids: Sequence[Sequence[int]],
     ) -> None:
-        """Skip the chunks that a load brings in."""
+        """Record the chunks a load brings in, to add when the load completes."""
+        # A load skips the computation of its chunks, so they come in the map
+        # when the load completes. A request has one load in flight, and the
+        # job completes before the next load of the request starts.
+        req = req_status.req
+        loaded_chunks: list[GpuChunk] = []
+        for config_idx, (start, end) in enumerate(load_chunk_ranges):
+            load_block_ids_of_group = load_block_ids[config_idx]
+            offload_keys = req_status.group_states[config_idx].offload_keys
+            for chunk_idx in range(start, end):
+                loaded_chunks.append(
+                    self._make_gpu_chunk(
+                        req,
+                        config_idx,
+                        chunk_idx,
+                        offload_keys[chunk_idx],
+                        load_block_ids_of_group,
+                    )
+                )
+        self._pending_loads[req.request_id] = loaded_chunks
         # A loaded chunk is not computed by this request. The request-level
         # policy stores the whole request anyway, so nothing is skipped there.
         if req_status.offloading_context.policy != OffloadPolicy.CHUNK_LEVEL:
@@ -222,20 +244,33 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
         return start_chunk_idxs[config_idx]
 
     @override
+    def on_load_complete(self, job_status: TransferJobStatus) -> None:
+        assert job_status.req_id is not None
+        loaded_chunks = self._pending_loads.pop(job_status.req_id, None)
+        # A failed load never wrote the blocks, so they hold no chunk.
+        if loaded_chunks and not job_status.failed:
+            self._overwrite_map.add(loaded_chunks)
+
+    @override
     def on_request_removed(self, req_id: ReqId) -> None:
         """Forget where the request recorded; its chunks stay in the map."""
         self._first_unrecorded_chunk_idxs.pop(req_id, None)
+        self._pending_loads.pop(req_id, None)
 
     @override
     def on_request_restarted(self, req_id: ReqId) -> None:
         """Record the request from chunk 0 again, as it recomputes them."""
+        # The blocks of a pending load are gone with the preemption.
         self._first_unrecorded_chunk_idxs.pop(req_id, None)
+        self._pending_loads.pop(req_id, None)
 
     @override
     def reset(self, req_states: Mapping[ReqId, RequestOffloadState]) -> None:
         """Drop the map, and record the active requests from chunk 0."""
-        # The tracked blocks belonged to the cache generation that was reset.
+        # The tracked blocks belonged to the cache generation that was reset,
+        # and no pending load will ever report.
         self._overwrite_map.clear()
+        self._pending_loads.clear()
         self._allocated_block_keys = {}
         self._first_unrecorded_chunk_idxs = {
             req_id: [0] * len(req_status.group_states)

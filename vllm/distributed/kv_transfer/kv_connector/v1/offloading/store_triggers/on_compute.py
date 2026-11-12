@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from itertools import chain
 
 from typing_extensions import override
@@ -53,6 +53,8 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         self,
         req_status: RequestOffloadState,
         num_cached_tokens: int,
+        load_chunk_ranges: Sequence[tuple[int, int]],
+        load_block_ids: Sequence[Sequence[int]],
     ) -> None:
         # Skip prefix-hit chunks for block-level policy; for
         # request-level, the next stored chunk stays at 0 so all
