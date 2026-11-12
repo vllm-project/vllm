@@ -7,12 +7,16 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use vllm_engine_core_client::mock_engine::MockEngineDataSockets;
+use vllm_engine_core_client::protocol::decode_msgpack;
 use vllm_engine_core_client::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use vllm_engine_core_client::protocol::utility::EngineCoreUtilityRequest;
-use vllm_engine_core_client::protocol::{decode_msgpack, encode_msgpack};
 use zeromq::{DealerSocket, PushSocket, SocketRecv as _, SocketSend as _, ZmqMessage};
 
 use crate::engine::{EngineInput, EngineOutput};
+
+/// Arrays of at least this many bytes go in auxiliary frames, as with Python's
+/// default `VLLM_MSGPACK_ZERO_COPY_THRESHOLD`.
+const AUX_FRAME_THRESHOLD: usize = 256;
 
 /// Send one engine output batch to the client over the appropriate push socket.
 async fn send_engine_outputs_to_client(
@@ -22,7 +26,8 @@ async fn send_engine_outputs_to_client(
         outputs,
     }: EngineOutput,
 ) -> Result<()> {
-    let message = ZmqMessage::from(encode_msgpack(&outputs)?);
+    let message = ZmqMessage::try_from(outputs.into_frames(AUX_FRAME_THRESHOLD)?)
+        .map_err(|err| anyhow!("failed to build engine output message: {err}"))?;
     push_sockets[client_index as usize].send(message).await?;
     Ok(())
 }
