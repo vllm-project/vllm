@@ -87,7 +87,7 @@ def test_sparse_attention_selects_through_tied_scores(
 def test_kda_layer_matches_vllm_ops(
     monkeypatch: pytest.MonkeyPatch, tp: int, dim_first: bool, tpr: int
 ):
-    """``tpr`` > 1: an MTP verify step, ``tpr`` tokens a request."""
+    """`tpr` > 1: an MTP verify step, `tpr` tokens a request."""
     _ready(tp)
     multi_process_parallel(
         monkeypatch, tp, 1, _ffn._worker(_kda._check, dim_first, tpr)

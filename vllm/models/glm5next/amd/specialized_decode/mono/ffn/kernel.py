@@ -1361,8 +1361,8 @@ def build_flash_ffn_kernel(
                 )
 
             def norm_out(h, s, e0, ov, gv):
-                """Gated RMSNorm of row ``s``'s head ``h`` outputs, two a lane of
-                one wave (values ``e0``, ``e0 + 1``) -> o_in."""
+                """Gated RMSNorm of row `s`'s head `h` outputs, two a lane of
+                one wave (values `e0`, `e0 + 1`) -> o_in."""
                 (o0, o1), (g0, g1) = ov, gv
                 rstd = _rsq(wave_sum(o0 * o0 + o1 * o1) * (1.0 / KD) + O_NORM_EPS)
                 y0 = o0 * rstd * ld_f32(r_won, e0) * sigmoid(g0)
