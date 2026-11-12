@@ -7,7 +7,7 @@ import time
 import numpy as np
 import torch
 
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     cpu_attention_with_kv_cache,
     cpu_attn_get_scheduler_metadata,
     cpu_attn_reshape_and_cache,
