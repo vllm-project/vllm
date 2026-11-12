@@ -5,15 +5,10 @@ from collections.abc import Iterable
 import numpy as np
 import torch
 
-from vllm.config import LoadConfig, replace
-from vllm.distributed import get_pp_group
-from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.worker.gpu.async_utils import async_copy_to_np
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np, new_d2h_stream
 from vllm.v1.worker.gpu.input_batch import InputBatch
-
-logger = init_logger(__name__)
 
 
 def max_num_tokens_after_draft_slots(
@@ -42,23 +37,10 @@ def get_drafter_hidden_states(
     return target_hidden_states[: hidden_states.shape[0]]
 
 
-def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
-    """Avoid collectives that include PP ranks without a draft model."""
-    if get_pp_group().world_size > 1 and load_config.load_format == "fastsafetensors":
-        logger.warning_once(
-            "fastsafetensors cannot load a draft model instantiated on only "
-            "one pipeline stage; falling back to the standard safetensors "
-            "loader for the draft model. The target model still uses "
-            "fastsafetensors."
-        )
-        return replace(load_config, load_format="auto")
-    return load_config
-
-
 class DraftTokensHandler:
     def __init__(self, device: torch.device | None = None):
         self.device = device
-        self.copy_stream = torch.cuda.Stream(device)
+        self.copy_stream = new_d2h_stream(device)
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._copy_pending = False
@@ -68,15 +50,15 @@ class DraftTokensHandler:
         # when the scheduler doesn't need the token ids.
         self._draft_tokens_by_req: dict[str, np.ndarray | int] = {}
         # Requests whose drafts the scheduler will fetch for the latest step's
-        # deferred grammar bitmask; None means all requests.
-        self._deferred_req_ids: Iterable[str] | None = None
+        # structured-output grammar bitmask; None means all requests.
+        self._spec_decode_req_ids: Iterable[str] | None = None
 
     def begin_step(self, scheduler_output: SchedulerOutput) -> None:
         # get_draft_tokens is only called for the most recently executed
         # scheduler output.
-        self._deferred_req_ids = (
+        self._spec_decode_req_ids = (
             scheduler_output.scheduled_spec_decode_tokens.keys()
-            if scheduler_output.pending_structured_output_tokens
+            if scheduler_output.has_structured_output_spec_decode
             else None
         )
 
@@ -111,15 +93,15 @@ class DraftTokensHandler:
         self._draft_tokens_by_req.pop(req_id, None)
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
-        """Return the latest drafts needed for the current step's deferred
-        grammar bitmask, or for all live requests if sampling isn't deferred.
-        Requests without retained drafts are omitted."""
+        """Return the latest drafts needed for the current step's grammar bitmask.
+        Requests without retained drafts are omitted.
+        """
         if self._copy_pending:
             self.copy_event.synchronize()
             self._copy_pending = False
 
         drafts_by_req = self._draft_tokens_by_req
-        req_ids = self._deferred_req_ids
+        req_ids = self._spec_decode_req_ids
         if req_ids is None:
             out_req_ids = list(drafts_by_req)
         else:

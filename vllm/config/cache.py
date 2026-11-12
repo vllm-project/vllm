@@ -64,6 +64,7 @@ CacheDType = Literal[
     "fp8_per_token_head",
     "nvfp4",
     "nvfp4_4over6",
+    "mxfp4_mla",
 ]
 
 # Mutable mirror of the CacheDType Literal. Custom dtypes registered by
@@ -224,7 +225,14 @@ class CacheConfig:
     utilization.
 
     If unspecified, 1.0 with the extensible KV cache (sized from measured
-    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`."""
+    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`.
+
+    With the extensible KV cache (the default on CUDA and ROCm), leave this
+    unset unless something needs memory that vLLM does not measure: other
+    processes sharing the GPU (including ones that allocate after vLLM has
+    started), unified-memory devices whose memory the CPU also uses, weight
+    transfer buffers for weight updates, or KV connectors that allocate their
+    own device buffers. A lower value takes memory away from the KV cache."""
 
     @property
     def device_memory_utilization(self) -> float | None:
@@ -319,14 +327,15 @@ class CacheConfig:
     EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
     block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM logical history length B for Mamba2. Triton uses B physical
-    rows and FlashInfer uses B+T, where T is the target verification length.
-    Kimi-K3 speculative decode does not use B. Default 16."""
+    """ReplaySSM logical history length B for Mamba2. Triton standard decode
+    uses B physical rows; FlashInfer and Triton speculative decoding use B+T,
+    where T is the target verification length. Kimi-K3 speculative decode does
+    not use B. Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
     Triton and FlashInfer support the 'none' and 'align' Mamba cache modes.
-    Mamba2 speculative decoding requires FlashInfer. Pipeline parallelism is not
+    Mamba2 speculative decoding supports both backends. Pipeline parallelism is not
     supported. Flushes are most efficient when mamba_block_size is a
     multiple of replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
@@ -390,9 +399,15 @@ class CacheConfig:
     physical pages after warmup, so the cache is sized from the memory actually
     free after CUDA graph capture rather than from a profiling estimate. If
     unspecified, enabled on CUDA and ROCm unless kv_cache_memory_bytes is set,
-    or NIXL on device memory has no IMEX channel;
-    falls back to estimate-based sizing where the driver lacks VMM support.
-    Explicitly requesting it where unsupported is an error."""
+    or NIXL on device memory has no IMEX channel; falls back to estimate-based
+    sizing where the driver lacks VMM support. Explicitly requesting it where
+    unsupported is an error. On unpartitioned discrete ROCm GPUs, the sizing
+    adds back free memory that HIP hides by counting each allocation as at
+    least 2 MiB, so gpu_memory_utilization bounds exact device memory use
+    there. When a KV connector registers the KV cache for RDMA or exports it to
+    another process, each segment is backed by a single physical allocation;
+    connectors declare this by overriding
+    `KVConnectorBase_V1.kv_cache_access`."""
 
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
