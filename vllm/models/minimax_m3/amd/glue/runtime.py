@@ -176,7 +176,16 @@ class M3Glue:
     def begin_forward(
         self, positions: torch.Tensor, intermediate_tensors
     ) -> StepPlan | None:
+        setup_now = not self._ready
         self._maybe_setup()
+        if setup_now and self._ready:
+            # The setup forward is vLLM's profile run (its largest step): leave
+            # it to the stock path, so the MoE workspace is sized (and later
+            # locked) for the largest step the stock path can still see, e.g.
+            # eager steps below SP's minimum. The glue's own buffers were just
+            # allocated, so the profile counts them too.
+            self._tls.plan = None
+            return None
         plan = self._decide(positions.shape[-1], intermediate_tensors)
         self._tls.plan = plan
         return plan
