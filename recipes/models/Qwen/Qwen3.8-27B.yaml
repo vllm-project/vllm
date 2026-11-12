@@ -28,11 +28,6 @@ meta:
     rtx_5090_2x: verified
     rtx_pro_6000: verified
     dgx_spark_gb10: verified
-    # Huawei Ascend NPU, verified 2026-08-18 on vLLM Ascend 0.23.0 (image
-    # quay.io/ascend/vllm-ascend:qwen3.8-a5). The `ascend_w8a8` variant booted on a
-    # single 950PR at TP1 with the in-checkpoint MTP head and FULL_DECODE_ONLY
-    # ACLGraph and answered a long-form prompt correctly.
-    ascend_950pr: verified
     arc_pro_b60: verified
     arc_pro_b70: verified
 
@@ -189,14 +184,7 @@ variants:
     # (quantization_config.weight_block_size [128, 128]).
     vram_minimum_gb: 38
     description: "Official block-scaled FP8 checkpoint — 28.7 GiB: 1 GPU."
-    # ascend_950pr added 2026-08-26: vllm-project/vllm-ascend#14852 dispatches
-    # `quant_method: fp8` + `weight_block_size` in AscendFp8Config.get_quant_method and
-    # re-quantizes the block-scaled tiles to MXFP8 at load time on 950. No
-    # `--quantization ascend` — the scheme is picked up from the checkpoint config.
-    supported_hardware: [h100, h200, b200, b300, gb200, gb300, mi300x, mi325x, mi355x, rtx_5090, rtx_5090_2x, ascend_950pr]
-    hardware_overrides:
-      ascend_950pr:
-        docker_image: "quay.io/ascend/vllm-ascend:nightly-main-a5"
+    supported_hardware: [h100, h200, b200, b300, gb200, gb300, mi300x, mi325x, mi355x, rtx_5090, rtx_5090_2x]
   nvfp4:
     model_id: "Inferact/Qwen3.8-27B-NVFP4"
     precision: nvfp4
@@ -275,40 +263,6 @@ variants:
     vram_minimum_gb: 24
     supported_hardware: [h100, h200, b200, b300, gb200, gb300, rtx_5090, rtx_5090_2x]
     description: "Red Hat AI compressed-tensors MXFP4 build — 19.8 GB: 1 GPU. True W4A4 on Blackwell (SM100+); W4A16 via Marlin on Hopper and elsewhere."
-
-  ascend_w8a8:
-    model_id: "Eco-Tech/Qwen3.8-27B-w8a8"
-    precision: int8
-    label: "W8A8 (Ascend)"
-    # 32,128,768,176 B across 10 shards = 32.1 GB. ModelSlim keeps the vision tower in BF16
-    # and stores FP32 per-channel scales, so this is not a uniform 8-bit build.
-    vram_minimum_gb: 39
-    supported_hardware: [ascend_950pr]
-    default_modes:
-      spec_decoding: qwen3_5_mtp
-    # `--quantization ascend` is what selects the ModelSlim scheme; without it the loader
-    # treats the checkpoint as float. ACLGraph replays decode only. CPU binding cuts
-    # cross-core scheduling overhead on the Kunpeng host.
-    extra_args:
-      - "--quantization"
-      - "ascend"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-      - "--max-num-batched-tokens"
-      - "16384"
-    extra_env:
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      HCCL_BUFFSIZE: "512"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-    # `computeDockerMeta` has no Huawei brand, so a bare string `docker_image` would only pin
-    # NVIDIA. The exact variant+hardware override lands regardless of brand.
-    hardware_overrides:
-      ascend_950pr:
-        docker_image: "quay.io/ascend/vllm-ascend:qwen3.8-a5"
-    description: "ModelSlim INT8 W8A8 for Ascend NPU — 32.1 GB: 1 NPU. Requires --quantization ascend."
 
 # Dense model: no routed experts, so none of the expert-parallel or PD strategies apply.
 #
@@ -457,74 +411,7 @@ guide: |
   official vLLM XPU image `vllm/vllm-openai-xpu:latest`. `--enforce-eager` is required on this
   backend. Select Arc Pro B60/B70 in the hardware picker above for the exact command.
 
-  ### Huawei Ascend 950PR-w8a8 (vLLM Ascend)
-
-  Verified on a single 950PR, TP1, vLLM Ascend 0.23.0 from the
-  `quay.io/ascend/vllm-ascend:qwen3.8-a5` image.
-
-  The ModelSlim INT8 build is the checkpoint to use here. `--quantization ascend` is what
-  selects the ModelSlim scheme — without it the loader treats the weights as float. The MTP
-  head inside the checkpoint works and is spelled `qwen3_5_mtp` on this backend.
-
-  Both the weight and the image come from ModelScope, not HuggingFace: set
-  `VLLM_USE_MODELSCOPE=True` or pass a local path.
-
-  ```bash
-  export VLLM_USE_MODELSCOPE=True
-  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-  export HCCL_BUFFSIZE=512
-  export OMP_PROC_BIND=false
-  export OMP_NUM_THREADS=1
-
-  vllm serve Eco-Tech/Qwen3.8-27B-w8a8 \
-    --tensor-parallel-size 1 \
-    --quantization ascend \
-    --max-num-batched-tokens 16384 \
-    --enable-prefix-caching \
-    --reasoning-parser qwen3 \
-    --tool-call-parser qwen3_coder \
-    --mm-encoder-tp-mode data \
-    --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true}'
-  ```
-
-  `--reasoning-parser qwen3` is not optional in practice: the chat template opens every
-  assistant turn with `<think>`, so without it the entire reasoning block lands in
-  `message.content` and a 2048-token budget can be spent before the answer starts.
-  
-  Measured single-stream decode: 64 tok/s (2048-token completion, one request, MTP on).
-  Read MTP acceptance from `vllm:spec_decode_num_{accepted,draft}_tokens_total` before
-  tuning `num_speculative_tokens` — throughput alone cannot tell a working drafter from
-  one that loaded and was ignored.
-  
-  ### Huawei Ascend 950PR-Native block-scaled FP8 (vLLM Ascend)
-
-  Verified on a single 950PR, TP1, vLLM Ascend 0.23.0 from the
-  `quay.io/ascend/vllm-ascend:nightly-main-a5` image.
-
-  The official `Qwen/Qwen3.8-27B-FP8` checkpoint serves directly on a 950PR — no offline
-  re-quantization and **no `--quantization ascend`**. vLLM Ascend reads `quant_method: fp8`
-  and `weight_block_size` straight from the checkpoint, expands the `weight_scale_inv`
-  tiles at load time and re-quantizes to MXFP8 on 950.
-
-  Requires a vLLM Ascend build that includes
-  [vllm-ascend#14852](https://github.com/vllm-project/vllm-ascend/pull/14852) (merged
-  2026-08-26); no tagged release carries it yet. The W8A8 path above is unaffected.
-
-  ```bash
-  vllm serve Qwen/Qwen3.8-27B-FP8 \
-    --tensor-parallel-size 1 \
-    --max-model-len 128000 \
-    --max-num-seqs 16 \
-    --gpu-memory-utilization 0.85 \
-    --trust-remote-code \
-    --enable-prefix-caching \
-    --reasoning-parser qwen3 \
-    --tool-call-parser qwen3_coder \
-    --mm-encoder-tp-mode data \
-    --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
-  ```
+  <!-- overlay:vllm-ascend:ascend -->
   
   ### DFlash2 (opt-in)
   

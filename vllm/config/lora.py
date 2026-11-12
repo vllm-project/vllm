@@ -8,10 +8,10 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 
 from vllm import envs
-from vllm.config.utils import config
+from vllm.config.kernel import MEGA_MOE_BACKENDS, KernelConfig
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -87,10 +87,9 @@ class LoRAConfig:
     """Maximum output size for LoRA classification heads. Defaults to the
     base classification head size."""
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -98,22 +97,17 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.enable_tower_connector_lora)
-        factors.append(self.enable_mixed_moe_lora_format)
-        factors.append(self.enable_moe_shared_loras)
-        factors.append(self.max_lora_cls_labels)
-        # target_modules affects which modules get LoRA applied
-        factors.append(
-            tuple(sorted(self.target_modules)) if self.target_modules else None
-        )
-
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            # Runtime/placement only; does not affect compiled graph
+            "max_cpu_loras",
+            "default_mm_loras",
+            "specialize_active_lora",
+        }
+        factors = get_compile_factors(self, ignored_factors)
+        if self.target_modules is not None:
+            # Order is not semantic
+            factors["target_modules"] = sorted(self.target_modules)
+        return factors
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
@@ -133,6 +127,15 @@ class LoRAConfig:
             )
             envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
         return self
+
+    def verify_with_kernel_config(self, kernel_config: KernelConfig) -> None:
+        """Reject MegaMoE backends, which do not support LoRA."""
+        moe_backend = kernel_config.moe_backend
+        if moe_backend in MEGA_MOE_BACKENDS or moe_backend == "aiter_mega_moe":
+            raise ValueError(
+                f"LoRA is not supported with moe_backend={moe_backend!r}. "
+                "Disable LoRA or select a MoE backend that supports LoRA."
+            )
 
     def verify_with_model_config(self, model_config: ModelConfig):
         # Speculative decoding drafters don't run LoRA adapters.

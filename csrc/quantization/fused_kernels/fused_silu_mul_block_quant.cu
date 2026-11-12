@@ -4,6 +4,7 @@
 #include "../../torch_utils.h"
 
 #include "../../dispatch_utils.h"
+#include "../../core/cuda_compat.h"
 #include "quant_conversions.cuh"
 
 namespace vllm {
@@ -102,6 +103,84 @@ __global__ void silu_and_mul_per_block_quant_kernel(
       vllm::ScaledQuant<scalar_out_t, false>::quant_fn(result, group_scale);
 }
 
+// Vectorized variant: each group is handled by group_size / 8 lanes of a
+// warp, each loading 8 contiguous 16-bit elements of gate and up (16B loads)
+// and storing 8 quantized bytes. The group max is reduced with warp shuffles,
+// so there is no shared memory or __syncthreads. Requires 16B-aligned input
+// and 8B-aligned output rows. Same arithmetic as the kernel above.
+template <typename scalar_t, typename scalar_out_t, bool is_scale_transposed,
+          int32_t group_size>
+__global__ void silu_and_mul_per_block_quant_vec_kernel(
+    scalar_out_t* __restrict__ out, float* __restrict__ scales,
+    scalar_t const* __restrict__ input, float const* scale_ub,
+    int32_t const hidden_size, int32_t const num_groups,
+    int64_t const num_tokens) {
+  constexpr int kVec = 16 / sizeof(scalar_t);
+  constexpr int kLanes = group_size / kVec;
+  static_assert(kVec == 8, "expects 16-bit input");
+  static_assert(kLanes > 0 && kLanes <= 32 && (32 % kLanes) == 0);
+
+  int64_t const gid =
+      (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) / kLanes;
+  int const lane = threadIdx.x % kLanes;
+  bool const valid = gid < num_tokens * num_groups;
+  int64_t const token_idx = valid ? gid / num_groups : 0;
+  int const group_idx = valid ? static_cast<int>(gid % num_groups) : 0;
+
+  int64_t const in_off = token_idx * (2 * static_cast<int64_t>(hidden_size)) +
+                         group_idx * group_size + lane * kVec;
+  alignas(16) scalar_t g[kVec];
+  alignas(16) scalar_t u[kVec];
+  if (valid) {
+    *reinterpret_cast<uint4*>(g) =
+        *reinterpret_cast<uint4 const*>(input + in_off);
+    *reinterpret_cast<uint4*>(u) =
+        *reinterpret_cast<uint4 const*>(input + in_off + hidden_size);
+  } else {
+    *reinterpret_cast<uint4*>(g) = make_uint4(0, 0, 0, 0);
+    *reinterpret_cast<uint4*>(u) = make_uint4(0, 0, 0, 0);
+  }
+
+  float r[kVec];
+  float local_max = 0.f;
+#pragma unroll
+  for (int i = 0; i < kVec; ++i) {
+    float const gate = static_cast<float>(g[i]);
+    float const sigmoid_gate = 1.0f / (1.0f + expf(-gate));
+    r[i] = gate * sigmoid_gate * static_cast<float>(u[i]);
+    local_max = fmaxf(local_max, fabsf(r[i]));
+  }
+#pragma unroll
+  for (int off = kLanes / 2; off > 0; off >>= 1) {
+    local_max =
+        fmaxf(local_max, VLLM_SHFL_XOR_SYNC_WIDTH(local_max, off, kLanes));
+  }
+
+  float group_scale = local_max / quant_type_max_v<scalar_out_t>;
+  if (scale_ub != nullptr) {
+    group_scale = fminf(group_scale, *scale_ub);
+  }
+  group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+  if (!valid) {
+    return;
+  }
+
+  alignas(8) scalar_out_t q[kVec];
+#pragma unroll
+  for (int i = 0; i < kVec; ++i) {
+    q[i] = vllm::ScaledQuant<scalar_out_t, false>::quant_fn(r[i], group_scale);
+  }
+  *reinterpret_cast<uint2*>(out + token_idx * hidden_size +
+                            group_idx * group_size + lane * kVec) =
+      *reinterpret_cast<uint2 const*>(q);
+  if (lane == 0) {
+    float* scale_ptr = is_scale_transposed
+                           ? scales + group_idx * num_tokens + token_idx
+                           : scales + token_idx * num_groups + group_idx;
+    *scale_ptr = group_scale;
+  }
+}
+
 }  // namespace vllm
 
 void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
@@ -144,6 +223,13 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
 
   dim3 grid(num_tokens, num_groups);
   dim3 block(group_size);
+  // Below ~3k groups the one-block-per-group kernel has lower latency.
+  bool const use_vec =
+      static_cast<int64_t>(num_tokens) * num_groups >= 3072 &&
+      input.element_size() == 2 &&
+      reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(out.const_data_ptr()) % 8 == 0;
+  constexpr int kVecBlock = 256;
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "silu_and_mul_per_block_quant", [&] {
@@ -156,6 +242,27 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
               VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
                 VLLM_STABLE_DISPATCH_BOOL(
                     is_scale_transposed, transpose_scale, [&] {
+                      if constexpr (sizeof(scalar_in_t) == 2) {
+                        if (use_vec) {
+                          constexpr int kLanes = gs / 8;
+                          int64_t const total =
+                              static_cast<int64_t>(num_tokens) * num_groups *
+                              kLanes;
+                          dim3 vgrid(static_cast<unsigned>(
+                              (total + kVecBlock - 1) / kVecBlock));
+                          vllm::silu_and_mul_per_block_quant_vec_kernel<
+                              scalar_in_t, scalar_out_t, transpose_scale, gs>
+                              <<<vgrid, kVecBlock, 0, stream>>>(
+                                  out.mutable_data_ptr<scalar_out_t>(),
+                                  scales.mutable_data_ptr<float>(),
+                                  input.const_data_ptr<scalar_in_t>(),
+                                  scale_ub.has_value()
+                                      ? scale_ub->const_data_ptr<float>()
+                                      : nullptr,
+                                  hidden_size, num_groups, num_tokens);
+                          return;
+                        }
+                      }
                       vllm::silu_and_mul_per_block_quant_kernel<
                           scalar_in_t, scalar_out_t, transpose_scale, gs>
                           <<<grid, block, 0, stream>>>(
