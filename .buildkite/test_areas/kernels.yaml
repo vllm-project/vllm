@@ -1205,6 +1205,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/kernels/moe/test_mori_moe.py
+      - tests/kernels/moe/test_mori_mxfp8_dispatch.py
       - tests/kernels/moe/utils.py
       - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
       - tests/kernels/utils.py
@@ -1213,6 +1214,7 @@ steps:
       - vllm/utils/torch_utils.py
       - vllm/model_executor/layers/fused_moe/
       - vllm/model_executor/layers/quantization/
+      - vllm/models/deepseek_v41/quant_config.py
       - vllm/distributed/
       - vllm/config/
       - vllm/forward_context.py
@@ -1220,11 +1222,13 @@ steps:
       - vllm/platforms/
       - vllm/_aiter_ops.py
       - requirements/test/rocm.txt
-      # Same-node MoRI/AITER BF16 and per-token/channel FP8. TODO: the
+      # Same-node MoRI/AITER BF16 and per-token/channel FP8, plus the MXFP8
+      # dispatch selection for AITER's gfx950-only MXFP4 experts. TODO: the
       # DeepEP v2 FlashInfer backend matrix has no direct AMD implementation.
       commands:
       - amd-smi
       - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 pytest -v -s kernels/moe/test_mori_moe.py
+      - pytest -v -s kernels/moe/test_mori_mxfp8_dispatch.py
 
 - label: ":amd: (MI355 DPX) Native Quantization Kernels"
   key: amd-native-quantization-kernels-mi355
