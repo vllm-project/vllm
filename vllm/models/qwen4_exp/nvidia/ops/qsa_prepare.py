@@ -92,7 +92,7 @@ def _to_dst_dtype(x, dst, scale):
 
 @triton.jit
 def _store_rotated(dst, y, o1, o2, scale):
-    """Store a normalized head whose first ``2 * len(o1)`` dims are rotated."""
+    """Store a normalized head whose first `2 * len(o1)` dims are rotated."""
     HALF: tl.constexpr = o1.shape[0]
     dims = tl.arange(0, y.shape[0])
     rot = tl.arange(0, HALF)
