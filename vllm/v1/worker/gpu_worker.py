@@ -110,7 +110,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
     kv_cache_lent_for_weight_update,
@@ -176,6 +176,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -265,6 +266,8 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        # Chosen by VLLM_PP_TRANSPORT in load_model; None sends over NCCL.
+        self._pp_transport: PPTransport | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -609,6 +612,14 @@ class Worker(WorkerBase):
             logger.info(
                 "Updated engine memory budget after disk fallback: %s GiB",
                 format_gib(self.requested_memory),
+            )
+
+        if envs.VLLM_PP_TRANSPORT != "nccl" and self._pp_transport is None:
+            # After init_device, so memory profiling counts its buffers.
+            from vllm.distributed.pp_transport import create_pp_transport
+
+            self._pp_transport = create_pp_transport(
+                self.vllm_config, self.model_runner.intermediate_tensors
             )
 
         if has_ec_transfer():
@@ -1010,6 +1021,10 @@ class Worker(WorkerBase):
         """Commit the final size of an extensible KV cache."""
         extend_kv_cache(self.model_runner, self._kv_cache_config, num_blocks)
         self.cache_config.num_gpu_blocks = num_blocks
+        if getattr(self.model_runner, "adaptive_verification", None) is not None:
+            # Capture profiled step costs with only a block or two committed,
+            # so their KV reads hit L2; profile again against the final cache.
+            self.model_runner.profile_adaptive_verification()
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -1088,6 +1103,12 @@ class Worker(WorkerBase):
                 stats.get("allocated_bytes.all.peak", 0)
                 - stats.get("allocated_bytes.all.current", 0),
             )
+            if not self.model_config.enforce_eager:
+                # Warmup's blocks hold garbage and capture addresses only the
+                # null block: release them so the graphs fit (encoder graphs
+                # can take GiBs). extend_kv_cache commits the size measured
+                # after capture.
+                kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -1168,11 +1189,9 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if get_pp_group().is_last_rank and not self.model_runner.is_pooling_model:
-            # Warm up the sampler and keep its max-batch buffers (e.g. the
-            # fp32 logits copy) cached after the empty_cache() in
-            # capture_model(), so later steps reuse them instead of reserving
-            # a new, larger block at each new batch size.
+        if not self.model_runner.is_pooling_model:
+            # Every PP rank runs an attention-bearing forward here, so lazily
+            # built attention state is ready before the sync check below.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
@@ -1182,7 +1201,13 @@ class Worker(WorkerBase):
             _, sample_hidden_states = self.model_runner._dummy_run(
                 num_tokens=max_num_reqs, skip_eplb=True
             )
-            self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
+            if get_pp_group().is_last_rank:
+                # Warm up the sampler and keep its max-batch buffers (e.g. the
+                # fp32 logits copy) cached after the empty_cache() in
+                # capture_model(), so later steps reuse them instead of
+                # reserving a new, larger block at each new batch size.
+                assert sample_hidden_states is not None
+                self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
             del sample_hidden_states
 
         # Reset the seed to ensure that the random state is not affected by
@@ -1282,6 +1307,7 @@ class Worker(WorkerBase):
             and self.model_runner.get_draft_model() is not None
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
+            and not speculative_config.prefill_context_kv_only
         )
 
     def _set_draft_weight_update_target(self) -> None:
@@ -1327,7 +1353,8 @@ class Worker(WorkerBase):
         if not self.profiler.should_annotate:
             return nullcontext()
 
-        iteration_details = compute_iteration_details(scheduler_output)
+        iteration_details = scheduler_output.iteration_details
+        assert iteration_details is not None
 
         if self.vllm_config.profiler_config.detailed_trace_annotation:
             # Compute roofline-model metrics per request, split by phase
@@ -1450,7 +1477,9 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and not get_pp_group().is_first_rank:
+        if forward_pass and self._pp_transport and not get_pp_group().is_first_rank:
+            intermediate_tensors = self._pp_transport.recv(get_pp_group())
+        elif forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
@@ -1481,14 +1510,17 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # Non-blocking send of the intermediate tensors. The metadata handle
-        # is reaped lazily by the GroupCoordinator; the device handles are
-        # waited at the top of the next step.
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-        )
-        self._pp_send_work = handles[1:]
+        if self._pp_transport is not None:
+            self._pp_transport.send(output.tensors, get_pp_group())
+        else:
+            # Non-blocking send of the intermediate tensors. The metadata handle
+            # is reaped lazily by the GroupCoordinator; the device handles are
+            # waited at the top of the next step.
+            handles = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            self._pp_send_work = handles[1:]
 
         if self.model_runner.is_pooling_model:
             return self.model_runner.pool()
@@ -1571,6 +1603,7 @@ class Worker(WorkerBase):
             self.model_runner.decode_query_len,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
+            num_active_loras=0,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -1669,6 +1702,16 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 f"{type(self.weight_transfer_engine).__name__} does not support "
                 "draft model weight updates."
+            )
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            is_draft
+            and speculative_config is not None
+            and speculative_config.prefill_context_kv_only
+        ):
+            raise RuntimeError(
+                "Draft model weight updates are not supported with "
+                "prefill_context_kv_only, which frees draft weights."
             )
 
         if self._weight_update_active:

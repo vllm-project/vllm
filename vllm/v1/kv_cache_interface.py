@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token blob,
+# so the page size is not derivable from head_size.
+DS_MLA_STATE_CONTENT_BYTES = {"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}
+
 _SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
 
 
@@ -1421,7 +1425,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     @property
     def uses_slot_mapping(self) -> bool:
-        return self.first_spec.uses_slot_mapping
+        return any(spec.uses_slot_mapping for spec in self.kv_cache_specs.values())
 
 
 def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:
