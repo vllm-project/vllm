@@ -19,7 +19,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import RunnerOption
-from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.scheduler import PrefillSchedulePolicy, SchedulerPolicy
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -86,6 +86,8 @@ def create_scheduler(
     per_request_spec_decode_metrics: str = "none",
     cache_aware_admission_window: int = 0,
     cache_aware_admission_threshold: float = 0.5,
+    prefill_schedule_policy: PrefillSchedulePolicy = "cadence",
+    prefill_max_wait_ms: float | None = None,
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
@@ -139,6 +141,8 @@ def create_scheduler(
         is_encoder_decoder=model_config.is_encoder_decoder,
         cache_aware_admission_window=cache_aware_admission_window,
         cache_aware_admission_threshold=cache_aware_admission_threshold,
+        prefill_schedule_policy=prefill_schedule_policy,
+        prefill_max_wait_ms=prefill_max_wait_ms,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
