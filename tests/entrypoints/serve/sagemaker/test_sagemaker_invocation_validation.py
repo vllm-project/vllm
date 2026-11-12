@@ -19,14 +19,31 @@ RERANK_BODY = {"query": "q", "documents": ["d"]}
 
 @pytest.fixture(scope="module")
 def generate_server():
-    args = ["--max-model-len", "2048", "--enforce-eager", "--max-num-seqs", "4"]
+    args = [
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "4",
+        # Both module servers are alive at once when the file runs in one process.
+        "--gpu-memory-utilization",
+        "0.4",
+    ]
     with RemoteOpenAIServer(MODEL_NAME_SMOLLM, args) as remote_server:
         yield remote_server
 
 
 @pytest.fixture(scope="module")
 def embedding_server():
-    args = ["--runner", "pooling", "--max-model-len", "128", "--enforce-eager"]
+    args = [
+        "--runner",
+        "pooling",
+        "--max-model-len",
+        "128",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.4",
+    ]
     with RemoteOpenAIServer(EMBEDDING_MODEL_NAME, args) as remote_server:
         yield remote_server
 
