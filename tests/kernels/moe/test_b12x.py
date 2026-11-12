@@ -444,6 +444,22 @@ def test_explicit_b12x_mxfp4_force_a16_uses_a16_contract(
     assert experts_cls is B12xExperts
 
 
+def test_explicit_b12x_mxfp4_force_a16_is_rejected_under_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forcing A16 drops a requested activation quantization, which
+    VLLM_STRICT_QUANT_SCHEME forbids like any other BF16 fallback."""
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(mxfp4_oracle.envs, "VLLM_B12X_MOE_FP4_FORCE_A16", True)
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", "1")
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
+    config.moe_backend = "b12x"
+
+    with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+        select_mxfp4_moe_backend(config, activation_key=kMxfp8Dynamic)
+
+
 @pytest.mark.parametrize(
     "force_a16,expected_backend",
     [

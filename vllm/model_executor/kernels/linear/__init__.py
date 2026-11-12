@@ -744,14 +744,17 @@ def choose_scaled_mm_linear_kernel(
         can_implement, failure_reason = is_supported_and_can_implement_kernel(
             force_kernel, config, compute_capability
         )
-        if can_implement and (
-            _check_activation_fallback(force_kernel, activation_quant_key) is None
-        ):
-            return force_kernel
+        if can_implement:
+            failure_reason = (
+                _check_activation_fallback(force_kernel, activation_quant_key) or ""
+            )
+            if not failure_reason:
+                return force_kernel
 
         logger.info_once(
-            "Tried to force %s, but the kernel couldn't be implemented",
+            "Tried to force %s, but the kernel couldn't be implemented: %s",
             force_kernel.__name__,
+            failure_reason,
             scope="global",
         )
 

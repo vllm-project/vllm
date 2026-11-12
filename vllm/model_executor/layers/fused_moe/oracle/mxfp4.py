@@ -659,7 +659,10 @@ def _get_requested_backends(
     backends = map_mxfp4_backend(runner_backend)
     if runner_backend == "b12x":
         if envs.VLLM_B12X_MOE_FP4_FORCE_A16:
-            return [Mxfp4MoeBackend.B12X_MXFP4_BF16]
+            backends = [Mxfp4MoeBackend.B12X_MXFP4_BF16]
+            if requested_activation_key is None:
+                return backends
+            return _filter_by_activation(backends, requested_activation_key)
         # W4A8 is the high-throughput b12x path and is preferred when the
         # model does not request an activation format. Keep this as backend
         # policy instead of exposing a separate backend name per precision.
@@ -751,7 +754,9 @@ def select_mxfp4_moe_backend(
             return backend, kernel_cls
         unsupported_reasons.extend((backend, reason) for _, reason in rejected)
 
-    if current_platform.is_xpu():
+    if current_platform.is_xpu() and not (
+        envs.VLLM_STRICT_QUANT_SCHEME and requested_activation_key is not None
+    ):
         return oracle.return_or_raise(
             Mxfp4MoeBackend.XPU,
             kernel_classes=_requested_kernel_cls(Mxfp4MoeBackend.XPU, config),
