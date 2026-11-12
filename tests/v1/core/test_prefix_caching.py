@@ -4530,7 +4530,8 @@ def test_sparse_retention_keeps_the_lookahead_replay_boundary(lookahead: int):
 
 
 @pytest.mark.parametrize("lookahead", [1, 2])
-def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
+@pytest.mark.parametrize("reused", [False, True])
+def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int, reused: bool):
     block_size = 2
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, num_blocks=20),
@@ -4550,6 +4551,12 @@ def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
         num_hash_lookahead_tokens=lookahead,
     )
     assert manager.allocate_slots(request, request.num_tokens) is not None
+
+    if reused:
+        manager.take_events()
+        manager.block_pool.emit_cached_block_events(
+            request, len(request.block_hashes), block_size, kv_cache_group_id=0
+        )
 
     (event,) = manager.take_events()
     assert isinstance(event, BlockStored)
