@@ -8,8 +8,8 @@ within the logits budget, and the candidate consumers' gathers rejoin a
 request's rows across the chunks that cut it.
 
 The kernels these plans drive are checked against a float32 reference in
-``tests/kernels/attention/test_rocm_paged_mxfp4_indexer.py``; the whole path
-runs in the engine in ``test_dispatch.py``.
+`tests/kernels/attention/test_rocm_paged_mxfp4_indexer.py`; the whole path
+runs in the engine in `test_dispatch.py`.
 """
 
 import random

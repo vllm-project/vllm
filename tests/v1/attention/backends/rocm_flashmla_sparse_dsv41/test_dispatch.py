@@ -1,38 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Every ``forward_mqa`` dispatch path of the DeepSeek V4.1 ROCm sparse MLA
+"""Every `forward_mqa` dispatch path of the DeepSeek V4.1 ROCm sparse MLA
 layer, inside the running engine, against a float32 reference.
 
-Dispatch table of ``DeepseekV41ROCMAiterMLAAttention.forward_mqa``
-(``vllm/models/deepseek_v41/amd/rocm.py``). "source" is a layer that is its
+Dispatch table of `DeepseekV41ROCMAiterMLAAttention.forward_mqa`
+(`vllm/models/deepseek_v41/amd/rocm.py`). "source" is a layer that is its
 own index source (layers 1, 3, 4 of the stand-in); a consumer (layer 2)
 reads the ragged top-k its source built this step; the SWA-only layer
 (layer 0) has no top-k.
 
 condition -> kernels:
 
-- ``attn_metadata is None`` (profiling) -> none; output zeroed, workspace
+- `attn_metadata is None` (profiling) -> none; output zeroed, workspace
   reserved at warmup.
-- decode, Triton, MXFP8 out (gfx950) -> ``rocm_sparse_attn_decode`` (its
+- decode, Triton, MXFP8 out (gfx950) -> `rocm_sparse_attn_decode` (its
   reduce epilogue does the inverse RoPE and the MXFP8 quant).
-- decode, Triton, bf16 out -> ``rocm_sparse_attn_decode`` +
-  ``rocm_inverse_rope_rows_``.
-- decode, aiter, MXFP8 out -> ``triton_sparse_mla_fwd`` alone: its store does
+- decode, Triton, bf16 out -> `rocm_sparse_attn_decode` +
+  `rocm_inverse_rope_rows_`.
+- decode, aiter, MXFP8 out -> `triton_sparse_mla_fwd` alone: its store does
   the inverse RoPE and the MXFP8 quant.
-- decode, aiter, bf16 out -> ``triton_sparse_mla_fwd`` (rotating store) +
-  ``rocm_inverse_rope_rows_`` over the rows left unrotated.
+- decode, aiter, bf16 out -> `triton_sparse_mla_fwd` (rotating store) +
+  `rocm_inverse_rope_rows_` over the rows left unrotated.
 - decode, compressed layer that is its own source -> also
-  ``compute_global_topk_ragged_indices_and_indptr`` (consumers reuse it).
-- prefill, Triton -> ``dequantize_and_gather_k_cache`` +
-  ``combine_topk_swa_indices`` + ``rocm_sparse_attn_prefill``, then
-  ``rocm_inverse_rope_mxfp8_rows`` (MXFP8) or ``rocm_inverse_rope_rows_``.
-- prefill, aiter -> ``triton_sparse_mla_fwd`` (rotating store), plus
-  ``rocm_inverse_rope_rows_`` for bf16 output.
+  `compute_global_topk_ragged_indices_and_indptr` (consumers reuse it).
+- prefill, Triton -> `dequantize_and_gather_k_cache` +
+  `combine_topk_swa_indices` + `rocm_sparse_attn_prefill`, then
+  `rocm_inverse_rope_mxfp8_rows` (MXFP8) or `rocm_inverse_rope_rows_`.
+- prefill, aiter -> `triton_sparse_mla_fwd` (rotating store), plus
+  `rocm_inverse_rope_rows_` for bf16 output.
 - prefill, aiter, compressed layer that is its own source -> also
-  ``build_prefill_topk_ragged_indices``.
+  `build_prefill_topk_ragged_indices`.
 - mixed -> the decode row + the prefill row.
 
-The aiter path is opt-in (``VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1``,
+The aiter path is opt-in (`VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`,
 gfx950 only). Every call is also checked for: finite output; the reference
 error (bf16 output 1%, MXFP8 output 3.5%: e4m3 rounding alone is ~2.7%); a
 negative control (the reference without the compressed rows must miss by

@@ -3,15 +3,15 @@
 """Driver for the ROCM_FLASHMLA_SPARSE_DSV41 suite.
 
 DeepSeek V4.1's sparse attention is a model-owned layer
-(``DeepseekV41ROCMAiterMLAAttention``), not a generic ``AttentionImpl``: its
-``forward_mqa`` reads the sliding-window (SWA) cache, the compressed cache of
+(`DeepseekV41ROCMAiterMLAAttention`), not a generic `AttentionImpl`: its
+`forward_mqa` reads the sliding-window (SWA) cache, the compressed cache of
 its KV source and the top-k indices its index source published. Those three
 only exist together inside a running model, so the dispatch and numerics
 suites run a five-layer stand-in of DeepSeek-V4.1-Flash through the real
-engine and check every ``forward_mqa`` call there, from a worker extension
-(``Dsv41AttnProbe``):
+engine and check every `forward_mqa` call there, from a worker extension
+(`Dsv41AttnProbe`):
 
-- which kernels the call ran (spied on the module attributes ``rocm.py``
+- which kernels the call ran (spied on the module attributes `rocm.py`
   resolves at call time), and
 - its output against a float32 reference computed from the logical K/V: the
   cache records decoded here in PyTorch (not by vLLM's gather kernel), the
@@ -19,7 +19,7 @@ engine and check every ``forward_mqa`` call there, from a worker extension
   the attention sink, and the inverse GPT-J RoPE.
 
 The five layers keep one of each attention kind of the real model
-(``compress_ratios`` 0/2/2/1/1 like layers 0, 2, 3, 20 and 24 of the
+(`compress_ratios` 0/2/2/1/1 like layers 0, 2, 3, 20 and 24 of the
 checkpoint): a sliding-window-only layer, a ratio-2 KV and index source, a
 ratio-2 consumer, a ratio-1 KV, index and candidate source, and a ratio-1
 re-indexer over those candidates.
@@ -95,7 +95,7 @@ DSV41_HEADS = [Dsv41Heads(1, 64, 8), Dsv41Heads(4, 16, 2), Dsv41Heads(8, 8, 1)]
 
 
 def hf_overrides(heads: Dsv41Heads = DSV41_HEADS[0], **extra) -> dict:
-    """A TP1 stand-in with ``heads``' per-rank query heads."""
+    """A TP1 stand-in with `heads`' per-rank query heads."""
     return {
         **TINY,
         "num_attention_heads": heads.num_heads,
@@ -112,14 +112,14 @@ def _apply_overrides(hf_config, overrides: dict):
 
 
 def callable_overrides(overrides: dict):
-    """``overrides`` as a callable ``hf_overrides``: unlike a dict, a callable
-    is composed onto the draft model's config too (``SpeculativeConfig``), so
+    """`overrides` as a callable `hf_overrides`: unlike a dict, a callable
+    is composed onto the draft model's config too (`SpeculativeConfig`), so
     a DSpark draft taps the stand-in's layers, not the checkpoint's 37-39."""
     return functools.partial(_apply_overrides, overrides=overrides)
 
 
 def engine_kwargs(**overrides) -> dict:
-    """``LLM`` arguments for the stand-in on CDNA4: the MXFP4 indexer cache
+    """`LLM` arguments for the stand-in on CDNA4: the MXFP4 indexer cache
     with 128-token blocks, as the checkpoint is served on MI350/MI355."""
     kwargs: dict[str, Any] = dict(
         load_format=LOAD_FORMAT,
@@ -200,7 +200,7 @@ def dequant_mxfp8_rows(data: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
 def rope_gptj(
     x: torch.Tensor, positions: torch.Tensor, cos_sin_cache: torch.Tensor
 ) -> torch.Tensor:
-    """Forward GPT-J RoPE of the last ``ROPE_DIM`` dims of [T, ..., 512]."""
+    """Forward GPT-J RoPE of the last `ROPE_DIM` dims of [T, ..., 512]."""
     cs = cos_sin_cache[positions.long()].float()
     shape = (cs.shape[0],) + (1,) * (x.dim() - 2) + (ROPE_DIM // 2,)
     cos = cs[:, : ROPE_DIM // 2].reshape(shape)
@@ -215,7 +215,7 @@ def rope_gptj(
 def inverse_rope_gptj(
     x: torch.Tensor, positions: torch.Tensor, cos_sin_cache: torch.Tensor
 ) -> torch.Tensor:
-    """Rotate the last ``ROPE_DIM`` dims of [T, H, 512] by -theta(position),
+    """Rotate the last `ROPE_DIM` dims of [T, H, 512] by -theta(position),
     GPT-J style (adjacent pairs); cos_sin_cache rows are cos | sin."""
     cs = cos_sin_cache[positions.long()].float()
     cos, sin = cs[:, None, : ROPE_DIM // 2], cs[:, None, ROPE_DIM // 2 :]
@@ -233,7 +233,7 @@ def inverse_rope_gptj(
 
 @dataclass
 class LayerInputs:
-    """What one ``forward_mqa`` call read, captured before it ran."""
+    """What one `forward_mqa` call read, captured before it ran."""
 
     layer_id: int
     compress_ratio: int
@@ -267,7 +267,7 @@ def reference_attention(
     Each valid token at position p attends to the SWA rows at positions
     max(p - window + 1, replay_start) .. p and to the compressed rows its
     top-k names, plus one sink column per head. The latent is both K and V.
-    ``drop_compressed`` is the negative control: a reference that forgets
+    `drop_compressed` is the negative control: a reference that forgets
     the compressed rows must not match a layer that has them.
     """
     q = inp.q.float()
@@ -383,9 +383,9 @@ def _phase(swa_md) -> str:
 
 
 class Dsv41AttnProbe:
-    """Worker extension (``worker_extension_cls``) that checks every
-    ``forward_mqa`` of the stand-in. Install with ``probe_install``, read
-    the aggregate with ``probe_report``."""
+    """Worker extension (`worker_extension_cls`) that checks every
+    `forward_mqa` of the stand-in. Install with `probe_install`, read
+    the aggregate with `probe_report`."""
 
     def _attn_layers(self) -> dict[int, Any]:
         rocm = importlib.import_module(ROCM_MODULE)
@@ -414,8 +414,8 @@ class Dsv41AttnProbe:
     ) -> dict:
         """Wrap the kernels and every layer's forward_mqa.
 
-        ``check`` compares each call (up to ``max_checked_calls`` a layer)
-        with the reference; ``bf16_rerun`` also runs the call again into a
+        `check` compares each call (up to `max_checked_calls` a layer)
+        with the reference; `bf16_rerun` also runs the call again into a
         plain bf16 output, the buffer non-gfx950 GPUs and other callers use.
         Returns each layer's static configuration.
         """
@@ -497,7 +497,7 @@ class Dsv41AttnProbe:
 
     def _wrap_kv_insert(self, layer, original):
         """D1/D4: the fused q-RoPE + KV RoPE/quant/insert against RoPE in
-        PyTorch, with the written SWA rows decoded by ``decode_v4_records``."""
+        PyTorch, with the written SWA rows decoded by `decode_v4_records`."""
         from vllm.platforms import current_platform
 
         def insert(q, kv, positions, attn_metadata):
@@ -611,8 +611,8 @@ class Dsv41AttnProbe:
         return forward_mqa
 
     def probe_profile_call(self, num_tokens: int = 16) -> dict:
-        """Call every layer's ``forward_mqa`` the way the profiling run does
-        (``attn_metadata is None``) on a poisoned output: it must zero the
+        """Call every layer's `forward_mqa` the way the profiling run does
+        (`attn_metadata is None`) on a poisoned output: it must zero the
         output, launch no kernel and grow no workspace."""
         from vllm.forward_context import set_forward_context
         from vllm.v1.worker.workspace import current_workspace_manager

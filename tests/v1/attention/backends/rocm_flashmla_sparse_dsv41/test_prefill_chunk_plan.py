@@ -4,16 +4,16 @@
 
 Two kinds of request reach the prefill region with no query tokens:
 - FULL CUDA graph request padding (seq_len 0), whenever the builder declares
-  ``ALWAYS`` (DSv4.1 on ROCm with adaptive verification);
+  `ALWAYS` (DSv4.1 on ROCm with adaptive verification);
 - a request whose KV an async connector is loading (seq_len > 0,
   vllm-project/vllm#51486).
 
-``split_decodes_and_prefills`` counts every row after the first prefill as a
-prefill, and ``get_prefill_chunk_plan`` charges each chunk at its widest row,
+`split_decodes_and_prefills` counts every row after the first prefill as a
+prefill, and `get_prefill_chunk_plan` charges each chunk at its widest row,
 so once four long-context prefills fill a chunk the empty rows get a chunk of
-their own. ``_forward_prefill`` then views zero rows and crashes
+their own. `_forward_prefill` then views zero rows and crashes
 (vllm-project/vllm#55695). The plan is built here from the same CPU fields the
-SWA builder fills (``sparse_swa.py``), on host tensors.
+SWA builder fills (`sparse_swa.py`), on host tensors.
 """
 
 from types import SimpleNamespace

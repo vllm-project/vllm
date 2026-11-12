@@ -3,7 +3,7 @@
 """ROCM_FLASHMLA_SPARSE_DSV41 capability contract.
 
 DeepSeek V4.1's attention layer picks its backend class itself
-(``DeepseekV41ROCMAiterMLAAttention.backend_cls``), so the generic selector
+(`DeepseekV41ROCMAiterMLAAttention.backend_cls`), so the generic selector
 never vets the model's own layers; the declarations still matter to the
 selector when a user names the backend, to the KV-cache manager (block sizes)
 and to the runner (CUDA graph support). Each one is checked both ways: what
@@ -114,7 +114,7 @@ def test_selector_rejects_undeclared(override, reason):
 
 
 def test_compute_capability():
-    """``supports_compute_capability`` is the CUDA base's ``major in (9, 10)``:
+    """`supports_compute_capability` is the CUDA base's `major in (9, 10)`:
     on ROCm it admits every gfx9 part (gfx942 is 9.4, gfx950 9.5) and refuses
     RDNA (gfx11/gfx12), which has no fp8_ds_mla kernels."""
     assert BACKEND.supports_compute_capability(GFX942)
@@ -196,7 +196,7 @@ def test_cudagraph_support(builder, adaptive, support):
 
 def test_swa_builder_keeps_draft_decode_update_off():
     """The ROCm ragged SWA buffers are not refreshed by
-    ``update_draft_decode_metadata``, so the builder must not offer it."""
+    `update_draft_decode_metadata`, so the builder must not offer it."""
     assert SWA_BUILDER.supports_draft_decode_metadata_update is False
 
 
@@ -319,7 +319,7 @@ def test_v4_indexer_backend_declarations():
 
 
 def test_v41_indexer_backend_block_sizes():
-    """``DeepseekV41IndexerBackend`` keys its block size on the CUDA "family
+    """`DeepseekV41IndexerBackend` keys its block size on the CUDA "family
     90" check. On ROCm every gfx9 part is 9.x, so the check holds there and
     the FP8 indexer asks for 64-token blocks, which is what the gfx942 FP8
     indexer kernels need. The MXFP4 backend (CDNA4) declares its own sizes."""
@@ -354,8 +354,8 @@ def test_v41_indexer_backend_block_sizes():
 
 
 def test_indexer_cache_picks_the_rocm_mxfp4_backend():
-    """On ROCm with ``indexer_kv_dtype="mxfp4"`` the index cache's backend is
-    the aiter paged MXFP4 one, also when ``indexer_sparse_logits`` asks for
+    """On ROCm with `indexer_kv_dtype="mxfp4"` the index cache's backend is
+    the aiter paged MXFP4 one, also when `indexer_sparse_logits` asks for
     the candidate consumers' sparse path (whose CUDA backend needs SM100)."""
     attention = pytest.importorskip("vllm.models.deepseek_v41.attention")
     from vllm.v1.attention.backends.mla.indexer import DeepseekV41IndexerBackend

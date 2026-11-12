@@ -4,14 +4,14 @@
 CUDA graphs, async scheduling, spec decode and tensor parallelism.
 
 The model is the five-layer DeepSeek-V4.1-Flash stand-in of the unit suite
-(``tests/v1/attention/backends/rocm_flashmla_sparse_dsv41/dsv41_harness.py``):
+(`tests/v1/attention/backends/rocm_flashmla_sparse_dsv41/dsv41_harness.py`):
 one layer of each attention kind, random weights in the checkpoint's ranges
 (peaked logits, unlike stock dummy weights). DeepSeek V4.1 has no second ROCm
 backend to compare with, so the reference is the same model on the eager
 Triton sparse path under the same scheduler settings, and the per-call
 numerics are checked against a float32 reference in the unit suite. The
 tolerances were calibrated on MI350X against the aiter sparse MLA path
-(``VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1``), a second correct
+(`VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`), a second correct
 implementation of the same attention.
 
 The batch mixes short prompts, prompts past the window (128) and past both
@@ -149,7 +149,7 @@ def _mean_prompt_diff(ref, out) -> float:
 
 def _check_samples(ref, out) -> None:
     """Greedy tokens may diverge only where the other run ranks the token in
-    its top 5 (a near tie), as ``check_logprobs_close`` allows."""
+    its top 5 (a near tie), as `check_logprobs_close` allows."""
     for i, (r, o) in enumerate(zip(ref, out)):
         for step, (a, b) in enumerate(zip(r["tokens"], o["tokens"])):
             if a == b:
@@ -198,7 +198,9 @@ ENGINE_MODES = [
 
 @pytest.mark.parametrize("aiter", [False, True], ids=["triton", "aiter"])
 @pytest.mark.parametrize("cudagraph_mode, async_scheduling", ENGINE_MODES)
-def test_engine_modes(vllm_runner, monkeypatch, aiter, cudagraph_mode, async_scheduling):
+def test_engine_modes(
+    vllm_runner, monkeypatch, aiter, cudagraph_mode, async_scheduling
+):
     from vllm.platforms.rocm import on_gfx950
 
     if aiter and not on_gfx950():
