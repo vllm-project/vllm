@@ -37,6 +37,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.layers.attention.mla_attention import SparseMLAPrefillRoute
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
@@ -523,7 +524,7 @@ def should_skip_indexer_scoring(
     prefill = getattr(mla_metadata, "prefill", None)
     return (
         cudagraph_runtime_mode != CUDAGraphMode.FULL
-        and getattr(prefill, "use_dense_mha", False)
+        and getattr(prefill, "route", None) is SparseMLAPrefillRoute.DENSE_MHA
         and getattr(mla_metadata, "num_decode_tokens", -1) == 0
         and not torch.cuda.is_current_stream_capturing()
     )

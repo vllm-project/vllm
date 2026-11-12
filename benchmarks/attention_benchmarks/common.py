@@ -188,7 +188,9 @@ class MockLayer(AttentionLayerBase):
     in get_layers_from_vllm_config when FlashInfer prefill is enabled.
     """
 
-    def __init__(self, device: torch.device, impl=None, kv_cache_spec=None):
+    def __init__(
+        self, device: torch.device, impl=None, kv_cache_spec=None, attn_backend=None
+    ):
         # Don't call super().__init__() as AttentionLayerBase doesn't have __init__
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
@@ -201,11 +203,11 @@ class MockLayer(AttentionLayerBase):
         self.impl = impl
         # KV cache spec for get_kv_cache_config
         self._kv_cache_spec = kv_cache_spec
+        self._attn_backend = attn_backend
 
     def get_attn_backend(self):
         """Get the attention backend class (required by AttentionLayerBase)."""
-        # Return None as this is just a mock layer for benchmarking
-        return None
+        return self._attn_backend
 
     def get_kv_cache_config(self, vllm_config=None):
         """Get the KV cache config (required by AttentionLayerBase)."""

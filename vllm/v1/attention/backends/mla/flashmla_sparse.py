@@ -394,10 +394,6 @@ class FlashMLASparseMetadataBuilder(
             cache_config.cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
         )
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
-        self.topk_tokens_tensor = torch.full(
-            (max_num_seqs,), self.topk_tokens, device=device, dtype=torch.int32
-        )
         # Shape: [max_num_seqs], all elements = max_model_len
         self.max_model_len_tensor = torch.full(
             (max_num_seqs,),

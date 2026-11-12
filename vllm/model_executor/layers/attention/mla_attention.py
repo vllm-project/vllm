@@ -1083,13 +1083,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             quant_key is not None
             and self.prefill_backend is not None
             and self.prefill_backend.supports_quant_output(quant_key)
-            and (
-                not self.impl.is_sparse
-                or attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-                <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
-            )
             and attn_metadata is not None
             and attn_metadata.prefill is not None
+            and (
+                not self.impl.is_sparse
+                or attn_metadata.prefill.route  # type: ignore[attr-defined]
+                is SparseMLAPrefillRoute.DENSE_MHA
+            )
             and attn_metadata.prefill.chunked_context is None
             and self.impl.dcp_world_size <= 1
         )
@@ -1362,33 +1362,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output_padded
 
     def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
-        if self.hisparse_cache is not None:
-            return False
-        # ShardQ steps' top-k are compact per rank and run through forward_mqa.
-        if getattr(attn_metadata, "shardq", None) is not None:
-            return False
         prefill = attn_metadata.prefill
-        if prefill is None:
-            return False
-        use_masked_mha = (
-            self.prefill_backend is not None
-            and self.impl.masked_mha_available  # type: ignore[attr-defined]
-            and self.impl.dcp_world_size <= 1
-            and _use_masked_mha(
-                backend_name=self.attn_backend.get_name(),
-                tensor_parallel_size=(
-                    self._vllm_config.parallel_config.tensor_parallel_size
-                ),
-                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                query_len=prefill.max_query_len,
-                seq_len=attn_metadata.prefill_max_seq_len,  # type: ignore[attr-defined]
-                has_context=prefill.chunked_context is not None,
-            )
-            and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
-        )
-        return (prefill.use_dense_mha or use_masked_mha) and not (
-            self._vllm_config.attention_config.sparse_mla_force_mqa
+        return (
+            prefill is not None
+            and prefill.route is not SparseMLAPrefillRoute.SPARSE_MQA  # type: ignore[attr-defined]
         )
 
     def process_weights_after_loading(self) -> None:
@@ -1712,6 +1689,22 @@ class QueryLenSupport(Enum):
     VARLEN = "varlen"
 
 
+class SparseMLAPrefillRoute(Enum):
+    """How a sparse MLA step runs its prefill tokens.
+
+    - DENSE_MHA: every prefill fits in the top-k, so MHA over all keys.
+    - MASKED_MHA: MHA with the top-k as a per-query key mask.
+    - SPARSE_MQA: the prefill tokens run in forward_mqa, like the decodes.
+
+    Set once per step by SparseMLACommonMetadataBuilder._prefill_route;
+    readers use it as is instead of re-deriving it.
+    """
+
+    DENSE_MHA = "dense_mha"
+    MASKED_MHA = "masked_mha"
+    SPARSE_MQA = "sparse_mqa"
+
+
 def dynamic_per_batched_tensor_quant(
     x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
 ):
@@ -1843,7 +1836,6 @@ class MLACommonPrefillMetadata:
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
     query_lens_cpu: torch.Tensor | None = None
-    use_dense_mha: bool = False
     topk_mask_workspace: torch.Tensor | None = None
 
 
