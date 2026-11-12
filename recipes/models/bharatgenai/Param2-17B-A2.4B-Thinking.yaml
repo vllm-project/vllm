@@ -91,8 +91,7 @@ guide: |
     `configuration_param2moe.py`.
   - **Hardware:** one GPU is enough. The BF16 weights are ~34.3 GB, so an H100
     80GB leaves ample room for the 32,768-token KV cache. A single 48 GB
-    **L40S** also runs the same configuration: at the default
-    `--gpu-memory-utilization 0.9` roughly 8–9 GB remains for KV, and this
+    **L40S** also runs the same configuration: at least 8–9 GB remains for KV, and this
     model's KV cache is small (21 layers × 8 KV heads × 64 head dim ≈ 42 KB per
     token), so about 6 concurrent sequences fit at the full 32,768-token
     window — more if you cap `--max-model-len`.
