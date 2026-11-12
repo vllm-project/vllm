@@ -36,7 +36,10 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
-from vllm.compilation.wrapper import compile_model_with_stock_torch
+from vllm.compilation.wrapper import (
+    compile_model_with_stock_torch,
+    remove_bytecode_hooks,
+)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.aux_output_connector.worker import (
@@ -94,7 +97,10 @@ from vllm.v1.watermarking.spec_decode import (
     speculative_target_watermark_key,
 )
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
-from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
+from vllm.v1.worker.extensible_kv_cache import (
+    ExtensibleKVCache,
+    kv_cache_export_handle_types,
+)
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
@@ -668,6 +674,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_cache_config,
                 self.device,
                 self.cache_config.get_resolved_kv_cache_layout(),
+                export_handle_types=kv_cache_export_handle_types(self.vllm_config),
             )
 
         block_table_max_model_len = self.max_model_len
@@ -2515,13 +2522,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             del self.model_state
         # Detach the layer-level KV/state cache tensors before dropping the
         # models; the model objects can outlive this runner.
+        # Their compiled modules' bytecode hooks would keep them alive: by the
+        # time LLMEngine's finalizer runs, the top-level model may be gone.
         speculator = getattr(self, "speculator", None)
         if speculator is not None:
             if draft_model := getattr(speculator, "model", None):
                 clear_layer_kv_caches(draft_model.modules())
+                remove_bytecode_hooks(draft_model)
             self.speculator = None
         if hasattr(self, "model"):
             clear_layer_kv_caches(self.model.modules())
+            remove_bytecode_hooks(self.model)
             del self.model
         # Its views do not keep it alive, and the runner can outlive shutdown
         # (an in-process engine), so unmap the extensible KV cache explicitly.
