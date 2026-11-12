@@ -243,7 +243,6 @@ class TestPinnedMemory:
 
         engine_args_kwargs = dict(
             model=model,
-            gpu_memory_utilization=0.88,
             max_model_len=max_model_len,
             enable_prefix_caching=False,
         )
@@ -279,7 +278,6 @@ class TestPinnedMemory:
 
         engine_args_kwargs = dict(
             model=model,
-            gpu_memory_utilization=0.88,
             max_model_len=max_model_len,
             enable_prefix_caching=False,
         )

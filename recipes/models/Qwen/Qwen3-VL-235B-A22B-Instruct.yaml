@@ -186,7 +186,6 @@ guide: |
     --tensor-parallel-size 4 \
     --limit-mm-per-prompt.video 0 \
     --async-scheduling \
-    --gpu-memory-utilization 0.95 \
     --max-num-seqs 128
   ```
 
@@ -228,7 +227,6 @@ guide: |
     --mm-encoder-tp-mode data \
     --enable-expert-parallel \
     --async-scheduling \
-    --gpu-memory-utilization 0.94 \
     --max-model-len 32768 \
     --max-num-seqs 10240 \
     --max-num-batched-tokens 32768 \
@@ -251,7 +249,6 @@ guide: |
     --async-scheduling \
     --enable-chunked-prefill \
     --limit-mm-per-prompt '{"image": 1}' \
-    --gpu-memory-utilization 0.94 \
     --max-model-len 32768 \
     --max-num-seqs 10240 \
     --max-num-batched-tokens 32768 \
@@ -278,7 +275,6 @@ guide: |
 
   vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct-FP8 \
     --tensor-parallel-size 8 \
-    --gpu-memory-utilization 0.94 \
     --distributed-executor-backend mp \
     --enable-chunked-prefill \
     --max-model-len 16384 \
@@ -333,7 +329,7 @@ guide: |
   ## Troubleshooting
 
   - OOM on A100 / H100 BF16: reduce `--max-model-len`, drop to image-only, or switch to the FP8 checkpoint.
-  - If enabling `--mm-encoder-tp-mode data` raises memory pressure, lower `--gpu-memory-utilization`.
+  - If enabling `--mm-encoder-tp-mode data` raises memory pressure, lower `--max-num-seqs` or `--max-model-len`.
 
   ## References
 

@@ -18,6 +18,7 @@ import torch
 import zmq
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
@@ -276,6 +277,11 @@ def resolve_moriio_transfer_ack(
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Registers the device KV cache with an RDMA engine.
+        return KVCacheAccess.REGISTERS
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
@@ -941,6 +947,11 @@ class MoRIIOConnectorScheduler:
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            request.truncate_block_hashes(
+                hash_block_size, self.vllm_config.num_hash_lookahead_tokens
+            )
             params["_p_side_truncated"] = True
 
     def send_notify_block(
