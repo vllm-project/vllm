@@ -7,7 +7,12 @@
 
 import pytest
 
+from vllm.platforms import current_platform
+
 from .utils import PROBE_TIMEOUT_S, ready_probe_server
+
+# The fault injection launches CUDA kernels.
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 
 MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 

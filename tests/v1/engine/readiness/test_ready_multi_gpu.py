@@ -12,10 +12,15 @@ import time
 import pytest
 
 from tests.utils import multi_gpu_marks
+from vllm.platforms import current_platform
 
 from .utils import PROBE_TIMEOUT_S, ready_probe_server
 
-pytestmark = multi_gpu_marks(num_gpus=2)
+# The fault injection launches CUDA kernels.
+pytestmark = [
+    *multi_gpu_marks(num_gpus=2),
+    pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA"),
+]
 
 MOE_MODEL = "ibm-research/PowerMoE-3b"
 DENSE_MODEL = "hmellor/tiny-random-LlamaForCausalLM"

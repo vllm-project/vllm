@@ -119,6 +119,8 @@ A busy engine rank is reported ready without extra GPU work. An idle rank runs o
 
 Use `/health_generate` for readiness checks and keep `/health` for liveness checks, so that a sleeping or temporarily slow server is taken out of rotation instead of restarted. `/health_generate` is not authenticated with `--api-key`, like `/health`.
 
+While elastic EP is scaling, the server answers every request, including `/health_generate`, with a 503 and an `{"error": ...}` body instead. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not serve `/health_generate` yet.
+
 ### Metrics APIs
 
 For further details on metrics, please refer to [this page](../../design/metrics.md).
