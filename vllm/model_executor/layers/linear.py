@@ -807,15 +807,12 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
-        if padding_size:
-            with torch.no_grad():
-                for name in self.padding_fill_params():
-                    param = getattr(self, name)
-                    param.zero_()
-                    set_weight_attrs(
-                        param,
-                        {"weight_loader_numel": param[:-padding_size].numel()},
-                    )
+        for name in self.padding_fill_params():
+            param = getattr(self, name)
+            self._zero_output_padding(param)
+            set_weight_attrs(
+                param, {"weight_loader_numel": param[:-padding_size].numel()}
+            )
 
     def padding_fill_params(self) -> list[str]:
         if not self.padding_size:

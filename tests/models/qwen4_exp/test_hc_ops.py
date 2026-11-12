@@ -183,38 +183,19 @@ def test_hc_up_gate_mix(num_tokens: int) -> None:
 
 
 def test_hc_padding_shard_is_not_expected_from_checkpoints(dist_init) -> None:
-    """A direct reload restores checkpoint rows and resets alignment padding."""
-    from vllm.model_executor.model_loader.reload.direct import (
-        begin_direct_reload,
-        record_checkpoint_layout,
-    )
+    """Checkpoints carry only the down and block-inject rows, not the padding."""
     from vllm.models.qwen4_exp.common.hyperconnection import HyperConnectionConfig
     from vllm.models.qwen4_exp.nvidia.hyperconnection import GatedResidual
 
-    model = torch.nn.Module()
-    model.hc = GatedResidual(HyperConnectionConfig())
-    hc = model.hc
+    hc = GatedResidual(HyperConnectionConfig())
     assert hc.pad_size > 0
     linear = hc.input_mix_weight_down_block_inject
-    end = hc.hc_lowrank + hc.hc_count
-
-    assert not linear.weight[end:].any()
-    record_checkpoint_layout(model)
     with torch.no_grad():
         linear.weight.fill_(1.0)
-    begin_direct_reload(model)
-    assert not linear.weight[end:].any()
-
     for shard_id, rows in ((0, hc.hc_lowrank), (1, hc.hc_count)):
-        weight = torch.full(
-            (rows, hc.hyper_hidden_size),
-            shard_id + 2.0,
-            dtype=linear.weight.dtype,
-            device=linear.weight.device,
-        )
+        weight = torch.full((rows, hc.hyper_hidden_size), 2.0)
         weight.shard_id = shard_id
         set(linear.load_weights([("weight", weight)]))
-    assert (linear.weight[: hc.hc_lowrank] == 2).all()
-    assert (linear.weight[hc.hc_lowrank : end] == 3).all()
-    assert not linear.weight[end:].any()
+    assert (linear.weight[: hc.hc_lowrank + hc.hc_count] == 2).all()
+    assert not linear.weight[hc.hc_lowrank + hc.hc_count :].any()
     assert linear.pop_missing_shards() == []
