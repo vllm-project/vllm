@@ -51,7 +51,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Static,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _import_deep_gemm
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -97,7 +97,7 @@ def _requantize(
     deep_gemm = _import_deep_gemm()
     cast = (
         deep_gemm.per_token_cast_to_fp4
-        if weight_format is MEGA_MOE_MXFP4
+        if weight_format.name == MEGA_MOE_MXFP4.name
         else deep_gemm.per_token_cast_to_fp8
     )
     values, sf = cast(x, use_ue8m0=True, gran_k=32)
@@ -362,7 +362,7 @@ class Qwen4ExpMegaMoeBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.shared_expert_gate",
         )
-        self.shared_expert = Qwen2MoeMLP(
+        self.shared_expert = Qwen3MoeMLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.shared_expert_intermediate_size,
             hidden_act=config.hidden_act,
