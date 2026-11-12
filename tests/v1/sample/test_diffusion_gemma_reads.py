@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="the sampler state lives on the GPU"
+    not current_platform.is_cuda_alike(), reason="the sampler state lives on the GPU"
 )
 
 CL = 8
@@ -124,9 +124,9 @@ def _denoise_once(
     embed_weight: torch.Tensor | None = None,
     embed_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One compiled denoise step over ``slots`` with flat logits, so nothing
+    """One compiled denoise step over `slots` with flat logits, so nothing
     converges by stability or confidence and only the step cap can end it.
-    ``width`` below CL runs the step on [:, :width] views, as the sampler
+    `width` below CL runs the step on [:, :width] views, as the sampler
     does for a narrow tile."""
     n = len(slots)
     device = states.device

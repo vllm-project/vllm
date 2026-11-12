@@ -24,7 +24,7 @@ class INCMxfp4LinearMethod(INCLinearScheme):
 
     E2M1 weights packed two per byte with per-group E8M0 scales
     (group_size=32, no global scale). The platform kernel is selected by
-    ``init_mxfp4_linear_kernel`` (FlashInfer / Marlin on CUDA, ``fp4_gemm``
+    `init_mxfp4_linear_kernel` (FlashInfer / Marlin on CUDA, `fp4_gemm`
     on XPU).
     """
 
