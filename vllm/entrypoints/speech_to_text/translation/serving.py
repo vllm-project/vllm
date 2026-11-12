@@ -35,6 +35,7 @@ class OpenAIServingTranslation(SpeechToTextBaseServing):
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_force_include_usage: bool = False,
+        max_vad_workers: int = 0,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -43,6 +44,7 @@ class OpenAIServingTranslation(SpeechToTextBaseServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="translate",
             enable_force_include_usage=enable_force_include_usage,
+            max_vad_workers=max_vad_workers,
         )
 
     async def create_translation(

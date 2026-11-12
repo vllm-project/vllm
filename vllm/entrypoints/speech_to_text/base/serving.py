@@ -109,6 +109,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
         enable_force_include_usage: bool = False,
+        max_vad_workers: int = 0,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -163,13 +164,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         )
         # VAD-enabled requests decode on the preprocess pool and then run
         # VAD + audio splitting on a dedicated pool, so VAD scales
-        # independently of audio decoding. With VLLM_MAX_VAD_WORKERS=0, VAD
-        # shares the preprocess pool.
+        # independently of audio decoding. With max_vad_workers=0, VAD shares
+        # the preprocess pool.
         self._vad_executor: ThreadPoolExecutor | None = None
-        num_vad_workers = envs.VLLM_MAX_VAD_WORKERS
-        if num_vad_workers > 0:
+        if max_vad_workers > 0:
             self._vad_executor = ThreadPoolExecutor(
-                max_workers=num_vad_workers,
+                max_workers=max_vad_workers,
                 thread_name_prefix="stt-vad",
             )
             self._decode_audio_async = make_async_with_semaphore(
@@ -184,7 +184,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             # waiting for a VAD worker are bounded by the worker counts rather
             # than by the number of in-flight requests.
             self._vad_pipeline_semaphore = asyncio.Semaphore(
-                num_audio_preprocess_workers + num_vad_workers
+                num_audio_preprocess_workers + max_vad_workers
             )
         self._vad_provider = ThreadLocalVADProvider()
 

@@ -52,6 +52,7 @@ def init_speech_to_text_state(
             state.openai_serving_models,
             request_logger=request_logger,
             enable_force_include_usage=args.enable_force_include_usage,
+            max_vad_workers=args.max_vad_workers,
         )
 
         from .translation.serving import OpenAIServingTranslation
@@ -61,6 +62,7 @@ def init_speech_to_text_state(
             state.openai_serving_models,
             request_logger=request_logger,
             enable_force_include_usage=args.enable_force_include_usage,
+            max_vad_workers=args.max_vad_workers,
         )
 
     if "realtime" in supported_tasks:

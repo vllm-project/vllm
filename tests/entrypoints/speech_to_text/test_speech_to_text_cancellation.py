@@ -225,7 +225,6 @@ async def test_vad_pool_bounds_decoded_audio_waiting_for_vad(monkeypatch):
     decode_workers, vad_workers, num_requests = 2, 1, 8
     bound = decode_workers + vad_workers
     monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_PREPROCESS_WORKERS", decode_workers)
-    monkeypatch.setattr(envs, "VLLM_MAX_VAD_WORKERS", vad_workers)
     monkeypatch.setattr(
         SpeechToTextBaseServing,
         "model_cls",
@@ -256,7 +255,12 @@ async def test_vad_pool_bounds_decoded_audio_waiting_for_vad(monkeypatch):
         renderer=None,
         input_processor=None,
     )
-    server = SpeechToTextBaseServing(engine_client, models=None, request_logger=None)
+    server = SpeechToTextBaseServing(
+        engine_client,
+        models=None,
+        request_logger=None,
+        max_vad_workers=vad_workers,
+    )
     request = SimpleNamespace(
         language="en",
         to_language=None,
