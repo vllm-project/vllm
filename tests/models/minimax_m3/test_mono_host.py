@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
 from vllm.models.minimax_m3.amd.mono import config as mono_config  # noqa: E402
 from vllm.models.minimax_m3.amd.mono import dispatch as mono_dispatch  # noqa: E402
 from vllm.models.minimax_m3.amd.mono.config import (  # noqa: E402
+    BLOCKS,
     MAX_CONTEXT,
     MAX_TOKENS,
     SPARSE_BLOCK,
@@ -38,10 +39,8 @@ from vllm.models.minimax_m3.amd.mono.selection import (  # noqa: E402
 )
 
 
-def _selection_config(monokernel: bool = True, **extra):
-    return SimpleNamespace(
-        kernel_config=SimpleNamespace(monokernel=monokernel), additional_config=extra
-    )
+def _selection_config(**extra):
+    return SimpleNamespace(additional_config=extra)
 
 
 @pytest.mark.parametrize(
@@ -58,30 +57,33 @@ def test_enabled_monokernels(names, want):
     assert enabled_monokernels(_selection_config(**extra)) == want
 
 
-def test_enabled_monokernels_is_empty_without_the_flag():
-    cfg = _selection_config(monokernel=False, minimax_m3_monokernel=["drafter"])
-    assert enabled_monokernels(cfg) == frozenset()
-
-
 @pytest.mark.parametrize("names", [[], ["mono"], ["decode", "draft"]])
 def test_enabled_monokernels_rejects_unknown_names(names):
     with pytest.raises(ValueError, match="minimax_m3_monokernel"):
         enabled_monokernels(_selection_config(minimax_m3_monokernel=names))
 
 
-def _linear(dtype: torch.dtype):
+def _linear(dtype: torch.dtype, scale_cols: int):
     return SimpleNamespace(
-        weight=torch.empty(0, dtype=dtype), weight_scale=torch.empty(0)
+        weight=torch.empty(8, 64, dtype=dtype),
+        weight_scale=torch.empty(8, scale_cols, dtype=torch.uint8),
     )
 
 
-def _layer(moe: bool, sparse: bool, attn_dtype: torch.dtype = MXFP8_VALUE_DTYPE):
+def _layer(
+    moe: bool,
+    sparse: bool,
+    attn_dtype: torch.dtype = MXFP8_VALUE_DTYPE,
+    scale_cols: int = 2,  # one scale per 32 of the 64 inputs
+    sparse_pa: bool = True,
+):
     attn = (
         SimpleNamespace(
             layer_name="attn",
             indexer=SimpleNamespace(index_cache=SimpleNamespace(prefix="idx")),
-            qkv_proj=_linear(attn_dtype),
-            o_proj=_linear(attn_dtype),
+            qkv_proj=_linear(attn_dtype, scale_cols),
+            o_proj=_linear(attn_dtype, scale_cols),
+            use_aiter_sparse_pa=sparse_pa,
         )
         if sparse
         else SimpleNamespace()
@@ -160,6 +162,7 @@ def _vllm_config(**overrides):
         attention_config=SimpleNamespace(
             resolve_indexer_kv_dtype=lambda default: "fp8"
         ),
+        weight_transfer_config=None,
     )
     for path, value in overrides.items():
         obj, _, attr = path.rpartition(".")
@@ -167,13 +170,8 @@ def _vllm_config(**overrides):
     return cfg
 
 
-def _model(
-    fse: bool = True,
-    shared_mlp: bool = True,
-    aux=(),
-    attn_dtype: torch.dtype = MXFP8_VALUE_DTYPE,
-):
-    moe = _layer(True, True, attn_dtype)
+def _model(fse: bool = True, shared_mlp: bool = True, aux=(), **attn):
+    moe = _layer(True, True, **attn)
     moe.block_sparse_moe = SimpleNamespace(
         is_fused_shared_expert_enabled=fse,
         shared_experts=object() if shared_mlp else None,
@@ -183,6 +181,11 @@ def _model(
         aux_hidden_state_layers=aux,
         layers=[_layer(False, True)] * 3 + [moe] * 2,
     )
+
+
+@pytest.fixture(autouse=True)
+def _mi355x(monkeypatch):
+    monkeypatch.setattr(mono_dispatch, "_compute_units", lambda: BLOCKS)
 
 
 @pytest.mark.parametrize("fse", [True, False])
@@ -204,11 +207,59 @@ def test_config_refusal_accepts_the_supported_deployment(fse, aux):
         ),
         (_vllm_config(), _model(fse=False, shared_mlp=False), "neither fused nor"),
         (_vllm_config(), _model(attn_dtype=torch.bfloat16), "not MXFP8"),
+        (_vllm_config(), _model(scale_cols=1), "not MXFP8"),  # per-channel FP8
+        (_vllm_config(), _model(sparse_pa=False), "SHUFFLE_KV_CACHE_LAYOUT"),
+        (_vllm_config(weight_transfer_config=object()), _model(), "weight transfer"),
     ],
 )
 def test_config_refusal_names_the_unmet_condition(cfg, model, why):
     reason = config_refusal(cfg, model)
     assert reason is not None and why in reason
+
+
+def test_config_refusal_needs_every_cu(monkeypatch):
+    monkeypatch.setattr(mono_dispatch, "_compute_units", lambda: BLOCKS - 8)
+    reason = config_refusal(_vllm_config(), _model())
+    assert reason is not None and "CUs" in reason
+
+
+@pytest.mark.parametrize(
+    "mono_why, ffn_why, drafter_why, want",
+    [
+        (None, "why-ffn", "why-drafter", "mono"),
+        ("why-mono", None, "why-drafter", "ffn"),
+        ("why-mono", "why-ffn", None, "drafter"),
+        ("why-mono", "why-ffn", "why-drafter", "refused"),
+    ],
+)
+def test_init_monokernel_falls_back_in_order(
+    monkeypatch, mono_why, ffn_why, drafter_why, want
+):
+    """Whole-layer mono decode, else FFN-only decode, else the drafter kernels
+    alone; refused with every reason when none fits."""
+    from vllm.models.minimax_m3.amd import model as model_mod
+    from vllm.models.minimax_m3.amd.mono.drafter import dispatch as drafter_dispatch
+
+    def ffn_config(cfg):
+        if ffn_why is not None:
+            raise ValueError(ffn_why)
+        return "ffn-config"
+
+    monkeypatch.setattr(mono_dispatch, "config_refusal", lambda cfg, m: mono_why)
+    monkeypatch.setattr(mono_dispatch, "MonoDecode", lambda m, cfg: "mono-decode")
+    monkeypatch.setattr(model_mod, "specialized_decode_config", ffn_config)
+    monkeypatch.setattr(drafter_dispatch, "config_refusal", lambda cfg: drafter_why)
+    m = SimpleNamespace(_mono=None, specialized_decode_config=None)
+    m._init_mono_decode = lambda cfg: model_mod.MiniMaxM3Model._init_mono_decode(m, cfg)
+    cfg = _selection_config()
+    if want == "refused":
+        with pytest.raises(ValueError) as err:
+            model_mod.MiniMaxM3Model._init_monokernel(m, cfg)
+        assert all(why in str(err.value) for why in (mono_why, ffn_why, drafter_why))
+        return
+    model_mod.MiniMaxM3Model._init_monokernel(m, cfg)
+    assert (m._mono == "mono-decode") == (want == "mono")
+    assert (m.specialized_decode_config == "ffn-config") == (want == "ffn")
 
 
 def _fwd(n: int, q: int = 1, reqs: int | None = None, prefills: int = 0):

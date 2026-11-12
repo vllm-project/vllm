@@ -15,8 +15,6 @@ ALL = frozenset((DECODE, DRAFTER))
 
 
 def enabled_monokernels(vllm_config: VllmConfig) -> frozenset[str]:
-    if not vllm_config.kernel_config.monokernel:
-        return frozenset()
     extra = vllm_config.additional_config
     names = extra.get(KEY) if isinstance(extra, dict) else None
     if names is None:

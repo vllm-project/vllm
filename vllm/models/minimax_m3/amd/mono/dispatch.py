@@ -22,9 +22,11 @@ from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
     MXFP8_VALUE_DTYPE,
 )
 from vllm.models.minimax_m3.amd.mono.config import (
+    BLOCKS,
     MAX_CONTEXT,
     MAX_TOKENS,
     SPARSE_BLOCK,
@@ -32,6 +34,7 @@ from vllm.models.minimax_m3.amd.mono.config import (
     MonoUnsupported,
 )
 from vllm.models.minimax_m3.amd.mono.runner import MonoDecodeRunner, dense_prefix
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -55,20 +58,49 @@ def _separate_shared_ok(layers) -> bool:
     )
 
 
-def _mxfp8_attention_ok(layers) -> bool:
-    """The sparse layers' qkv and o projections are MXFP8. The dtype is set
-    when the layer is built, so this works before the weights load."""
+def _sparse_layers(layers) -> list:
+    """The layers the kernels run, after the dense prefix; empty for a layer mix
+    they cannot serve."""
     try:
-        n_dense = dense_prefix(layers)
+        return list(layers[dense_prefix(layers) :])
     except MonoUnsupported:
-        return False
-    return all(
-        getattr(linear, "weight", None) is not None
-        and linear.weight.dtype == MXFP8_VALUE_DTYPE
-        and getattr(linear, "weight_scale", None) is not None
-        for lyr in layers[n_dense:]
+        return []
+
+
+def _is_mxfp8(linear) -> bool:
+    w = getattr(linear, "weight", None)
+    s = getattr(linear, "weight_scale", None)
+    return (
+        w is not None
+        and s is not None
+        and w.dtype == MXFP8_VALUE_DTYPE
+        and w.dim() == 2
+        and tuple(s.shape) == (w.shape[0], w.shape[1] // MXFP8_BLOCK_SIZE)
+    )
+
+
+def _mxfp8_attention_ok(layers) -> bool:
+    """The sparse layers' qkv and o projections are MXFP8. The weight dtype and
+    scale shape are set when the layer is built, so this works before the
+    weights load."""
+    sparse = _sparse_layers(layers)
+    return bool(sparse) and all(
+        _is_mxfp8(linear)
+        for lyr in sparse
         for linear in (lyr.self_attn.qkv_proj, lyr.self_attn.o_proj)
     )
+
+
+def _sparse_pa_ok(layers) -> bool:
+    sparse = _sparse_layers(layers)
+    return bool(sparse) and all(
+        getattr(lyr.self_attn, "use_aiter_sparse_pa", False) for lyr in sparse
+    )
+
+
+def _compute_units() -> int:
+    device = torch.accelerator.current_device_index()
+    return current_platform.get_device_properties(device).multi_processor_count
 
 
 def config_refusal(vllm_config: VllmConfig, model) -> str | None:
@@ -78,7 +110,10 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
     cg = vllm_config.compilation_config.cudagraph_mode
     max_len = vllm_config.model_config.max_model_len
     index_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("bf16")
+    cus = _compute_units()
     checks = (
+        # one CTA per CU, all co-resident
+        (cus == BLOCKS, f"{cus} CUs != {BLOCKS}"),
         (pc.tensor_parallel_size == TP, f"TP {pc.tensor_parallel_size} != {TP}"),
         (pc.data_parallel_size == 1, "DP > 1"),
         (pc.pipeline_parallel_size == 1, "PP > 1"),
@@ -88,6 +123,8 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
         (cc.block_size == SPARSE_BLOCK, f"block size {cc.block_size}"),
         (max_len <= MAX_CONTEXT, f"max_model_len {max_len} > {MAX_CONTEXT}"),
         (cg is None or not cg.requires_piecewise_compilation(), "piecewise cudagraph"),
+        # the runner keeps converted weight copies that a weight push would not update
+        (vllm_config.weight_transfer_config is None, "weight transfer"),
         (
             getattr(model, "is_fused_shared_expert_enabled", False)
             or _separate_shared_ok(model.layers),
@@ -102,6 +139,10 @@ def config_refusal(vllm_config: VllmConfig, model) -> str | None:
         ),
         (_dense_prefix_ok(model.layers), "layer mix"),
         (_mxfp8_attention_ok(model.layers), "attention projections not MXFP8"),
+        (
+            _sparse_pa_ok(model.layers),
+            "AITER sparse PA off (needs VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1)",
+        ),
     )
     for ok, why in checks:
         if not ok:
