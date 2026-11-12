@@ -3,10 +3,10 @@
 """The consumer must not read remote KV after the producer's lease ran out.
 
 A router can hold a prefilled request outside the decode engine (no heartbeats)
-for longer than P's ``kv_lease_duration``. P then releases and recycles the
-blocks, so the stale ``remote_block_ids`` address other requests' KV: the NIXL
+for longer than P's `kv_lease_duration`. P then releases and recycles the
+blocks, so the stale `remote_block_ids` address other requests' KV: the NIXL
 read succeeds and silently loads corrupted KV and SSM state. The pull worker
-declines such reads (``failed_recving`` -> kv_load_failure_policy) unless its
+declines such reads (`failed_recving` -> kv_load_failure_policy) unless its
 own heartbeats kept the lease alive, which it models exactly.
 """
 
@@ -82,7 +82,7 @@ def _make_connector(kv_lease_duration: int = _LEASE):
 
 def _recv_meta(expiry_delta: float | None, local_blocks=([10, 11],)):
     """D-side metadata for a remote-prefill read whose producer deadline is
-    ``expiry_delta`` seconds from now (None: deadline not exported)."""
+    `expiry_delta` seconds from now (None: deadline not exported)."""
     params = {
         "do_remote_prefill": True,
         "do_remote_decode": False,
@@ -105,7 +105,7 @@ def _recv_meta(expiry_delta: float | None, local_blocks=([10, 11],)):
 
 
 def _hb_meta(*req_ids: str, leases=None, engine_id: str = _REMOTE):
-    """Scheduler heartbeat batch for ``req_ids``; ``leases`` maps a remote
+    """Scheduler heartbeat batch for `req_ids`; `leases` maps a remote
     request id to (remote deadline, extension) as the scheduler ships it."""
     meta = NixlConnectorMetadata()
     meta.heartbeat_by_engine = {

@@ -132,7 +132,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         reused them, so the read would load other requests' KV and SSM state
         without any transport error. The deadline is rebased with the handshake
         clock offset and extended by the renewals our heartbeats caused
-        (``_record_heartbeat_sent``).
+        (`_record_heartbeat_sent`).
         """
         remote = meta.remote
         assert remote is not None

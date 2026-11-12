@@ -3685,14 +3685,14 @@ class NixlBaseConnectorWorker:
     def _record_heartbeat_sent(
         self, key: tuple[EngineId, str], now: float, deadline: float, extension: int
     ) -> None:
-        """Apply one heartbeat sent at ``now`` to our model of the remote's lease
-        (initial deadline ``deadline``, our clock), mirroring its
-        ``_handle_heartbeat``: a heartbeat that reaches a live lease renews it
-        to ``now + extension``. Our send time plus the safety margin stands in
+        """Apply one heartbeat sent at `now` to our model of the remote's lease
+        (initial deadline `deadline`, our clock), mirroring its
+        `_handle_heartbeat`: a heartbeat that reaches a live lease renews it
+        to `now + extension`. Our send time plus the safety margin stands in
         for the arrival time, so the model lags the real lease (as long as a
         notification propagates within the margin). Once a heartbeat finds the
         lease gone, no later one renews it: the deadline no longer moves while
-        ``now`` grows."""
+        `now` grows."""
         lease = self._remote_leases.setdefault(key, deadline)
         if now + self._lease_safety_margin <= lease:
             self._remote_leases[key] = max(lease, now + extension)
