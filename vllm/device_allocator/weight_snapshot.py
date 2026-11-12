@@ -227,13 +227,38 @@ def save(roots: dict[str, nn.Module], path: Path) -> None:
     )
 
 
+def _pread_exact(fd: int, buf, pos: int, need: int) -> None:
+    """Read at least `need` bytes into `buf` at `pos`; short reads raise."""
+    view = memoryview(buf)
+    got = 0
+    while got < need:
+        n = os.preadv(fd, [view[got:]], pos + got)
+        if n <= 0:
+            raise RuntimeError(
+                f"weight snapshot is truncated: needed {need} bytes at offset "
+                f"{pos}, read {got}; delete it to rebuild"
+            )
+        got += n
+
+
 def _read_header(fd: int) -> tuple[dict, int]:
     head = mmap.mmap(-1, _ALIGN)
-    os.preadv(fd, [head], 0)
+    _pread_exact(fd, head, 0, 8)
     hlen = int.from_bytes(head[:8], "little")
     hbuf = mmap.mmap(-1, _round_up(hlen + 8))
-    os.preadv(fd, [hbuf], 0)
+    _pread_exact(fd, hbuf, 0, hlen + 8)
     return json.loads(bytes(hbuf[8 : 8 + hlen])), _round_up(hlen + 8)
+
+
+def _check_size(fd: int, header: dict, data_off: int, path: Path) -> None:
+    """Reject a file shorter than its header says, before touching the model."""
+    end = data_off + sum(_round_up(e["nbytes"]) for e in header.get("tensors", []))
+    size = os.fstat(fd).st_size
+    if size < end:
+        raise RuntimeError(
+            f"weight snapshot {path} is truncated ({size} of {end} bytes); "
+            "delete it to rebuild"
+        )
 
 
 def _open_direct(path: Path) -> int:
@@ -252,6 +277,7 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
         header, offset = _read_header(fd)
         if header.get("magic") != _MAGIC:
             raise RuntimeError(f"weight snapshot {path} has an old format; delete it")
+        _check_size(fd, header, offset, path)
         plan = _plan(roots, header.get("tensors", []), tensors, aliases, offset, path)
         # Two pinned buffers: the disk read of one overlaps the H2D copy of the other.
         bufs = [_pinned(), _pinned()]
@@ -269,7 +295,7 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
             for off in range(0, t.nbytes, _CHUNK):
                 n = min(_CHUNK, t.nbytes - off)
                 events[i].synchronize()
-                os.preadv(fd, [views[i][: _round_up(n)]], offset + off)
+                _pread_exact(fd, views[i][: _round_up(n)], offset + off, n)
                 target[off : off + n].copy_(bufs[i][:n], non_blocking=True)
                 events[i].record()
                 i ^= 1

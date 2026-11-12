@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Weight snapshot: save/restore of post-processed model state."""
 
+import os
 import sys
 import types
 from types import SimpleNamespace
@@ -88,6 +89,38 @@ def test_shape_mismatch_is_rejected(tmp_path):
     dst.table = torch.rand(4, 5, device="cuda")
     with pytest.raises(RuntimeError, match="does not match the model"):
         ws.restore(_roots(dst), path)
+
+
+@cuda
+@pytest.mark.parametrize("cut", ["data", "header"])
+def test_truncated_snapshot_is_rejected(tmp_path, cut):
+    path = tmp_path / "snap.bin"
+    ws.save(_roots(_Toy()), path)
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) - 1] if cut == "data" else data[:4])
+    dst = _Toy()
+    before = dst.linear.weight.detach().clone()
+    with pytest.raises(RuntimeError, match="truncated"):
+        ws.restore(_roots(dst), path)
+    assert torch.equal(dst.linear.weight, before)
+
+
+def test_short_reads_are_retried_and_eof_raises(tmp_path):
+    path = tmp_path / "f.bin"
+    path.write_bytes(bytes(range(16)))
+    buf = bytearray(16)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        real = os.preadv
+        with pytest.MonkeyPatch.context() as m:
+            # One byte per call: a short read must be retried, not accepted.
+            m.setattr(ws.os, "preadv", lambda f, b, p: real(f, [b[0][:1]], p))
+            ws._pread_exact(fd, buf, 0, 16)
+        assert bytes(buf) == bytes(range(16))
+        with pytest.raises(RuntimeError, match="truncated"):
+            ws._pread_exact(fd, bytearray(32), 0, 32)
+    finally:
+        os.close(fd)
 
 
 @cuda
