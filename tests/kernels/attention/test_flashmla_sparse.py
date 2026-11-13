@@ -242,12 +242,13 @@ def test_sparse_flashmla_prefill_on_the_kv_cache_at_allocation(
     the start of the KV view. Autotuning runs this before warmup commits more than
     the extensible cache's first blocks, which an illegal access would crash."""
     import vllm.v1.attention.ops.flashmla as fm
+    from tests.v1.core.utils import new_kv_cache_group
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils.extensible_tensor import granule_size
     from vllm.utils.vmm_driver import vmm_unavailable_reason
     from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
     from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MLAAttentionSpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.kv_cache_layout import KVCacheLayout
     from vllm.v1.worker.extensible_kv_cache import (
         ExtensibleKVCache,
@@ -272,7 +273,7 @@ def test_sparse_flashmla_prefill_on_the_kv_cache_at_allocation(
     layers = [f"layer.{i}" for i in range(num_layers)]
     config = get_kv_cache_config_from_groups(
         vllm_config,
-        [KVCacheGroupSpec(layers, spec)],
+        [new_kv_cache_group(layers, spec)],
         available_memory=num_layers * spec.page_size_bytes * num_blocks,
     )
     assert config.num_blocks == num_blocks
