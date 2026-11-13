@@ -1342,11 +1342,10 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             embeddings.extend(process_input(**kwargs) or [])
         return embeddings
 
-    def _stash_deepstack_embeds(
-        self, multimodal_embeddings: MultiModalEmbeddings, is_multimodal: torch.Tensor
-    ) -> list[torch.Tensor]:
-        """Split the DeepStack features off `multimodal_embeddings` and scatter them
-        into `deepstack_input_embeds` at the multimodal positions."""
+    def _split_deepstack_embeds(
+        self, multimodal_embeddings: MultiModalEmbeddings
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        """Split the DeepStack features off `multimodal_embeddings`."""
         hidden_size = self.text_config.hidden_size
         deepstack_size = hidden_size * self.deepstack_num_levels
         embeddings, deepstack = [], []
@@ -1360,13 +1359,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # [num_mm_tokens, levels * hidden] -> [levels, num_mm_tokens, hidden]
         deepstack_flat = torch.cat(deepstack).reshape(-1, deepstack_size)
         deepstack_flat = deepstack_flat.unflatten(-1, (-1, hidden_size)).transpose(0, 1)
-
-        num_tokens = is_multimodal.numel()
-        buffer = self.deepstack_input_embeds[:, 0, :num_tokens]
-        # If is_multimodal is on CPU this avoids a D2H sync
-        buffer[:, is_multimodal] = deepstack_flat.to(buffer.dtype)
-        self.deepstack_num_tokens = num_tokens
-        return embeddings
+        return embeddings, deepstack_flat
 
     def embed_input_ids(
         self,
@@ -1375,18 +1368,28 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        deepstack_flat = None
         if hasattr(self, "deepstack_input_embeds"):
             # Cleared here rather than after `forward`, which full CUDA graphs skip
             if self.deepstack_num_tokens:
                 self.deepstack_input_embeds[:, 0, : self.deepstack_num_tokens].zero_()
                 self.deepstack_num_tokens = 0
             if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
-                multimodal_embeddings = self._stash_deepstack_embeds(
-                    multimodal_embeddings, _require_is_multimodal(is_multimodal)
+                multimodal_embeddings, deepstack_flat = self._split_deepstack_embeds(
+                    multimodal_embeddings
                 )
-        return super().embed_input_ids(
+        # Merge first so a placeholder count mismatch raises its usual error
+        inputs_embeds = super().embed_input_ids(
             input_ids, multimodal_embeddings, is_multimodal=is_multimodal
         )
+        if deepstack_flat is not None:
+            is_multimodal = _require_is_multimodal(is_multimodal)
+            num_tokens = is_multimodal.numel()
+            buffer = self.deepstack_input_embeds[:, 0, :num_tokens]
+            # If is_multimodal is on CPU this avoids a D2H sync
+            buffer[:, is_multimodal] = deepstack_flat.to(buffer.dtype)
+            self.deepstack_num_tokens = num_tokens
+        return inputs_embeds
 
     def get_mrope_input_positions(
         self,
