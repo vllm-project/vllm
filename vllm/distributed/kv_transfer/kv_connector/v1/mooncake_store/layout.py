@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     derive_mamba_conv_split,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -167,8 +168,10 @@ class StoreLayout:
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
+        layer_names: Sequence[str] | None = None,
     ) -> None:
-        """Build descriptors from the local KV cache tensors."""
+        """Build descriptors from the local KV cache tensors. `layer_names`
+        names each tensor's layer; layouts with layer ranges need it."""
         raise NotImplementedError
 
     def prepare_values(
@@ -188,6 +191,36 @@ def split_layer_range(
     start, end = layer_range
     cuts = sorted({start, end, *(cut for cut in cut_points if start < cut < end)})
     return tuple(zip(cuts[:-1], cuts[1:]))
+
+
+def _layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> int:
+    """Index of the range holding `layer`. Layers past the last range (e.g. a
+    draft model's on the last PP stage) belong to the last range."""
+    if layer >= layer_ranges[-1][1]:
+        return len(layer_ranges) - 1
+    for index, (start, end) in enumerate(layer_ranges):
+        if start <= layer < end:
+            return index
+    raise ValueError(f"Layer {layer} is not in the Store layer ranges {layer_ranges}")
+
+
+def _tensor_ranges(
+    layer_ranges: Sequence[tuple[int, int]] | None,
+    num_caches: int,
+    layer_names: Sequence[str] | None,
+) -> list[int] | None:
+    """Layer range index of each KV cache tensor, or None without ranges."""
+    if layer_ranges is None:
+        return None
+    if layer_names is None or len(layer_names) != num_caches:
+        raise ValueError("Store layer ranges need the layer name of each KV cache")
+    ranges = [
+        _layer_range_index(layer_ranges, extract_layer_index(name))
+        for name in layer_names
+    ]
+    if len(set(ranges)) != len(layer_ranges):
+        raise ValueError(f"No KV cache for some Store layer ranges {layer_ranges}")
+    return ranges
 
 
 class RankLocalStoreLayout(StoreLayout):
@@ -257,24 +290,18 @@ class RankLocalStoreLayout(StoreLayout):
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
-        layer_indices: Sequence[int] | None = None,
+        layer_names: Sequence[str] | None = None,
     ) -> None:
-        """Build descriptors from the local KV cache tensors.
-
-        With layer ranges, `layer_indices` gives the global layer of each
-        tensor, and every region must hold layers of a single range.
-        """
-        if self.layer_ranges is not None and (
-            layer_indices is None or len(layer_indices) != len(kv_caches)
-        ):
-            raise ValueError("Store layer ranges need the layer of each KV cache")
+        """Build descriptors from the local KV cache tensors. With layer
+        ranges, every region must hold layers of a single range."""
+        tensor_ranges = _tensor_ranges(self.layer_ranges, len(kv_caches), layer_names)
         # Map each region's base address to its entry in the parallel lists.
         region_index: dict[int, int] = {}
         base_addrs: list[int] = []
         block_strides: list[int] = []
         block_lens: list[int] = []
-        region_layers: list[set[int]] = []
-        layer = -1
+        region_ranges: list[set[int]] = []
+        range_index = 0
 
         def add_region(addr: int, block_stride: int, block_len: int) -> None:
             assert 0 < block_len <= block_stride
@@ -284,16 +311,16 @@ class RankLocalStoreLayout(StoreLayout):
                 base_addrs.append(addr)
                 block_strides.append(block_stride)
                 block_lens.append(block_len)
-                region_layers.append({layer})
+                region_ranges.append({range_index})
             else:
                 # Several views can share a region (e.g. the layers of a
                 # block-outermost buffer); keep the bytes up to the last one.
                 block_lens[index] = max(block_lens[index], block_len)
-                region_layers[index].add(layer)
+                region_ranges[index].add(range_index)
 
         for cache_index, cache in enumerate(kv_caches):
-            if layer_indices is not None:
-                layer = layer_indices[cache_index]
+            if tensor_ranges is not None:
+                range_index = tensor_ranges[cache_index]
             cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
@@ -336,37 +363,17 @@ class RankLocalStoreLayout(StoreLayout):
         self.block_stride = block_strides
         self.block_len = block_lens
         if self.layer_ranges is not None:
-            self._shard_regions = self._assign_regions(region_layers)
-
-    def _assign_regions(self, region_layers: list[set[int]]) -> list[np.ndarray]:
-        """Group regions by the layer range their layers fall in. Layers past
-        the last range (e.g. a draft model's on the last PP stage) belong to
-        the last range."""
-        layer_ranges = self.layer_ranges
-        assert layer_ranges is not None
-
-        def shard_of(layer: int) -> int | None:
-            if layer >= layer_ranges[-1][1]:
-                return len(layer_ranges) - 1
-            for shard, (start, end) in enumerate(layer_ranges):
-                if start <= layer < end:
-                    return shard
-            return None
-
-        shard_regions: list[list[int]] = [[] for _ in layer_ranges]
-        for region, layers in enumerate(region_layers):
-            shards = {shard_of(layer) for layer in layers}
-            shard = shards.pop() if len(shards) == 1 else None
-            if shard is None:
-                raise ValueError(
-                    f"KV cache region of layers {sorted(layers)} does not fit "
-                    f"in one of the Store layer ranges {layer_ranges}"
-                )
-            shard_regions[shard].append(region)
-        for (start, end), regions in zip(layer_ranges, shard_regions, strict=True):
-            if not regions:
-                raise ValueError(f"No KV cache for Store layer range [{start}, {end})")
-        return [np.asarray(regions, dtype=np.int64) for regions in shard_regions]
+            shard_regions: list[list[int]] = [[] for _ in self.layer_ranges]
+            for region, ranges in enumerate(region_ranges):
+                if len(ranges) != 1:
+                    raise ValueError(
+                        "A KV cache region holds layers of several Store layer "
+                        f"ranges {self.layer_ranges}"
+                    )
+                shard_regions[ranges.pop()].append(region)
+            self._shard_regions = [
+                np.asarray(regions, dtype=np.int64) for regions in shard_regions
+            ]
 
     def prepare_values(
         self,
@@ -720,6 +727,7 @@ class AttentionStoreLayout(TPShardedStoreLayout):
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
+        layer_names: Sequence[str] | None = None,
     ) -> None:
         templates: list[list[tuple[list[int], list[int], list[int]]]] = [
             [([], [], []) for _ in range(self.shards_per_rank)]
@@ -940,6 +948,7 @@ class MambaStoreLayout(TPShardedStoreLayout):
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
+        layer_names: Sequence[str] | None = None,
     ) -> None:
         templates: list[tuple[list[int], list[int], list[int]]] = [
             ([], [], []) for _ in range(self.shards_per_rank)

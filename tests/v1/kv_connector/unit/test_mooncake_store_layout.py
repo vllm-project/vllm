@@ -5,6 +5,7 @@
 import ctypes
 import os
 import random
+from collections.abc import Iterable
 
 import pytest
 import torch
@@ -377,6 +378,10 @@ def test_split_layer_range_cuts_only_inside_the_range():
     assert split_layer_range((10, 20), {5, 14, 25}) == ((10, 14), (14, 20))
 
 
+def _layer_names(layers: Iterable[int]) -> list[str]:
+    return [f"model.layers.{layer}.self_attn.attn" for layer in layers]
+
+
 def test_rank_local_layer_ranges_store_one_object_per_range():
     """A block is one object per layer range, holding only that range's
     layers under a key naming the range. A layer past the last range, like a
@@ -391,7 +396,9 @@ def test_rank_local_layer_ranges_store_one_object_per_range():
         BLOCK_SIZE,
         layer_ranges=((0, 2), (2, 4)),
     )
-    layout.register_kv_caches(caches, num_blocks, layer_indices=[0, 1, 2, 3, 9])
+    layout.register_kv_caches(
+        caches, num_blocks, layer_names=_layer_names([0, 1, 2, 3, 9])
+    )
 
     assert layout.local_shard_ids == (0, 1)
     assert "@layers:0-2@group:0@" in layout.key_for(0, BlockHash(b"h"))
@@ -419,9 +426,9 @@ def test_rank_local_layer_ranges_reject_a_region_across_ranges():
         layer_ranges=((0, 1), (1, 2)),
     )
 
-    with pytest.raises(ValueError, match="does not fit"):
+    with pytest.raises(ValueError, match="several Store layer ranges"):
         layout.register_kv_caches(
-            [raw[:, 0:1], raw[:, 1:2]], num_blocks, layer_indices=[0, 1]
+            [raw[:, 0:1], raw[:, 1:2]], num_blocks, layer_names=_layer_names([0, 1])
         )
 
 

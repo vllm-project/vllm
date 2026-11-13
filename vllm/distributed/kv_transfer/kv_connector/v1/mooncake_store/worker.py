@@ -88,7 +88,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.distributed.utils import get_default_pp_partition, get_pp_indices
 from vllm.logger import init_logger
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
@@ -2230,39 +2229,29 @@ class MooncakeStoreWorker:
             for group_id, (group, db) in enumerate(
                 zip(self._kv_cache_groups, self.token_dbs, strict=True)
             ):
+                tp_shared = self.store_tp_size is not None
                 group_views = [
-                    cache_by_layer[name]
+                    (name, views[:1] if tp_shared else views)
                     for name in group.layer_names
-                    if name in cache_by_layer
+                    if (views := cache_by_layer.get(name)) is not None
                 ]
-                if self.store_tp_size is not None:
-                    if len(group_views) != len(group.layer_names):
-                        raise ValueError(
-                            "Missing KV cache tensors for TP-shared cache group "
-                            f"{group_id}"
-                        )
-                    group_tensors = [views[0] for views in group_views]
-                else:
-                    group_tensors = [cache for views in group_views for cache in views]
-                group_tensors = group_tensors or cache_tensors
+                if tp_shared and len(group_views) != len(group.layer_names):
+                    raise ValueError(
+                        f"Missing KV cache tensors for TP-shared cache group {group_id}"
+                    )
+                group_tensors = [
+                    cache for _, views in group_views for cache in views
+                ] or cache_tensors
                 if not isinstance(db.store_layout, RankLocalStoreLayout):
                     group_tensors = [
                         group_kernel_blocks(cache, self.num_blocks)
                         for cache in group_tensors
                     ]
-                    db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
-                elif db.store_layout.layer_ranges is not None:
-                    layer_indices = [
-                        extract_layer_index(name)
-                        for name in group.layer_names
-                        if name in cache_by_layer
-                        for _ in cache_by_layer[name]
-                    ]
-                    db.store_layout.register_kv_caches(
-                        group_tensors, self.num_blocks, layer_indices
-                    )
-                else:
-                    db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
+                db.store_layout.register_kv_caches(
+                    group_tensors,
+                    self.num_blocks,
+                    layer_names=[name for name, views in group_views for _ in views],
+                )
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
