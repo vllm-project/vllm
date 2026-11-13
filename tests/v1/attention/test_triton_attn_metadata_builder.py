@@ -155,30 +155,31 @@ def test_draft_decode_update_matches_fresh_build(builder_cls):
     assert torch.equal(metadata.query_start_loc, expected.query_start_loc)
 
 
-# gfx942 uses 64 segments until the 16-segment grid reaches about two programs per
+# CDNA3 uses 64 segments until the 16-segment grid reaches about two programs per
 # CU: (2 * 304 - 1) // (16 * num_kv_heads) requests.
 @pytest.mark.parametrize(
     "builder_cls",
     [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
 )
 @pytest.mark.parametrize(
-    "gfx942,num_kv_heads,num_seqs,query_len,segments",
+    "cdna_version,num_kv_heads,num_seqs,query_len,segments",
     [
-        (True, 8, 1, 1, 64),
-        (True, 8, 4, 1, 64),
-        (True, 8, 5, 1, 16),
-        (True, 2, 18, 1, 64),
-        (True, 2, 19, 1, 16),
-        (True, 2, 4, 4, 64),
-        (False, 8, 1, 1, 16),  # other ROCm GPUs keep 16
+        (3, 8, 1, 1, 64),
+        (3, 8, 4, 1, 64),
+        (3, 8, 5, 1, 16),
+        (3, 2, 18, 1, 64),
+        (3, 2, 19, 1, 16),
+        (3, 2, 4, 4, 64),
+        (4, 8, 1, 1, 16),  # CDNA4 remains untested
+        (2, 8, 1, 1, 16),  # CDNA2 keeps 16
     ],
 )
-def test_split_k_segments_follow_cu_occupancy_gfx942(
-    monkeypatch, builder_cls, gfx942, num_kv_heads, num_seqs, query_len, segments
+def test_split_k_segments_follow_cu_occupancy_cdna3(
+    monkeypatch, builder_cls, cdna_version, num_kv_heads, num_seqs, query_len, segments
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
+    monkeypatch.setattr("vllm.platforms.rocm.get_cdna_version", lambda: cdna_version)
     monkeypatch.setattr(current_platform, "num_compute_units", lambda: 304)
     config = SimpleNamespace(
         model_config=SimpleNamespace(

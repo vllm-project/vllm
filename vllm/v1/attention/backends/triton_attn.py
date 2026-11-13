@@ -161,11 +161,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv
             )
         elif current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx942
+            from vllm.platforms.rocm import get_cdna_version
 
             # 64 segments stay faster until the 16-segment grid has about two
             # programs per CU (measured on MI325X, 304 CUs).
-            if on_gfx942():
+            if get_cdna_version() == 3:
                 self.max_seqs_64_segments = (
                     2 * current_platform.num_compute_units() - 1
                 ) // (NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv)
