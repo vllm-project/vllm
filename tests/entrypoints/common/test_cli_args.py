@@ -9,6 +9,8 @@ import pytest
 import vllm.entrypoints.common.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.cli.launch import LaunchSubcommand
+from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -247,6 +249,67 @@ def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
     args = parser.parse_args(["--grpc-port", "50051"])
     with pytest.raises(ValueError, match="--grpc-port requires"):
         validate_parsed_serve_args(args)
+
+
+@pytest.mark.parametrize(
+    "cli_args, env, rejected",
+    [
+        (["--api-key", "secret"], {}, True),
+        ([], {"VLLM_API_KEY": "secret"}, True),
+        # An empty key does not enable HTTP auth either.
+        ([], {"VLLM_API_KEY": ""}, False),
+    ],
+)
+def test_grpc_rejects_api_key(vllm_parser, monkeypatch, cli_args, env, rejected):
+    """The Python gRPC server cannot enforce API keys, so it must not start."""
+    monkeypatch.delenv("VLLM_API_KEY", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    args = vllm_parser.parse_args(["serve", "--grpc", *cli_args])
+    if rejected:
+        with pytest.raises(ValueError, match="does not support API keys"):
+            ServeSubcommand().validate(args)
+    else:
+        ServeSubcommand().validate(args)
+
+
+@pytest.mark.parametrize(
+    "cli_args, env",
+    [
+        (["--api-key", "secret"], {}),
+        ([], {"VLLM_API_KEY": "secret"}),
+        (
+            ["--grpc-port", "50051", "--api-key", "secret"],
+            {"VLLM_USE_RUST_FRONTEND": "1"},
+        ),
+    ],
+)
+def test_api_key_still_accepted_without_python_grpc(
+    vllm_parser, monkeypatch, cli_args, env
+):
+    """HTTP, including next to Rust gRPC services, still enforces API keys."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    ServeSubcommand().validate(vllm_parser.parse_args(["serve", *cli_args]))
+
+
+def test_launch_render_does_not_treat_grpc_flag_as_python_grpc(
+    launch_render_parser,
+):
+    """`vllm launch render` reuses the serve parser but always serves HTTP."""
+    args = launch_render_parser.parse_args(
+        ["launch", "render", "--grpc", "--api-key", "secret"]
+    )
+    LaunchSubcommand().validate(args)
+    assert args.api_key == ["secret"]
+
+
+def test_grpc_rejects_api_key_from_config(serve_parser, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("api_key:\n  - secret\n")
+    args = serve_parser.parse_args(["dummy", "--grpc", "--config", str(config)])
+    with pytest.raises(ValueError, match="does not support API keys"):
+        ServeSubcommand().validate(args)
 
 
 def test_enable_auto_choice_fails_without_tool_call_parser(serve_parser):
