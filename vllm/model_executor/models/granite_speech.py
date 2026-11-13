@@ -94,20 +94,119 @@ ISO639_1_SUPPORTED_LANGS = {
 _MAX_AUDIO_TOKENS = 8190
 
 
-def get_encoder_batch_size(
-    config: PreTrainedConfig, num_features: int, max_num_encoder_input_tokens: int
-) -> int:
+def get_max_audio_features(config: PreTrainedConfig) -> int:
     tokens_per_window = config.window_size // config.downsample_rate
-    num_clips = max(1, max_num_encoder_input_tokens // _MAX_AUDIO_TOKENS)
-    max_features = (
-        num_clips * _MAX_AUDIO_TOKENS // tokens_per_window * config.window_size
+    return _MAX_AUDIO_TOKENS // tokens_per_window * config.window_size
+
+
+def get_encoder_context_blocks(config: PreTrainedConfig) -> int:
+    encoder_config = config.encoder_config
+    context_size = encoder_config.context_size
+    return math.ceil(
+        encoder_config.num_layers
+        * (context_size + encoder_config.conv_kernel_size // 2)
+        / context_size
     )
+
+
+def get_profiled_audio_features(
+    config: PreTrainedConfig, audio_length: int | None, hop_length: int
+) -> int:
+    num_features = get_max_audio_features(config)
+    if audio_length is None:
+        return num_features
     context_size = config.encoder_config.context_size
-    return max(
-        1,
-        math.ceil(max_features / context_size)
-        // math.ceil(num_features / context_size),
+    min_window = 4 * get_encoder_context_blocks(config) * context_size + math.lcm(
+        context_size, config.window_size
     )
+    return min(num_features, max(min_window, (audio_length // hop_length + 1) // 2))
+
+
+def get_max_encoder_call_blocks(model_config: ModelConfig) -> int:
+    config = model_config.hf_config
+    mm_config = model_config.multimodal_config
+    audio_options = mm_config.limit_per_prompt.get("audio") if mm_config else None
+    length = getattr(audio_options, "length", None)
+    hop_length = 0
+    if length is not None:
+        audio_processor = cached_processor_from_config(model_config).audio_processor
+        hop_length = audio_processor.melspec_kwargs["hop_length"]
+    num_features = get_profiled_audio_features(config, length, hop_length)
+    return math.ceil(num_features / config.encoder_config.context_size)
+
+
+def get_encoder_batch_size(
+    config: PreTrainedConfig, num_features: int, max_blocks: int
+) -> int:
+    context_size = config.encoder_config.context_size
+    return max(1, max_blocks // math.ceil(num_features / context_size))
+
+
+def get_encoder_windows(
+    config: PreTrainedConfig, num_features: int, max_blocks: int
+) -> list[tuple[int, int, int, int]]:
+    context_size = config.encoder_config.context_size
+    max_features = max_blocks * context_size
+    if num_features <= max_features:
+        return [(0, 0, num_features, num_features)]
+    context = get_encoder_context_blocks(config) * context_size
+    align = math.lcm(context_size, config.window_size)
+    windows = []
+    start = 0
+    while start < num_features:
+        begin = max(0, start - context)
+        if begin + max_features >= num_features:
+            windows.append((begin, start, num_features, num_features))
+            break
+        end = max(start + align, (begin + max_features - context) // align * align)
+        windows.append((begin, start, end, end + context))
+        start = end
+    return windows
+
+
+def encode_audio(
+    encoder: nn.Module,
+    projector: nn.Module,
+    config: PreTrainedConfig,
+    input_features: torch.Tensor | list[torch.Tensor],
+    audio_embed_sizes: list[int],
+    max_blocks: int,
+) -> tuple[torch.Tensor, ...]:
+    order = sorted(
+        range(len(input_features)),
+        key=lambda i: input_features[i].shape[0],
+        reverse=True,
+    )
+    audio_embeds: dict[int, torch.Tensor] = {}
+    start = 0
+    while start < len(order):
+        num_features = input_features[order[start]].shape[0]
+        batch_size = get_encoder_batch_size(config, num_features, max_blocks)
+        group = order[start : start + batch_size]
+        start += len(group)
+        if len(group) == 1:
+            i = group[0]
+            pieces = []
+            for begin, keep_begin, keep_end, end in get_encoder_windows(
+                config, num_features, max_blocks
+            ):
+                hidden = encoder(input_features[i][begin:end].unsqueeze(0))
+                hidden = hidden[:, keep_begin - begin : keep_end - begin]
+                pieces.append(projector(hidden)[0])
+                del hidden
+            audio_embeds[i] = torch.cat(pieces)[: audio_embed_sizes[i]]
+            continue
+        features = torch.nn.utils.rnn.pad_sequence(
+            [input_features[i] for i in group], batch_first=True
+        )
+        projected_embeds = projector(encoder(features))
+        sizes = [audio_embed_sizes[i] for i in group]
+        group_embeds = torch.cat(
+            [embeds[:size] for embeds, size in zip(projected_embeds, sizes)]
+        ).split(sizes)
+        del features, projected_embeds
+        audio_embeds.update(zip(group, group_embeds))
+    return tuple(audio_embeds[i] for i in range(len(order)))
 
 
 ### Audio Input
@@ -151,11 +250,10 @@ class GraniteSpeechProcessingInfo(BaseProcessingInfo):
         return _MAX_AUDIO_TOKENS
 
     def get_max_audio_len(self):
-        audio_processor = self.get_hf_processor().audio_processor
-        window_size = audio_processor.projector_window_size
-        tokens_per_window = window_size // audio_processor.projector_downsample_rate
-        encoder_length = _MAX_AUDIO_TOKENS // tokens_per_window * window_size
-        return (2 * encoder_length - 1) * audio_processor.melspec_kwargs["hop_length"]
+        hop_length = self.get_hf_processor().audio_processor.melspec_kwargs[
+            "hop_length"
+        ]
+        return (2 * get_max_audio_features(self.get_hf_config()) - 1) * hop_length
 
 
 ### Input Processing  & Multimodal utils
@@ -233,11 +331,18 @@ class GraniteSpeechDummyInputsBuilder(
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
+        hop_length = self.info.get_hf_processor().audio_processor.melspec_kwargs[
+            "hop_length"
+        ]
+        num_features = get_profiled_audio_features(
+            self.info.get_hf_config(),
+            getattr(mm_options.get("audio"), "length", None),
+            hop_length,
+        )
         return {
             "audio": self._get_dummy_audios(
-                length=self.info.get_max_audio_len(),
+                length=(2 * num_features - 1) * hop_length,
                 num_audios=mm_counts.get("audio", 0),
-                overrides=mm_options.get("audio"),
             )
         }
 
@@ -613,8 +718,9 @@ class GraniteSpeechForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.cache_config = cache_config
-        self.max_num_encoder_input_tokens = (
-            vllm_config.scheduler_config.max_num_encoder_input_tokens
+
+        self.max_encoder_call_blocks = get_max_encoder_call_blocks(
+            vllm_config.model_config
         )
 
         # Check for OOV tokens to see if offsets need to be preserved
@@ -728,33 +834,14 @@ class GraniteSpeechForConditionalGeneration(
 
         """
         # TODO (Alex) - support embedding inputs
-        input_features = audio_input["input_features"]
-        audio_embed_sizes = audio_input["audio_embed_sizes"]
-        order = sorted(
-            range(len(input_features)),
-            key=lambda i: input_features[i].shape[0],
-            reverse=True,
+        return encode_audio(
+            self.encoder,
+            self.projector,
+            self.config,
+            audio_input["input_features"],
+            audio_input["audio_embed_sizes"],
+            self.max_encoder_call_blocks,
         )
-        audio_embeds: dict[int, torch.Tensor] = {}
-        start = 0
-        while start < len(order):
-            num_features = input_features[order[start]].shape[0]
-            batch_size = get_encoder_batch_size(
-                self.config, num_features, self.max_num_encoder_input_tokens
-            )
-            group = order[start : start + batch_size]
-            start += len(group)
-            features = torch.nn.utils.rnn.pad_sequence(
-                [input_features[i] for i in group], batch_first=True
-            )
-            projected_embeds = self.projector(self.encoder(features))
-            sizes = [audio_embed_sizes[i] for i in group]
-            group_embeds = torch.cat(
-                [embeds[:size] for embeds, size in zip(projected_embeds, sizes)]
-            ).split(sizes)
-            del features, projected_embeds
-            audio_embeds.update(zip(group, group_embeds))
-        return tuple(audio_embeds[i] for i in range(len(order)))
 
     def embed_multimodal(
         self,
