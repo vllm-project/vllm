@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end tests for the FlashInfer MoE-EP adapter on Hopper and Blackwell GPUs.
+"""End-to-end FlashInfer MoE-EP tests on Hopper, Blackwell and Rubin GPUs.
 
 Each test spawns one process per GPU, bootstraps vLLM's expert-parallel
 groups, builds a `FlashInferMoeEp` adapter from bf16 expert weights at the

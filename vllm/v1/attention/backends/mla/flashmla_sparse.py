@@ -899,7 +899,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         ):
             self.fp8_q_padded = _shared_fp8_q_padded(
                 max_decode_tokens,
-                self.fp8_decode_padded_heads,
+                self._compute_fp8_decode_padded_heads(num_heads),
                 self.q_head_size,
             )
 
@@ -1297,7 +1297,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         prefill kernel which has head padding overhead when num_heads is small.
         Used when use_mixed_batch is True.
 
-        ``num_heads`` is the real head count when ``q`` is already head-padded;
+        `num_heads` is the real head count when `q` is already head-padded;
         the output keeps only those heads.
 
         The lse is only returned when DCP needs it, otherwise None.

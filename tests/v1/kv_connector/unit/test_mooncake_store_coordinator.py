@@ -804,10 +804,8 @@ def test_eagle_swa_prefix_saved_by_chunked_prefill_serves_next_turn(
     next turn that extends the prompt its whole prefix but EAGLE's dropped
     block, at every prompt-end residue."""
     groups = [
-        KVCacheGroupSpec(["target"], _full(block_size)),
-        KVCacheGroupSpec(
-            ["draft"], _swa(block_size, sliding_window), is_eagle_group=True
-        ),
+        _group(["target"], _full(block_size)),
+        _group(["draft"], _swa(block_size, sliding_window), is_eagle_group=True),
     ]
     coord = _make_coord(
         groups, hash_block_size=block_size, use_eagle=True, retention_interval=0
