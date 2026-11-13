@@ -169,6 +169,51 @@ def _shard_q_kernel(
     tl.store(dst + i * dst_stride + dst_col + col, vals, mask=mask)
 
 
+@triton.jit
+def _shard_q_pair_kernel(
+    q0,
+    q0_stride,
+    q0_head_stride,
+    q1,
+    q1_stride,
+    q1_head_stride,
+    token_ids,
+    rank_offsets,
+    peer_ptrs,
+    dst_stride,
+    dst_col,
+    HEADS: tl.constexpr,
+    DIM0: tl.constexpr,
+    DIM1: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Push a two-tensor (nope, rope) query without torch.cat.
+
+    Each token's head block is laid out as head * (DIM0 + DIM1); columns
+    below DIM0 read q0, the rest read q1. The source pointer is selected per
+    lane so every element issues one load, and the constexpr head/dim values
+    let Triton strength-reduce the column split.
+    """
+    i = tl.program_id(0).to(tl.int64)
+    peer = tl.program_id(1)
+    start = tl.load(rank_offsets + peer)
+    valid = start + i < tl.load(rank_offsets + peer + 1)
+    TOTAL: tl.constexpr = DIM0 + DIM1
+    WIDTH: tl.constexpr = HEADS * TOTAL
+    col = tl.program_id(2) * BLOCK + tl.arange(0, BLOCK)
+    mask = valid & (col < WIDTH)
+    src_token = tl.load(token_ids + start + i, mask=valid, other=0)
+    dst = tl.load(peer_ptrs + peer).to(tl.pointer_type(q0.dtype.element_ty))
+    head = col // TOTAL
+    inner = col - head * TOTAL
+    is_q0 = inner < DIM0
+    head64 = head.to(tl.int64)
+    q0_ptr = q0 + src_token * q0_stride + head64 * q0_head_stride + inner
+    q1_ptr = q1 + src_token * q1_stride + head64 * q1_head_stride + (inner - DIM0)
+    vals = tl.load(tl.where(is_q0, q0_ptr, q1_ptr), mask=mask)
+    tl.store(dst + i * dst_stride + dst_col + col, vals, mask=mask)
+
+
 @triton.jit(do_not_specialize=["num_decode_tokens"])
 def _unshard_out_kernel(
     out,
@@ -281,14 +326,71 @@ def shard_q(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """[T, H, D] head shards -> the decode tokens, still head-sharded, and
     this rank's token shard with every rank's heads, [T_rank, world * H, D]."""
-    if isinstance(q, tuple):
-        q = torch.cat(q, dim=-1)
-    decode_q, q = q[: metadata.num_decode_tokens], q[metadata.num_decode_tokens :]
-    _, heads, dim = q.shape
-    assert q[0].is_contiguous()
     group = get_tp_group()
     world = group.world_size
     num_local = metadata.num_tokens_per_rank[group.rank_in_group]
+    num_decode = metadata.num_decode_tokens
+
+    if isinstance(q, tuple):
+        q0_full, q1_full = q
+        # Decode is normally tiny (often zero on pure-prefill steps), so this
+        # cat is not the hot path; keep its packed tensor form for callers.
+        decode_q = (
+            torch.cat((q0_full[:num_decode], q1_full[:num_decode]), dim=-1)
+            if num_decode
+            else q0_full.new_empty(
+                (0, q0_full.shape[1], q0_full.shape[2] + q1_full.shape[2])
+            )
+        )
+        if _workspace is None:
+            # NCCL fallback keeps the old packed path.
+            return shard_q(torch.cat((q0_full, q1_full), dim=-1), metadata)
+
+        if (
+            q0_full.dtype != q1_full.dtype
+            or q0_full.stride(-1) != 1
+            or q1_full.stride(-1) != 1
+        ):
+            # Keep the packed path for layouts the pair kernel cannot address.
+            return shard_q(torch.cat((q0_full, q1_full), dim=-1), metadata)
+        q0 = q0_full[num_decode:]
+        q1 = q1_full[num_decode:]
+        heads, dim0, dim1 = q0.shape[1], q0.shape[2], q1.shape[2]
+        storage, peer_ptrs = _workspace.q
+        width = heads * (dim0 + dim1)
+        assert storage.shape[-2:] == (world * heads, dim0 + dim1)
+        ubatch = dbo_current_ubatch_id()
+        # Peers may still read the previous exchange from their buffers.
+        _workspace.handle.barrier(channel=ubatch)
+        grid = (
+            max(metadata.num_tokens_per_rank),
+            world,
+            triton.cdiv(width, _PUSH_BLOCK),
+        )
+        _shard_q_pair_kernel[grid](
+            q0,
+            q0.stride(0),
+            q0.stride(1),
+            q1,
+            q1.stride(0),
+            q1.stride(1),
+            metadata.token_ids,
+            metadata.rank_offsets,
+            peer_ptrs[ubatch],
+            world * width,
+            group.rank_in_group * width,
+            heads,
+            dim0,
+            dim1,
+            BLOCK=_PUSH_BLOCK,
+        )
+        _workspace.handle.barrier(channel=ubatch)
+        # Views the buffer, which the next exchange reuses.
+        return decode_q, storage[ubatch, :num_local]
+
+    assert q[0].is_contiguous()
+    decode_q, q = q[:num_decode], q[num_decode:]
+    _, heads, dim = q.shape
     if _workspace is None:
         # Every rank sends this rank its num_local tokens, in rank order.
         recv = q.new_empty((world, num_local, heads, dim))

@@ -93,7 +93,9 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
     assert build_shardq_split(short, vllm_config) is None
 
 
-def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
+def _round_trip(
+    rank, world, port, use_sm, q_dtype, num_decode_tokens, tuple_input=False
+):
     torch.accelerator.set_device_index(rank)
     vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
@@ -124,9 +126,20 @@ def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
                 np.r_[0, np.cumsum(num_tokens_per_rank)]
             ).cuda(),
         )
-        local_heads = full[:, rank * heads : (rank + 1) * heads].contiguous()
+        if tuple_input:
+            # The model's ql_nope is a bmm output transposed to token-major,
+            # so its head stride is num_tokens * dim0 instead of dim0.
+            dim0 = dim - 64
+            q0 = full[..., :dim0].permute(1, 0, 2).contiguous().transpose(0, 1)
+            q1 = full[..., dim0:].contiguous()
+            heads_slice = slice(rank * heads, (rank + 1) * heads)
+            local_heads = torch.cat((q0[:, heads_slice], q1[:, heads_slice]), dim=-1)
+            q_input = (q0[:, heads_slice], q1[:, heads_slice])
+        else:
+            local_heads = full[:, rank * heads : (rank + 1) * heads].contiguous()
+            q_input = local_heads
         for _ in range(2):  # The second pass reuses the symmetric buffers.
-            decode_q, sharded = shard_q(local_heads, shardq)
+            decode_q, sharded = shard_q(q_input, shardq)
             # Bitwise, as the exchanges only move bytes (and fp8 lacks
             # torch.equal).
             assert torch.equal(
@@ -158,5 +171,27 @@ def test_shard_q_round_trip(use_sm, q_dtype, num_decode_tokens):
     mp.spawn(
         _round_trip,
         args=(world, get_open_port(), use_sm, q_dtype, num_decode_tokens),
+        nprocs=world,
+    )
+
+
+@pytest.mark.parametrize("num_decode_tokens", [0, 33])
+def test_shard_q_tuple_round_trip(num_decode_tokens):
+    """The model passes (ql_nope, q_pe) instead of a packed query, and only
+    the first one is non-contiguous. The pair exchange must match a packed
+    round trip and still leave the decode tokens head-sharded."""
+    world = 2
+    if torch.accelerator.device_count() < world:
+        pytest.skip(f"needs {world} GPUs")
+    mp.spawn(
+        _round_trip,
+        args=(
+            world,
+            get_open_port(),
+            True,
+            torch.float8_e4m3fn,
+            num_decode_tokens,
+            True,
+        ),
         nprocs=world,
     )
