@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
-
 import torch
 from einops import rearrange
 from torch import nn
@@ -68,7 +66,6 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -95,9 +92,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             num_spec=self.num_spec,
         )
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # Only the fused path exports the checkpoint snapshots. AITER's
         # chunk_kda cannot, so the gluon backend hands the steps that carry a
         # checkpoint to the fused kernel when the build has it.
@@ -114,13 +109,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
             logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(can_checkpoint),
-            prefill_checkpoint_alignment=(
-                KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
-            ),
-        )
+        return KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
 
     def __init__(
         self,
