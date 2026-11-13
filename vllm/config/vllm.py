@@ -1060,6 +1060,33 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
+    def _validate_dynamic_sd_schedule(self) -> None:
+        """Validate the schedule before the model loads."""
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            return
+
+        schedule = speculative_config.num_speculative_tokens_per_batch_size
+        if not schedule:
+            logger.warning_once(
+                "num_speculative_tokens_per_batch_size is empty. Falling back "
+                "to static num_speculative_tokens=%d.",
+                speculative_config.num_speculative_tokens,
+            )
+            speculative_config.num_speculative_tokens_per_batch_size = None
+            return
+
+        from vllm.v1.spec_decode.dynamic.utils import (
+            validate_and_normalize_dynamic_sd_schedule,
+        )
+
+        speculative_config.num_speculative_tokens_per_batch_size = (
+            validate_and_normalize_dynamic_sd_schedule(schedule)
+        )
+
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
     ) -> None:
@@ -1490,6 +1517,9 @@ class VllmConfig:
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
+        # Model hooks read the schedule, so settle it first.
+        self._maybe_disable_dynamic_sd_for_data_parallel()
+        self._validate_dynamic_sd_schedule()
         # Model hooks derive values from max_model_len, so apply the draft's
         # limit first.
         self._limit_max_model_len_to_draft()
@@ -1801,8 +1831,6 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
-
-        self._maybe_disable_dynamic_sd_for_data_parallel()
 
         if (
             self.attention_config.sparse_mla_prefill_workspace_factor is None
@@ -2402,16 +2430,9 @@ class VllmConfig:
                 max_cudagraph_capture_size is not None
                 or self.compilation_config.cudagraph_capture_sizes is not None
             )
-            try:
-                target_query_lens = self.get_decode_cudagraph_query_lens(
-                    self.uniform_decode_query_len
-                )
-            except ValueError:
-                # Validation lives elsewhere; an invalid dynamic speculative
-                # decoding schedule keeps the single static width.
-                target_query_lens = {
-                    self.uniform_decode_query_len: self.scheduler_config.max_num_seqs
-                }
+            target_query_lens = self.get_decode_cudagraph_query_lens(
+                self.uniform_decode_query_len
+            )
             # Decode sizes to cover, in tokens. Populated only when the default
             # is computed here, so an explicit capture range is left exactly as
             # configured.
