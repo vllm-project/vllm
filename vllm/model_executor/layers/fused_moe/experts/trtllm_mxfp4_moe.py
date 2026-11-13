@@ -160,7 +160,15 @@ class TrtLlmMxfp4ExpertsMonolithic(
     Wraps flashinfer.trtllm_fp4_block_scale_moe().
     """
 
-    def supports_routing_replay_capture(self) -> bool:
+    @staticmethod
+    def supports_partial_expert_execution(moe_config: FusedMoEConfig) -> bool:
+        return (
+            moe_config.in_dtype == torch.bfloat16
+            and moe_config.num_logical_experts <= 2048
+        )
+
+    @staticmethod
+    def supports_routing_replay_capture() -> bool:
         return True
 
     @staticmethod

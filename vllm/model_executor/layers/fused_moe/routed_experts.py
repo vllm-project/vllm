@@ -39,22 +39,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Checkpoint suffixes of fused expert tensors that name quantized-expert
-# parameters, e.g. the compact MoNE exports store
-# ``experts.gate_up_proj.weight_packed`` for ``experts.w13_weight_packed``
-# and ``experts.gate_up_proj.input_global_scale`` for
-# ``experts.w13_input_global_scale``.
-_FUSED_QUANT_SUFFIXES = (
-    "weight_packed",
-    "weight_scale",
-    "weight_global_scale",
-    "weight_scale_2",
-    "weight_zero_point",
-    "weight_shape",
-    "input_global_scale",
-    "input_scale",
-)
-
 
 def _index_expert_mapping(
     mapping: list[tuple[str, str, int, str]],
@@ -1072,7 +1056,7 @@ class RoutedExperts(PluggableLayer):
             )
             # Fused tensors and ambiguous names keep the full mapping.
             candidates = expert_mapping
-            if not is_fused and qual_name.count("experts.") == 1:
+            if not is_fused and has_single_experts_component:
                 candidates = named_expert or expert_mapping
 
             matched = False
@@ -1092,11 +1076,11 @@ class RoutedExperts(PluggableLayer):
                     )
                 )
                 weight_name = qual_name.replace(weight_name, param_name)
-                # Quantized fused tensors suffix the module name; fold the
-                # known suffixes onto the ``w13_``/``w2_`` parameter stem.
-                # Unrecognized suffixes keep the separator so unknown names
-                # still fail loudly.
-                if weight_name.endswith(tuple(f".{s}" for s in _FUSED_QUANT_SUFFIXES)):
+                # Stacked MoNE checkpoints use gate_up_proj.weight_packed.
+                # Mapping gate_up_proj to w13_weight leaves an extra "weight.":
+                # w13_weight.weight_packed must become w13_weight_packed.
+                # Fused biases still require the model's weight mapper.
+                if not weight_name.endswith(".bias"):
                     weight_name = weight_name.replace(".w13_weight.", ".w13_").replace(
                         ".w2_weight.", ".w2_"
                     )

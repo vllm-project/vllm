@@ -704,6 +704,18 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("hash routing")
         elif moe_config.require_decomposed_backend and cls.is_monolithic():
             return False, _make_reason("routes adjusted after routing")
+        elif (
+            moe_config.require_partial_expert_execution
+            and cls.is_monolithic()
+            and not cls.supports_partial_expert_execution(moe_config)
+        ):
+            return False, _make_reason("partial expert execution")
+        elif (
+            moe_config.require_routing_replay_capture
+            and cls.is_monolithic()
+            and not cls.supports_routing_replay_capture()
+        ):
+            return False, _make_reason("routing replay capture")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, executed_key
         ):
@@ -730,6 +742,26 @@ class FusedMoEExperts(ABC):
         ):
             return False, reason
         return True, None
+
+    @staticmethod
+    def supports_partial_expert_execution(moe_config: FusedMoEConfig) -> bool:
+        """Whether monolithic routing can execute only a local expert range.
+
+        Route over `global_num_experts`, but access weights/scales only for
+        the configured local range. Selected experts outside that range add
+        zero without changing the original routing weights. An entirely
+        nonlocal selection must produce zero output, without dummy weights.
+        """
+        return False
+
+    @staticmethod
+    def supports_routing_replay_capture() -> bool:
+        """Whether the kernel can capture its selected logical expert IDs.
+
+        Monolithic kernels exposing `routing_replay_out` should override.
+        Captured IDs must include selections outside the local expert range.
+        """
+        return False
 
     @staticmethod
     @abstractmethod
@@ -1159,14 +1191,6 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     @staticmethod
     def is_monolithic() -> bool:
         return True
-
-    def supports_routing_replay_capture(self) -> bool:
-        """Whether this expert supports routing replay capture.
-
-        Subclasses backed by a kernel that exposes routed expert IDs
-        (e.g. FlashInfer's `routing_replay_out`) should override.
-        """
-        return False
 
     def supports_precomputed_routing(self) -> bool:
         """Whether `apply_precomputed_routing` is implemented."""
@@ -1774,6 +1798,7 @@ class FusedMoEKernelMonolithicImpl:
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
         a1q_scale: torch.Tensor | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1795,15 +1820,16 @@ class FusedMoEKernelMonolithicImpl:
             a1_scale=a1q_scale,
         )
 
-        routing_replay_out = None
-        if routing_sink is not None:
+        if routing_sink is not None or routing_replay_out is not None:
             # Checked per call: a weight reload may rebuild a different kernel.
             if not self.fused_experts.supports_routing_replay_capture():
                 raise ValueError(
                     "Routed-experts capture is not supported with monolithic MoE "
                     f"kernel {type(self.fused_experts).__name__}."
                 )
-            routing_replay_out = routing_sink.buffer[: len(a1q)]
+            if routing_replay_out is None:
+                assert routing_sink is not None
+                routing_replay_out = routing_sink.buffer[: len(a1q)]
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
@@ -1979,6 +2005,7 @@ class FusedMoEKernel:
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
         a1q_scale: torch.Tensor | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1998,6 +2025,7 @@ class FusedMoEKernel:
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
             a1q_scale=a1q_scale,
+            routing_replay_out=routing_replay_out,
         )
 
     def supports_precomputed_routing(self) -> bool:

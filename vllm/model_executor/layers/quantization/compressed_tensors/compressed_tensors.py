@@ -239,10 +239,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.config = config
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
-        # MoNE "novice" expert-pruning metadata; consumed by expert
-        # substitution, which survives on this object even when a sub-model
-        # config (e.g. the text config of a multimodal wrapper) drops
-        # ``quantization_config``.
+        # Preserve MoNE pruning metadata when a text sub-model's HF config
+        # lacks the outer checkpoint's quantization_config.
         self.moe_sparsity_config = moe_sparsity_config
 
         if transform_config:

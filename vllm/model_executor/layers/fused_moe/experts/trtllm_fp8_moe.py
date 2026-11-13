@@ -363,7 +363,13 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
 class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
     """Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface."""
 
-    def supports_routing_replay_capture(self) -> bool:
+    @staticmethod
+    def supports_partial_expert_execution(moe_config: FusedMoEConfig) -> bool:
+        # The block-scaled FP8/MXFP8 path has a 512-expert routing limit.
+        return moe_config.num_logical_experts <= 512
+
+    @staticmethod
+    def supports_routing_replay_capture() -> bool:
         return True
 
     def __init__(

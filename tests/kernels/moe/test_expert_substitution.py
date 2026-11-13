@@ -1,29 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import MixtralConfig
 
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     parallel_launch_with_config,
 )
-from tests.single_rank_group import SingleRankGroup, override_parallel_groups
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.config.kernel import MoEBackend
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedScaleMode
 from vllm.model_executor.layers.fused_moe.expert_substitution import (
     ConstantExpertSubstitution,
-    SubstitutedRoutedExperts,
     get_expert_substitution_spec,
     make_expert_substitution,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
-from vllm.model_executor.models.mixtral import MixtralMoE
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    TrtLlmBf16ExpertsMonolithic,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsSink,
+)
 from vllm.platforms import current_platform
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -47,8 +59,8 @@ def _model_config(num_experts, **kwargs) -> SimpleNamespace:
 
 
 def _substitution(hidden_size: int, dtype=torch.float32):
-    # Experts 1 and 3 of 5 are substituted; 0, 2, 4 map to physical 0, 1, 2.
-    return ConstantExpertSubstitution(1, 5, (1, 3), hidden_size, dtype)
+    # Experts 0..2 are retained; experts 3 and 4 are novices.
+    return ConstantExpertSubstitution(1, 5, 3, hidden_size, dtype)
 
 
 def test_parse_moe_sparsity_config():
@@ -103,11 +115,9 @@ def test_make_expert_substitution_matches_layer_index():
 
     assert substitution is not None
     assert substitution.layer_idx == 1
-    assert substitution.substituted_expert_ids == (3, 4)
+    assert substitution.num_logical_experts == 5
     assert substitution.num_compute_experts == 3
     assert substitution.novices.dtype == torch.bfloat16
-    # Retained router rows already name their compact physical rows.
-    assert [substitution.physical_expert_id(i) for i in range(5)] == [0, 1, 2, -1, -1]
     assert (
         make_expert_substitution(config, "model.layers.0.mlp.experts", 5, 16, None)
         is None
@@ -136,85 +146,178 @@ def test_constant_substitution_loads_novices():
         substitution.weight_loader(substitution.novices, torch.ones(3, 2))
 
 
-@pytest.mark.parametrize("num_tokens", [0, 1, 3, 7])
-@pytest.mark.parametrize("hidden_size", [2, 4])
-def test_constant_substitution_transforms_routes(num_tokens, hidden_size):
-    substitution = _substitution(hidden_size)
-
-    rows = torch.arange(num_tokens) % 3
-    topk_ids = torch.tensor([[1, 2], [4, 3], [99, -1]])[rows]
-    topk_weights = torch.tensor([[0.25, 0.75], [0.6, 0.4], [0.5, 0.5]])[rows]
-    assert substitution.transform_routes(topk_weights, topk_ids) is None
+@pytest.mark.parametrize("num_tokens,hidden_size", [(0, 2), (6, 2), (6, 4)])
+def test_constant_substitution_computes_novices_and_transforms_routes(
+    num_tokens, hidden_size
+):
+    substitution = _substitution(2)
+    substitution.weight_loader(
+        substitution.novices, torch.tensor([[10.0, 20.0], [30.0, 40.0]])
+    )
+    rows = torch.arange(num_tokens) % 6
+    topk_ids = torch.tensor([[3, 1], [2, 4], [99, -1], [3, 4], [1, 2], [3, 3]])[rows]
+    topk_weights = torch.tensor(
+        [[0.25, 0.75], [0.6, 0.4], [0.5, 0.5], [0.25, 0.75], [0.25, 0.75], [0.25, 0.75]]
+    )[rows]
+    actual = substitution.compute_output(
+        torch.zeros(num_tokens, hidden_size), topk_weights, topk_ids
+    )
+    substitution.transform_routes(topk_weights, topk_ids)
+    expected = torch.zeros(num_tokens, hidden_size)
+    expected[:, :2] = torch.tensor(
+        [[2.5, 5.0], [12.0, 16.0], [0.0, 0.0], [25.0, 35.0], [0.0, 0.0], [10.0, 20.0]]
+    )[rows]
+    torch.testing.assert_close(actual, expected)
 
     torch.testing.assert_close(
-        topk_weights, torch.tensor([[0.0, 0.75], [0.6, 0.0], [0.0, 0.0]])[rows]
+        topk_weights,
+        torch.tensor(
+            [[0.0, 0.75], [0.6, 0.0], [0.0, 0.0], [0.0, 0.0], [0.25, 0.75], [0.0, 0.0]]
+        )[rows],
     )
-    torch.testing.assert_close(topk_ids, torch.tensor([[0, 1], [2, 0], [0, 0]])[rows])
-
-
-def _bare_substituted_routed_experts(**attrs) -> SubstitutedRoutedExperts:
-    layer = SubstitutedRoutedExperts.__new__(SubstitutedRoutedExperts)
-    torch.nn.Module.__init__(layer)
-    layer.expert_substitution = _substitution(2)
-    for name, value in attrs.items():
-        setattr(layer, name, value)
-    return layer
-
-
-@pytest.mark.parametrize("tp_rank", [0, 1])
-def test_substituted_routed_experts_remaps_routes(tp_rank):
-    def apply(*, layer, x, topk_weights, topk_ids, **kwargs):
-        torch.testing.assert_close(topk_weights, torch.tensor([[0.0, 0.75]]))
-        torch.testing.assert_close(topk_ids, torch.tensor([[0, 1]]))
-        return torch.ones(x.shape[0], 2)
-
-    layer = _bare_substituted_routed_experts(
-        moe_config=SimpleNamespace(tp_rank=tp_rank),
-        quant_method=SimpleNamespace(is_monolithic=False, apply=apply),
+    torch.testing.assert_close(
+        topk_ids, torch.tensor([[0, 1], [2, 0], [0, 0], [0, 0], [1, 2], [0, 0]])[rows]
     )
-    actual = layer.forward_modular(
-        torch.zeros(1, 2),
-        torch.tensor([[0.25, 0.75]]),
-        torch.tensor([[1, 2]]),
-    )
-    torch.testing.assert_close(actual, torch.ones(1, 2))
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like platform"
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda_alike(),
+                reason="requires a CUDA-like platform",
+            ),
+        ),
+    ],
 )
-@override_parallel_groups(SingleRankGroup())
-def test_standard_fused_moe_model_discovers_substitution():
-    vllm_config = VllmConfig()
-    vllm_config.model_config = _model_config([3], dtype=torch.bfloat16, is_moe=True)
-    vllm_config.kernel_config.moe_backend = "triton"
+def test_constant_substitution_uses_novice_dtype(dtype, device):
+    substitution = _substitution(1, dtype).to(device)
+    substitution.weight_loader(
+        substitution.novices,
+        torch.tensor([[60000.0], [-60000.0]], dtype=dtype, device=device),
+    )
+    topk_weights = torch.tensor(
+        [[0.5001, 0.4999], [0.7501, 0.2499]], dtype=torch.float32, device=device
+    )
+    expected = (topk_weights.to(dtype).double() @ substitution.novices.double()).to(
+        dtype
+    )
+    actual = substitution.compute_output(
+        torch.zeros(2, 1, dtype=dtype, device=device),
+        topk_weights,
+        torch.tensor([[3, 4], [3, 4]], device=device),
+    )
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
-    with set_current_vllm_config(vllm_config):
-        moe = MixtralMoE(
-            num_experts=4,
-            top_k=2,
-            hidden_size=256,
-            intermediate_size=512,
-            params_dtype=torch.bfloat16,
-            prefix="model.layers.0.block_sparse_moe",
-        )
 
-    routed_experts = moe.experts.routed_experts
-    assert isinstance(routed_experts, SubstitutedRoutedExperts)
-    assert routed_experts.expert_substitution.substituted_expert_ids == (3,)
-    assert routed_experts.w13_weight.shape[0] == 3
-    assert moe.experts.moe_config.require_decomposed_backend
+def _semantic_config(
+    model_dir: Path, backend: MoEBackend, tp_size: int = 1
+) -> VllmConfig:
+    config = MixtralConfig(
+        architectures=["MixtralForCausalLM"],
+        vocab_size=32,
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=32,
+    )
+    config.quantization_config = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {},
+        "format": "fakequant",
+        "quantization_status": "compressed",
+        "moe_sparsity_config": _moe_sparsity_config([2]),
+    }
+    config.save_pretrained(model_dir)
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_dir),
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            max_model_len=32,
+            enforce_eager=True,
+        ),
+        parallel_config=ParallelConfig(tensor_parallel_size=tp_size),
+        kernel_config=KernelConfig(moe_backend=backend),
+    )
+
+
+def _semantic_example():
+    """Exact BF16 outputs, with useful retained work in both TP partitions."""
+    hidden, intermediate = 256, 512
+    gate_up = torch.zeros(
+        2, 2 * intermediate, hidden, dtype=torch.bfloat16, device="cpu"
+    )
+    down = torch.zeros(2, hidden, intermediate, dtype=torch.bfloat16, device="cpu")
+    patterns = torch.tensor(
+        [[1, 2, 3, 4], [4, 3, 2, 1]], dtype=torch.bfloat16, device="cpu"
+    ).repeat(1, hidden // 4)
+    for expert in range(2):
+        for neuron in (0, intermediate // 2):
+            gate_up[expert, neuron, 0] = 16
+            gate_up[expert, intermediate + neuron, 0] = expert + 1
+            down[expert, :, neuron] = (3 / 32) * patterns[expert]
+    novices = -torch.tensor([[9], [15]], device="cpu") * patterns
+    inputs = torch.ones(8, hidden, dtype=torch.bfloat16, device="cpu")
+    inputs[:, 0] = torch.tensor([1, 0, 0.5, 2, 1, 0.5, 2, 2], device="cpu")
+    # Retained-only, novice-only, and mixed pairs in both score orders.
+    pairs = torch.tensor(
+        [[0, 1], [2, 3], [0, 2], [1, 3], [2, 0], [3, 1], [1, 0], [3, 2]],
+        device="cpu",
+    )
+    probabilities = torch.full((8, 4), 0.125, device="cpu")
+    probabilities.scatter_(
+        1, pairs, torch.tensor([[0.5, 0.25]], device="cpu").expand(8, 2)
+    )
+    return inputs, probabilities.log(), gate_up, down, novices
+
+
+def _reference_mone(inputs, logits, gate_up, down, novices, renormalize, scale):
+    """Evaluate logical experts directly, without vLLM routing or MoE helpers."""
+    weights, ids = logits.double().softmax(dim=-1).topk(2, dim=-1)
+    if renormalize:
+        weights = weights / weights.sum(dim=-1, keepdim=True)
+    expected = torch.zeros_like(inputs, dtype=torch.float64)
+    for token in range(inputs.shape[0]):
+        for slot in range(2):
+            expert = int(ids[token, slot])
+            if expert < gate_up.shape[0]:
+                gate, up = torch.nn.functional.linear(
+                    inputs[token].double(), gate_up[expert].double()
+                ).chunk(2)
+                value = torch.nn.functional.linear(
+                    torch.nn.functional.silu(gate) * up, down[expert].double()
+                )
+            else:
+                value = novices[expert - gate_up.shape[0]].double()
+            expected[token] += weights[token, slot] * value
+    return (expected * scale).to(inputs.dtype)
 
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like platform"
 )
 @pytest.mark.parametrize(
-    "moe_backend",
+    "moe_backend,renormalize,scale,scale_mode",
     [
-        pytest.param("triton", id="triton"),
+        ("triton", False, 1.0, RoutedScaleMode.ROUTER),
+        ("triton", True, 1.0, RoutedScaleMode.ROUTER),
+        ("triton", False, 2.0, RoutedScaleMode.ROUTER),
+        ("triton", True, 2.0, RoutedScaleMode.OUTPUT),
+        ("auto", True, 2.0, RoutedScaleMode.ROUTER),
         pytest.param(
             "flashinfer_cutlass",
+            True,
+            2.0,
+            RoutedScaleMode.OUTPUT,
             id="flashinfer-cutlass",
             marks=pytest.mark.skipif(
                 not FlashInferExperts._supports_current_device(),
@@ -223,51 +326,95 @@ def test_standard_fused_moe_model_discovers_substitution():
         ),
     ],
 )
-@override_parallel_groups(SingleRankGroup())
-def test_fused_moe_combines_compact_experts_and_substitution(moe_backend):
-    hidden_size = 256
-    vllm_config = VllmConfig()
-    vllm_config.model_config = _model_config([2], dtype=torch.bfloat16, is_moe=True)
-    vllm_config.compilation_config.static_forward_context = {}
-    vllm_config.kernel_config.moe_backend = moe_backend
+def test_fused_moe_combines_compact_experts_and_substitution(
+    dist_init, tmp_path, moe_backend, renormalize, scale, scale_mode
+):
+    _check_fused_moe_semantics(tmp_path, moe_backend, renormalize, scale, scale_mode)
+
+
+def _check_fused_moe_semantics(
+    tmp_path, moe_backend, renormalize, scale, scale_mode, capture_graph=False
+):
+    vllm_config = _semantic_config(tmp_path, moe_backend)
+    inputs, logits, gate_up, down, novices = _semantic_example()
+    expected = _reference_mone(
+        inputs, logits, gate_up, down, novices, renormalize, scale
+    )
 
     with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
         init_workspace_manager(torch.accelerator.current_device_index())
         layer = FusedMoEFactory(
             num_experts=4,
             top_k=2,
-            hidden_size=hidden_size,
+            hidden_size=inputs.shape[1],
             intermediate_size=512,
             params_dtype=torch.bfloat16,
             prefix="model.layers.0.mlp.experts",
-            renormalize=False,
+            renormalize=renormalize,
+            routed_scaling_factor=scale,
+            routed_scale_mode=scale_mode,
+            use_grouped_topk=scale_mode == RoutedScaleMode.ROUTER and scale != 1.0,
+            num_expert_group=1,
+            topk_group=1,
         ).cuda()
         substitution = layer.routed_experts.expert_substitution
+        if not renormalize or scale_mode == RoutedScaleMode.ROUTER and scale != 1.0:
+            assert layer.moe_config.require_decomposed_backend
+            assert not layer._quant_method.is_monolithic
         assert layer.routed_experts.w13_weight.shape[0] == 2
         with torch.no_grad():
-            layer.routed_experts.w13_weight.normal_(0, 0.01)
-            layer.routed_experts.w2_weight.normal_(0, 0.01)
-            substitution.novices.normal_(0, 0.01)
+            layer.routed_experts.w13_weight.copy_(gate_up)
+            layer.routed_experts.w2_weight.copy_(down)
+            substitution.weight_loader(substitution.novices, novices)
         layer._quant_method.process_weights_after_loading(layer.routed_experts)
 
-        hidden_states = torch.randn(8, hidden_size, dtype=torch.bfloat16, device="cuda")
-        router_logits = torch.randn(8, 4, dtype=torch.float32, device="cuda")
-        topk_weights, topk_ids = layer.router.select_experts(
-            hidden_states.clone(), router_logits
-        )
-        substitution.transform_routes(topk_weights, topk_ids)
-        expected = layer._quant_method.apply(
-            layer=layer.routed_experts,
-            x=hidden_states.clone(),
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            shared_experts=None,
-            shared_experts_input=None,
-        )
+        captured_ids = None
+        if layer._quant_method.is_monolithic:
+            captured_buffer = torch.empty(8, 2, device="cuda", dtype=torch.int16)
+            captured_ids = captured_buffer
+            layer.routed_experts.routing_sink = RoutedExpertsSink(
+                layer.moe_config, lambda ids: captured_buffer.copy_(ids)
+            )
 
         get_forward_context().all_moe_layers = None
-        actual = layer(hidden_states.clone(), router_logits)
-        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        actual = layer(inputs.cuda(), logits.cuda())
+        torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
+        if capture_graph:
+            graph = torch.cuda.CUDAGraph()
+            hidden, scores = inputs.cuda(), logits.cuda()
+            with torch.cuda.graph(graph):
+                graph_output = layer(hidden, scores)
+            # Change the selected experts after capture to check replay uses
+            # current routing IDs, including all-novice and retained-only rows.
+            scores.copy_(logits.flip(0).cuda())
+            graph.replay()
+            replay_expected = _reference_mone(
+                inputs, logits.flip(0), gate_up, down, novices, renormalize, scale
+            )
+            torch.testing.assert_close(
+                graph_output.cpu(), replay_expected, atol=0, rtol=0
+            )
+            expected_ids = logits.flip(0).topk(2, dim=-1).indices
+            assert captured_ids is not None
+            torch.testing.assert_close(
+                captured_ids.cpu().long().sort(-1).values,
+                expected_ids.sort(-1).values,
+            )
+
+
+@pytest.mark.skipif(
+    not TrtLlmBf16ExpertsMonolithic._supports_current_device(),
+    reason="requires FlashInfer TRTLLM BF16",
+)
+def test_monolithic_mone_matches_logical_expert_reference(dist_init, tmp_path):
+    _check_fused_moe_semantics(
+        tmp_path,
+        "flashinfer_trtllm",
+        True,
+        2.0,
+        RoutedScaleMode.OUTPUT,
+        capture_graph=True,
+    )
 
 
 def _tp_substitution_worker(
@@ -275,46 +422,56 @@ def _tp_substitution_worker(
     vllm_config: VllmConfig,
     _cpu_group,
 ) -> None:
+    inputs, logits, gate_up, down, novices = _semantic_example()
+    expected = _reference_mone(inputs, logits, gate_up, down, novices, True, 2.0)
     with set_forward_context(None, vllm_config):
         init_workspace_manager(process_group.local_rank)
         layer = FusedMoEFactory(
             num_experts=4,
-            top_k=1,
+            top_k=2,
             hidden_size=256,
             intermediate_size=512,
             params_dtype=torch.bfloat16,
             prefix="model.layers.0.mlp.experts",
             renormalize=True,
+            routed_scaling_factor=2.0,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
         )
+        # Shard the canonical weights explicitly; each rank owns one active neuron.
+        start = process_group.rank * 256
+        stop = start + 256
+        gate, up = gate_up.chunk(2, dim=1)
         with torch.no_grad():
-            layer.routed_experts.w13_weight.zero_()
-            layer.routed_experts.w2_weight.zero_()
+            layer.routed_experts.w13_weight.copy_(
+                torch.cat([gate[:, start:stop], up[:, start:stop]], dim=1)
+            )
+            layer.routed_experts.w2_weight.copy_(down[:, :, start:stop])
+            substitution = layer.routed_experts.expert_substitution
+            substitution.weight_loader(substitution.novices, novices)
         layer._quant_method.process_weights_after_loading(layer.routed_experts)
 
-        hidden_states = torch.zeros(2, 256, dtype=torch.bfloat16)
-        # Expert 3 is the novice; route every token to it.
-        router_logits = torch.tensor(
-            [[-100.0, -100.0, -100.0, 100.0]] * 2,
-            dtype=torch.float32,
-        )
         get_forward_context().all_moe_layers = None
-        actual = layer(hidden_states, router_logits)
-        torch.testing.assert_close(actual, torch.zeros_like(actual), atol=0, rtol=0)
+        actual = layer(inputs.to(process_group.device), logits.to(process_group.device))
+        torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike() or current_platform.device_count() < 2,
     reason="requires two CUDA-like devices",
 )
-def test_routes_to_novices_are_dropped_with_tp2():
-    vllm_config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=2))
-    vllm_config.model_config = _model_config(
-        [3],
-        dtype=torch.bfloat16,
-        is_moe=True,
-        sleep_mode_offload_cudagraph=False,
-    )
-    vllm_config.compilation_config.static_forward_context = {}
-    vllm_config.kernel_config.moe_backend = "triton"
-
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "triton",
+        pytest.param(
+            "flashinfer_trtllm",
+            marks=pytest.mark.skipif(
+                not TrtLlmBf16ExpertsMonolithic._supports_current_device(),
+                reason="requires FlashInfer TRTLLM BF16",
+            ),
+        ),
+    ],
+)
+def test_constant_substitution_is_added_once_with_tp2(tmp_path, backend):
+    vllm_config = _semantic_config(tmp_path, backend, tp_size=2)
     parallel_launch_with_config(2, _tp_substitution_worker, vllm_config, None)

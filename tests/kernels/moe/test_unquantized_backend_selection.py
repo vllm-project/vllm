@@ -10,8 +10,12 @@ import torch
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+    TrtLlmBf16ExpertsMonolithic,
+)
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
+    UnquantizedMoEKernelOracle,
     backend_to_kernel_cls,
     select_unquantized_moe_backend,
 )
@@ -434,7 +438,7 @@ def test_require_decomposed_backend_rejects_monolithic_kernels(
     mock_supports_current_device,
     require_decomposed_backend,
 ):
-    """Expert substitution adjusts routes, so the kernel must not route itself."""
+    """Route rewriting requires routing to run before the expert kernel."""
     from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
         TrtLlmBf16ExpertsMonolithic,
     )
@@ -458,6 +462,56 @@ def test_require_decomposed_backend_rejects_monolithic_kernels(
     assert (reason is not None and "routes adjusted" in reason) == (
         require_decomposed_backend
     )
+
+
+@pytest.mark.skipif(
+    not TrtLlmBf16ExpertsMonolithic._supports_current_device(),
+    reason="requires FlashInfer TRTLLM BF16",
+)
+def test_partial_execution_selection_allows_sigmoid_routing():
+    """Partial execution and ID capture do not prescribe weight reconstruction."""
+    moe_config = make_dummy_moe_config(
+        num_experts=2, experts_per_token=2, hidden_dim=256, intermediate_size=512
+    )
+    moe_config.num_logical_experts = 4
+    moe_config.moe_backend = "flashinfer_trtllm"
+    moe_config.routing_method = RoutingMethodType.Sigmoid
+    moe_config.require_partial_expert_execution = True
+    moe_config.require_routing_replay_capture = True
+
+    backend, experts_cls = select_unquantized_moe_backend(moe_config)
+
+    assert backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+    assert experts_cls is TrtLlmBf16ExpertsMonolithic
+
+
+@pytest.mark.skipif(
+    not TrtLlmBf16ExpertsMonolithic._supports_current_device(),
+    reason="requires FlashInfer TRTLLM BF16",
+)
+@pytest.mark.parametrize(
+    "logical_experts,dtype", [(4, torch.float16), (2049, torch.bfloat16)]
+)
+def test_partial_execution_selection_rejects_unsupported_config(logical_experts, dtype):
+    """A compact caller must not select a kernel unable to execute its range."""
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        in_dtype=dtype,
+    )
+    moe_config.num_logical_experts = logical_experts
+    moe_config.moe_backend = "flashinfer_trtllm"
+    moe_config.routing_method = RoutingMethodType.Renormalize
+    moe_config.require_partial_expert_execution = True
+
+    oracle = UnquantizedMoEKernelOracle(moe_config, None, None)
+    with pytest.raises(ValueError, match="partial expert execution"):
+        oracle.return_or_raise(
+            UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+            kernel_classes=[TrtLlmBf16ExpertsMonolithic],
+        )
 
 
 @patch(
