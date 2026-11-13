@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DSpark's sequential Markov sampling with one launch a draft step.
 
-vLLM's ``DSparkSpeculator._sample_sequential`` runs about 9 kernels for each
+vLLM's `DSparkSpeculator._sample_sequential` runs about 9 kernels for each
 of the 5 draft steps: the Markov embedding of the previous token, the bias
 GEMV over the whole vocabulary (66 MB of markov_w2 at 129280 x 256 bf16),
 the add to the base logits, the Gumbel sample (its kernel, the argmax over
@@ -12,7 +12,7 @@ that is about 220 us a decode step.
 Here each step is one launch over the vocabulary in blocks of BLOCK tokens.
 For each row, a program computes its block's bias from markov_w2, adds the
 base logits, stores the step's logits into the draft logits cache and takes
-the Gumbel-max of its block with vLLM's own ``gumbel_noised_argmax``. The
+the Gumbel-max of its block with vLLM's own `gumbel_noised_argmax`. The
 next step's programs first take the argmax over the previous step's block
 maxima themselves, which gives the previous token, and the last step's
 tokens get one small launch. The noise depends only on the request's seed,
@@ -25,16 +25,16 @@ bias value can differ in its last bf16 bit. That changes only which tokens
 the draft proposes, not the target's output, because the rejection sampler
 verifies every draft token against the target's own distribution.
 
-It runs on gfx942 with --monokernel (``ops.enabled()``). The speculator asks
-the draft model's ``sample_sequential`` (dspark.py) before its loop, and that
-calls ``sample_sequential`` here.
+It runs on gfx942 and gfx950 with --monokernel (`ops.monokernel_cdna3_or_4()`).
+The speculator asks the draft model's `sample_sequential` (dspark.py)
+before its loop, and that calls `sample_sequential` here.
 tests/kernels/models/amd/test_dsv41_gfx942_fused_markov.py compares it with vLLM's loop.
 """
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.models.deepseek_v41.amd.ops import enabled
+from vllm.models.deepseek_v41.amd.ops import monokernel_cdna3_or_4
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 
@@ -50,6 +50,8 @@ NUM_WARPS = 4
 # The step launch unrolls its loop over the rows (requests) of a step, so it
 # is built for at most this many. A larger step takes vLLM's loop.
 MAX_ROWS = 8
+# gfx950: vLLM's loop is faster from 6 rows, where its Markov GEMV leaves wvSplitK.
+MAX_ROWS_GFX950 = 5
 
 
 @triton.jit
@@ -217,7 +219,10 @@ def _why_not(spec, num_reqs: int) -> str | None:
         return "the confidence head"
     if spec.acceptance_estimator is not None:
         return "the acceptance estimator"
-    if not 1 <= num_reqs <= MAX_ROWS:
+    from vllm.platforms.rocm import get_cdna_version
+
+    max_rows = MAX_ROWS_GFX950 if get_cdna_version() == 4 else MAX_ROWS
+    if not 1 <= num_reqs <= max_rows:
         return f"{num_reqs} requests"
     w1 = head.markov_w1.weight
     w2 = head.markov_w2.weight
@@ -225,8 +230,8 @@ def _why_not(spec, num_reqs: int) -> str | None:
         return "Markov weights not bf16"
     if w1.shape[1] != w2.shape[1] or not (w1.is_contiguous() and w2.is_contiguous()):
         return "Markov weight layout"
-    if spec.draft_logits.dtype != torch.bfloat16:
-        return f"a {spec.draft_logits.dtype} draft logits cache"
+    if spec.draft_logits.values.dtype != torch.bfloat16:
+        return f"a {spec.draft_logits.values.dtype} draft logits cache"
     if head.markov_w2.quant_method.__class__.__name__ != "UnquantizedEmbeddingMethod":
         return "a quantized Markov head"
     return None
@@ -235,7 +240,7 @@ def _why_not(spec, num_reqs: int) -> str | None:
 def sample_sequential(spec, num_reqs: int, head_hidden: torch.Tensor) -> bool:
     """DSparkSpeculator._sample_sequential with the fused launches. Returns
     False, having done nothing, when this step takes vLLM's loop."""
-    if not enabled():
+    if not monokernel_cdna3_or_4():
         return False
     why = _why_not(spec, num_reqs)
     if why is not None:
@@ -260,7 +265,7 @@ def sample_sequential(spec, num_reqs: int, head_hidden: torch.Tensor) -> bool:
     idx_map = spec.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
     sample_pos = spec.sample_pos[:num_sample].view(num_reqs, n_spec)
     assert idx_map.stride(1) == 1 and sample_pos.stride(1) == 1
-    cache = spec.draft_logits
+    cache = spec.draft_logits.values
     tokens = spec.draft_tokens
     use_fp64 = bool(spec.use_fp64_gumbel)
     bufs = _scratch(base_logits.device, vocab, use_fp64)

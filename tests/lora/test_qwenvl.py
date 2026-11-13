@@ -150,8 +150,10 @@ EXPECTED_OUTPUTS = [
 ]
 
 EXPECTED_OUTPUTS_LANGUAGE = [
-    "A stop sign is shown in an Asian city, with buildings and a car in the "
-    "background.",
+    (
+        "A stop sign is shown in an Asian city, with buildings and a car in the "
+        "background."
+    ),
     "The Tokyo Skytree can be seen behind the pink blossoms of the cherry trees.",
 ]
 

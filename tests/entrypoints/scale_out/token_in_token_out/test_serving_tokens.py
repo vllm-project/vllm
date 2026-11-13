@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import io
 import json
 
@@ -9,6 +10,7 @@ import numpy as np
 import pybase64 as base64
 import pytest
 import pytest_asyncio
+from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoTokenizer
 
 import vllm.envs as envs
@@ -188,12 +190,12 @@ async def test_generate_sampling_mask(client):
 
 @pytest.mark.asyncio
 async def test_generate_defaults_max_tokens_when_omitted(client):
-    """Regression: omitting ``max_tokens`` must not silently cap at 16.
+    """Regression: omitting `max_tokens` must not silently cap at 16.
 
-    ``SamplingParams.max_tokens`` defaults to 16. Before the server-side
-    defaulting was wired up, every request that didn't set ``max_tokens``
+    `SamplingParams.max_tokens` defaults to 16. Before the server-side
+    defaulting was wired up, every request that didn't set `max_tokens`
     truncated mid-generation. The server should now fill it in from
-    ``max_model_len - prompt_len`` (matching ``/v1/chat/completions``).
+    `max_model_len - prompt_len` (matching `/v1/chat/completions`).
     """
     payload = {
         "model": MODEL_NAME,
@@ -222,10 +224,10 @@ async def test_generate_defaults_max_tokens_when_omitted(client):
     reason="parallel sampling (n > 1) is not supported by the Rust frontend",
 )
 async def test_generate_returns_all_choices_when_n_greater_than_one(client):
-    """Regression: ``n > 1`` must return ``n`` choices.
+    """Regression: `n > 1` must return `n` choices.
 
-    Non-streaming requests kept ``SamplingParams``' default output kind,
-    ``CUMULATIVE``, so only the sequences updated during the last engine step
+    Non-streaming requests kept `SamplingParams`' default output kind,
+    `CUMULATIVE`, so only the sequences updated during the last engine step
     reached the response and the others were silently dropped.
     """
     payload = {
@@ -515,8 +517,8 @@ async def test_stop_strings_rejected_when_tokens_only(client):
         [
             "--enable-lora",
             "--lora-modules",
-            "Alice=charent/self_cognition_Alice",
-            "Bob=charent/self_cognition_Bob",
+            "Alice=vllm-project/self_cognition_Alice",
+            "Bob=vllm-project/self_cognition_Bob",
             "--max-lora-rank",
             "64",
             "--max-cpu-loras",
@@ -744,9 +746,6 @@ async def test_text_mode_stream_matches_non_stream(client, tokenizer, messages):
             {"sampling_params": {"detokenize": False}}, "detokenize", id="no-detok"
         ),
         pytest.param({"output_mode": "bogus"}, "output_mode", id="unsupported"),
-        pytest.param(
-            {"output_mode": "derender", "stream": True}, "stream", id="derender-stream"
-        ),
     ],
 )
 async def test_text_mode_invalid_requests_return_400(client, overrides, expected):
@@ -926,3 +925,163 @@ async def test_abort_requests_is_served_without_tokens_only(client):
         "/abort_requests", json={"request_ids": ["generate-tokens-unknown"]}
     )
     assert resp.status_code == 404
+
+
+async def _wait_for_gauge(client, name: str, value: float) -> None:
+    while True:
+        resp = await client.get("/metrics")
+        resp.raise_for_status()
+        total = sum(
+            sample.value
+            for family in text_string_to_metric_families(resp.text)
+            for sample in family.samples
+            if sample.name == name
+        )
+        if total == value:
+            return
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not read X-Vllm-Priority on this endpoint",
+)
+@pytest.mark.parametrize(
+    "server",
+    [["--scheduling-policy", "priority", "--max-num-seqs", "1"]],
+    indirect=True,
+)
+async def test_generate_priority_header_overrides_body(client):
+    """`X-Vllm-Priority` overrides the body priority, as on the coupled APIs."""
+    finished = []
+
+    async def generate(name, max_tokens, priority=0, headers=None):
+        payload = {
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": max_tokens,
+                "ignore_eos": True,
+                "temperature": 0,
+            },
+            "priority": priority,
+        }
+        resp = await client.post(GEN_ENDPOINT, json=payload, headers=headers)
+        resp.raise_for_status()
+        finished.append(name)
+
+    # One sequence runs at a time, so the two short requests wait behind the
+    # long one and leave the queue in priority order.
+    long = asyncio.create_task(generate("long", 900))
+    await asyncio.wait_for(
+        _wait_for_gauge(client, "vllm:num_requests_running", 1), timeout=60
+    )
+    queued = [
+        asyncio.create_task(generate("body", 5)),
+        asyncio.create_task(
+            generate("header", 5, priority=1, headers={"X-Vllm-Priority": "-1"})
+        ),
+    ]
+    await asyncio.wait_for(
+        _wait_for_gauge(client, "vllm:num_requests_waiting", 2), timeout=60
+    )
+    await asyncio.gather(long, *queued)
+
+    assert finished == ["long", "header", "body"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not read X-Vllm-Priority on this endpoint",
+)
+@pytest.mark.parametrize(
+    "server",
+    [["--scheduling-policy", "priority", "--max-num-seqs", "1"]],
+    indirect=True,
+)
+async def test_generate_priority_is_bounded_to_int32(client):
+    """A priority outside int32 is rejected with a 400, in the header or the body."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 1},
+    }
+    for priority, expected in ((2**31 - 1, 200), (2**31, 400)):
+        resp = await client.post(
+            GEN_ENDPOINT, json=payload, headers={"X-Vllm-Priority": str(priority)}
+        )
+        assert resp.status_code == expected, f"header {priority}: {resp.text}"
+        resp = await client.post(GEN_ENDPOINT, json={**payload, "priority": priority})
+        assert resp.status_code == expected, f"body {priority}: {resp.text}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="The Rust frontend does not support /render",
+)
+@pytest.mark.parametrize(
+    ("server", "server_flag"),
+    [
+        (["--gpu-memory-utilization", "0.3"], False),
+        (["--gpu-memory-utilization", "0.3", "--return-tokens-as-token-ids"], True),
+    ],
+    indirect=["server"],
+    scope="module",
+)
+async def test_derender_logprob_request_override(client, server_flag):
+    """Both derender routes must use the same tri-state override as coupled chat."""
+    for override in (None, False, True):
+        request = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_completion_tokens": 2,
+            "temperature": 0,
+            "logprobs": True,
+            "top_logprobs": 2,
+        }
+        if override is not None:
+            request["return_tokens_as_token_ids"] = override
+        coupled = await client.post("/v1/chat/completions", json=request)
+        assert coupled.status_code == 200, coupled.text
+        expected = coupled.json()["choices"][0]["logprobs"]
+        assert expected and expected["content"]
+        placeholders = server_flag if override is None else override
+        if placeholders:
+            # Both derender paths keep generate text mode's null bytes
+            # for placeholders; coupled chat currently includes bytes.
+            # Normalize only that existing representation difference.
+            for entry in expected["content"]:
+                entry["bytes"] = None
+                for top in entry["top_logprobs"]:
+                    top["bytes"] = None
+        # Separate requests can differ slightly in floating-point logprobs.
+        # Keep token strings, bytes and the remaining structure exact.
+        for entry in expected["content"]:
+            entry["logprob"] = pytest.approx(entry["logprob"], abs=1e-3)
+            for top in entry["top_logprobs"]:
+                top["logprob"] = pytest.approx(top["logprob"], abs=1e-3)
+        rendered = await client.post("/v1/chat/completions/render", json=request)
+        assert rendered.status_code == 200, rendered.text
+        payload = rendered.json()
+        for mode in ("derender", "tokens"):
+            generated = await client.post(
+                "/inference/v1/generate", json={**payload, "output_mode": mode}
+            )
+            assert generated.status_code == 200, generated.text
+            result = generated.json()
+            if mode == "tokens":
+                derendered = await client.post(
+                    "/v1/chat/completions/derender",
+                    json={
+                        "model": MODEL_NAME,
+                        "chat_request": request,
+                        "prompt_token_ids": payload["token_ids"],
+                        "generate_response": result,
+                    },
+                )
+                assert derendered.status_code == 200, derendered.text
+                result = derendered.json()
+            assert result["choices"][0]["logprobs"] == expected

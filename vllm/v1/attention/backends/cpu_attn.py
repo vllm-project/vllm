@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm import envs
 from vllm.config import (
     VllmConfig,
@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    get_attn_type_from_layers,
     get_num_attention_heads_from_layers,
 )
 from vllm.v1.attention.backends.zentorch_sdpa import (
@@ -37,8 +38,6 @@ from vllm.v1.attention.backends.zentorch_sdpa import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CrossAttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheLayout,
     is_quantized_kv_cache,
 )
@@ -170,10 +169,9 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             self.kv_cache_dtype,
         )
         self._set_isa_to_layers(layer_names)
-        self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
-        self.is_encoder_only_attention = isinstance(
-            kv_cache_spec, EncoderOnlyAttentionSpec
-        )
+        attn_type = get_attn_type_from_layers(vllm_config, layer_names)
+        self.is_cross_attention = attn_type == AttentionType.ENCODER_DECODER
+        self.is_encoder_only_attention = attn_type == AttentionType.ENCODER_ONLY
 
     def _set_isa_to_layers(self, layer_names: list[str]) -> None:
         attn_layers = get_layers_from_vllm_config(
@@ -226,7 +224,9 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
         causal = (
             False
-            if self.is_cross_attention or is_dynamic_casual
+            if self.is_cross_attention
+            or self.is_encoder_only_attention
+            or is_dynamic_casual
             else common_attn_metadata.causal
         )
 
@@ -334,7 +334,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.is_fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
         self.attn_type = attn_type
 
         self.sinks = sinks

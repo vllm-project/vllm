@@ -88,7 +88,10 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
 
     speculator = object.__new__(_TestSpeculator)
     speculator.arange_np = torch.arange(5, dtype=torch.int32).numpy()
-    speculator.max_model_len = speculator.draft_max_seq_len = 32
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=32)
+    )
+    speculator.draft_max_seq_len = 32
     speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(4, dtype=torch.int64),
@@ -178,6 +181,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         method="mtp",
         num_speculative_tokens=3,
         draft_model_config=draft_model_config,
+        draft_decode_context_parallel_size=1,
         use_local_argmax_reduction=False,
         draft_sample_method="greedy",
         enable_adaptive_verification=False,
@@ -197,6 +201,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
             data_parallel_size=1,
             data_parallel_rank=0,
             decode_context_parallel_size=1,
+            use_ubatching=False,
         ),
     )
 
@@ -229,6 +234,7 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.draft_model_config = draft_model_config
         speculator.supports_mm_inputs = False
         speculator.use_acceptance_estimator = False
+        speculator.use_draft_logits = False
 
     monkeypatch.setattr(DraftModelSpeculator, "__init__", init_base)
     _mock_base_model_load(monkeypatch)
@@ -253,6 +259,7 @@ def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
     )
@@ -275,6 +282,7 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
     )
@@ -305,6 +313,7 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.use_acceptance_estimator = False
+    speculator.use_draft_logits = False
     speculator.cached_draft_input_embeds = None
     speculator.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(supports_multimodal_inputs=True)
@@ -460,8 +469,8 @@ def test_run_model_uses_complete_pcp_padding(monkeypatch, partitioned):
     [
         ("_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
         ("_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 3),
-        ("_fused_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
-        ("_fused_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 1),
+        ("_run_fused_multi_step_decode", CUDAGraphMode.NONE, 4, 3, 0),
+        ("_run_fused_multi_step_decode", CUDAGraphMode.FULL, 4, 0, 1),
         ("_multi_step_decode", CUDAGraphMode.FULL, 3, 0, 2),
     ],
 )
@@ -483,9 +492,9 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator.idx_mapping = torch.arange(2)
     speculator.attn_groups = []
     speculator.block_tables = SimpleNamespace(input_block_tables=[])
-    generate_draft = Mock()
+    decode = Mock()
     # Stub the bound method on a hand-built speculator to count eager draft calls.
-    monkeypatch.setattr(speculator, "_generate_draft", generate_draft)
+    monkeypatch.setattr(speculator, "_decode", decode)
     run_fullgraph = Mock()
     speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
     batch_desc = BatchExecutionDescriptor(
@@ -503,7 +512,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         num_speculative_steps=num_speculative_steps,
     )
 
-    assert generate_draft.call_count == expected_eager_calls
+    assert decode.call_count == expected_eager_calls
     assert run_fullgraph.call_count == expected_graph_replays
 
 
@@ -538,7 +547,7 @@ def test_fused_full_graph_maps_split_group_block_tables():
         )
     )
 
-    speculator._fused_multi_step_decode(
+    speculator._run_fused_multi_step_decode(
         num_reqs=2,
         skip_attn=False,
         batch_desc=BatchExecutionDescriptor(
@@ -672,3 +681,88 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator._configure_decode_metadata_update()
 
     assert speculator.supports_decode_metadata_update is expected
+
+
+def test_rebuilt_prefill_metadata_uses_target_batch_slots():
+    # Under DBO the target builds only per-microbatch metadata, so the drafter
+    # rebuilds the full batch's on its own builders from the target's slots.
+    speculator = object.__new__(_TestSpeculator)
+    target = ({"draft": "target metadata"}, {"draft": torch.zeros(6)})
+    assert speculator._build_drafter_attn_metadata(None, *target) == target
+
+    speculator.can_reuse_target_attn_metadata = False
+    speculator.attn_groups = [[Mock()]]
+    speculator.model_state = Mock()
+    speculator.model_state.prepare_attn.return_value = {"draft": "metadata"}
+    speculator.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])]
+    )
+    speculator.block_tables = SimpleNamespace(
+        input_block_tables=[torch.arange(8, dtype=torch.int32).view(4, 2)],
+        slot_mappings=torch.arange(8).view(1, 8),
+    )
+    input_batch = SimpleNamespace(num_reqs_after_padding=2, num_tokens_after_padding=6)
+
+    attn_metadata, slot_mappings = speculator._build_drafter_attn_metadata(
+        input_batch, *target, CUDAGraphMode.FULL
+    )
+
+    assert attn_metadata == {"draft": "metadata"}
+    args = speculator.model_state.prepare_attn.call_args.args
+    batch, cg_mode, (block_table,), target_slots, attn_groups, _ = args
+    assert batch is input_batch and cg_mode == CUDAGraphMode.FULL
+    assert attn_groups is speculator.attn_groups
+    assert block_table.shape == (2, 2)
+    assert target_slots.data_ptr() == speculator.block_tables.slot_mappings.data_ptr()
+    assert target_slots.shape == (1, 6)
+    assert slot_mappings["draft"].tolist() == list(range(6))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires a GPU")
+def test_captured_draft_update_reads_reduced_max_model_len():
+    """Auto-fit can shrink max_model_len after the draft graphs are captured.
+    A replay must clamp draft positions to the new length, as a server started
+    with that length would, not to the length seen at capture time."""
+    device = torch.device("cuda")
+    num_reqs, hidden_size, num_steps = 2, 8, 3
+    input_buffers = SimpleNamespace(
+        input_ids=torch.zeros(num_reqs, dtype=torch.int32, device=device),
+        positions=torch.zeros(num_reqs, dtype=torch.int64, device=device),
+        seq_lens=torch.zeros(num_reqs, dtype=torch.int32, device=device),
+    )
+    max_model_len = torch.tensor(100, dtype=torch.int32, device=device)
+    draft_tokens = torch.zeros(num_reqs, dtype=torch.int64, device=device)
+    output_draft_tokens = torch.zeros(
+        num_reqs, num_steps, dtype=torch.int64, device=device
+    )
+    hidden_states = torch.zeros(num_reqs, hidden_size, device=device)
+    next_hidden_states = torch.zeros_like(hidden_states)
+    sample_src_positions = torch.zeros(num_reqs, dtype=torch.int64, device=device)
+    current_step = torch.zeros((), dtype=torch.int64, device=device)
+
+    def update():
+        spec_module.update_draft_inputs(
+            draft_tokens,
+            current_step,
+            hidden_states,
+            output_draft_tokens,
+            next_hidden_states,
+            input_buffers,
+            sample_src_positions,
+            num_reqs,
+            max_model_len,
+            num_steps,
+        )
+
+    update()  # compile before capture
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        update()
+
+    max_model_len.fill_(8)
+    input_buffers.positions.copy_(torch.tensor([5, 7], device=device))
+    input_buffers.seq_lens.copy_(torch.tensor([6, 8], device=device))
+    graph.replay()
+    assert input_buffers.positions.tolist() == [6, 7]
+    assert input_buffers.seq_lens.tolist() == [7, 8]
