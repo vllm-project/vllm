@@ -558,8 +558,12 @@ class PreloadSubcommand(CLISubcommand):
                 if proc.is_alive():
                     proc.terminate()
             # SIGTERM runs the daemon's lease-aware cleanup. Leave enough
-            # time for outstanding copies to acknowledge before escalating.
-            deadline = time.monotonic() + WEIGHT_COPY_LEASE_TIMEOUT_S + 30.0
+            # time for outstanding copies to acknowledge before escalating
+            # during an external shutdown; fail fast when a rank has exited.
+            grace_period = (
+                WEIGHT_COPY_LEASE_TIMEOUT_S + 30.0 if shutdown_requested else 10.0
+            )
+            deadline = time.monotonic() + grace_period
             for proc in started:
                 proc.join(timeout=max(0.0, deadline - time.monotonic()))
             for proc in started:
