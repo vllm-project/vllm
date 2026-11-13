@@ -17,6 +17,11 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.models.kimi_k3.amd.specialized_decode import runtime
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     FFN,
@@ -213,6 +218,83 @@ def test_an_unknown_backend_is_refused():
     cfg = _vllm_config(additional_config={"decode_backend": "fast"})
     with pytest.raises(ValueError, match="decode_backend must be"):
         specialized_decode_config(cfg)
+
+
+def test_bf16_copies_need_the_specialized_decode():
+    cfg = _vllm_config(additional_config={runtime.BF16_COPIES: True})
+    with pytest.raises(ValueError, match="needs decode_backend=latency_specialized"):
+        specialized_decode_config(cfg)
+
+
+def test_bf16_copies_are_carried(on_mi355x):
+    cfg = _vllm_config(
+        additional_config={
+            "decode_backend": "latency_specialized",
+            runtime.BF16_COPIES: True,
+        }
+    )
+    assert specialized_decode_config(cfg) == DecodeConfig(q=8, bf16_copies=True)
+
+
+def _linear(quant_config: OnlineQuantizationConfig | None) -> ReplicatedLinear:
+    """A linear before load; online FP8 linears hold a meta weight."""
+    return ReplicatedLinear(
+        8, 4, bias=False, params_dtype=torch.bfloat16, quant_config=quant_config
+    )
+
+
+def _k3_layer_before_load() -> SimpleNamespace:
+    """The linears of a Kimi-K3 decoder layer under online FP8 per channel; as
+    in the model, up_proj has no quant config."""
+    fp8 = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_channel"))
+    shared = SimpleNamespace(gate_up_proj=_linear(fp8), down_proj=_linear(fp8))
+    mlp = SimpleNamespace(
+        routed_expert_down_proj=_linear(fp8),
+        routed_expert_up_proj=_linear(None),
+        shared_experts=shared,
+    )
+    attn = SimpleNamespace(
+        o_proj=_linear(fp8), in_proj_qkvgfab=_linear(fp8), f_b_proj=_linear(fp8)
+    )
+    return SimpleNamespace(mlp=mlp, self_attn=attn)
+
+
+def _marked(linear) -> bool:
+    return getattr(linear, "keep_unquantized_weight", False)
+
+
+def test_bf16_copies_mark_the_online_fp8_linears_the_kernels_read(
+    default_vllm_config,
+):
+    """Only this rank's kernel layers, and in them only the online-FP8 linears
+    K1 / K2 read: KDA layers also keep in_proj and f_b_proj."""
+    config = _k3_text_config()
+    layers = [_k3_layer_before_load() for _ in range(93)]
+    model = SimpleNamespace(config=config, layers=layers, start_layer=0, end_layer=47)
+
+    nbytes = runtime.mark_bf16_copies(model)
+
+    kinds = {i: k for i, k in layer_kinds(config).items() if i < 47}
+    whole = sum(kind == WHOLE for kind in kinds.values())
+    assert nbytes == (6 * whole + 4 * (len(kinds) - whole)) * 4 * 8 * 2
+    kda, mla = layers[1], layers[3]
+    assert kinds[1] == WHOLE and kinds[3] == FFN
+    assert all(
+        _marked(linear)
+        for linear in (
+            kda.self_attn.o_proj,
+            kda.self_attn.in_proj_qkvgfab,
+            kda.self_attn.f_b_proj,
+            kda.mlp.routed_expert_down_proj,
+            kda.mlp.shared_experts.gate_up_proj,
+            kda.mlp.shared_experts.down_proj,
+        )
+    )
+    assert not _marked(kda.mlp.routed_expert_up_proj)
+    assert _marked(mla.self_attn.o_proj)
+    assert not _marked(mla.self_attn.in_proj_qkvgfab)
+    assert not _marked(layers[0].self_attn.o_proj)  # dense, no kernel
+    assert not _marked(layers[50].self_attn.o_proj)  # another PP rank's
 
 
 def test_supported_config_is_accepted(supported_vllm_config):

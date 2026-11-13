@@ -127,6 +127,14 @@ def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
     return is_row_parallel or (reduces_output_dim and is_column_parallel)
 
 
+def keep_unquantized_weight(layer: Module) -> None:
+    """Keep the weight an online-quantized linear replaces (the loaded fp16/bf16
+    weight, or the dequantized checkpoint weight when requantizing) as
+    `layer.unquantized_weight`. Call before the weights load. Not supported
+    with weight reloading."""
+    layer.keep_unquantized_weight = True
+
+
 class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
     """Shared base for online FP8 linear methods. Loads fp16/bf16 checkpoint
     weights onto meta device and materializes them just-in-time."""
@@ -141,10 +149,17 @@ class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
 
     def get_weight_for_quantization(self, layer: torch.nn.Module) -> torch.Tensor:
         if self.requantization_source is None:
-            return layer.weight
-        weight = self.requantization_source.dequantize_weight(layer)
-        if not isinstance(weight, torch.Tensor):
-            raise TypeError("Linear requantization requires a single weight tensor.")
+            weight = layer.weight
+        else:
+            weight = self.requantization_source.dequantize_weight(layer)
+            if not isinstance(weight, torch.Tensor):
+                raise TypeError(
+                    "Linear requantization requires a single weight tensor."
+                )
+        if getattr(layer, "keep_unquantized_weight", False):
+            # A copy: replace_parameter may write the quantized weight into the
+            # storage `weight` lives in.
+            layer.unquantized_weight = weight.detach().clone()
         return weight
 
     def create_weights(
