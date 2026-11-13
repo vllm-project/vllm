@@ -248,9 +248,7 @@ class EngineCoreClient(ABC):
     def get_engine_ranks(self) -> list[int]:
         raise NotImplementedError
 
-    async def check_health_gpu_async(
-        self, engine_rank: int, cache_ttl_s: float
-    ) -> EngineHealthState:
+    async def check_health_gpu_async(self, engine_rank: int) -> EngineHealthState:
         raise NotImplementedError
 
     async def set_weight_version_async(self, weight_version: str) -> None:
@@ -1467,11 +1465,9 @@ class AsyncMPClient(MPClient):
     def get_engine_ranks(self) -> list[int]:
         return [int.from_bytes(engine, "little") for engine in self.core_engines]
 
-    async def check_health_gpu_async(
-        self, engine_rank: int, cache_ttl_s: float
-    ) -> EngineHealthState:
+    async def check_health_gpu_async(self, engine_rank: int) -> EngineHealthState:
         state = await self._call_utility_async(
-            "check_health_gpu", cache_ttl_s, engine=engine_rank.to_bytes(2, "little")
+            "check_health_gpu", engine=engine_rank.to_bytes(2, "little")
         )
         return EngineHealthState(state)
 

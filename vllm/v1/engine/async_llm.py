@@ -88,10 +88,6 @@ from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
 
-# How long a passing idle /health_generate probe is reused, so frequent polling
-# does not run a dummy batch on every call.
-IDLE_PROBE_CACHE_TTL_S = 10.0
-
 
 class InputStreamError(Exception):
     """Wrapper for errors from the input stream generator.
@@ -1197,9 +1193,7 @@ class AsyncLLM(EngineClient):
         task = self._health_probe_tasks.get(engine_rank)
         if task is None or task.done():
             task = asyncio.create_task(
-                self.engine_core.check_health_gpu_async(
-                    engine_rank, IDLE_PROBE_CACHE_TTL_S
-                )
+                self.engine_core.check_health_gpu_async(engine_rank)
             )
             task.add_done_callback(
                 lambda done: None if done.cancelled() else done.exception()

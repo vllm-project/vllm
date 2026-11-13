@@ -79,7 +79,7 @@ def test_cuda_error_on_non_output_pp_stage():
     with ready_probe_server(DENSE_MODEL, args) as srv:
         assert srv.status() == 200
         srv.rpc("fault_ima_now_on_worker", "0")
-        assert srv.wait_until_unready() is not None
+        assert srv.status() == 503
 
 
 def test_probe_failure_on_one_worker_keeps_serving():
@@ -90,6 +90,6 @@ def test_probe_failure_on_one_worker_keeps_serving():
     with ready_probe_server(DENSE_MODEL, args) as srv:
         assert srv.status() == 200
         srv.rpc("fault_raise_on_next_forward_on_worker", "0")
-        assert srv.wait_until_unready()["reason"] == "probe_failed"
+        assert srv.ready_body()["reason"] == "probe_failed"
         assert srv.generate() == 200
         assert srv.status() == 200

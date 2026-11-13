@@ -19,67 +19,33 @@ BUSY = EngineHealthState.BUSY
 SLEEPING = EngineHealthState.SLEEPING
 
 
-class FakeClock:
-    def __init__(self, monkeypatch: pytest.MonkeyPatch):
-        self.now = 1000.0
-        monkeypatch.setattr("vllm.v1.engine.core.time.monotonic", lambda: self.now)
-
-
-def make_core(*, has_requests: bool = False) -> EngineCoreProc:
+def make_core(*, has_requests: bool, sleeping: bool) -> EngineCoreProc:
     core = object.__new__(EngineCoreProc)
     core.scheduler = SimpleNamespace(has_requests=Mock(return_value=has_requests))
     core.batch_queue = None
     core.engines_running = False
-    core.is_sleeping = Mock(return_value=False)  # type: ignore[method-assign]
+    core.is_sleeping = Mock(return_value=sleeping)  # type: ignore[method-assign]
     core.model_executor = SimpleNamespace(check_health_gpu=Mock())
-    core.step_fn = Mock(return_value=({}, False))
-    core.post_step = Mock()  # type: ignore[method-assign]
-    core._last_gpu_probe_at = 0.0
     return core
 
 
-def test_engine_idle_probe_cache(monkeypatch: pytest.MonkeyPatch):
-    """Passing probes are cached for the TTL; failures and model steps are
-    not."""
-    clock = FakeClock(monkeypatch)
-    core = make_core()
-    probe = core.model_executor.check_health_gpu
-
-    core.check_health_gpu(10)
-    core.check_health_gpu(10)
-    assert probe.call_count == 1
-
-    clock.now += 11
-    core.check_health_gpu(10)
-    assert probe.call_count == 2
-
-    core.step_fn.return_value = ({}, True)
-    core._process_engine_step()
-    core.check_health_gpu(10)
-    assert probe.call_count == 3
-
-    clock.now += 11
-    probe.side_effect = RuntimeError("CUDA error")
-    with pytest.raises(RuntimeError):
-        core.check_health_gpu(10)
-    probe.side_effect = None
-    core.check_health_gpu(10)
-    assert probe.call_count == 5
-
-
 @pytest.mark.parametrize(
-    ("has_requests", "sleeping", "expected"),
-    [(True, False, BUSY), (False, True, SLEEPING)],
+    ("has_requests", "sleeping", "expected", "probed"),
+    [
+        pytest.param(False, False, OK, True, id="idle"),
+        pytest.param(True, False, BUSY, False, id="busy"),
+        pytest.param(False, True, SLEEPING, False, id="sleeping"),
+    ],
 )
-def test_engine_skips_probe_when_busy_or_sleeping(
-    has_requests: bool, sleeping: bool, expected: EngineHealthState
+def test_engine_probes_only_idle_ranks(
+    has_requests: bool, sleeping: bool, expected: EngineHealthState, probed: bool
 ):
-    """Busy ranks get no extra GPU work, and sleeping ranks are not probed."""
-    core = make_core(has_requests=has_requests)
-    core.is_sleeping.return_value = sleeping
+    """Idle ranks run the GPU probe; busy ranks get no extra GPU work, and
+    sleeping ranks are not probed."""
+    core = make_core(has_requests=has_requests, sleeping=sleeping)
 
-    assert core.check_health_gpu(10) == expected
-    core.model_executor.check_health_gpu.assert_not_called()
+    assert core.check_health_gpu() == expected
+    assert core.model_executor.check_health_gpu.called == probed
 
 
 def make_async_engine(*rank_results) -> AsyncLLM:

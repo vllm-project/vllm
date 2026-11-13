@@ -262,9 +262,6 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
-        # /health_generate state: when the last GPU probe passed.
-        self._last_gpu_probe_at = 0.0
-
         self._idle_state_callbacks: list[Callable] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
@@ -1230,38 +1227,6 @@ class EngineCore:
             self.collective_rpc("has_incomplete_weight_update")
         )
 
-    def _is_busy(self) -> bool:
-        """Whether the engine is awake and has work to step."""
-        return not self.is_sleeping() and (
-            getattr(self, "engines_running", False)
-            or self.scheduler.has_requests()
-            or bool(self.batch_queue)
-        )
-
-    def check_health_gpu(self, cache_ttl_s: float) -> EngineHealthState:
-        """Health check served by the busy loop between steps.
-
-        A busy engine adds no GPU work; an idle one runs the GPU probe, or
-        reuses a probe that passed within `cache_ttl_s`.
-        """
-        if self.is_sleeping():
-            return EngineHealthState.SLEEPING
-        if self._is_busy():
-            return EngineHealthState.BUSY
-
-        if (
-            cache_ttl_s > 0
-            and self._last_gpu_probe_at > 0
-            and time.monotonic() - self._last_gpu_probe_at < cache_ttl_s
-        ):
-            return EngineHealthState.OK
-        self._probe_gpu()
-        self._last_gpu_probe_at = time.monotonic()
-        return EngineHealthState.OK
-
-    def _probe_gpu(self) -> None:
-        self.model_executor.check_health_gpu()
-
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
@@ -1836,6 +1801,21 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
+    def check_health_gpu(self) -> EngineHealthState:
+        """Health check served by the busy loop between steps.
+
+        A busy engine adds no GPU work; an idle one runs the GPU probe.
+        """
+        if self.is_sleeping():
+            return EngineHealthState.SLEEPING
+        if self.has_work():
+            return EngineHealthState.BUSY
+        self._probe_gpu()
+        return EngineHealthState.OK
+
+    def _probe_gpu(self) -> None:
+        self.model_executor.check_health_gpu()
+
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
         return (
@@ -1916,9 +1896,6 @@ class EngineCoreProc(EngineCore):
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
-        if model_executed:
-            # Re-probe the GPU once the engine is idle again.
-            self._last_gpu_probe_at = 0.0
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)

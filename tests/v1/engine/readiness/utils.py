@@ -46,11 +46,7 @@ class ReadyProbeServer:
         return resp.json() if resp.status_code != 200 else {}
 
     def wait_until_unready(self) -> dict | None:
-        """Return the first not-ready `/health_generate` body, or None.
-
-        A passing idle probe is cached for a few seconds, so a fault may take
-        that long to show.
-        """
+        """Return the first not-ready `/health_generate` body, or None."""
         start = time.monotonic()
         while time.monotonic() - start < DETECT_DEADLINE_S:
             with suppress(requests.RequestException):
