@@ -1531,10 +1531,10 @@ KNOWLINE_KW = {
 
 class KnowLineMockTok:
     """A whitespace tokenizer: every word one token, its ids stable per
-    instance. The modes cover the template paths: ``permissive`` renders
-    anything, ``alternation`` rejects adjacent same-role turns (the fold
-    fallback), ``user_only`` rejects non-user roles (the flatten fallback),
-    and ``broken`` rejects everything."""
+    instance. The modes cover the template paths: `permissive` renders
+    anything, `alternation` rejects adjacent same-role turns (the fold
+    fallback), `user_only` rejects non-user roles (the flatten fallback),
+    and `broken` rejects everything."""
 
     def __init__(self, mode="permissive"):
         self.mode = mode
@@ -1751,8 +1751,10 @@ def test_knowline_pins_the_trained_text():
             "choice",
             {"address": None, "delay": "the parcel was late"},
             "What broke?",
-            "Question: What broke?\nOptions:\nA. address\n"
-            "B. delay: the parcel was late",
+            (
+                "Question: What broke?\nOptions:\nA. address\n"
+                "B. delay: the parcel was late"
+            ),
         ),
         (
             "noul",
@@ -1764,8 +1766,10 @@ def test_knowline_pins_the_trained_text():
             "noul",
             {"true": "locked", "false": "anything else"},
             "Is the account locked?",
-            "Question: Is the account locked?\nOptions:\n"
-            "A. Yes: locked\nB. No: anything else",
+            (
+                "Question: Is the account locked?\nOptions:\n"
+                "A. Yes: locked\nB. No: anything else"
+            ),
         ),
         (
             "score",
@@ -1778,8 +1782,10 @@ def test_knowline_pins_the_trained_text():
             "choice",
             {"a": 1, "b": "x"},
             {"stem": "Pick the team", "notes": "line two"},
-            "Question: stem: Pick the team\nnotes: line two\nOptions:\n"
-            "A. a: 1\nB. b: x",
+            (
+                "Question: stem: Pick the team\nnotes: line two\nOptions:\n"
+                "A. a: 1\nB. b: x"
+            ),
         ),
     ],
 )
@@ -2044,6 +2050,58 @@ def test_knowline_disabled_endpoints_log_the_reason(caplog, monkeypatch):
     assert "Decisions endpoints disabled: KnowLine label discovery failed" in (
         caplog.text
     )
+
+
+def test_an_unmapped_model_logs_quieter_than_a_misconfiguration(caplog, monkeypatch):
+    logger_name = "vllm.entrypoints.openai.decisions.state"
+    monkeypatch.setattr(logging.getLogger(logger_name), "propagate", True)
+    state = State()
+    state.online_renderer = SimpleNamespace(
+        renderer=SimpleNamespace(get_tokenizer=KnowLineMockTok, _executor=None)
+    )
+    args = Namespace(chat_template_content_format="auto")
+
+    def init(model_config):
+        return init_decisions_state(
+            SimpleNamespace(model_config=model_config),
+            state,
+            args,
+            None,
+            None,
+            {},
+            ("generate",),
+        )
+
+    def logged():
+        return [
+            r
+            for r in caplog.records
+            if "Decisions endpoints disabled" in r.getMessage()
+        ]
+
+    unmapped = SimpleNamespace(
+        architecture="Gemma2ForCausalLM",
+        logprobs_mode="raw_logprobs",
+        hf_config=None,
+    )
+    with caplog.at_level(logging.DEBUG, logger=logger_name):
+        assert init(unmapped) is None
+    # Most models map to no strategy, so the common case stays under the
+    # default log level: one line per server start is noise.
+    assert len(logged()) == 1 and logged()[0].levelno == logging.DEBUG
+
+    caplog.clear()
+    marked_off_arch = SimpleNamespace(
+        architecture="Gemma2ForCausalLM",
+        logprobs_mode="raw_logprobs",
+        hf_config=SimpleNamespace(knowline_config={}),
+    )
+    with caplog.at_level(logging.DEBUG, logger=logger_name):
+        assert init(marked_off_arch) is None
+    # A knowline marker on an architecture the format does not serve is a
+    # misconfiguration: it warns.
+    assert len(logged()) == 1 and logged()[0].levelno == logging.WARNING
+    assert "serves only" in logged()[0].getMessage()
 
 
 def test_knowline_answers_match_the_checkpoint():
