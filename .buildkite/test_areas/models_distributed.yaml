@@ -39,7 +39,13 @@ steps:
       - vllm/model_executor/models/qwen3_next.py
       - vllm/platforms/rocm.py
       - tests/models/qwen4_exp/test_ple.py
+      - tests/models/qwen4_exp/test_replicated_moe.py
       - tests/models/qwen4_exp/test_tpsp.py
+      commands:
+      - >-
+        pytest -v -s
+        models/qwen4_exp/test_replicated_moe.py
+        models/qwen4_exp/test_tpsp.py
 
 - label: ":nvidia: (L4) Distributed Models"
   key: distributed-model-tests-2-gpus
