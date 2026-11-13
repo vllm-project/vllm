@@ -1639,7 +1639,7 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
         ShardedRDTWeightTransferEngine,
         ShardedRDTWeightTransferInitInfo,
     )
-    from vllm.model_executor.model_loader.reload import get_layerwise_info
+    from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
     from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 
     model = self.model_runner.model
