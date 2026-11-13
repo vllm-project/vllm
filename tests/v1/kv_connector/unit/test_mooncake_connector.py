@@ -1155,8 +1155,9 @@ def patch_worker_dependencies():
     """Helper to mock all distributed and network dependencies for Worker tests."""
     with (
         patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",
-            FakeMooncakeWrapper,
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector._load_transfer_engine",
+            return_value=FakeMooncakeWrapper,
         ),
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.get_ip",
@@ -1458,8 +1459,9 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
 
 @pytest.mark.asyncio
 @patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",
-    FakeMooncakeWrapper,
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+    "mooncake_connector._load_transfer_engine",
+    return_value=FakeMooncakeWrapper,
 )
 async def test_kv_producer(monkeypatch):
     """Simulates a Producer Worker (Prefiller) receiving a transfer request
@@ -3603,8 +3605,8 @@ async def test_packed_matching_layers_coalesce_to_one_copy():
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-    "mooncake_connector.TransferEngine",
-    FakeMooncakeWrapper,
+    "mooncake_connector._load_transfer_engine",
+    return_value=FakeMooncakeWrapper,
 )
 @pytest.mark.parametrize("d_tp_size", [1, 4], ids=["p_tp2_d_tp1", "p_tp2_d_tp4"])
 async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):

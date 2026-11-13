@@ -58,6 +58,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend impo
     MemoryRegion,
     RangeRequest,
     TransferBackend,
+    TransferEngineKind,
     TransferOp,
     TransferState,
     format_peer_address,
@@ -107,15 +108,20 @@ _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
 # one only costs that peer a LAYOUT_MISS and one layout resend.
 _MAX_PEER_LAYOUTS: Final[int] = 1024
 
-try:
-    from mooncake.engine import TransferEngine
-except ImportError:
-    logger.warning(
-        "Please install mooncake by following the instructions at "
-        "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
-        "to run VLLM with MooncakeTransferEngine."
-    )
-    TransferEngine = None
+
+def _load_transfer_engine() -> type | None:
+    """Load `mooncake.engine.TransferEngine` for the te backend.
+
+    The native tent backend does not use the classic Mooncake Python package,
+    so importing it eagerly would load both engines' shared libraries in every
+    process, including deployments that select tent.
+    """
+    try:
+        from mooncake.engine import TransferEngine
+    except ImportError:
+        return None
+    return TransferEngine
+
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -1389,10 +1395,6 @@ class MooncakeConnectorWorker:
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
-        if TransferEngine is None:
-            logger.warning(
-                "Mooncake is not available, so only transfer_engine='tent' can run"
-            )
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
@@ -1444,7 +1446,9 @@ class MooncakeConnectorWorker:
         )
         self.transfer_backend: TransferBackend = create_transfer_backend(
             transfer_engine,
-            engine_cls=TransferEngine,
+            engine_cls=_load_transfer_engine()
+            if transfer_engine is TransferEngineKind.TE
+            else None,
             hostname=self.hostname,
             protocol=protocol,
             device_name=device_name,

@@ -225,8 +225,8 @@ def test_metadata_hma_block_ids():
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-    ".mooncake_connector.TransferEngine",
-    FakeMooncakeWrapper,
+    ".mooncake_connector._load_transfer_engine",
+    return_value=FakeMooncakeWrapper,
 )
 async def test_build_transfer_params_multi_group_trimming(monkeypatch):
     """_build_transfer_params trims per-group blocks when local > remote."""
@@ -321,8 +321,8 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-    ".mooncake_connector.TransferEngine",
-    FakeMooncakeWrapper,
+    ".mooncake_connector._load_transfer_engine",
+    return_value=FakeMooncakeWrapper,
 )
 async def test_build_transfer_params_group_count_mismatch(monkeypatch):
     """_build_transfer_params reports an error when group counts differ."""
