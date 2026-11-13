@@ -12,6 +12,7 @@ from torch import nn
 
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
     )
     from vllm.sequence import IntermediateTensors
     from vllm.v1.attention.backend import AttentionBackend
-    from vllm.v1.kv_cache_interface import KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheLayerConfig, KVCacheSpec
 
 
 @dataclass(frozen=True)
@@ -136,10 +137,11 @@ class PipelineCache(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         assert self.spec is not None
         # The executor may update the block size after model construction.
-        return replace(self.spec, block_size=vllm_config.cache_config.block_size)
+        spec = replace(self.spec, block_size=vllm_config.cache_config.block_size)
+        return FullAttentionManager.layer_config(spec)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         assert self.backend is not None
