@@ -133,15 +133,20 @@ def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
     assert not getattr(model_config, "_supports_multimodal_inputs_cache", None)
 
 
-def test_text_only_architecture_clears_inherited_mm_prefix():
+@pytest.mark.parametrize("language_model_only", [False, True])
+def test_text_only_architecture_clears_inherited_mm_prefix(language_model_only: bool):
     """Regression test for #67161: a text-only class loaded from a checkpoint
     whose text config asks for bidirectional vision attention must not keep
-    mm_prefix, which would restrict the attention backends for no reason."""
+    mm_prefix, which would restrict the attention backends for no reason.
+    `language_model_only` cannot clear it there, since no multimodal config
+    is built."""
     multimodal = ModelConfig(_GEMMA4_MODEL)
     assert multimodal.is_mm_prefix_lm is True
 
     text_only = ModelConfig(
-        _GEMMA4_MODEL, hf_overrides={"architectures": ["Gemma4ForCausalLM"]}
+        _GEMMA4_MODEL,
+        hf_overrides={"architectures": ["Gemma4ForCausalLM"]},
+        language_model_only=language_model_only,
     )
     assert text_only.multimodal_config is None
     assert text_only.is_mm_prefix_lm is False
