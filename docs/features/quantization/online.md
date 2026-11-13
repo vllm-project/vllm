@@ -161,19 +161,6 @@ vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
   --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
 ```
 
-Block-scaled FP8 MoE checkpoints can likewise be re-quantized, for example to MXFP4 experts with MXFP4 activations (W4A4), which halves the expert bytes:
-
-```bash
-vllm serve <block-fp8-model> --quantization-config '{"moe":"mxfp4"}'
-```
-
-For online MXFP4 MoE, `activation: null` lets the MoE backend pick its own activation handling instead of MXFP4 activations, for example on ROCm gfx950:
-
-```bash
-vllm serve <block-fp8-model> \
-  --quantization-config '{"moe":{"weight":"mxfp4","activation":null}}'
-```
-
 !!! info
 
     Re-quantization is available for both linear and MoE layers.

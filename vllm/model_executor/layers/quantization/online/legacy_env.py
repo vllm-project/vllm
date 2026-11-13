@@ -7,7 +7,10 @@ import json
 import vllm.envs as envs
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Static,
+    kMxfp8Dynamic,
+)
 
 logger = init_logger(__name__)
 
@@ -32,21 +35,19 @@ def fp8_moe_requant_args() -> QuantizationConfigArgs | None:
     if envs.VLLM_FP8_MOE_REQUANT != "mxfp4":
         return None
     act = envs.VLLM_FP8_MOE_REQUANT_ACT
-    # a4w4 is the default activation of online MXFP4. a8w4 and a16w4 request the
-    # backend's bf16-activation kernels (`activation: null`): the interleaved
-    # FlyDSL kernels of `AITER_MXFP4_BF16` quantize activations to fp8 per token.
+    # a4w4 is the default activation of online MXFP4. a8w4 is MXFP8 activations
+    # and a16w4 bf16 ones (`activation: null`), both on the interleaved AITER
+    # kernels (`AITER_MXFP4_BF16`).
     if act == "a4w4":
         config: dict = {"moe": "mxfp4"}
         spec = QuantSpec(weight=kMxfp4Static)
+    elif act == "a8w4":
+        config = {"moe": {"weight": "mxfp4", "activation": "mxfp8"}}
+        spec = QuantSpec(weight=kMxfp4Static, activation=kMxfp8Dynamic)
     else:
         config = {"moe": {"weight": "mxfp4", "activation": None}}
         spec = QuantSpec(weight=kMxfp4Static, activation=None)
     _warn("VLLM_FP8_MOE_REQUANT and VLLM_FP8_MOE_REQUANT_ACT", config)
-    if act == "a16w4":
-        logger.warning_once(
-            "VLLM_FP8_MOE_REQUANT_ACT=a16w4 also needs "
-            "--moe-backend aiter_triton_mxfp4_bf16 (it was selected implicitly)."
-        )
     return QuantizationConfigArgs(moe=spec)
 
 

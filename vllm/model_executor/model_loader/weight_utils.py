@@ -257,6 +257,10 @@ def get_quant_config(
         args = online_args
         if args is None:
             args = _deprecated_env_online_args(checkpoint_config)
+            # Same as an explicit `--quantization-config`: the MoE oracles read
+            # the user's activation request from the model config.
+            if args is not None:
+                model_config.quantization_config = args
         if args is None:
             return checkpoint_config
         assert isinstance(args, QuantizationConfigArgs)

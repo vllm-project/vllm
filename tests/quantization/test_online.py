@@ -3,6 +3,7 @@
 """Tests online quantization."""
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -831,29 +832,37 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
 
 
 @pytest.mark.parametrize(
-    "checkpoint, moe",
+    "checkpoint, moe, expected_activation",
     [
-        pytest.param("quark_int8", "mxfp4", id="quark_int8-mxfp4"),
+        pytest.param("quark_int8", "mxfp4", kMxfp4Dynamic, id="quark_int8-mxfp4"),
         # Replaces VLLM_FP8_MOE_REQUANT=mxfp4: block-FP8 experts to a4w4 MXFP4
-        # (the default activation), or to a8w4 with `activation: null`.
-        pytest.param("block_fp8", "mxfp4", id="block_fp8-mxfp4"),
+        # (the default activation), a8w4 (`activation: mxfp8`) or a16w4
+        # (`activation: null`).
+        pytest.param("block_fp8", "mxfp4", kMxfp4Dynamic, id="block_fp8-mxfp4"),
+        pytest.param(
+            "block_fp8",
+            {"weight": "mxfp4", "activation": "mxfp8"},
+            kMxfp8Dynamic,
+            id="block_fp8-mxfp4-activation_mxfp8",
+        ),
         pytest.param(
             "block_fp8",
             {"weight": "mxfp4", "activation": None},
+            None,
             id="block_fp8-mxfp4-activation_null",
         ),
     ],
 )
 def test_online_quantization_configures_prequantized_moe(
-    checkpoint, moe, default_vllm_config, dist_init, monkeypatch
+    checkpoint, moe, expected_activation, default_vllm_config, dist_init, monkeypatch
 ) -> None:
     """Configure the checkpoint method as the online MoE's weight source."""
     default_vllm_config.model_config = ModelConfig()
     prefix = "model.layers.0.mlp.experts"
     if isinstance(moe, dict):
-        # a8w4 (`activation: null`) needs the AITER MXFP4 backend.
+        # MXFP8 or bf16 activations with MXFP4 weights need the AITER backend.
         if not current_platform.is_rocm():
-            pytest.skip("MXFP4 weights with bf16 activations need ROCm AITER.")
+            pytest.skip("MXFP4 weights with MXFP8/bf16 activations need ROCm AITER.")
         _enable_aiter_mxfp4_moe(monkeypatch)
     if checkpoint == "block_fp8":
         quant_config = Fp8Config(weight_block_size=[128, 128])
@@ -865,6 +874,7 @@ def test_online_quantization_configures_prequantized_moe(
         expected_source_cls = QuarkMoEMethod
         online_args = quant_config_args(linear="mxfp4", moe=moe)
         hidden_size, intermediate_size = 32, 64
+    default_vllm_config.model_config.quantization_config = online_args
     quant_config.online_quantization_config = OnlineQuantizationConfig(online_args)
 
     layer = FusedMoEFactory(
@@ -877,14 +887,43 @@ def test_online_quantization_configures_prequantized_moe(
         prefix=prefix,
     )
 
-    assert isinstance(layer._quant_method, Mxfp4OnlineMoEMethod)
-    assert isinstance(layer._quant_method.requantization_source, expected_source_cls)
-    assert not layer._quant_method.uses_meta_device
+    method = layer._quant_method
+    assert isinstance(method, Mxfp4OnlineMoEMethod)
+    assert isinstance(method.requantization_source, expected_source_cls)
+    assert not method.uses_meta_device
+    assert method.activation_quant_key == expected_activation
     if isinstance(moe, dict):
-        # An explicit `activation: null` requests no MXFP4 activation quantization.
-        assert layer._quant_method.activation_quant_key is None
-    else:
-        assert layer._quant_method.activation_quant_key == kMxfp4Dynamic
+        # The interleaved AITER kernels serve both bf16 and MXFP8 activations.
+        assert method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+
+
+@pytest.mark.parametrize(
+    "moe, expected_bound",
+    [
+        pytest.param({"weight": "mxfp4", "activation": "mxfp8"}, "0", id="mxfp8"),
+        pytest.param(
+            {"weight": "mxfp4", "activation": None}, str(2**31 - 1), id="null"
+        ),
+        # Other requests keep the previous behavior.
+        pytest.param("mxfp4", "0", id="unset"),
+    ],
+)
+def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
+    moe, expected_bound, default_vllm_config, monkeypatch
+) -> None:
+    """AITER computes with bf16 activations below AITER_BF16_FP8_MOE_BOUND tokens
+    and MXFP8 ones above it: MXFP8 -> 0 (always fp8), null -> very high (always
+    bf16)."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        _set_aiter_bf16_fp8_moe_bound,
+    )
+
+    default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.model_config.quantization_config = quant_config_args(moe=moe)
+    # Restores the env var after the test.
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
+    _set_aiter_bf16_fp8_moe_bound()
+    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == expected_bound
 
 
 def _pack_e2m1(values: torch.Tensor) -> torch.Tensor:
@@ -3111,8 +3150,16 @@ def _enable_aiter_mxfp4_moe(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm AITER.")
+@pytest.mark.parametrize(
+    "activation_key",
+    [
+        pytest.param(kMxfp4Dynamic, id="a4w4"),
+        pytest.param(kMxfp8Dynamic, id="a8w4"),
+        pytest.param(None, id="a16w4"),
+    ],
+)
 def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
-    default_vllm_config, dist_init, monkeypatch
+    activation_key, default_vllm_config, dist_init, monkeypatch
 ) -> None:
     """A block-FP8 checkpoint requantized to MXFP4 by online quantization
     (`--quantization-config '{"moe": "mxfp4"}'`, which replaces
@@ -3123,6 +3170,10 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
 
     _enable_aiter_mxfp4_moe(monkeypatch)
     default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.model_config.quantization_config = quant_config_args(
+        moe={"weight": "mxfp4", "activation": activation_key}
+    )
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
 
     num_experts, hidden_size, intermediate_size = 4, 256, 256
     block = [128, 128]
@@ -3146,7 +3197,9 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
 
         # The FP8 checkpoint method only creates and loads the FP8 parameters.
         fp8_method = Fp8MoEMethod(Fp8Config(weight_block_size=block), source_layer)
-        online_method = Mxfp4OnlineMoEMethod(moe=source_layer.moe_config)
+        online_method = Mxfp4OnlineMoEMethod(
+            moe=source_layer.moe_config, activation_quant_key=activation_key
+        )
         online_method.set_requantization_source(fp8_method)
         online_method.create_weights(
             layer=source_layer,
@@ -3192,7 +3245,9 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
         assert not hasattr(source_layer, "w13_weight_scale_inv")
         assert not hasattr(source_layer, "w2_weight_scale_inv")
 
-        reference_method = Mxfp4OnlineMoEMethod(moe=reference_layer.moe_config)
+        reference_method = Mxfp4OnlineMoEMethod(
+            moe=reference_layer.moe_config, activation_quant_key=activation_key
+        )
         reference_method.create_weights(
             layer=reference_layer,
             num_experts=num_experts,
@@ -3213,6 +3268,13 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
         reference_method.process_weights_after_loading(reference_layer)
 
     assert online_method.mxfp4_backend == reference_method.mxfp4_backend
+    if activation_key != kMxfp4Dynamic:
+        # The interleaved AITER kernels serve MXFP8 (bound 0: fp8 for any token
+        # count) and bf16 activations (very high bound).
+        assert online_method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+        assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == (
+            "0" if activation_key == kMxfp8Dynamic else str(2**31 - 1)
+        )
     assert_quantized_weights_equal(
         reference_layer,
         source_layer,
@@ -3224,8 +3286,10 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
 @pytest.mark.parametrize(
     "act, expected",
     [
-        pytest.param(None, {"weight": "mxfp4", "activation": None}, id="default-a8w4"),
-        pytest.param("a8w4", {"weight": "mxfp4", "activation": None}, id="a8w4"),
+        pytest.param(
+            None, {"weight": "mxfp4", "activation": "mxfp8"}, id="default-a8w4"
+        ),
+        pytest.param("a8w4", {"weight": "mxfp4", "activation": "mxfp8"}, id="a8w4"),
         pytest.param("a16w4", {"weight": "mxfp4", "activation": None}, id="a16w4"),
         pytest.param("a4w4", "mxfp4", id="a4w4"),
     ],

@@ -132,12 +132,10 @@ variants:
       amd:
         extra_args:
           # FP8 → MXFP4 routed experts, re-quantized at load by online
-          # quantization. `activation: null` = the AITER backend's default,
-          # a8w4 (its FlyDSL kernels quantize activations to FP8 per token);
-          # `{"moe": "mxfp4"}` (MXFP4 activations, a4w4) measured level with
-          # it at TP4.
+          # quantization. a8w4 = MXFP8 activations; `{"moe": "mxfp4"}` (MXFP4
+          # activations, a4w4) measured level with it at TP4.
           - "--quantization-config"
-          - '{"moe":{"weight":"mxfp4","activation":null}}'
+          - '{"moe":{"weight":"mxfp4","activation":"mxfp8"}}'
       # The ROCm image carries ML4 kernels and AITER tables a wheel doesn't.
       mi350x:
         install:
@@ -751,7 +749,7 @@ notes:
       to ~69 GiB per GPU at TP8), or the AMD Quark MXFP4 checkpoint. The
       activation format is picked in the same spec: `{"moe":"mxfp4"}` is `a4w4`
       (MXFP4, required by the specialized decode) and
-      `{"moe":{"weight":"mxfp4","activation":null}}` is `a8w4` (FP8, the
+      `{"moe":{"weight":"mxfp4","activation":"mxfp8"}}` is `a8w4` (MXFP8, the
       default of the AMD FP8 recipe).
       `VLLM_ROCM_USE_AITER=1` runs the MoE, GEMMs, MLA decode, RMSNorm and the
       TP all-reduce on AITER; every AMD number here was measured with it on.
