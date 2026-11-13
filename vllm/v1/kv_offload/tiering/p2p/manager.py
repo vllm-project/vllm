@@ -141,6 +141,7 @@ class P2PSourceInfo:
     kv_request_id: str
     peer_id: str
     do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_source
+    pd_fetch_submitted: bool = False
 
 
 @dataclass(slots=True)
@@ -435,6 +436,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
         # Until the peer acks the handshake, prefill locally rather than wait
         # up to VLLM_P2P_HANDSHAKE_TIMEOUT_S on a peer that may be gone.
+        if not source.do_probe and source.pd_fetch_submitted:
+            # The initial PD fetch consumes its producer's one-time supply.
+            return LookupResult.MISS
         if source.do_probe:
             session = self._sessions.get(source.peer_id)
             if session is None or not session.ready:
@@ -663,6 +667,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.ready,
         )
         session.request_blocks(job_id, kv_request_id, keys, block_ids)
+        if not source.do_probe:
+            source.pd_fetch_submitted = True
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
