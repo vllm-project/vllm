@@ -169,7 +169,7 @@ def test_confidence_uses_proposal_input_after_request_reorder(
         for _ in range(3):
             run(i)
         if use_graph:
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 run(i)
