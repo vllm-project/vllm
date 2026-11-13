@@ -65,8 +65,6 @@ _CONFIG_KEY = "audio_bucket_seconds"
 _CONFIG_PATH = f"additional_config.{_CONFIG_KEY}"
 _CONFIG_KEY_BUDGET = "audio_bucket_budget"
 _CONFIG_PATH_BUDGET = f"additional_config.{_CONFIG_KEY_BUDGET}"
-_CONFIG_KEY_FILL_FLOOR = "audio_bucket_fill_floor"
-_CONFIG_PATH_FILL_FLOOR = f"additional_config.{_CONFIG_KEY_FILL_FLOOR}"
 # Retired in favor of the compute-budget band; still recognized to warn.
 _LEGACY_KEY_MIN_SIZE = "audio_bucket_min_size"
 
@@ -216,25 +214,27 @@ def _ladder_seconds(
 
 def _compute_budget(
     additional_config: Mapping[str, object] | None,
-) -> tuple[int, int] | None:
-    """Read the compute-budget band, or `None` for plain rung bucketing.
+) -> int | None:
+    """Read `additional_config.audio_bucket_budget`, or `None` to skip merging.
 
-    `additional_config.audio_bucket_budget` bounds one encoder call's compute
-    (items x padded frames): oversized groups are split into balanced chunks,
-    each near the budget. `additional_config.audio_bucket_fill_floor` is the
-    under-full line below which a call merges with its larger neighbor
-    (default `budget // 6`). The retired `audio_bucket_min_size` threshold is
-    ignored (a warning is logged when it is still present).
+    The budget bounds one encoder call's compute (items x padded frames):
+    oversized groups are split into balanced chunks, each near the budget, and
+    under-filled groups are folded into their larger neighbor while the merged
+    call stays within the budget. The fold trigger is derived (`budget // 6`)
+    rather than exposed as a knob: sweeping it over a 6x range (4000-24000) at
+    c=8/32/128 on Cohere moved throughput and TTFT by less than 2%, i.e. inside
+    run-to-run noise. The retired `audio_bucket_min_size` threshold is ignored
+    (a warning is logged when it is still present).
 
     Args:
         additional_config: The `VllmConfig.additional_config` mapping in effect.
 
     Returns:
-        `(budget, fill_floor)`, or `None` when compute-budget batching is off.
+        The per-call compute budget, or `None` when compute-budget batching is
+        off.
 
     Raises:
-        ValueError: If the budget is not a positive int, or the floor is not a
-            positive int within the budget.
+        ValueError: If the budget is not a positive int.
     """
     raw = (
         additional_config.get(_CONFIG_KEY_BUDGET)
@@ -249,22 +249,7 @@ def _compute_budget(
         )
     if raw <= 0:
         raise ValueError(f"{_CONFIG_PATH_BUDGET} must be > 0, got {raw!r}")
-    floor_raw = (
-        additional_config.get(_CONFIG_KEY_FILL_FLOOR)
-        if isinstance(additional_config, Mapping)
-        else None
-    )
-    if floor_raw is None:
-        return raw, max(1, raw // 6)
-    if isinstance(floor_raw, bool) or not isinstance(floor_raw, int):
-        raise ValueError(
-            f"{_CONFIG_PATH_FILL_FLOOR} must be a positive int, got {floor_raw!r}"
-        )
-    if floor_raw <= 0 or floor_raw > raw:
-        raise ValueError(
-            f"{_CONFIG_PATH_FILL_FLOOR} must be in (0, {raw}], got {floor_raw!r}"
-        )
-    return raw, floor_raw
+    return raw
 
 
 def _rungs_from_seconds(
@@ -370,10 +355,8 @@ class EncoderBucketing:
         ladder: Rung ladder, or `None` to disable bucketing.
         compute_budget: Compute-budget batching: the per-call compute bound
             (items x padded frames). Oversized groups split into balanced
-            chunks; under-full groups merge up toward `fill_floor`. `None`
-            emits one call per rung (plain bucketing).
-        fill_floor: The under-full line for compute-budget merging, or `None`
-            for `compute_budget // 6`. Only meaningful with `compute_budget`.
+            chunks; groups below `fill_floor` merge up toward it. `None` emits
+            one call per rung (plain bucketing).
     """
 
     def __init__(
@@ -381,15 +364,14 @@ class EncoderBucketing:
         spec: EncoderBucketingSpec,
         ladder: LengthBucketingConfig | None,
         compute_budget: int | None = None,
-        fill_floor: int | None = None,
     ):
         self.spec = spec
         self.ladder = ladder
         self.compute_budget = compute_budget
-        self.fill_floor = (
-            fill_floor if fill_floor is not None
-            else (max(1, compute_budget // 6) if compute_budget else None)
-        )
+        # Derived, not a knob: sweeping the merge trigger over a 6x range
+        # (4000-24000 at budget 48000) at c=8/32/128 on Cohere moved
+        # throughput and TTFT by under 2% -- inside run-to-run noise.
+        self.fill_floor = max(1, compute_budget // 6) if compute_budget else None
 
     @property
     def active(self) -> bool:
@@ -649,8 +631,7 @@ def install_encoder_bucketing(
     model._encoder_bucketing = EncoderBucketing(
         spec,
         ladder,
-        compute_budget=compute_budget[0] if compute_budget else None,
-        fill_floor=compute_budget[1] if compute_budget else None,
+        compute_budget=compute_budget,
     )
     model._encoder_bucketing_manifest = manifest
     if ladder is not None:
