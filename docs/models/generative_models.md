@@ -57,7 +57,7 @@ for output in outputs:
 
 #### Token log probabilities
 
-Set `SamplingParams(logprobs=k)` to return token log probabilities alongside generated text. The values in each generated output's `logprobs` are natural logarithms of normalized token probabilities.
+Set `SamplingParams(logprobs=k)` to return token scores alongside generated text. With the default `logprobs_mode="raw_logprobs"`, or with `"processed_logprobs"`, the values in each generated output's `logprobs` are natural logarithms of normalized token probabilities. The `"raw_logits"` and `"processed_logits"` modes return unnormalized scores instead.
 
 On the standalone CPU runner, normalization remains stable when logits share a large finite offset. For example, `N` equal logits produce `-log(N)` for every token, including when their common value is large. Normalization cannot recover differences already lost when logits were rounded to their storage dtype.
 
