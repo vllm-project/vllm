@@ -1030,6 +1030,16 @@ class Scheduler(SchedulerInterface):
             step_skipped_async_kv: deque[Request] = deque()
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
+            # Without chunked prefill, a request cut for encoder limits is
+            # deferred whole. While earlier batches are in flight, later
+            # requests could keep taking the encoder space it needs.
+            hold_after_encoder_deferral = (
+                not self.scheduler_config.enable_chunked_prefill
+                and not self.is_mm_encoder_only
+                and not self.is_encoder_decoder
+                and self.vllm_config.max_concurrent_batches > 1
+            )
+            encoder_deferred = False
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
@@ -1390,6 +1400,20 @@ class Scheduler(SchedulerInterface):
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
+                        if encoder_deferred:
+                            lo, hi = get_mm_features_in_window(
+                                request.mm_features,
+                                start=num_computed_tokens,
+                                end=num_computed_tokens
+                                + num_new_tokens
+                                + self.num_prefill_lookahead,
+                            )
+                            if lo < hi:
+                                # Leave the encoder cache and budget to the
+                                # earlier request deferred in this step.
+                                skip_request(request_queue)
+                                continue
+                        num_tokens_before_encoder = num_new_tokens
                         (
                             encoder_inputs_to_schedule,
                             num_new_tokens,
@@ -1402,6 +1426,11 @@ class Scheduler(SchedulerInterface):
                             num_new_tokens,
                             encoder_compute_budget,
                             shift_computed_tokens=self.num_prefill_lookahead,
+                        )
+                        encoder_deferred |= (
+                            hold_after_encoder_deferral
+                            and num_new_tokens < num_tokens_before_encoder
+                            and request_id not in self.encoder_cache_mismatch_reqs
                         )
 
                     # Multi-module MTP: avoid ending a prefill chunk within
