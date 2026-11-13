@@ -966,3 +966,26 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
                 layer.get_parameter(param_name).cpu(),
                 weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
             )
+
+
+def test_init_parameters_keeps_declared_dtype_and_requires_grad():
+    """Meta parameters materialize in their own dtype, as with `from_pretrained`,
+    and an integer parameter, which cannot require grad, does not fail."""
+    with torch.device("meta"):
+        module = nn.Module()
+        module.fp32 = nn.Parameter(torch.empty(2))
+        module.fp8 = nn.Parameter(
+            torch.empty(2, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        module.int8 = nn.Parameter(
+            torch.empty(2, dtype=torch.int8), requires_grad=False
+        )
+    stub = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        device_config=SimpleNamespace(device=torch.device("cpu")),
+    )
+    Base.init_parameters(stub, module)
+
+    assert module.fp32.dtype == torch.float32 and module.fp32.requires_grad
+    assert module.fp8.dtype == torch.float8_e4m3fn and not module.fp8.requires_grad
+    assert module.int8.dtype == torch.int8 and not module.int8.requires_grad

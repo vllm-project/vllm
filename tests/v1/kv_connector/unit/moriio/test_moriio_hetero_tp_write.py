@@ -46,10 +46,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -95,20 +94,12 @@ def _groups(model: str, hma: bool) -> list[str]:
 
 
 def _spec(layer: Layer, num_heads: int, tp_size: int):
-    if layer.kind == "full":
-        return FullAttentionSpec(
+    if layer.kind in ("full", "swa"):
+        return AttentionSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=num_heads,
             head_size=2,
             dtype=torch.bfloat16,
-        )
-    if layer.kind == "swa":
-        return SlidingWindowSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=num_heads,
-            head_size=2,
-            dtype=torch.bfloat16,
-            sliding_window=8,
         )
     if layer.kind == "mla":
         return MLAAttentionSpec(
@@ -238,6 +229,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
         None,
     )
     worker.kv_layer_mr_offset = {}
+    worker.kv_region_mr_offsets = {}
     worker._mamba_offset_templates = {}
     worker._region_session_index = None
     worker.layer_name_to_local_kv_cache_metadata = {
