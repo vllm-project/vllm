@@ -119,8 +119,9 @@ def _store_block(
                 # write(2) sets no errno on a short write, so name the likely
                 # cause. Keep in sync with the message in csrc/fs_io.cpp.
                 raise OSError(
-                    f"Short write to {dest_path}: wrote {written} of "
-                    f"{len(view_slice)} bytes; the filesystem may be full (ENOSPC)"
+                    f"Encountered short-write error when writing {dest_path}. "
+                    "This could be a hardware error or the filesystem may be "
+                    "full (ENOSPC)"
                 )
         finally:
             os.close(fd)

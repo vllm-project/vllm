@@ -38,13 +38,11 @@ inline int ensure_parent_dirs(const std::string& path) {
 constexpr int kShortWrite = -1;
 
 // Core single-block store: src/size are raw pointer + byte count. Returns 0
-// on success, kShortWrite on a short write (with *written set to the bytes
-// written), or the errno of the failing step on failure -- captured before
-// any subsequent cleanup call can overwrite it. On failure, the temp file is
-// removed.
+// on success, kShortWrite on a short write, or the errno of the failing step
+// on failure -- captured before any subsequent cleanup call can overwrite
+// it. On failure, the temp file is removed.
 inline int _store_block(const char* tmp_path, const char* dest_path,
-                        const char* src, size_t size, bool use_o_direct,
-                        ssize_t* written) {
+                        const char* src, size_t size, bool use_o_direct) {
   if (access(dest_path, F_OK) == 0) {
     return 0;  // Already present.
   }
@@ -60,10 +58,9 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
     return errno;
   }
 
-  const ssize_t n = write(fd, src, size);
-  if (n < 0 || static_cast<size_t>(n) != size) {
-    const int err = n < 0 ? errno : kShortWrite;
-    *written = n;
+  const ssize_t written = write(fd, src, size);
+  if (written < 0 || static_cast<size_t>(written) != size) {
+    const int err = written < 0 ? errno : kShortWrite;
     close(fd);  // Best-effort cleanup; the real error is already captured.
     unlink(tmp_path);
     return err;
@@ -244,14 +241,13 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
 
   Py_ssize_t failed_index = -1;
   int failure_errno = 0;
-  ssize_t written = 0;
 
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       const char* buf = static_cast<const char*>(buffers[i].buf);
-      const int err = _store_block(tmp_paths[i], dest_paths[i], buf,
-                                   static_cast<size_t>(buffers[i].len),
-                                   use_o_direct, &written);
+      const int err =
+          _store_block(tmp_paths[i], dest_paths[i], buf,
+                       static_cast<size_t>(buffers[i].len), use_o_direct);
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
@@ -261,16 +257,15 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
     Py_END_ALLOW_THREADS
   }
 
-  const Py_ssize_t failed_len =
-      failed_index >= 0 ? buffers[failed_index].len : 0;
   release_buffer_list(buffers);
 
   if (failure_errno == kShortWrite) {
     // Keep in sync with the message in fs/io.py.
     return PyErr_Format(PyExc_OSError,
-                        "Short write to %s: wrote %zd of %zd bytes; the "
-                        "filesystem may be full (ENOSPC)",
-                        dest_paths[failed_index], written, failed_len);
+                        "Encountered short-write error when writing %s. This "
+                        "could be a hardware error or the filesystem may be "
+                        "full (ENOSPC)",
+                        dest_paths[failed_index]);
   }
   if (failed_index >= 0) {
     // PyErr_SetFromErrnoWithFilename() reads the errno to format exception.
