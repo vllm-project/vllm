@@ -7,6 +7,7 @@ without S3 credentials or a live object store. They verify the manager's
 state machine: job submission, transfer completion polling, and lookup.
 """
 
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -34,10 +35,15 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.base import (
+    JobResult,
+    ParentContext,
+    TransferJob,
+)
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
+    TieringTransferJob,
 )
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 from vllm.v1.kv_offload.tiering.obj.manager import (
@@ -49,6 +55,10 @@ from vllm.v1.kv_offload.tiering.obj.manager import (
 # ---------------------------------------------------------------------------
 # Shared stubs
 # ---------------------------------------------------------------------------
+
+
+def _parent_ctx(view, lock=None):
+    return ParentContext(lock or threading.Lock(), view)
 
 
 def _make_offloading_config(
@@ -118,7 +128,7 @@ def make_job(
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
-    return TransferJob(
+    return TieringTransferJob(
         job_id=job_id,
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int32),
@@ -244,6 +254,7 @@ def _make_tier(
     offloading_spec: SimpleNamespace = _OFFLOADING_SPEC,
     primary_kv_view: memoryview | None = None,
     store_config: dict | None = None,
+    lock=None,
     **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
@@ -264,7 +275,7 @@ def _make_tier(
     ):
         tier = ObjectStoreSecondaryTierManager(
             offloading_spec=offloading_spec,
-            primary_kv_view=primary_kv_view,
+            parent_ctx=_parent_ctx(primary_kv_view, lock),
             tier_type="obj",
             store_config=store_config or _STORE_CONFIG,
             prefix=_RUN_PREFIX,
@@ -596,7 +607,9 @@ class TestMockObjTierFailures:
         assert not tier._transfers
         assert list(tier.get_finished_jobs()) == []
 
-    def test_xfer_cleanup_retry_finalizes_parent_job_and_primary_pin(self, monkeypatch):
+    def test_xfer_cleanup_retry_finalizes_parent_job_and_primary_pin(
+        self, monkeypatch, manager_lock
+    ):
         num_blocks = 4
         tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
         primary_kv_view = memoryview(tensor.numpy())
@@ -606,10 +619,12 @@ class TestMockObjTierFailures:
             num_chunks=num_blocks, mmap_region=mmap_region
         )
         obj_tier, agent = _make_tier(
-            num_blocks=num_blocks, primary_kv_view=primary_kv_view
+            num_blocks=num_blocks, primary_kv_view=primary_kv_view, lock=manager_lock
         )
         manager = TieringOffloadingManager(
-            primary_tier=primary_tier, secondary_tiers=[obj_tier]
+            lock=manager_lock,
+            primary_tier=primary_tier,
+            secondary_tiers=[obj_tier],
         )
 
         keys = [key(1)]

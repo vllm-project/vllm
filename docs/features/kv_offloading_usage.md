@@ -469,6 +469,11 @@ Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your 
 
 `type` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `module_path` and looks up `type` as a class name in that module.
 
+A `submit_load()` implementation receives its `TransferJob` un-materialized: promotion jobs allocate their primary-tier CPU slots lazily, so the tier must call `job_metadata.materialize()` before reading `keys` or `chunk_ids`, which raise `ValueError` until then. A `False` return means the primary tier could not fit the promotion. In that case, complete the job without transferring (the manager marks those chunks for recomputation). `job_metadata.materialize()` must be called under the `manager_lock`. It is safe to call `job_metadata.materialize()` inside `submit_load()`, without explicit lock acquisition, as `submit_load()` is called with the lock held. If materializing from a tier worker thread,
+
+- The lock must be explicitly acquired and protected against deadlocks (see the FS tier's `_materialize_under_lock`).
+- `materialize()` can raise for fatal errors. This exception must be propagated to the Scheduler thread so the engine crashes loudly. (see the FS tier's `_job_errors`)
+
 ## Tuning Tips
 
 - `cpu_bytes_to_use`: a bigger CPU tier means fewer trips to slower secondary tiers and a higher hit rate. The value is total across all workers, not per-worker. Leave headroom for the rest of the host workload.

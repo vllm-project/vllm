@@ -18,6 +18,7 @@ import functools
 import json
 import os
 from collections.abc import Iterable
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar
 
 try:
@@ -44,6 +45,7 @@ from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
+    ParentContext,
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
@@ -60,6 +62,9 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
+
+# How long a load worker waits on the manager lock between drain checks.
+_MANAGER_LOCK_POLL_S: float = 0.5
 
 
 class FsAsyncLookupManager(AsyncLookupManager):
@@ -109,7 +114,7 @@ class FileSystemTierManager(SecondaryTierManager):
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
-        primary_kv_view: memoryview,
+        parent_ctx: "ParentContext",
         tier_type: str,
         root_dir: str,
         n_read_threads: int = 16,
@@ -121,7 +126,7 @@ class FileSystemTierManager(SecondaryTierManager):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
             blocks_per_chunk.
-        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        parent_ctx: Handles into the composing tiering manager.
         tier_type: Tier type identifier, set by SecondaryTierFactory.
         root_dir: Root directory for block files.
         n_read_threads: Number of read-priority I/O threads.
@@ -134,9 +139,7 @@ class FileSystemTierManager(SecondaryTierManager):
         backpressure_detector: Optional backpressure detector.
 
         """
-        super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
-        )
+        super().__init__(offloading_spec, parent_ctx, tier_type, backpressure_detector)
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
@@ -157,6 +160,8 @@ class FileSystemTierManager(SecondaryTierManager):
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
         # Block count per in-flight job, used to report transfer_bytes.
         self._job_block_counts: dict[JobId, int] = {}
+        # Fatal errors recorded by FS worker threads.
+        self._job_errors: dict[JobId, Exception] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
         # Written by the pool worker inside the load task before it raises (so
         # before task_done publishes the job); read on the scheduler thread in
@@ -165,11 +170,7 @@ class FileSystemTierManager(SecondaryTierManager):
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
 
-        # Extract block size from primary view
-        assert primary_kv_view.strides is not None, (
-            "primary_kv_view.strides cannot be None"
-        )
-        self._block_size: int = primary_kv_view.strides[0]
+        self._block_size: int = self.block_size_bytes
 
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self.file_mapper = FileMapper.from_offloading_spec(
@@ -207,6 +208,8 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        # Set while drain_jobs() / shutdown waits on the pool
+        self._draining = False
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -237,15 +240,31 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
-        # Track this load's keys so a failed promotion can mark only its failed
-        # keys as a miss (see get_finished_jobs).
-        keys = list(job_metadata.keys)
-        self._load_job_keys[job_id] = keys
-        self._job_block_counts[job_id] = len(keys)
-        paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
         def load_task() -> None:
+            try:
+                materialized = self._materialize_under_lock(job_metadata)
+            except Exception as exc:
+                # Allocation raised an error that must be propagated
+                # to the scheduler thread.
+                self._job_errors[job_id] = exc
+                raise
+            if not materialized:
+                # Job materialization failed / could not acquire lock;
+                # Setup state for safe job reaping.
+                self._job_block_counts[job_id] = 0
+                self._load_job_keys[job_id] = []
+                return
+
+            keys = list(job_metadata.keys)
+            self._job_block_counts[job_id] = len(keys)
+            self._load_job_keys[job_id] = list(keys)
+            # TODO (varun): Path generation is expensive. Consider doing in
+            # Scheduler thread.
+            paths = [self.file_mapper.get_file_name(k) for k in keys]
+            offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
+            assert len(paths) == len(offsets)
+
             try:
                 batch_load_block(
                     paths,
@@ -278,6 +297,9 @@ class FileSystemTierManager(SecondaryTierManager):
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Collect finished jobs; a failed promotion marks only its failed keys
         as a miss here (scheduler thread)."""
+        if self._job_errors:
+            # Raise allocation errors in scheduler thread.
+            raise next(iter(self._job_errors.values()))
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
             block_count = self._job_block_counts.pop(job_id, 0)
@@ -332,10 +354,36 @@ class FileSystemTierManager(SecondaryTierManager):
             yield from self.events
             self.events.clear()
 
+    @contextmanager
+    def _drain_scope(self):
+        """Mark the tier as draining when the block runs"""
+        self._draining = True
+        try:
+            yield
+        finally:
+            self._draining = False
+
+    def _materialize_under_lock(self, transfer_job: TransferJob) -> bool:
+        """Determine if the manager_lock can be acquired and materialize
+        job under the lock.
+        Returns True, if lock acquired and materialization successful.
+        Returns False, if lock can't be acquired or materialization failed.
+        Raise if materialize() raises.
+        """
+        while True:
+            if self._draining:
+                return False
+            if self.manager_lock.acquire(timeout=_MANAGER_LOCK_POLL_S):
+                try:
+                    return transfer_job.materialize()
+                finally:
+                    self.manager_lock.release()
+
     @override
     def drain_jobs(self) -> None:
         """Block until all in-flight transfers in the threadpool finish."""
-        self._pool.wait_idle()
+        with self._drain_scope():
+            self._pool.wait_idle()
 
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
@@ -352,4 +400,5 @@ class FileSystemTierManager(SecondaryTierManager):
         clearing pending tasks and waiting for active threads to complete.
         """
         self._lookup_manager.shutdown()
-        self._pool.shutdown(wait=True)
+        with self._drain_scope():
+            self._pool.shutdown(wait=True)
