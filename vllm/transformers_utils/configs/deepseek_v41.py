@@ -29,7 +29,7 @@ class DeepseekV41Config(PreTrainedConfig):
         # ``rope_scaling`` is a property in Transformers v5 (backed by
         # ``rope_parameters``); capture it here and restore after
         # super().__init__, which re-standardizes rope params.
-        rope_scaling = text_config.pop("rope_scaling", None)
+        rope_parameters = text_config.pop("rope_scaling", None)
 
         for key, value in text_config.items():
             if key == "model_type":
@@ -40,8 +40,8 @@ class DeepseekV41Config(PreTrainedConfig):
             setattr(self, key, value)
 
         super().__init__(**kwargs)
-        if rope_scaling is not None:
-            self.rope_parameters = rope_scaling
+        if rope_parameters is not None:
+            self.rope_parameters = rope_parameters
 
         # The v4.1 quantization_config carries the expert dtype; the model
         # code reads it from the top-level hf_config.

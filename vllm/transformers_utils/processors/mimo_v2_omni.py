@@ -981,8 +981,8 @@ class MiMoOmniProcessor(ProcessorMixin):
                 )
 
         rope_type = "rope"
-        rs = getattr(hf_config, "rope_parameters", None)
-        if rs and rs.get("type") == "default" and rs.get("mrope_section") is not None:
+        rp = getattr(hf_config, "rope_parameters", None)
+        if rp and rp.get("type") == "default" and rp.get("mrope_section") is not None:
             rope_type = "mrope"
 
         unit = patch_size * merge_size

@@ -844,17 +844,15 @@ class IsaacForConditionalGeneration(
             else config
         )
 
-        checkpoint_rope = getattr(target_cfg, "rope_parameters", None)
-        if checkpoint_rope is None and target_cfg is config:
-            checkpoint_rope = getattr(config, "_rope_scaling", None)
+        rp = getattr(target_cfg, "rope_parameters", None)
+        if rp is None and target_cfg is config:
+            rp = getattr(config, "_rope_scaling", None)
 
         patch_rope_parameters(target_cfg)
         rope_parameters = target_cfg.rope_parameters
         rope_parameters["mrope_section"] = calculated_mrope_section
-        if checkpoint_rope is not None and "mrope_interleaved" in checkpoint_rope:
-            rope_parameters.setdefault(
-                "mrope_interleaved", checkpoint_rope["mrope_interleaved"]
-            )
+        if rp is not None and "mrope_interleaved" in rp:
+            rope_parameters.setdefault("mrope_interleaved", rp["mrope_interleaved"])
         target_cfg.rope_parameters = rope_parameters
 
         with self._mark_language_model(vllm_config):
