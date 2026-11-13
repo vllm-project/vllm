@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
+import vllm.envs as envs
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -14,12 +15,18 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    make_block_hash_with_group_id,
+    trim_null_head,
+)
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_kv_cache_spec_kind,
@@ -197,6 +204,25 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        self._diagnostic_block_size: int | None = None
+        if envs.VLLM_PREFIX_CACHE_DIAGNOSTICS and enable_caching:
+            groups = kv_cache_config.kv_cache_groups
+            if (
+                len(groups) == 1
+                and type(groups[0].kv_cache_spec) is FullAttentionSpec
+                and groups[0].kv_cache_spec.block_size == hash_block_size
+                and scheduler_block_size == hash_block_size
+                and dcp_world_size == pcp_world_size == 1
+                and not use_eagle
+                and num_hash_lookahead_tokens == num_prefill_lookahead == 0
+            ):
+                self._diagnostic_block_size = hash_block_size
+                self.block_pool.enable_prefix_cache_diagnostics()
+            else:
+                logger.warning(
+                    "Prefix-cache diagnostics are unsupported for this cache "
+                    "layout or speculative/context-parallel configuration."
+                )
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -328,6 +354,11 @@ class KVCacheManager:
             )
         )
 
+        if self._diagnostic_block_size is not None:
+            self._log_prefix_cache_diagnostic(
+                request, num_new_computed_tokens, max_cache_hit_length
+            )
+
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
         # (e.g. gateway) can learn about them.
@@ -348,6 +379,41 @@ class KVCacheManager:
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
+
+    def _log_prefix_cache_diagnostic(
+        self, request: Request, cached_tokens: int, lookup_limit: int
+    ) -> None:
+        block_size = self._diagnostic_block_size
+        assert block_size is not None
+        if cached_tokens >= lookup_limit // block_size * block_size:
+            reason = "lookup_limit"
+        elif cached_tokens // block_size >= len(request.block_hashes):
+            return
+        else:
+            key = make_block_hash_with_group_id(
+                request.block_hashes[cached_tokens // block_size], 0
+            )
+            history = self.block_pool.recently_evicted_block_hashes
+            assert history is not None
+            reason = "evicted" if key in history else "no_match"
+        extra_key_kinds = []
+        if request.cache_salt:
+            extra_key_kinds.append("cache_salt")
+        if request.lora_request is not None:
+            extra_key_kinds.append("lora")
+        if request.mm_features:
+            extra_key_kinds.append("mm")
+        if request.prompt_embeds is not None:
+            extra_key_kinds.append("prompt_embeds")
+        logger.debug(
+            "prefix_cache_diagnostic request_id=%r group_id=0 reason=%s "
+            "cached_tokens=%d lookup_limit_tokens=%d request_extra_key_kinds=%s",
+            request.request_id,
+            reason,
+            cached_tokens,
+            lookup_limit,
+            extra_key_kinds,
+        )
 
     def get_computed_blocks_for_connector(
         self, request: Request, max_cache_hit_length: int | None = None
