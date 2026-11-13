@@ -8,7 +8,7 @@ steps:
   timeout_in_minutes: 35
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -40,7 +40,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     pytest --continue-on-collection-errors -v -s v1/fault_tolerance/test_engine_core_sentinel.py || true &&
     pytest --continue-on-collection-errors -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py || true'

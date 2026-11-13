@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -50,7 +50,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -82,7 +82,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -136,7 +136,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -166,7 +166,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -188,7 +188,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/install-kv-offload.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/install-kv-offload.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_offload || true &&
     pytest --continue-on-collection-errors -v -s v1/simple_kv_offload || true'
 - label: ':nvidia: (H200 MIG 35GB) V1 KV Connectors'
@@ -197,7 +197,7 @@ steps:
   timeout_in_minutes: 45
   parallelism: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -226,7 +226,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -256,7 +256,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 20
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -286,7 +286,7 @@ steps:
   timeout_in_minutes: 20
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -315,7 +315,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 40
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -346,7 +346,7 @@ steps:
   timeout_in_minutes: 25
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -388,7 +388,7 @@ steps:
   timeout_in_minutes: 75
   optional: true
   depends_on: null
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -414,7 +414,7 @@ steps:
   timeout_in_minutes: 85
   optional: true
   depends_on: null
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -438,7 +438,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 25
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -484,7 +484,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 60
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -524,7 +524,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -575,7 +575,7 @@ steps:
   timeout_in_minutes: 45
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -616,7 +616,7 @@ steps:
   timeout_in_minutes: 20
   num_gpus: 1
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
