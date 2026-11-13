@@ -42,10 +42,8 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    MambaSpec,
-)
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LoadStoreSpec,
@@ -1149,7 +1147,7 @@ class OffloadingConnectorScheduler:
                         )
                     )
                 keys_to_load.extend(group_keys_to_load)
-                if isinstance(group_config.kv_cache_spec, MambaSpec):
+                if issubclass(group_config.manager_cls, MambaManager):
                     req_status.load_key_ranges.extend(
                         (num_locally_computed_tokens, num_cached_tokens, key)
                         for key in group_keys_to_load
