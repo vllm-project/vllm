@@ -67,16 +67,33 @@ class _EagerReplay:
     eagerly, launch overhead included, and copies the output into the first run's
     tensor so callers holding it see the latest result."""
 
-    def __init__(self, step: Callable[[], Any]):
-        self.step = step
+    def __init__(self, step: Callable[[], Any], before: Callable[[], None]):
+        self.step, self.before = step, before
+        before()
         self.output = step()
 
     def replay(self) -> None:
+        self.before()
         _first_tensor(self.output).copy_(_first_tensor(self.step()))
 
 
+class _HostRendezvousReplay:
+    """A breakable capture whose replays start after a host-side rendezvous."""
+
+    def __init__(self, capture: BreakableCUDAGraphCapture, before: Callable[[], None]):
+        self.capture, self.before = capture, before
+
+    @property
+    def num_eager_breaks(self) -> int:
+        return self.capture.num_eager_breaks
+
+    def replay(self) -> None:
+        self.before()
+        self.capture.replay()
+
+
 _Capture: TypeAlias = torch.cuda.CUDAGraph | BreakableCUDAGraphCapture
-_Graph: TypeAlias = _Capture | _EagerReplay
+_Graph: TypeAlias = _Capture | _EagerReplay | _HostRendezvousReplay
 
 
 def _new_capture(vllm_config: Any, mode: str) -> _Capture:
@@ -427,9 +444,21 @@ class ForwardBench:
             # eager breaks (e.g. attention in PIECEWISE steps) run eagerly
             # between graph segments at replay.
 
+            # Ranks start each timed step together. FULL graphs rendezvous in the
+            # graph (a device all-reduce); steps with eager work rendezvous on the
+            # host: a device collective queued ahead of eager MegaMoE (which
+            # occupies every SM waiting for its peers) can deadlock across ranks
+            # once the host runs ahead of the GPU.
+            in_graph = self.result["cudagraph_mode"] == CUDAGraphMode.FULL.name
+
+            def host_rendezvous() -> None:
+                if world.world_size > 1:
+                    torch.accelerator.synchronize()
+                    torch.distributed.barrier(group=world.cpu_group)
+
             def step() -> Any:
                 restore()
-                if world.world_size > 1:
+                if in_graph and world.world_size > 1:
                     torch.distributed.all_reduce(flag, group=world.device_group)
                 self._events[0].record()
                 output = self._run_model()
@@ -438,7 +467,7 @@ class ForwardBench:
 
             graph: _Graph
             if self.result["cudagraph_mode"] == CUDAGraphMode.NONE.name:
-                graph = _EagerReplay(step)
+                graph = _EagerReplay(step, host_rendezvous)
                 output = graph.output
             else:
                 capture = _new_capture(
@@ -446,9 +475,13 @@ class ForwardBench:
                 )
                 with _capturing(capture, stream):
                     output = step()
-                graph = capture
+                graph = (
+                    capture
+                    if in_graph or isinstance(capture, torch.cuda.CUDAGraph)
+                    else _HostRendezvousReplay(capture, host_rendezvous)
+                )
         hidden = self._real_rows(_first_tensor(output))
-        if isinstance(graph, BreakableCUDAGraphCapture):
+        if isinstance(graph, (BreakableCUDAGraphCapture, _HostRendezvousReplay)):
             self.result["eager_breaks"] = graph.num_eager_breaks
 
         sampled = self.sampled
@@ -479,9 +512,9 @@ class ForwardBench:
         self.result["latency_us"] = self._time(graph)
         from vllm.benchmarks.forward.profile import profile_graph
 
-        # Each replay restores the state views, then (multi-rank) rendezvouses,
+        # Each replay restores the state views and, in FULL graphs, rendezvouses
         # before the timed forward.
-        skip = len(self.state_views) + (world.world_size > 1)
+        skip = len(self.state_views) + (world.world_size > 1 and in_graph)
         summary = profile_graph(graph, self.name, self.profile_prefix, skip)
         if summary is not None:
             self.result["profile"] = {
