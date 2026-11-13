@@ -282,7 +282,12 @@ class DSpineCodeBridge(nn.Module):
     ``fused`` Triton path (CUDA + BF16) or the ``eager`` torch path.
     """
 
-    def __init__(self, config, params_dtype: torch.dtype = torch.bfloat16) -> None:
+    def __init__(
+        self,
+        config,
+        params_dtype: torch.dtype = torch.bfloat16,
+        block_size: int | None = None,
+    ) -> None:
         super().__init__()
         cfg = getattr(config, "dflash_config", None) or {}
         if cfg.get("selected_prefix_terminal", True):
@@ -311,7 +316,7 @@ class DSpineCodeBridge(nn.Module):
         self.code_size = int(bridge["code_size"])
         self.rank = int(bridge["rank"])
         self.num_layers = int(config.num_hidden_layers)
-        self.block_size = int(config.block_size)
+        self.block_size = int(config.block_size if block_size is None else block_size)
         self.eps = float(bridge["eps"])
         feature_layers = cfg.get("selected_prefix_feature_layers")
         if feature_layers is None:
@@ -657,12 +662,19 @@ class DSpineQwen3Model(DFlashQwen3Model):
             start_layer_id=start_layer_id,
             prefix=prefix,
         )
-        block_size = int(self.config.block_size)
-        if 1 + speculative_config.num_speculative_tokens != block_size:
-            raise ValueError(
-                "DSPINE needs 1 + num_speculative_tokens == draft block "
-                f"size ({block_size}), got "
-                f"{1 + speculative_config.num_speculative_tokens}"
+        draft_block_size = 1 + speculative_config.num_speculative_tokens
+        trained_block_size = getattr(self.config, "block_size", None)
+        if (
+            trained_block_size is not None
+            and int(trained_block_size) != draft_block_size
+        ):
+            logger.warning_once(
+                "DSpine checkpoint was trained with block_size=%d "
+                "(recommended num_speculative_tokens=%d), got "
+                "num_speculative_tokens=%d; acceptance length may differ.",
+                int(trained_block_size),
+                int(trained_block_size) - 1,
+                speculative_config.num_speculative_tokens,
             )
         for layer in self.layers:
             if layer.self_attn.causal is not True:
@@ -672,7 +684,9 @@ class DSpineQwen3Model(DFlashQwen3Model):
             if layer.self_attn.sliding_window is not None:
                 raise ValueError("DSPINE drafts use full attention layers")
         self.selected_prefix_bridge = DSpineCodeBridge(
-            self.config, params_dtype=vllm_config.model_config.dtype
+            self.config,
+            params_dtype=vllm_config.model_config.dtype,
+            block_size=draft_block_size,
         )
         self.head_topk = resolve_dspine_head_topk(self.config, len(self.layers))
 

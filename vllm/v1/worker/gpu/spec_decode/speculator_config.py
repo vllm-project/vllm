@@ -295,6 +295,7 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "eagle3": _builtin("eagle.config", "Eagle3SpeculatorConfig"),
     "mtp": _builtin("mtp.config", "MTPSpeculatorConfig"),
     "dflash": _builtin("dflash.config", "DFlashSpeculatorConfig"),
+    "dspine": _builtin("dspine.config", "DSpineSpeculatorConfig"),
     "dspark": _builtin("dspark.config", "DSparkSpeculatorConfig"),
 }
 
@@ -399,7 +400,7 @@ def _get_draft_declared_config_class(
 
 
 # Methods detected by `matches` (in order) if the draft model declares none.
-_CHECKPOINT_DETECTION_ORDER = ("eagle", "eagle3", "dflash", "dspark", "mtp")
+_CHECKPOINT_DETECTION_ORDER = ("eagle", "eagle3", "dspine", "dflash", "dspark", "mtp")
 
 
 def _resolve_checkpoint_config_class(
@@ -412,18 +413,22 @@ def _resolve_checkpoint_config_class(
     """
     declared_cls = _get_draft_declared_config_class(spec_config)
     if spec_config.method is not None:
-        if declared_cls is not None and declared_cls.base_method != spec_config.method:
-            draft = spec_config.draft_model_config
-            declared = declared_cls.base_method
-            requested = spec_config.custom_method or spec_config.method
-            raise ValueError(
-                f"speculative_config requested method={requested!r}, but "
-                f"the draft model {draft.model!r} is a {declared!r} checkpoint "
-                f"(model_type={getattr(draft.hf_config, 'model_type', None)!r}, "
-                f"architectures={getattr(draft, 'architectures', None)}). Pass a "
-                f"matching method or a matching draft checkpoint. Use "
-                f"method={declared!r} if that is what you intended."
-            )
+        if declared_cls is not None:
+            if declared_cls.base_method != spec_config.method:
+                draft = spec_config.draft_model_config
+                declared = declared_cls.base_method
+                requested = spec_config.custom_method or spec_config.method
+                raise ValueError(
+                    f"speculative_config requested method={requested!r}, but "
+                    f"the draft model {draft.model!r} is a {declared!r} checkpoint "
+                    f"(model_type={getattr(draft.hf_config, 'model_type', None)!r}, "
+                    f"architectures={getattr(draft, 'architectures', None)}). Pass a "
+                    f"matching method or a matching draft checkpoint. Use "
+                    f"method={declared!r} if that is what you intended."
+                )
+            if issubclass(declared_cls, configured_cls):
+                assert issubclass(declared_cls, DraftModelSpeculatorConfig)
+                return declared_cls
         return configured_cls
     if spec_config.custom_method is not None:
         # Not based on a built-in speculator, so there's nothing to check.

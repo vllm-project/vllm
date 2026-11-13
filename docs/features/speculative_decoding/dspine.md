@@ -15,15 +15,16 @@ vllm serve /path/to/target --dtype bfloat16 \
     --speculative-config '{"method":"dspine","model":"/path/to/dspine","num_speculative_tokens":15}'
 ```
 
-`"method":"dflash"` with the same checkpoint also works: vLLM rewrites a draft
-whose `dflash_config` carries `selected_prefix_code_bridge` to
-`DSpineDraftModel` and dispatches the DSpine speculator. The `dspine` alias is
+`"method":"dflash"` with a `DSpineDraftModel` checkpoint (or omitting `"method"`
+when the checkpoint carries `selected_prefix_code_bridge`) also dispatches the
+DSpine speculator. The `dspine` method selects `DSpineSpeculatorConfig` and is
 normalized to the shared `dflash` runtime.
 
-`num_speculative_tokens` must be exactly the checkpoint's `block_size - 1`
-(for example, `15` for `block_size=16`): the code bridge is trained for one
-anchor row plus a fixed number of mask rows, and other lengths are rejected at
-startup rather than silently degrading acceptance length.
+When `num_speculative_tokens` is omitted, it defaults to `block_size - 1`
+(for example, `15` for `block_size=16`). Supplying a different
+`num_speculative_tokens` logs a warning and runs with `1 + num_speculative_tokens`
+tokens per draft block, though acceptance length may differ from the trained
+block size.
 
 ## Proposal sampling
 
