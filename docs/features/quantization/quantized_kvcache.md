@@ -45,7 +45,7 @@ You can configure how the quantization scales are computed in vLLM using three d
 
 On dense MLA models (e.g. DeepSeek-V3, Kimi-K3), `kv_cache_dtype="nvfp4"` stores the 512 latent dims as NVFP4 and the 64 RoPE dims as FP8: 352 bytes per token per layer, instead of 576 for FP8.
 
-- **Requirements:** the `FLASHINFER_MLA` backend, an SM100/SM103 GPU, BF16 activations (FP8- and NVFP4-weight checkpoints are fine), FlashInfer 0.7.4 or newer (for its Cake NVFP4 MLA decode) with its experimental kernel sources, and a CUDA 13.4+ toolkit at runtime. vLLM's nightly CUDA 13.4 Docker images include those sources. FlashInfer's PyPI wheel leaves them out, so after installing or upgrading FlashInfer with pip, copy them from the same release's sdist into the installed package:
+- **Requirements:** the `FLASHINFER_MLA` backend, an SM100/SM103 GPU, BF16 activations (FP8- and NVFP4-weight checkpoints are fine), FlashInfer 0.7.4 or newer (for its Cake NVFP4 MLA decode) with its experimental kernel sources, and a CUDA 13.4+ toolkit at runtime. vLLM's nightly Docker images built with CUDA 13.4 or newer include those sources. FlashInfer's PyPI wheel leaves them out, so after installing or upgrading FlashInfer with pip, copy them from the same release's sdist into the installed package:
 
     ```bash
     ver=$(python -c 'from importlib.metadata import version; print(version("flashinfer-python"))')
