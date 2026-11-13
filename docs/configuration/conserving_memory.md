@@ -84,6 +84,11 @@ others; `--attention-config.indexer_logits_dtype bfloat16` halves FP32 logits.
 Batches that fit are not split. A larger budget launches fewer
 chunks in eager and piecewise steps; a smaller one reserves less memory.
 
+On SM120, the sparse indexer instead scores only the candidate tokens with a
+Triton kernel. Its logits have `candidate_topk_blocks * candidate_block_size`
+columns per row (e.g. 16384 for DeepSeek-V4.1), so decode logits stay small
+and the chunking above never binds.
+
 ## Adjust cache size
 
 If you run out of CPU RAM, try the following options:

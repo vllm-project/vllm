@@ -22,6 +22,9 @@ from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
     has_deep_select,
     pick_sparse_block_kv,
 )
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits_triton import (
+    has_triton_sparse_mqa,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -42,7 +45,9 @@ class SparseMQARowsMetadata:
 
     `kernel_metadata` (the DeepGEMM schedule) is filled by the first
     consumer indexer layer of the step together with `sparse_indices` /
-    `end`; later consumer layers reuse all three.
+    `end`; later consumer layers reuse all three. On the Triton path
+    (SM120) there is no schedule, so `plan_ready` marks the expansion as
+    done instead.
     """
 
     row_ks: torch.Tensor
@@ -56,15 +61,20 @@ class SparseMQARowsMetadata:
     col_indices: torch.Tensor
     """[rows, topk] int32 scratch for the sparse-column top-k."""
     block_table: torch.Tensor | None = None
-    """Decode only: [rows, pages] per-row page table."""
+    """Decode only: [rows, pages] per-row page table; on the Triton path a
+    per-request table whose rows repeat `rows // shape[0]` times."""
     row_indices: torch.Tensor | None = None
     """Decode only: [rows] row -> request index."""
     kernel_metadata: torch.Tensor | None = None
+    plan_ready: bool = False
+    """Triton path only: the candidate expansion for this step is done."""
 
 
 @dataclass
 class DeepseekV41SparseIndexerMetadata(DeepseekV32IndexerMetadata):
     sparse_block_kv: int = 0
+    use_triton_scorer: bool = False
+    """True on SM120: score with the Triton kernels instead of DeepGEMM."""
     sparse_decode: SparseMQARowsMetadata | None = None
     sparse_prefill: list[SparseMQARowsMetadata] | None = None
     """Parallel to `prefill.chunks`."""
@@ -106,38 +116,63 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
                 f"{prefix} requires a two-level (candidate block) indexer model "
                 "such as DeepSeek-V4.1."
             )
-        if not (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability_family(100)
-        ):
-            raise ValueError(f"{prefix} requires an SM100-class GPU.")
-        if not has_deep_gemm_sparse_mqa():
-            raise ValueError(
-                f"{prefix} requires DeepGEMM >= 2.8 "
-                "(fp8_fp4_sparse_mqa_logits not found)."
-            )
         if self.dcp_world_size > 1 or self.use_pcp:
             raise NotImplementedError(
                 f"{prefix} is not supported with decode/prefill context parallel."
             )
-        if not self.supports_varlen:
-            raise ValueError(
-                f"{prefix} requires the varlen paged MQA logits decode layout."
-            )
-        # The top-k runs on the kernels' bf16 logits with DeepSelect; there is
-        # no fp32 fallback, so the other top-k backends cannot be honored.
         topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
-        if not has_deep_select():
-            raise ValueError(
-                f"{prefix} requires the DeepSelect top-k extension "
-                "(vllm._deepselect_C) for this GPU."
-            )
-        if topk_backend not in ("auto", "deep_select"):
-            raise ValueError(
-                f"{prefix} uses DeepSelect for the top-k; "
-                f"kernel_config.sparse_indexer_topk_backend='{topk_backend}' "
-                "is not supported with it."
-            )
+        self.use_triton_scorer = False
+        if current_platform.is_cuda() and current_platform.is_device_capability_family(
+            100
+        ):
+            if not has_deep_gemm_sparse_mqa():
+                raise ValueError(
+                    f"{prefix} requires DeepGEMM >= 2.8 "
+                    "(fp8_fp4_sparse_mqa_logits not found)."
+                )
+            if not self.supports_varlen:
+                raise ValueError(
+                    f"{prefix} requires the varlen paged MQA logits decode layout."
+                )
+            # The top-k runs on the kernels' bf16 logits with DeepSelect; there is
+            # no fp32 fallback, so the other top-k backends cannot be honored.
+            if not has_deep_select():
+                raise ValueError(
+                    f"{prefix} requires the DeepSelect top-k extension "
+                    "(vllm._deepselect_C) for this GPU."
+                )
+            if topk_backend not in ("auto", "deep_select"):
+                raise ValueError(
+                    f"{prefix} uses DeepSelect for the top-k; "
+                    f"kernel_config.sparse_indexer_topk_backend='{topk_backend}' "
+                    "is not supported with it."
+                )
+        elif has_triton_sparse_mqa():
+            # SM120: Triton scorer + persistent top-k, fp32 logits.
+            self.use_triton_scorer = True
+            # The scorer wants one row per query token with a per-row page
+            # table and causal length: the flattened decode layout. Forcing
+            # it also keeps requires_padding (native multi-token decode with
+            # ragged per-request token counts) out of this path.
+            self.use_flattening = True
+            if self.indexer_uses_fp4:
+                raise ValueError(
+                    f"{prefix} on SM120 requires the FP8 indexer cache; "
+                    "the MXFP4 cache is only supported on SM100."
+                )
+            if topk_tokens not in (512, 1024, 2048):
+                raise ValueError(
+                    f"{prefix} on SM120 uses persistent_topk, which needs "
+                    f"index_topk in (512, 1024, 2048), got {topk_tokens}."
+                )
+            if topk_backend not in ("auto", "persistent"):
+                raise ValueError(
+                    f"{prefix} on SM120 uses persistent_topk for the top-k; "
+                    f"kernel_config.sparse_indexer_topk_backend='{topk_backend}' "
+                    "is not supported with it."
+                )
+        else:
+            raise ValueError(f"{prefix} requires an SM100- or SM120-class GPU.")
         self.sparse_block_kv = pick_sparse_block_kv(candidate_block_size)
         if kv_cache_spec.block_size % self.sparse_block_kv != 0:
             raise ValueError(
@@ -148,11 +183,17 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
             candidate_block_size // self.sparse_block_kv
         )
         num_sparse_cols = self.num_sparse_blocks * self.sparse_block_kv
-        check_deep_select_layout(num_sparse_cols, topk_tokens)
-        # Sparse logits are bf16 [rows, num_sparse_cols]; make the prefill
-        # chunker (which budgets fp32 [rows, seq_len]) size chunks as if every
-        # row were this wide.
-        self.min_split_seq_len = (num_sparse_cols * 2 + 3) // 4
+        if self.use_triton_scorer:
+            # Sparse logits are fp32 [rows, num_sparse_cols]; make the prefill
+            # chunker (which budgets fp32 [rows, seq_len]) size chunks as if
+            # every row were this wide.
+            self.min_split_seq_len = num_sparse_cols
+        else:
+            check_deep_select_layout(num_sparse_cols, topk_tokens)
+            # Sparse logits are bf16 [rows, num_sparse_cols]; make the prefill
+            # chunker (which budgets fp32 [rows, seq_len]) size chunks as if
+            # every row were this wide.
+            self.min_split_seq_len = (num_sparse_cols * 2 + 3) // 4
 
         # Rows are indexed by batch token (decode rows first, then prefill
         # chunks by token range), like ``arange_buffer``.
@@ -166,8 +207,12 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
         self.zero_row_ks = torch.zeros(max_rows, **int32)
         logger.info_once(
             "DeepSeek V4.1 indexer: candidate consumers score only the candidate "
-            "blocks with DeepGEMM sparse MQA logits (%d sparse blocks of %d "
-            "tokens per row).",
+            "blocks with %s (%d sparse blocks of %d tokens per row).",
+            (
+                "DeepGEMM sparse MQA logits"
+                if not self.use_triton_scorer
+                else "Triton sparse MQA logits"
+            ),
             self.num_sparse_blocks,
             self.sparse_block_kv,
         )
@@ -195,14 +240,24 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
         metadata = DeepseekV41SparseIndexerMetadata(
             **{f.name: getattr(base, f.name) for f in fields(base)},
             sparse_block_kv=self.sparse_block_kv,
+            use_triton_scorer=self.use_triton_scorer,
         )
         if base.decode is not None:
             decode = base.decode
-            rows = decode.seq_lens.shape[0]
-            # The varlen layout flattens every query to one row, so the base
-            # decode tensors are already per row.
-            assert decode.seq_lens.shape[1] == 1 and not decode.requires_padding
-            assert decode.block_table.shape[0] == rows
+            if self.use_triton_scorer:
+                # The Triton scorer reads K in place through the page table;
+                # it needs one row per query token. The flattened layout
+                # (forced in __init__) provides exactly that: per-row causal
+                # lengths and a per-row page table, never requires_padding.
+                rows = decode.seq_lens.numel()
+                assert decode.seq_lens.shape[-1] == 1 and not decode.requires_padding
+                assert decode.block_table.shape[0] == rows
+            else:
+                rows = decode.seq_lens.shape[0]
+                # The varlen layout flattens every query to one row, so the base
+                # decode tensors are already per row.
+                assert decode.seq_lens.shape[1] == 1 and not decode.requires_padding
+                assert decode.block_table.shape[0] == rows
             metadata.sparse_decode = self._rows(
                 0,
                 rows,

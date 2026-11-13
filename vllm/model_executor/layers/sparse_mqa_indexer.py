@@ -23,6 +23,11 @@ from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
     sparse_mqa_logits_paged_decode,
     sparse_mqa_logits_prefill_chunk,
 )
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits_triton import (
+    has_triton_sparse_mqa,
+    sparse_mqa_logits_paged_decode_triton,
+    sparse_mqa_logits_prefill_chunk_triton,
+)
 from vllm.model_executor.layers.sparse_attn_indexer import (
     _gather_workspace_shapes,
     kv_cache_as_quant_view,
@@ -75,18 +80,21 @@ def _gather_prefill_chunk_k(
 
 
 class SparseMQAIndexer(nn.Module):
-    """Candidate-consuming indexer on DeepGEMM's sparse MQA-logits kernels.
+    """Candidate-consuming indexer on sparse MQA-logits kernels.
 
-    Only valid for indexer layers that read candidate blocks on SM100, with
-    the FP8 or the MXFP4 indexer cache. The K cache is written by the model
-    before this runs; `forward` takes the same arguments as
-    `SparseAttnIndexer` so the attention layer can call either.
+    Only valid for indexer layers that read candidate blocks. On SM100 it
+    calls DeepGEMM's sparse MQA-logits kernels (FP8 or MXFP4 indexer cache);
+    on SM120 it calls the Triton scorer in `sparse_mqa_logits_triton` (FP8
+    cache only). The K cache is written by the model before this runs;
+    `forward` takes the same arguments as `SparseAttnIndexer` so the
+    attention layer can call either.
     """
 
     weights_dtype = torch.bfloat16
     """Per-head weights dtype the sparse kernels take. The fused Q RoPE-quant
     kernel writes it directly on the MXFP4 cache; on the FP8 cache it emits
-    fp32 (Q scale folded in) and `forward` casts."""
+    fp32 (Q scale folded in) and `forward` casts on SM100 (the Triton SM120
+    scorer consumes fp32 directly)."""
 
     def __init__(
         self,
@@ -99,18 +107,31 @@ class SparseMQAIndexer(nn.Module):
         candidate_block_size: int,
     ):
         super().__init__()
-        if not (
+        self.use_fp4_cache = dsa_indexer_uses_fp4(get_current_vllm_config())
+        if (
             current_platform.is_cuda()
             and current_platform.is_device_capability_family(100)
-            and has_deep_gemm_sparse_mqa()
         ):
+            if not has_deep_gemm_sparse_mqa():
+                raise ValueError(
+                    "SparseMQAIndexer requires DeepGEMM >= 2.8 on SM100."
+                )
+            if not has_deep_select():
+                raise ValueError(
+                    "SparseMQAIndexer requires the DeepSelect top-k extension "
+                    "(vllm._deepselect_C)."
+                )
+            self.use_triton_scorer = False
+        elif has_triton_sparse_mqa():
+            if self.use_fp4_cache:
+                raise ValueError(
+                    "SparseMQAIndexer on SM120 requires the FP8 indexer cache; "
+                    "the MXFP4 cache is only supported on SM100."
+                )
+            self.use_triton_scorer = True
+        else:
             raise ValueError(
-                "SparseMQAIndexer requires an SM100-class GPU and DeepGEMM >= 2.8."
-            )
-        if not has_deep_select():
-            raise ValueError(
-                "SparseMQAIndexer requires the DeepSelect top-k extension "
-                "(vllm._deepselect_C)."
+                "SparseMQAIndexer requires an SM100- or SM120-class GPU."
             )
         self.k_cache = k_cache
         self.topk_tokens = topk_tokens
@@ -119,7 +140,6 @@ class SparseMQAIndexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
-        self.use_fp4_cache = dsa_indexer_uses_fp4(get_current_vllm_config())
 
     def _reserve_workspaces(self, device: torch.device) -> None:
         """Profiling run: claim the K-gather workspace and the peak sparse
@@ -177,24 +197,44 @@ class SparseMQAIndexer(nn.Module):
                 if chunk.local_total_seq_lens == 0:
                     continue  # buffer already holds -1
                 start, end = chunk.token_start, chunk.token_end
-                rows.kernel_metadata = sparse_mqa_logits_prefill_chunk(
-                    q_values[start:end],
-                    q_scale[start:end],
-                    k_quant.view(k_dtype),
-                    k_scale.view(torch.int32).squeeze(-1),
-                    weights[start:end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    self.candidate_blocks[start:end],
-                    self.candidate_block_size,
-                    sparse_block_kv,
-                    topk_tokens,
-                    topk_indices_buffer[start:end, :topk_tokens],
-                    sparse_indices=rows.sparse_indices,
-                    end=rows.end,
-                    col_indices=rows.col_indices,
-                    kernel_metadata=rows.kernel_metadata,
-                )
+                if metadata.use_triton_scorer:
+                    sparse_mqa_logits_prefill_chunk_triton(
+                        q_values[start:end],
+                        k_quant,
+                        k_scale.view(torch.float32).squeeze(-1),
+                        weights[start:end],
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        self.candidate_blocks[start:end],
+                        self.candidate_block_size,
+                        sparse_block_kv,
+                        topk_tokens,
+                        topk_indices_buffer[start:end, :topk_tokens],
+                        sparse_indices=rows.sparse_indices,
+                        end=rows.end,
+                        col_indices=rows.col_indices,
+                        plan_ready=rows.plan_ready,
+                    )
+                    rows.plan_ready = True
+                else:
+                    rows.kernel_metadata = sparse_mqa_logits_prefill_chunk(
+                        q_values[start:end],
+                        q_scale[start:end],
+                        k_quant.view(k_dtype),
+                        k_scale.view(torch.int32).squeeze(-1),
+                        weights[start:end],
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        self.candidate_blocks[start:end],
+                        self.candidate_block_size,
+                        sparse_block_kv,
+                        topk_tokens,
+                        topk_indices_buffer[start:end, :topk_tokens],
+                        sparse_indices=rows.sparse_indices,
+                        end=rows.end,
+                        col_indices=rows.col_indices,
+                        kernel_metadata=rows.kernel_metadata,
+                    )
 
         if metadata.num_decodes > 0:
             decode_rows = metadata.sparse_decode
@@ -202,23 +242,46 @@ class SparseMQAIndexer(nn.Module):
             assert decode_rows.row_indices is not None
             num_rows = decode_rows.row_ke.shape[0]
             if num_rows > 0:
-                decode_rows.kernel_metadata = sparse_mqa_logits_paged_decode(
-                    q_values[:num_rows].unsqueeze(1),
-                    q_scale[:num_rows].unsqueeze(1),
-                    kv_cache_as_quant_view(kv_cache, self.head_dim, self.use_fp4_cache),
-                    weights[:num_rows],
-                    decode_rows.row_ke,
-                    decode_rows.block_table,
-                    decode_rows.row_indices,
-                    self.candidate_blocks[:num_rows],
-                    self.candidate_block_size,
-                    sparse_block_kv,
-                    topk_tokens,
-                    topk_indices_buffer[:num_rows, :topk_tokens],
-                    row_ks=decode_rows.row_ks,
-                    sparse_indices=decode_rows.sparse_indices,
-                    end=decode_rows.end,
-                    col_indices=decode_rows.col_indices,
-                    kernel_metadata=decode_rows.kernel_metadata,
-                )
+                if metadata.use_triton_scorer:
+                    sparse_mqa_logits_paged_decode_triton(
+                        q_values[:num_rows],
+                        kv_cache,
+                        weights[:num_rows],
+                        decode_rows.row_ke,
+                        decode_rows.block_table,
+                        self.candidate_blocks[:num_rows],
+                        self.candidate_block_size,
+                        sparse_block_kv,
+                        topk_tokens,
+                        topk_indices_buffer[:num_rows, :topk_tokens],
+                        row_ks=decode_rows.row_ks,
+                        sparse_indices=decode_rows.sparse_indices,
+                        end=decode_rows.end,
+                        col_indices=decode_rows.col_indices,
+                        head_dim=self.head_dim,
+                        plan_ready=decode_rows.plan_ready,
+                    )
+                    decode_rows.plan_ready = True
+                else:
+                    decode_rows.kernel_metadata = sparse_mqa_logits_paged_decode(
+                        q_values[:num_rows].unsqueeze(1),
+                        q_scale[:num_rows].unsqueeze(1),
+                        kv_cache_as_quant_view(
+                            kv_cache, self.head_dim, self.use_fp4_cache
+                        ),
+                        weights[:num_rows],
+                        decode_rows.row_ke,
+                        decode_rows.block_table,
+                        decode_rows.row_indices,
+                        self.candidate_blocks[:num_rows],
+                        self.candidate_block_size,
+                        sparse_block_kv,
+                        topk_tokens,
+                        topk_indices_buffer[:num_rows, :topk_tokens],
+                        row_ks=decode_rows.row_ks,
+                        sparse_indices=decode_rows.sparse_indices,
+                        end=decode_rows.end,
+                        col_indices=decode_rows.col_indices,
+                        kernel_metadata=decode_rows.kernel_metadata,
+                    )
         return topk_indices_buffer

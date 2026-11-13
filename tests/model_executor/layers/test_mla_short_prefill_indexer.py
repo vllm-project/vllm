@@ -682,13 +682,15 @@ def _candidate_token_mask(
     width = max(total, (candidates.shape[1] + 1) * cbk)
     if ks is not None:
         width += int(ks.max()) + cbk
-    in_cand = torch.zeros(rows, width, dtype=torch.bool, device=device)
-    block_id = torch.where(candidates >= 0, candidates.long(), candidates.shape[1])
+    in_cand = torch.zeros(rows, width + cbk, dtype=torch.bool, device=device)
+    block_id = torch.where(candidates >= 0, candidates.long(), 0)
     tok = block_id.unsqueeze(2) * cbk + torch.arange(cbk, device=device)
     if ks is not None:
         tok = tok + ks.unsqueeze(1).unsqueeze(2)
-    keep = (candidates >= 0).unsqueeze(2).expand(-1, -1, cbk)
-    in_cand.scatter_(1, tok.flatten(1), keep.flatten(1))
+    sentinel = width + torch.arange(cbk, device=device)
+    is_real = (candidates >= 0).unsqueeze(2)
+    tok = torch.where(is_real, tok, sentinel.expand(rows, candidates.shape[1], cbk))
+    in_cand.scatter_(1, tok.flatten(1), is_real.expand(-1, -1, cbk).flatten(1))
     return in_cand[:, :total]
 
 
@@ -1277,5 +1279,355 @@ def test_sparse_mqa_logits_accuracy_vs_torch(kv_dtype: str):
         f"p99={norm_err.quantile(0.99).item():.5f} max={norm_err.max().item():.5f}"
     )
     # bf16-level numerics: far below the value gaps that change top-k selection.
+    assert norm_err.quantile(0.99).item() < 1e-2
+    assert norm_err.max().item() < 2e-2
+
+
+def _skip_unless_sm120_triton_sparse():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits_triton import (
+        has_triton_sparse_mqa,
+    )
+
+    if not has_triton_sparse_mqa():
+        pytest.skip("SM120 with persistent_topk required")
+
+
+def _quant_k_fp8_fp32_scales(x: torch.Tensor):
+    """Quantize [N, D] rows as the SM120 FP8 indexer cache stores K: e4m3
+    values with one power-of-two fp32 scale per row (`_quant_k`'s UE8M0
+    packing is the SM100 layout)."""
+    amax = x.float().abs().amax(dim=-1).clamp(min=1e-4)
+    scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)))
+    values = (x.float() / scale[:, None]).to(torch.float8_e4m3fn)
+    return values, scale, values.float() * scale[:, None]
+
+
+def _dense_reference_logits(
+    q_deq: torch.Tensor,
+    k_deq: torch.Tensor,
+    weights: torch.Tensor,
+    ks: torch.Tensor,
+    ke: torch.Tensor,
+    max_len: int,
+) -> torch.Tensor:
+    """fp32 reference logits: row r scores positions [ks[r], ke[r]) of the
+    packed K workspace into request-local columns [0, max_len)."""
+    rows, num_heads, head_dim = q_deq.shape
+    total = k_deq.shape[0]
+    pos = (ks.unsqueeze(1) + torch.arange(max_len, device=ks.device)).clamp(
+        max=total - 1
+    )
+    k_gathered = k_deq[pos.long()]  # [rows, max_len, D]
+    dots = torch.einsum("rhd,rld->rhl", q_deq, k_gathered)
+    return (dots.relu() * weights.unsqueeze(-1)).sum(1)  # [rows, max_len]
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_triton_sparse_mqa_logits_prefill_matches_torch(
+    capture: bool, workspace_init
+):
+    """The SM120 Triton sparse-MQA prefill path selects the same values as
+    `torch.topk` over the fp32 reference logits masked to the candidates,
+    incl. under CUDA graph capture/replay, and a later layer reusing the
+    step's expansion (plan_ready) selects the same values."""
+    _skip_unless_sm120_triton_sparse()
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits_triton import (
+        sparse_mqa_logits_prefill_chunk_triton,
+    )
+
+    torch.manual_seed(0)
+    rows, num_heads, head_dim = 37, 32, 128
+    cbk, topk, num_candidates = 8, 512, 2048  # V4.1-Flash production values
+    lens = torch.randint(1, 30000, (rows,), dtype=torch.int32)
+    lens[0], lens[1], lens[2] = 1, 5, 2048  # single token, sub-block, long
+    ks = torch.zeros(rows, dtype=torch.int32)
+    ks[1:] = lens.cumsum(0)[:-1]
+    ks, ke, lens = ks.cuda(), (ks + lens).cuda(), lens.cuda()
+    total = int(lens.sum())
+    q, _, q_deq = _quant_q(
+        torch.randn(rows * num_heads, head_dim, device="cuda", dtype=torch.bfloat16),
+        "fp8",
+    )
+    q = q.view(rows, num_heads, head_dim)
+    k, k_scale, k_deq = _quant_k_fp8_fp32_scales(
+        torch.randn(total, head_dim, device="cuda", dtype=torch.bfloat16)
+    )
+    weights = torch.randn(rows, num_heads, device="cuda", dtype=torch.float32)
+    candidates = _make_candidates(lens, num_candidates, cbk).cuda()
+
+    max_len = int(lens.max())
+    dense = _dense_reference_logits(
+        q_deq.view(rows, num_heads, head_dim), k_deq, weights, ks, ke, max_len
+    )
+    in_range = torch.arange(max_len, device="cuda") < lens.unsqueeze(1)
+    # A row's last candidate block may extend past max_len.
+    in_cand = _candidate_token_mask(candidates, cbk, max_len + cbk)[:, :max_len]
+    masked = dense.masked_fill(~(in_range & in_cand), float("-inf"))
+    expected = _reference_topk(masked, topk)
+
+    out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
+    scratch = _sparse_scratch(rows, num_candidates, topk)
+
+    def run_sparse(plan_ready=False):
+        sparse_mqa_logits_prefill_chunk_triton(
+            q,
+            k,
+            k_scale,
+            weights,
+            ks,
+            ke,
+            candidates,
+            cbk,
+            cbk,
+            topk,
+            out,
+            plan_ready=plan_ready,
+            **scratch,
+        )
+
+    if capture:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run_sparse()  # warm up JIT
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                run_sparse(plan_ready=True)
+        out.fill_(-1)
+        graph.replay()
+    else:
+        run_sparse()
+        _assert_same_selection(dense, out, expected)
+        out.fill_(-1)
+        run_sparse(plan_ready=True)
+
+    _assert_same_selection(dense, out, expected)
+
+
+def _build_paged_cache_fp32_scales(
+    req_lens: torch.Tensor,
+    page_kv: int,
+    head_dim: int,
+    page_pad: int = 0,
+):
+    """FP8 paged indexer cache in the SM120 layout (fp32 scale bytes), plus
+    the dequantized K per request for reference logits. Same physical page
+    layout as `_build_paged_cache`: all value bytes, then all scale bytes."""
+    device = req_lens.device
+    batch = len(req_lens)
+    pages_per = (req_lens + page_kv - 1) // page_kv
+    num_pages, max_pages = int(pages_per.sum()), int(pages_per.max())
+    head_bytes = head_dim + 4
+    kv_cache = torch.zeros(
+        num_pages, page_kv * head_bytes + page_pad, dtype=torch.uint8, device=device
+    )[:, : page_kv * head_bytes].view(num_pages, page_kv, head_bytes)
+    block_table = torch.zeros(batch, max_pages, dtype=torch.int32, device=device)
+    max_len = int(req_lens.max())
+    k_deq = torch.zeros(batch, max_len, head_dim, dtype=torch.float32, device=device)
+    page_pool = torch.randperm(num_pages, device=device)
+    offset = 0
+    for b in range(batch):
+        n = int(pages_per[b])
+        block_table[b, :n] = page_pool[offset : offset + n].to(torch.int32)
+        offset += n
+        length = int(req_lens[b])
+        values, scale, deq = _quant_k_fp8_fp32_scales(
+            torch.randn(length, head_dim, device=device, dtype=torch.bfloat16)
+        )
+        k_deq[b, :length] = deq
+        rows_b = torch.zeros(n * page_kv, head_bytes, dtype=torch.uint8, device=device)
+        rows_b[:length, :head_dim] = values.view(torch.uint8)
+        rows_b[:length, head_dim:] = scale.view(torch.uint8).view(-1, 4)
+        by_page = rows_b.view(n, page_kv, head_bytes)
+        split = torch.cat(
+            [
+                by_page[..., :head_dim].reshape(n, -1),
+                by_page[..., head_dim:].reshape(n, -1),
+            ],
+            dim=1,
+        ).view(n, page_kv, head_bytes)
+        kv_cache[block_table[b, :n].long()] = split
+    return kv_cache, block_table, k_deq
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("next_n", [1, 2])
+@pytest.mark.parametrize("page_pad", [0, 256])
+def test_triton_sparse_mqa_logits_paged_matches_torch(
+    capture: bool, next_n: int, page_pad: int, workspace_init
+):
+    """The SM120 Triton sparse-MQA paged-decode path selects the same values
+    as the fp32 reference masked to the candidates, incl. MTP rows sharing
+    their request's page-table rows and CUDA graph capture/replay."""
+    _skip_unless_sm120_triton_sparse()
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits_triton import (
+        sparse_mqa_logits_paged_decode_triton,
+    )
+
+    torch.manual_seed(0)
+    batch, num_heads, head_dim, page_kv = 9, 32, 128, 128
+    cbk, topk, num_candidates = 8, 512, 2048
+    rows = batch * next_n
+    req_lens = torch.randint(1, 30000, (batch,), dtype=torch.int32, device="cuda")
+    req_lens[0], req_lens[1] = 1, 30000  # tiny row + a filtered (subset) row
+    # Row (b, j) sees L_b - next_n + j + 1 tokens (native MTP layout).
+    row_lens = (
+        (req_lens.unsqueeze(1) - next_n + torch.arange(1, next_n + 1, device="cuda"))
+        .clamp(min=0)
+        .to(torch.int32)
+    )
+    kv_cache, block_table, k_deq = _build_paged_cache_fp32_scales(
+        req_lens, page_kv, head_dim, page_pad
+    )
+
+    q, _, q_deq = _quant_q(
+        torch.randn(rows * num_heads, head_dim, device="cuda", dtype=torch.bfloat16),
+        "fp8",
+    )
+    q = q.view(rows, num_heads, head_dim)
+    weights = torch.randn(rows, num_heads, device="cuda", dtype=torch.float32)
+    candidates = _make_candidates(row_lens.flatten().cpu(), num_candidates, cbk).cuda()
+
+    max_len = int(req_lens.max())
+    dense = _dense_reference_logits(
+        q_deq.view(rows, num_heads, head_dim),
+        k_deq.repeat_interleave(next_n, dim=0).reshape(rows * max_len, head_dim),
+        weights,
+        torch.arange(rows, dtype=torch.int32, device="cuda") * max_len,
+        row_lens.flatten(),
+        max_len,
+    )
+    lens_flat = row_lens.flatten()
+    in_range = torch.arange(max_len, device="cuda") < lens_flat.unsqueeze(1)
+    in_cand = _candidate_token_mask(candidates, cbk, max_len + cbk)[:, :max_len]
+    masked = dense.masked_fill(~(in_range & in_cand), float("-inf"))
+    expected = _reference_topk(masked, topk)
+
+    out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
+    scratch = _sparse_scratch(rows, num_candidates, topk)
+    context_lens = lens_flat.contiguous()
+    row_ks = torch.zeros(rows, dtype=torch.int32, device="cuda")
+
+    def run_sparse(plan_ready=False):
+        sparse_mqa_logits_paged_decode_triton(
+            q,
+            kv_cache,
+            weights,
+            context_lens,
+            block_table,
+            candidates,
+            cbk,
+            cbk,
+            topk,
+            out,
+            row_ks=row_ks,
+            head_dim=head_dim,
+            plan_ready=plan_ready,
+            **scratch,
+        )
+
+    if capture:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run_sparse()  # warm up JIT
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                run_sparse(plan_ready=True)
+        out.fill_(-1)
+        graph.replay()
+    else:
+        run_sparse()
+        _assert_same_selection(dense, out, expected)
+        out.fill_(-1)
+        run_sparse(plan_ready=True)
+
+    _assert_same_selection(dense, out, expected)
+
+
+def test_triton_sparse_mqa_logits_accuracy_vs_torch(workspace_init):
+    """Triton scorer numerics vs a PyTorch fp32 reference on the dequantized
+    FP8 inputs (packed prefill workspace variant)."""
+    _skip_unless_sm120_triton_sparse()
+    from vllm.model_executor.kernels.attention.dsa import (
+        sparse_mqa_logits_triton as triton_path,
+    )
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        candidate_blocks_to_sparse_indices,
+    )
+    from vllm.triton_utils import triton
+
+    torch.manual_seed(0)
+    rows, num_heads, head_dim = 17, 32, 128
+    sbk, num_candidates = 8, 2048
+    lens = torch.randint(1, 1500, (rows,), dtype=torch.int32)
+    lens[0] = 1
+    ks = torch.zeros(rows, dtype=torch.int32)
+    ks[1:] = lens.cumsum(0)[:-1]
+    ks, ke, lens = ks.cuda(), (ks + lens).cuda(), lens.cuda()
+    total = int(lens.sum())
+    q, _, q_deq = _quant_q(
+        torch.randn(rows * num_heads, head_dim, device="cuda", dtype=torch.bfloat16),
+        "fp8",
+    )
+    q = q.view(rows, num_heads, head_dim)
+    k, k_scale, k_deq = _quant_k_fp8_fp32_scales(
+        torch.randn(total, head_dim, device="cuda", dtype=torch.bfloat16)
+    )
+    weights = torch.randn(rows, num_heads, device="cuda", dtype=torch.float32)
+    candidates = _make_candidates(lens, num_candidates, sbk).cuda()
+
+    sparse_idx, end = candidate_blocks_to_sparse_indices(candidates, ks, ke, sbk, sbk)
+    width = num_candidates * sbk
+    logits = torch.empty(rows, width, dtype=torch.float32, device="cuda")
+    triton_path._prefill_sparse_logits_kernel[(rows, triton.cdiv(width, 128))](
+        q,
+        k,
+        k_scale,
+        weights,
+        sparse_idx,
+        end,
+        ks,
+        ke,
+        logits,
+        q.stride(0),
+        q.stride(1),
+        weights.stride(0),
+        sparse_idx.stride(0),
+        logits.stride(0),
+        width,
+        H=num_heads,
+        H_PAD=triton.next_power_of_2(num_heads),
+        D=head_dim,
+        SBK=sbk,
+        BLOCK_N=128,
+    )
+
+    # fp32 reference on the compact columns (absolute packed positions).
+    cols = torch.arange(width, device="cuda")
+    pos = (
+        sparse_idx.repeat_interleave(sbk, dim=1).long() * sbk
+        + (ks % sbk).unsqueeze(1)
+        + (cols % sbk).unsqueeze(0)
+    ).clamp(min=0, max=total - 1)
+    k_gathered = k_deq[pos]  # [rows, width, D]
+    dots = torch.einsum(
+        "rhd,rwd->rhw", q_deq.view(rows, num_heads, head_dim), k_gathered
+    )
+    ref = (dots.relu() * weights.unsqueeze(-1)).sum(1)  # [rows, width]
+
+    valid = cols.unsqueeze(0) < end.unsqueeze(1).long()
+    abs_err = (logits - ref).abs()[valid]
+    row_scale = ref.abs().amax(dim=1)
+    norm_err = ((logits - ref).abs() / row_scale.unsqueeze(1))[valid]
+    print(
+        f"triton sparse vs torch fp32: max_abs={abs_err.max().item():.4f}; "
+        f"rowmax-normalized p50={norm_err.median().item():.5f} "
+        f"p99={norm_err.quantile(0.99).item():.5f} max={norm_err.max().item():.5f}"
+    )
+    # fp32 accumulation on both sides: far below the value gaps that change
+    # top-k selection.
     assert norm_err.quantile(0.99).item() < 1e-2
     assert norm_err.max().item() < 2e-2

@@ -659,8 +659,9 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
 def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
     """Whether the DeepSeek V4.1 sparse-logits indexer can run: a two-level
-    (candidate block) model on SM100 with DeepGEMM's sparse MQA kernels and
-    DeepSelect, no decode/prefill context parallelism, and a DeepSelect top-k
+    (candidate block) model on SM100 (DeepGEMM sparse MQA kernels and
+    DeepSelect) or SM120 (Triton scorer and persistent top-k, FP8 indexer
+    cache), no decode/prefill context parallelism, and a compatible top-k
     backend. Mirrors DeepseekV41SparseIndexerMetadataBuilder's checks."""
     from vllm.platforms import current_platform
 
@@ -668,34 +669,51 @@ def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
     block = getattr(hf_config, "candidate_block_size", 0)
     topk_blocks = getattr(hf_config, "candidate_topk_blocks", 0)
     parallel = vllm_config.parallel_config
+    topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
     if (
         block <= 0
         or topk_blocks <= 0
         or not current_platform.is_cuda()
-        or not current_platform.is_device_capability_family(100)
         or parallel.decode_context_parallel_size > 1
         or parallel.prefill_context_parallel_size > 1
-        or vllm_config.kernel_config.sparse_indexer_topk_backend
-        not in ("auto", "deep_select")
     ):
         return False
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
-        check_deep_select_layout,
-        has_deep_select,
         pick_sparse_block_kv,
     )
-    from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
 
-    if not (has_deep_gemm_sparse_mqa() and has_deep_select()):
-        return False
     try:
         pick_sparse_block_kv(block)
-        check_deep_select_layout(
-            topk_blocks * block, getattr(hf_config, "index_topk", 0)
-        )
     except ValueError:
         return False
-    return True
+    if current_platform.is_device_capability_family(100):
+        if topk_backend not in ("auto", "deep_select"):
+            return False
+        from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+            check_deep_select_layout,
+            has_deep_select,
+        )
+        from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
+
+        if not (has_deep_gemm_sparse_mqa() and has_deep_select()):
+            return False
+        try:
+            check_deep_select_layout(
+                topk_blocks * block, getattr(hf_config, "index_topk", 0)
+            )
+        except ValueError:
+            return False
+        return True
+    if topk_backend not in ("auto", "persistent"):
+        return False
+    if getattr(hf_config, "index_topk", 0) not in (512, 1024, 2048):
+        return False
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits_triton import (
+        has_triton_sparse_mqa,
+    )
+    from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
+
+    return has_triton_sparse_mqa() and not dsa_indexer_uses_fp4(vllm_config)
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
