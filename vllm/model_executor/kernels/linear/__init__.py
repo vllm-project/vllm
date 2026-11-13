@@ -153,6 +153,7 @@ from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
     CutlassNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.emulation import (
+    EmulationA16NvFp4LinearKernel,
     EmulationNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
@@ -380,6 +381,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     },
     "emulation": {
         EmulationMxfp8LinearKernel,
+        EmulationA16NvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
         EmulationMxfp6LinearKernel,
         EmulationMxfp4LinearKernel,
@@ -1214,6 +1216,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         FlashInferCuteDslNvFp4W4A16LinearKernel,
         MarlinNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
+        EmulationA16NvFp4LinearKernel,
     )
 
     # VLLM_BATCH_INVARIANT forces deterministic execution: Humming for W4A16,
@@ -1255,7 +1258,12 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         elif not prefers_humming(compute_capability):
-            force_kernel = MarlinNvFp4LinearKernel
+            marlin_ok, _ = MarlinNvFp4LinearKernel.is_supported()
+            if (
+                marlin_ok
+                and "MarlinNvFp4LinearKernel" not in envs.VLLM_DISABLED_KERNELS
+            ):
+                force_kernel = MarlinNvFp4LinearKernel
 
     if force_kernel is not None:
         if use_a16 and force_kernel not in a16_kernels:
@@ -1274,6 +1282,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     possible = list(_POSSIBLE_NVFP4_KERNELS.get(platform, []))
     if use_a16:
         possible = [kernel for kernel in possible if kernel in a16_kernels]
+        possible.append(EmulationA16NvFp4LinearKernel)
 
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(
@@ -1300,7 +1309,14 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
-        if kernel_cls is EmulationNvFp4LinearKernel and failure_reasons:
+        if (
+            kernel_cls
+            in (
+                EmulationNvFp4LinearKernel,
+                EmulationA16NvFp4LinearKernel,
+            )
+            and failure_reasons
+        ):
             logger.warning_once(
                 "NVFP4 linear falling back to the slow and unoptimized "
                 "emulation backend as no optimized backend is available "
@@ -1445,6 +1461,7 @@ __all__ = [
     "TorchMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
     "CutlassNvFp4LinearKernel",
+    "EmulationA16NvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
     "FbgemmNvFp4LinearKernel",
     "FlashInferCuteDslNvFp4LinearKernel",
