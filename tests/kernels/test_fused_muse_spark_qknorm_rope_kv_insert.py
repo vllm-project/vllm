@@ -351,9 +351,10 @@ def test_fused_kv_insert_requires_backend_bypass_support(monkeypatch):
             parallel_config=SimpleNamespace(decode_context_parallel_size=1)
         ),
     )
+    bypass = False
     backend = SimpleNamespace(
         forward_includes_kv_cache_update=False,
-        supports_kv_cache_update_bypass=False,
+        supports_kv_update_bypass=lambda: bypass,
     )
     attn_layer = SimpleNamespace(
         attn_backend=backend,
@@ -362,7 +363,7 @@ def test_fused_kv_insert_requires_backend_bypass_support(monkeypatch):
     )
 
     assert not fused_ops.supports_fused_kv_insert(attn_layer)
-    backend.supports_kv_cache_update_bypass = True
+    bypass = True
     assert fused_ops.supports_fused_kv_insert(attn_layer)
 
 
@@ -386,7 +387,7 @@ def test_rocm_aiter_fa_takes_the_fused_kv_insert(monkeypatch):
     # The kernel writes the packed [B, H, N, 2*hd] page, so the backend only
     # accepts the bypass outside the shuffle layout.
     shuffle = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-    assert AiterFlashAttentionBackend.supports_kv_cache_update_bypass is not shuffle
+    assert AiterFlashAttentionBackend.supports_kv_update_bypass() is not shuffle
     assert fused_ops.supports_fused_kv_insert(attn_layer) is not shuffle
 
 
