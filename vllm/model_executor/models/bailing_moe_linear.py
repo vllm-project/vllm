@@ -5,8 +5,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -19,6 +18,8 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -31,7 +32,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.linear.bailing_linear_attn import (
     BailingMoELinearAttention,
-    _build_rope_parameters,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
@@ -75,13 +75,11 @@ def is_linear_layer(layer_idx, layer_group_size):
 
 
 class BailingMoeV25MLAAttention(nn.Module):
-    """
-    MLA Attention for BailingMoeV2.5 full attention layers.
-    """
+    """MLA Attention for BailingMoeV2.5 full attention layers."""
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "attention",
@@ -176,11 +174,12 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_a_layernorm = None
             self.q_b_proj = None
 
-        rope_parameters = _build_rope_parameters(config) or {}
         # MLA rotates the full qk_rope_head_dim,
         # partial_rotary_factor is for the linear-attn head only.
         rope_parameters = {
-            k: v for k, v in rope_parameters.items() if k != "partial_rotary_factor"
+            k: v
+            for k, v in (getattr(config, "rope_parameters", None) or {}).items()
+            if k != "partial_rotary_factor"
         }
         rope_parameters["rope_dim"] = self.qk_rope_head_dim
         max_position = getattr(config, "max_position_embeddings", 8192)
@@ -231,43 +230,12 @@ class BailingMoeV25MLAAttention(nn.Module):
         return self.mla_attn(positions, hidden_states)
 
 
-class BailingMoEGate(nn.Module):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        params_dtype: torch.dtype | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        if params_dtype is None:
-            params_dtype = torch.get_default_dtype()
-        self.params_dtype = params_dtype
-        self.weight = nn.Parameter(
-            torch.empty(
-                (config.num_experts, config.hidden_size),
-                dtype=self.params_dtype,
-            ),
-        )
-        if getattr(config, "moe_router_enable_expert_bias", False):
-            self.expert_bias = nn.Parameter(
-                torch.empty((config.num_experts,), dtype=torch.float32),
-            )
-        else:
-            self.expert_bias = None
-
-    def forward(self, hidden_states):
-        logits = F.linear(hidden_states.to(self.weight.dtype), self.weight, None).to(
-            hidden_states.dtype
-        )
-        return logits
-
-
 class BailingMoeV25(nn.Module):
     """Bailing MoE v2.5 - standalone implementation for linear attention model."""
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "",
@@ -298,11 +266,19 @@ class BailingMoeV25(nn.Module):
             self.router_dtype = torch.bfloat16
 
         # Gate for routing
-        self.gate = BailingMoEGate(
-            config=config,
+        self.gate = GateLinear(
+            self.hidden_size,
+            self.num_experts,
+            out_dtype=self.router_dtype,
             params_dtype=self.router_dtype,
             prefix=f"{prefix}.gate",
         )
+        if getattr(config, "moe_router_enable_expert_bias", False):
+            self.gate.expert_bias = nn.Parameter(
+                torch.empty((self.num_experts,), dtype=torch.float32),
+            )
+        else:
+            self.gate.expert_bias = None
         correction_bias = (
             self.gate.expert_bias if self.gate.expert_bias is not None else None
         )
@@ -350,7 +326,7 @@ class BailingMoeV25(nn.Module):
             use_grouped_topk=self.use_grouped_topk,
             router_logits_dtype=self.router_dtype,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -359,7 +335,7 @@ class BailingMoeV25(nn.Module):
         hidden_states = hidden_states.contiguous().view(-1, hidden_size)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits = self.gate(hidden_states.to(self.router_dtype))
+        router_logits, _ = self.gate(hidden_states)
         router_logits = router_logits.to(hidden_states.dtype)
 
         final_hidden_states = self.experts(
@@ -374,7 +350,7 @@ class BailingMoeV25DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vllm_config: VllmConfig,
         prefix: str = "layer",
         layer_id: int = 0,
@@ -594,7 +570,6 @@ class BailingMoeV25Model(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load checkpoint weights with simplified mapping."""
-
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
 

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dis
+import itertools
 import os
 import sys
 from abc import abstractmethod
@@ -12,7 +14,13 @@ from typing import Any, ParamSpec, TypeVar
 import torch
 
 import vllm.envs as envs
-from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
+from vllm.compilation.counter import compilation_counter
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
@@ -44,9 +52,19 @@ def _compilation_context() -> Generator[None, None, None]:
         torch._dynamo.config.accumulated_cache_size_limit = original_accumulated_cache
 
 
+def compile_model_with_stock_torch(
+    model: torch.nn.Module, vllm_config: VllmConfig
+) -> None:
+    from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+    _apply_constrain_to_fx_strides_patch()
+    backend = vllm_config.compilation_config.init_backend(vllm_config)
+    compilation_counter.stock_torch_compile_count += 1
+    model.compile(fullgraph=True, backend=backend)
+
+
 class TorchCompileWithNoGuardsWrapper:
-    """
-    A wrapper class for torch.compile, it ensures that all guards are dropped
+    """A wrapper class for torch.compile, it ensures that all guards are dropped
     when CompilationMode is not CompilationMode.STOCK_TORCH_COMPILE.
     When guards are dropped, the first time __call__ is invoked, a single
     compilation is triggered. Dynamo should never be traced again after that
@@ -60,7 +78,7 @@ class TorchCompileWithNoGuardsWrapper:
             args_list = list(args)
             kwargs_dict = dict(kwargs)
             with layerwise_nvtx_marker_context(
-                "Torch Compiled Module (input):{}".format(self.__class__.__name__),
+                f"Torch Compiled Module (input):{self.__class__.__name__}",
                 self,
                 in_tensor=args_list,
                 kwargs=kwargs_dict,
@@ -68,6 +86,8 @@ class TorchCompileWithNoGuardsWrapper:
                 ctx.result = callable_fn(*args, **kwargs)
             return ctx.result
         return callable_fn(*args, **kwargs)
+
+    _allow_aot_compile: bool = True
 
     def __init__(
         self,
@@ -88,7 +108,10 @@ class TorchCompileWithNoGuardsWrapper:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
         backend = vllm_config.compilation_config.init_backend(
-            vllm_config, prefix=compile_prefix, is_encoder=is_encoder
+            vllm_config,
+            prefix=compile_prefix,
+            is_encoder=is_encoder,
+            use_aot_compile=self._allow_aot_compile,
         )
         options = {}
 
@@ -135,7 +158,7 @@ class TorchCompileWithNoGuardsWrapper:
         _apply_constrain_to_fx_strides_patch()
 
         aot_context = nullcontext()
-        if envs.VLLM_USE_AOT_COMPILE:
+        if self._allow_aot_compile and envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):
                 aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
             else:
@@ -154,9 +177,14 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            self._bytecode_hook_handle = (
-                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
-            )
+            # A model whose base class is also @support_torch_compile runs this
+            # twice; a second hook would outlive cleanup() and pin the model.
+            if getattr(self, "_bytecode_hook_handle", None) is None:
+                self._bytecode_hook_handle = (
+                    torch._dynamo.convert_frame.register_bytecode_hook(
+                        self.bytecode_hook
+                    )
+                )
             self._compiled_bytecode: CodeType | None = None
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
@@ -247,9 +275,11 @@ class TorchCompileWithNoGuardsWrapper:
                 except Exception:
                     pass
 
+        # Dynamo emits `<module>._buffers.update` for buffers assigned during forward
+        pairs = itertools.pairwise(dis.get_instructions(new_code))
         if (
             self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and "update" in new_code.co_names
+            and any(a.argval == "_buffers" and b.argval == "update" for a, b in pairs)
         ):
             import depyf
 
@@ -268,12 +298,12 @@ class TorchCompileWithNoGuardsWrapper:
         handle = getattr(self, "_bytecode_hook_handle", None)
         if handle is not None:
             handle.remove()
+            self._bytecode_hook_handle = None
 
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
         # noqa: E501
-        """
-        Context manager to dispatch to internally compiled code for torch<2.8.
+        """Context manager to dispatch to internally compiled code for torch<2.8.
         Why does this work? Because Dynamo guarantees that the compiled
         bytecode has exactly the same arguments, cell variables, and free
         variables as the original code. Therefore we can directly switch
@@ -291,9 +321,7 @@ class TorchCompileWithNoGuardsWrapper:
 
 
 def reset_compile_wrapper(model: torch.nn.Module) -> None:
-    """
-    Clean up compiled model and captured CUDA graphs for elastic EP.
-    """
+    """Clean up compiled model and captured CUDA graphs for elastic EP."""
     if not isinstance(model, TorchCompileWithNoGuardsWrapper) and hasattr(
         model, "model"
     ):
@@ -344,3 +372,11 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
         compile_prefix=model._compile_prefix,
         is_encoder=model._is_encoder,
     )
+
+
+def remove_bytecode_hooks(model: torch.nn.Module) -> None:
+    """Remove the global bytecode hooks of model's compiled modules, which
+    otherwise keep them, and the weights they hold, alive."""
+    for module in model.modules():
+        if isinstance(module, TorchCompileWithNoGuardsWrapper):
+            module.cleanup()

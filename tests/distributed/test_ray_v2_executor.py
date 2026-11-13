@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Integration tests for RayExecutorV2 at the executor level.
+"""Integration tests for RayExecutorV2 at the executor level.
 Validates executor initialization, placement group support, RPC calls,
 and distributed execution with various TP/PP configurations.
 """
@@ -91,7 +90,6 @@ def assert_executor(executor, tp_size, pp_size):
     if pp_size > 1:
         expected_concurrent_batches = pp_size + int(
             executor.vllm_config.scheduler_config.async_scheduling
-            and executor.vllm_config.use_v2_model_runner
         )
         assert (
             executor.vllm_config.max_concurrent_batches == expected_concurrent_batches
@@ -299,7 +297,6 @@ def test_ray_v2_run_refs_stored_for_monitoring(executor):
 @pytest.mark.parametrize("tp_size, pp_size", [(2, 1), (2, 2)])
 def test_ray_v2_single_node_generation(tp_size, pp_size):
     """End-to-end LLM generation with RayExecutorV2."""
-
     llm = LLM(
         model=MODEL,
         tensor_parallel_size=tp_size,

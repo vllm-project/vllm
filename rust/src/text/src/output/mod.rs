@@ -3,10 +3,13 @@
 
 //! Output processing helpers shared by text and chat layers.
 
-pub use decoded::{DecodedTextEvent, Finished, TextDecodeOptions, decoded_text_event_stream};
+pub use decoded::{
+    DecodedTextEvent, Finished, SampledDelta, TextDecodeOptions, decoded_text_event_stream,
+};
 pub use logprobs::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
 };
+pub use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
 
 mod decoded;
 mod logprobs;
@@ -14,6 +17,10 @@ mod logprobs;
 use std::sync::Arc;
 
 use futures::{StreamExt as _, pin_mut};
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
+use vllm_llm::WeightVersionSpan;
 
 use crate::{Error, FinishReason, Result, TextOutputStream};
 
@@ -23,15 +30,27 @@ pub struct CollectedTextOutput {
     pub text: String,
     pub prompt_token_ids: Arc<[u32]>,
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
+    /// Log probabilities of the request's `prompt_logprob_token_ids`, when
+    /// requested.
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
     pub finish_reason: FinishReason,
     pub usage: vllm_llm::TokenUsage,
+    pub timestamps: vllm_llm::RequestTimestamps,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned with generated token positions.
+    pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding statistics emitted by the engine.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    /// Weight-version spans over generated token positions.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
+    /// Routed-expert rows for the whole request, when the engine returned any.
+    pub routed_experts: Option<WireNdArray>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
@@ -44,6 +63,7 @@ impl<T: TextOutputStream> T {
             let stream = self;
             pin_mut!(stream);
             let mut prompt_logprobs = None;
+            let mut prompt_token_id_logprobs = None;
             let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
             let mut collected: Option<CollectedTextOutput> = None;
 
@@ -52,19 +72,24 @@ impl<T: TextOutputStream> T {
                     DecodedTextEvent::Start {
                         prompt_logprobs: start_prompt_logprobs,
                         prompt_token_ids: start_prompt_token_ids,
-                        ..
+                        prompt_token_id_logprobs: start_prompt_token_id_logprobs,
                     } => {
                         prompt_logprobs = start_prompt_logprobs;
+                        prompt_token_id_logprobs = start_prompt_token_id_logprobs;
                         prompt_token_ids = start_prompt_token_ids;
                     }
                     DecodedTextEvent::TextDelta {
-                        delta,
-                        token_ids: delta_token_ids,
-                        logprobs: mut delta_logprobs,
+                        decoded,
+                        sampled:
+                            SampledDelta {
+                                token_ids: delta_token_ids,
+                                logprobs: mut delta_logprobs,
+                                sampling_mask: delta_sampling_mask,
+                            },
                         finished,
                     } => {
                         if let Some(c) = collected.as_mut() {
-                            c.text.push_str(&delta);
+                            c.text.push_str(&decoded.text);
                             c.token_ids.extend(delta_token_ids);
                             if let Some(dlp) = delta_logprobs.as_mut() {
                                 if let Some(lp) = c.logprobs.as_mut() {
@@ -73,17 +98,26 @@ impl<T: TextOutputStream> T {
                                     c.logprobs = delta_logprobs;
                                 }
                             }
+                            if let Some(mut dsm) = delta_sampling_mask {
+                                c.sampling_mask.get_or_insert_default().rows.append(&mut dsm.rows);
+                            }
                         } else {
                             collected = Some(CollectedTextOutput {
-                                text: delta,
+                                text: decoded.text,
                                 prompt_token_ids: Arc::clone(&prompt_token_ids),
                                 prompt_logprobs: prompt_logprobs.take(),
+                                prompt_token_id_logprobs: prompt_token_id_logprobs.take(),
                                 logprobs: delta_logprobs,
                                 token_ids: delta_token_ids,
-                                finish_reason: FinishReason::Error,
+                                finish_reason: FinishReason::Error(None),
                                 usage: vllm_llm::TokenUsage::default(),
+                                timestamps: vllm_llm::RequestTimestamps::default(),
                                 kv_transfer_params: None,
                                 ec_transfer_params: None,
+                                sampling_mask: delta_sampling_mask,
+                                spec_decode_metrics: None,
+                                weight_versions: None,
+                                routed_experts: None,
                             })
                         };
 
@@ -91,8 +125,14 @@ impl<T: TextOutputStream> T {
                             let mut collected = collected.unwrap();
                             collected.finish_reason = finished.finish_reason;
                             collected.usage = finished.usage;
-                            collected.kv_transfer_params = finished.kv_transfer_params;
-                            collected.ec_transfer_params = finished.ec_transfer_params;
+                            collected.timestamps = finished.timestamps;
+                            collected.kv_transfer_params =
+                                finished.kv_transfer_params.map(|value| *value);
+                            collected.ec_transfer_params =
+                                finished.ec_transfer_params.map(|value| *value);
+                            collected.spec_decode_metrics = finished.spec_decode_metrics;
+                            collected.weight_versions = finished.weight_versions;
+                            collected.routed_experts = finished.routed_experts.map(|rows| *rows);
                             return Ok(collected);
                         }
                     }
@@ -132,40 +172,48 @@ mod tests {
                         }],
                     }],
                 }),
+                prompt_token_id_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
-                delta: "bc".to_string(),
-                token_ids: vec![1, 2],
-                logprobs: Some(DecodedLogprobs {
-                    positions: vec![
-                        DecodedPositionLogprobs {
-                            entries: vec![DecodedTokenLogprob {
-                                token_id: 0,
-                                token: "a".to_string(),
-                                logprob: -0.2,
-                                rank: 1,
-                            }],
-                        },
-                        DecodedPositionLogprobs {
-                            entries: vec![DecodedTokenLogprob {
-                                token_id: 0,
-                                token: "bc".to_string(),
-                                logprob: -0.3,
-                                rank: 1,
-                            }],
-                        },
-                    ],
-                }),
-                finished: Some(Finished {
+                decoded: DecodedText::unattributed("bc"),
+                sampled: SampledDelta {
+                    token_ids: vec![1, 2],
+                    logprobs: Some(DecodedLogprobs {
+                        positions: vec![
+                            DecodedPositionLogprobs {
+                                entries: vec![DecodedTokenLogprob {
+                                    token_id: 0,
+                                    token: "a".to_string(),
+                                    logprob: -0.2,
+                                    rank: 1,
+                                }],
+                            },
+                            DecodedPositionLogprobs {
+                                entries: vec![DecodedTokenLogprob {
+                                    token_id: 0,
+                                    token: "bc".to_string(),
+                                    logprob: -0.3,
+                                    rank: 1,
+                                }],
+                            },
+                        ],
+                    }),
+                    sampling_mask: None,
+                },
+                finished: Some(Box::new(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 2,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                }),
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    routed_experts: None,
+                    timestamps: Default::default(),
+                })),
             }),
         ]);
 
@@ -217,73 +265,84 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![10, 11].into(),
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
-                delta: "he".to_string(),
-                token_ids: vec![1, 2],
-                logprobs: Some(DecodedLogprobs {
-                    positions: vec![
-                        DecodedPositionLogprobs {
-                            entries: vec![DecodedTokenLogprob {
-                                token_id: 0,
-                                token: "h".to_string(),
-                                logprob: -0.1,
-                                rank: 1,
-                            }],
-                        },
-                        DecodedPositionLogprobs {
-                            entries: vec![DecodedTokenLogprob {
-                                token_id: 0,
-                                token: "e".to_string(),
-                                logprob: -0.2,
-                                rank: 1,
-                            }],
-                        },
-                    ],
-                }),
+                decoded: DecodedText::unattributed("he"),
+                sampled: SampledDelta {
+                    token_ids: vec![1, 2],
+                    logprobs: Some(DecodedLogprobs {
+                        positions: vec![
+                            DecodedPositionLogprobs {
+                                entries: vec![DecodedTokenLogprob {
+                                    token_id: 0,
+                                    token: "h".to_string(),
+                                    logprob: -0.1,
+                                    rank: 1,
+                                }],
+                            },
+                            DecodedPositionLogprobs {
+                                entries: vec![DecodedTokenLogprob {
+                                    token_id: 0,
+                                    token: "e".to_string(),
+                                    logprob: -0.2,
+                                    rank: 1,
+                                }],
+                            },
+                        ],
+                    }),
+                    sampling_mask: None,
+                },
                 finished: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
-                delta: "llo".to_string(),
-                token_ids: vec![3, 4, 5],
-                logprobs: Some(DecodedLogprobs {
-                    positions: vec![
-                        DecodedPositionLogprobs {
-                            entries: vec![DecodedTokenLogprob {
-                                token_id: 0,
-                                token: "l".to_string(),
-                                logprob: -0.3,
-                                rank: 1,
-                            }],
-                        },
-                        DecodedPositionLogprobs {
-                            entries: vec![DecodedTokenLogprob {
-                                token_id: 0,
-                                token: "l".to_string(),
-                                logprob: -0.4,
-                                rank: 1,
-                            }],
-                        },
-                        DecodedPositionLogprobs {
-                            entries: vec![DecodedTokenLogprob {
-                                token_id: 0,
-                                token: "o".to_string(),
-                                logprob: -0.5,
-                                rank: 1,
-                            }],
-                        },
-                    ],
-                }),
-                finished: Some(Finished {
+                decoded: DecodedText::unattributed("llo"),
+                sampled: SampledDelta {
+                    token_ids: vec![3, 4, 5],
+                    logprobs: Some(DecodedLogprobs {
+                        positions: vec![
+                            DecodedPositionLogprobs {
+                                entries: vec![DecodedTokenLogprob {
+                                    token_id: 0,
+                                    token: "l".to_string(),
+                                    logprob: -0.3,
+                                    rank: 1,
+                                }],
+                            },
+                            DecodedPositionLogprobs {
+                                entries: vec![DecodedTokenLogprob {
+                                    token_id: 0,
+                                    token: "l".to_string(),
+                                    logprob: -0.4,
+                                    rank: 1,
+                                }],
+                            },
+                            DecodedPositionLogprobs {
+                                entries: vec![DecodedTokenLogprob {
+                                    token_id: 0,
+                                    token: "o".to_string(),
+                                    logprob: -0.5,
+                                    rank: 1,
+                                }],
+                            },
+                        ],
+                    }),
+                    sampling_mask: None,
+                },
+                finished: Some(Box::new(Finished {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 5,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                }),
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    routed_experts: None,
+                    timestamps: Default::default(),
+                })),
             }),
         ]);
 

@@ -10,7 +10,7 @@ mkdir -p "${OUT_DIR}"
 
 wait_for_server() {
   local port=$1
-  timeout 600 bash -c '
+  timeout "${VLLM_ENGINE_READY_TIMEOUT_S:-600}" bash -c '
     until curl -sf "http://127.0.0.1:'"$port"'/health" > /dev/null; do
       sleep 1
     done'
@@ -56,7 +56,6 @@ for BACK in "${BACKENDS[@]}"; do
     --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
     --trust-remote-code \
     --max-model-len 2048 \
-    --gpu-memory-utilization 0.9 \
     "${PLATFORM_ARGS[@]}" \
     --port "$PORT" &
   SERVER_PID=$!

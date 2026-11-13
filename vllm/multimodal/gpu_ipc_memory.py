@@ -6,11 +6,11 @@ When multimodal media is decoded on the GPU in the API-server (frontend)
 process, the decoded buffers compete for the same device memory that the
 engine reserves for weights, activations, and the KV cache. To keep the
 frontend's GPU usage within a sequestered budget (see
-``MultiModalConfig.mm_ipc_gpu_memory_gb``), decode paths acquire the number of
-bytes they need from a process-global :class:`MultiModalGPUMemoryPool` before
+`MultiModalConfig.mm_ipc_gpu_memory_gb`), decode paths acquire the number of
+bytes they need from a process-global `MultiModalGPUMemoryPool` before
 allocating on the device and release them once the device memory is freed.
 
-The pool is a simple byte-counting semaphore: ``acquire`` blocks until enough
+The pool is a simple byte-counting semaphore: `acquire` blocks until enough
 budget is free, so concurrent requests serialize rather than oversubscribe the
 GPU. It lives only in the frontend process; the engine carves the matching
 amount out of its KV-cache budget so the headroom physically exists.
@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 
 
 class MultiModalGPUMemoryLease:
-    """A handle for bytes acquired from a :class:`MultiModalGPUMemoryPool`.
+    """A handle for bytes acquired from a `MultiModalGPUMemoryPool`.
 
     Releasing is idempotent and the lease doubles as a context manager so the
     budget is returned even if the decode raises.
@@ -54,7 +54,7 @@ class MultiModalGPUMemoryLease:
 class MultiModalGPUMemoryPool:
     """Blocking byte-counting semaphore for frontend GPU multimodal memory.
 
-    Thread-safe in both directions: ``acquire`` (blocking) and ``release`` are
+    Thread-safe in both directions: `acquire` (blocking) and `release` are
     typically called from the renderer's multimodal executor threads.
     """
 
@@ -78,9 +78,9 @@ class MultiModalGPUMemoryPool:
             return self._available
 
     def acquire(self, nbytes: int) -> MultiModalGPUMemoryLease:
-        """Reserve ``nbytes``, blocking until that much budget is free.
+        """Reserve `nbytes`, blocking until that much budget is free.
 
-        Raises ``ValueError`` if ``nbytes`` exceeds the pool's total capacity,
+        Raises `ValueError` if `nbytes` exceeds the pool's total capacity,
         since such a request could never be satisfied.
         """
         if nbytes < 0:
@@ -120,7 +120,7 @@ def set_mm_gpu_ipc_pool(pool: MultiModalGPUMemoryPool | None) -> None:
 
 
 def get_mm_gpu_ipc_pool() -> MultiModalGPUMemoryPool | None:
-    """Return the process-global pool, or ``None`` when gating is disabled."""
+    """Return the process-global pool, or `None` when gating is disabled."""
     return _GLOBAL_POOL
 
 
@@ -130,7 +130,7 @@ def maybe_init_mm_gpu_ipc_pool(
 ) -> MultiModalGPUMemoryPool | None:
     """Create and install the global pool from the configured GiB budget.
 
-    Returns ``None`` (and leaves gating disabled) when the budget is 0. When
+    Returns `None` (and leaves gating disabled) when the budget is 0. When
     multiple API-server processes share one engine, each process gets an equal
     slice of the user-provided frontend budget.
     """
@@ -161,19 +161,19 @@ def reserve_mm_ipc_gpu_memory(
 
     The reservation covers:
 
-    * The total ``mm_ipc_gpu_memory_gb`` budget for transient decoded-frame
+    * The total `mm_ipc_gpu_memory_gb` budget for transient decoded-frame
       buffers. This budget is divided among API processes, so it is not
-      multiplied by ``api_process_count``.
+      multiplied by `api_process_count`.
     * For GPU video backends, a fixed upper bound for each API process's
       retained decoder surfaces and CUDA context. The PyNvVideoCodec surface
-      reservation scales with its configured ``hw_decoders`` value, and the
-      entire decoder reservation scales with ``api_process_count`` because
+      reservation scales with its configured `hw_decoders` value, and the
+      entire decoder reservation scales with `api_process_count` because
       these resources are not shared between processes.
 
     Args:
         available_kv_cache_memory_bytes: KV-cache capacity before reserving
             memory for frontend multimodal processing.
-        mm_config: Multimodal configuration, or ``None`` when multimodal
+        mm_config: Multimodal configuration, or `None` when multimodal
             processing is disabled.
         api_process_count: Number of frontend API processes sharing the GPU.
             Values below one are treated as one.
@@ -183,6 +183,7 @@ def reserve_mm_ipc_gpu_memory(
 
     Raises:
         ValueError: If the reservation leaves no memory for the KV cache.
+
     """
     if mm_config is None:
         return available_kv_cache_memory_bytes
@@ -195,6 +196,7 @@ def reserve_mm_ipc_gpu_memory(
     from vllm.multimodal.video_decoders.pynvvideocodec import (
         PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
         PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+        get_pynvvideocodec_decoder_gpu_memory_bytes,
         validate_pynvvideocodec_hw_decoders,
     )
 
@@ -219,9 +221,15 @@ def reserve_mm_ipc_gpu_memory(
         if uses_pynvvideocodec
         else 1
     )
+    decoder_bytes = (
+        get_pynvvideocodec_decoder_gpu_memory_bytes(
+            video_kwargs.get("max_width"), video_kwargs.get("max_height")
+        )
+        if uses_pynvvideocodec
+        else PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+    )
     per_server_decoder_bytes = (
-        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * hw_decoders
-        + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+        decoder_bytes * hw_decoders + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
     )
     decoder_reserved_bytes = (
         num_api_servers * per_server_decoder_bytes

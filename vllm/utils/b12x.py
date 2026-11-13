@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Accessors for the optional ``b12x`` package."""
+"""Accessors for the `b12x` package shipped with flashinfer-python."""
 
 import importlib
 import importlib.util
@@ -10,6 +10,9 @@ from types import ModuleType
 from typing import Any
 
 import torch
+
+# Logical elements and encoded bytes per block.
+B12X_BLOCK_CODECS = {"iq2_xs": (256, 74), "iq2_xxs": (256, 66), "q8_0": (32, 34)}
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ def _import_submodule(module_name: str) -> ModuleType | None:
 _B12X_SUBMODULES = {
     module_name: _import_submodule(module_name)
     for module_name in (
+        "b12x.attention.paged",
         "b12x.gemm.blockscaled",
         # TODO: Remove once B12X exposes the scale-swizzle API publicly.
         "b12x._lib.intrinsics",
@@ -45,7 +49,7 @@ _B12X_SUBMODULES = {
 
 
 def has_b12x() -> bool:
-    """Return whether the B12X package is installed."""
+    """Return whether the b12x package is available."""
     return _HAS_B12X
 
 
@@ -71,6 +75,10 @@ def get_b12x_tensor_fp8_linear() -> ModuleType | None:
 
 def get_b12x_fused_moe() -> ModuleType | None:
     return _get_submodule("b12x.moe.fused_moe")
+
+
+def get_b12x_paged_attention() -> ModuleType | None:
+    return _get_submodule("b12x.attention.paged")
 
 
 def b12x_warmup_token_counts(

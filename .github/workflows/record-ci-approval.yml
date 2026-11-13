@@ -8,7 +8,7 @@ permissions: {}
 
 jobs:
   approved:
-    if: github.event.review.state == 'approved'
+    if: github.repository_owner == 'vllm-project' && github.event.review.state == 'approved'
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
       - run: echo "Approval recorded"

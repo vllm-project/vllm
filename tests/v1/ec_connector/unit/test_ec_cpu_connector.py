@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-E2E test for the ECCPUConnector.
+"""E2E test for the ECCPUConnector.
 
 Verifies:
 - Accuracy: outputs from EC CPU cache match fresh encoder computation.
@@ -58,7 +57,7 @@ def _wait_for_ec_ready(llm: LLM) -> None:
 
 def _latency_test(llm: LLM) -> None:
     """Verify EC CPU cache hit is faster than cold encoder computation."""
-    if not (current_platform.is_cuda() or current_platform.is_xpu()):
+    if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
         pytest.skip("Latency test requires an accelerator (CUDA or XPU)")
 
     sampling_params = SamplingParams(max_tokens=1, temperature=0)
@@ -136,8 +135,8 @@ def _accuracy_test(llm: LLM) -> None:
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="Requires an accelerator (CUDA or XPU)",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Requires an accelerator (CUDA, ROCm or XPU)",
 )
 def test_ec_cpu_offloading() -> None:
     """Tests ECCPUConnector accuracy and latency with a VLM model."""

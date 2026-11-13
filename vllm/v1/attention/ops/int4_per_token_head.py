@@ -6,8 +6,8 @@ INT4 packs two 4-bit values per cache byte, pre-rotates with a single RHT,
 and hides a 4-bit zero-point in the scale's low mantissa bits — too
 different from the core kernel to share it. Owns the whole mode: nibble
 pack/unpack, the reshape (write) kernel, the split-dot attention (read)
-kernel, the RHT transform, and the public ``reshape_and_cache_int4`` /
-``unified_attention_int4`` entry points.
+kernel, the RHT transform, and the public `reshape_and_cache_int4` /
+`unified_attention_int4` entry points.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -693,11 +694,11 @@ def _launch_packed_attn(
     softmax_segm_expsum,
     packing_factor: int,
 ):
-    """Launch ``_attn_packed`` for one of the sub-byte modes.
+    """Launch `_attn_packed` for one of the sub-byte modes.
 
     Handles 2D-vs-3D dispatch, placeholder pointers for the unused side
-    of that split, and the trailing ``reduce_segments`` pass.  Writes
-    into ``out`` (directly for 2D; via the segm buffers for 3D).
+    of that split, and the trailing `reduce_segments` pass.  Writes
+    into `out` (directly for 2D; via the segm buffers for 3D).
     """
     import vllm.envs as envs
     from vllm.v1.attention.ops.triton_unified_attention import _get_tile_size
@@ -908,14 +909,15 @@ def unified_attention_int4(
 ) -> None:
     """Paged attention over the INT4 packed cache, writing into *out*.
 
-    The forward RHT has norm ``sqrt(head_size)``, so ``softmax_scale`` is
-    divided by ``head_size`` and the inverse RHT divides the output by
-    ``head_size`` as well.
+    The forward RHT has norm `sqrt(b)` for `b` the largest power-of-two
+    divisor of `head_size` (`b == head_size` for power-of-two sizes), so
+    `softmax_scale` is divided by `b` and the inverse RHT divides the output
+    by `b` as well.
     """
     q_orig_dtype = q.dtype
     q = single_rht(q.float()).to(q_orig_dtype)
-    head_size = q.shape[2]
-    softmax_scale = softmax_scale / head_size
+    rht_norm = largest_power_of_2_divisor(q.shape[2])
+    softmax_scale = softmax_scale / rht_norm
 
     _launch_packed_attn(
         q=q,
@@ -945,7 +947,7 @@ def unified_attention_int4(
         packing_factor=_INT4_PACKING_FACTOR,
     )
 
-    out_f = single_rht(out.float(), inverse=True) / head_size
+    out_f = single_rht(out.float(), inverse=True) / rht_norm
     out.copy_(out_f.to(q_orig_dtype))
 
 
@@ -1134,11 +1136,20 @@ def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor
         gen = torch.Generator(device="cpu")
         gen.manual_seed(0x9E3779B9 + round_idx * 0x517CC1B7)
         signs = (
-            2.0 * torch.bernoulli(torch.full((d,), 0.5, device="cpu"), generator=gen)
+            2.0
+            * torch.bernoulli(
+                torch.full((d,), 0.5, dtype=torch.float32, device="cpu"),
+                generator=gen,
+            )
             - 1.0
         )
         _RHT_SIGNS_CACHE[key] = signs.to(device)
     return _RHT_SIGNS_CACHE[key]
+
+
+def init_rht_signs(head_size: int, device: torch.device) -> None:
+    """Pre-build the `single_rht` signs so no forward takes the H2D miss."""
+    _get_rht_signs(largest_power_of_2_divisor(head_size), 0, device)
 
 
 def single_rht(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
@@ -1148,6 +1159,16 @@ def single_rht(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
     before asymmetric quantization.
     """
     d = x.shape[-1]
+    block = largest_power_of_2_divisor(d)
+    if block < d:
+        # H is only defined for power-of-two rows, so apply it
+        # block-diagonally: H_b inside each of the d / b blocks, for b the
+        # largest power-of-two divisor of d.  That keeps H @ H.T = b * I
+        # without padding the row, hence the norm is sqrt(b), not sqrt(d).
+        lead = x.shape[:-1]
+        return single_rht(x.reshape(*lead, d // block, block), inverse).reshape(
+            *lead, d
+        )
     d1 = _get_rht_signs(d, 0, x.device)
     if inverse:
         return fast_hadamard_transform(x) * d1

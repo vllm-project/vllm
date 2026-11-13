@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Universal vLLM Attention Benchmark
+"""Universal vLLM Attention Benchmark.
 
 Benchmark any attention backend with the extended grammar.
 Supports standard attention (Flash/Triton/FlashInfer) and MLA backends.
@@ -23,6 +22,7 @@ Examples:
 
     # Parameter sweep (YAML config - recommended)
     python benchmark.py --config configs/cutlass_numsplits.yaml
+
 """
 
 import argparse
@@ -32,6 +32,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import get_args
 
 import yaml
 from rich.console import Console
@@ -50,6 +51,7 @@ from common import (
     is_mla_backend,
 )
 
+from vllm.config.cache import CacheDType
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
@@ -84,8 +86,7 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
 
 
 def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
-    """
-    Run a single benchmark with proper backend selection.
+    """Run a single benchmark with proper backend selection.
 
     Args:
         config: BenchmarkConfig with backend, batch_spec, and model params
@@ -93,6 +94,7 @@ def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
 
     Returns:
         BenchmarkResult (may have error field set on failure)
+
     """
     try:
         if is_mla_backend(config.backend):
@@ -119,8 +121,7 @@ def run_model_parameter_sweep(
     sweep: ModelParameterSweep,
     console: Console,
 ) -> list[BenchmarkResult]:
-    """
-    Run model parameter sweep for given backends and batch specs.
+    """Run model parameter sweep for given backends and batch specs.
 
     Args:
         backends: List of backend names
@@ -131,6 +132,7 @@ def run_model_parameter_sweep(
 
     Returns:
         List of BenchmarkResult objects
+
     """
     all_results = []
 
@@ -304,8 +306,7 @@ def run_parameter_sweep(
     sweep: ParameterSweep,
     console: Console,
 ) -> list[BenchmarkResult]:
-    """
-    Run parameter sweep for given backends and batch specs.
+    """Run parameter sweep for given backends and batch specs.
 
     Args:
         backends: List of backend names
@@ -316,6 +317,7 @@ def run_parameter_sweep(
 
     Returns:
         List of BenchmarkResult objects
+
     """
     all_results = []
 
@@ -395,8 +397,7 @@ def load_config_from_yaml(config_path: str) -> dict:
 
 
 def generate_batch_specs_from_ranges(ranges: list[dict]) -> list[str]:
-    """
-    Generate batch specs from range specifications.
+    """Generate batch specs from range specifications.
 
     Args:
         ranges: List of range specifications, each containing:
@@ -420,6 +421,7 @@ def generate_batch_specs_from_ranges(ranges: list[dict]) -> list[str]:
             }
         ]
         Returns: ["q1kv1k", "q2kv1k", ..., "q16kv1k"]
+
     """
     all_specs = []
 
@@ -549,6 +551,11 @@ def main():
     # Benchmark settings
     parser.add_argument("--device", default="cuda:0", help="Device")
     parser.add_argument(
+        "--model",
+        default="meta-llama/Meta-Llama-3-8B",
+        help="Model whose config the backend is built with",
+    )
+    parser.add_argument(
         "--warmup-ms",
         type=int,
         default=None,
@@ -561,8 +568,8 @@ def main():
     parser.add_argument(
         "--kv-cache-dtype",
         default="auto",
-        choices=["auto", "fp8"],
-        help="KV cache dtype: auto or fp8",
+        choices=get_args(CacheDType),
+        help="KV cache dtype",
     )
     parser.add_argument(
         "--cuda-graphs",
@@ -894,6 +901,7 @@ def main():
                         device=args.device,
                         profile_memory=args.profile_memory,
                         kv_cache_dtype=args.kv_cache_dtype,
+                        model=args.model,
                         use_cuda_graphs=args.cuda_graphs,
                         prefill_backend="fa4",
                     )
@@ -964,6 +972,7 @@ def main():
                         device=args.device,
                         profile_memory=args.profile_memory,
                         kv_cache_dtype=args.kv_cache_dtype,
+                        model=args.model,
                         use_cuda_graphs=args.cuda_graphs,
                         ncu_profile=args.ncu_profile,
                         warmup_ms=args.warmup_ms,
@@ -1036,6 +1045,8 @@ def main():
                 pbar.update(1)
 
         if args.ncu_profile:
+            if any(not result.success for result in all_results):
+                raise SystemExit(1)
             return
 
         # Display decode vs prefill results
@@ -1208,6 +1219,7 @@ def main():
                             device=args.device,
                             max_model_len=getattr(args, "max_model_len", None),
                             kv_cache_dtype=args.kv_cache_dtype,
+                            model=args.model,
                             profile_memory=args.profile_memory,
                             use_cuda_graphs=args.cuda_graphs,
                             ncu_profile=args.ncu_profile,
@@ -1353,6 +1365,7 @@ def main():
                             device=args.device,
                             profile_memory=args.profile_memory,
                             kv_cache_dtype=args.kv_cache_dtype,
+                            model=args.model,
                             use_cuda_graphs=args.cuda_graphs,
                             ncu_profile=args.ncu_profile,
                             warmup_ms=args.warmup_ms,
@@ -1434,6 +1447,9 @@ def main():
             formatter.save_csv(all_results, args.output_csv)
         if args.output_json:
             formatter.save_json(all_results, args.output_json)
+
+    if any(not result.success for result in all_results):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

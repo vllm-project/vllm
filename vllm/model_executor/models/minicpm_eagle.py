@@ -26,10 +26,11 @@
 
 import math
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -55,11 +56,19 @@ from .utils import (
     process_eagle_weight,
 )
 
+if TYPE_CHECKING:
+
+    class _EagleMiniCPMSupportsPP:
+        pass
+
+else:
+    _EagleMiniCPMSupportsPP = SupportsPP
+
 
 class EagleMiniCPMDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -149,7 +158,9 @@ class EagleMiniCPMModel(nn.Module):
     ):
         super().__init__()
 
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        config = speculative_config.draft_model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -178,7 +189,7 @@ class EagleMiniCPMModel(nn.Module):
     def _init_layers(
         self,
         prefix: str,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
         start_layer: int,
@@ -291,7 +302,9 @@ class EagleMiniCPMModel(nn.Module):
         return loaded_params
 
 
-class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle):
+class EagleMiniCPMForCausalLM(
+    nn.Module, SupportsLoRA, _EagleMiniCPMSupportsPP, SupportsEagle
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -312,7 +325,9 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        config = speculative_config.draft_model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -323,9 +338,7 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle
         self.cache_config = cache_config
         self.quant_config = quant_config
 
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
 
         self.model = self._init_model(
             vllm_config=vllm_config,

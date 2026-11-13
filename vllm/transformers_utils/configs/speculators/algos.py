@@ -14,8 +14,7 @@ def register_speculator(name):
 
 @register_speculator("eagle3")
 def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply Eagle-3 specific configuration transformations to the `dict` used to
+    """Apply Eagle-3 specific configuration transformations to the `dict` used to
     construct the Transformers PreTrainedConfig.
 
     Eagle-3 specific fields:
@@ -28,7 +27,6 @@ def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
         provide intermediate hidden states that help the drafter make better
         predictions. This is the standard field used in Eagle3 checkpoints.
     """
-
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
     if config_dict.get("target_hidden_size") is not None:
         pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
@@ -54,46 +52,12 @@ def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
 
 @register_speculator("peagle")
 def update_peagle(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply PEagle (Parallel Eagle) specific configuration transformations to
-    the `dict` used to construct the Transformers PreTrainedConfig.
-
-    PEagle specific fields:
-    - draft_vocab_size: Size of the draft model's vocabulary
-    - target_hidden_size: Hidden size of the target model
-    - norm_before_residual: Whether to apply norm before residual connection
-    - norm_before_fc: Whether to apply RMSNorm before the fc projection
-    - mask_token_id (required): Token ID used for parallel drafting mask
-        placeholders, mapped to pard_token for the proposer
-    - eagle_aux_hidden_state_layer_ids: Layer indices from the target model
-        whose intermediate hidden states are used as auxiliary inputs
-    """
-    pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
-    if config_dict.get("target_hidden_size") is not None:
-        pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
-    pre_trained_config["norm_before_residual"] = config_dict.get(
-        "norm_before_residual", False
-    )
-    pre_trained_config["norm_before_fc"] = config_dict.get("norm_before_fc", False)
-    peagle_arch_map = {
-        "qwen3": "PeagleQwen3ForCausalLM",
-        "llama": "PeagleLlamaForCausalLM",
-    }
-    model_type = pre_trained_config.get("model_type", "llama")
-    if model_type not in peagle_arch_map:
-        raise ValueError(f"Unsupported model_type {model_type} for PEagle speculator")
-    pre_trained_config["architectures"] = [peagle_arch_map[model_type]]
-    pre_trained_config["pard_token"] = config_dict["mask_token_id"]
-    if config_dict.get("eagle_aux_hidden_state_layer_ids"):
-        pre_trained_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
-            "eagle_aux_hidden_state_layer_ids"
-        ]
+    raise ValueError("P-EAGLE (parallel drafting EAGLE-3) is not supported.")
 
 
 @register_speculator("dflash")
 def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply DFlash specific configuration transformations to the `dict` used to
+    """Apply DFlash specific configuration transformations to the `dict` used to
     construct the Transformers PreTrainedConfig.
 
     DFlash specific fields:
@@ -132,8 +96,7 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
 
 @register_speculator("dflash2")
 def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply DFlash2 specific configuration transformations to the `dict` used
+    """Apply DFlash2 specific configuration transformations to the `dict` used
     to construct the Transformers PreTrainedConfig.
 
     DFlash2 extends DFlash with a grouped convolution layer and a
@@ -156,8 +119,7 @@ def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
 
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
-    """
-    Apply DSpark specific configuration transformations to the `dict` used to
+    """Apply DSpark specific configuration transformations to the `dict` used to
     construct the Transformers PreTrainedConfig.
 
     DSpark extends DFlash with a Markov logit-bias head, reusing the same

@@ -10,8 +10,8 @@ zero heavy dependencies — they work on raw decoded strings from any
 inference backend (vLLM, HuggingFace, TGI, etc.).
 
 For the OpenAI-compatible API reasoning parser (streaming +
-non-streaming), see ``vllm.reasoning.gemma4_reasoning_parser``.
-For tool call parsing, see ``vllm.tool_parsers.gemma4_utils``.
+non-streaming), see `vllm.reasoning.gemma4_reasoning_parser`.
+For tool call parsing, see `vllm.tool_parsers.gemma4_utils`.
 
 Usage with vLLM offline inference::
 
@@ -27,7 +27,7 @@ Usage with vLLM offline inference::
     print(result["thinking"])  # chain-of-thought or None
     print(result["answer"])  # final answer
 
-Ported from ``transformers.models.gemma4.utils_gemma4`` so that vLLM users
+Ported from `transformers.models.gemma4.utils_gemma4` so that vLLM users
 do not need a transformers dependency for output parsing.
 """
 
@@ -48,25 +48,25 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
     Use this on **all** Gemma4 output regardless of whether thinking mode
     was enabled.  It handles three cases:
 
-    1. **Thinking enabled, tags present** — splits on ``<|channel>``/
-       ``<channel|>`` to separate chain-of-thought from the answer and
-       strips the ``thought\\n`` role label.
+    1. **Thinking enabled, tags present** — splits on `<|channel>`/
+       `<channel|>` to separate chain-of-thought from the answer and
+       strips the `thought\\n` role label.
     2. **Thinking disabled, spurious label** — strips the bare
-       ``thought\\n`` prefix that some Gemma4 models emit even
+       `thought\\n` prefix that some Gemma4 models emit even
        without thinking mode.
     3. **Clean output** — returns the text unchanged.
 
     The answer text is always cleaned of trailing sentinel tokens
-    (``<turn|>``, ``<eos>``, etc.).
+    (`<turn|>`, `<eos>`, etc.).
 
     Args:
-        text: Decoded model output text (from ``tokenizer.decode(...)``).
+        text: Decoded model output text (from `tokenizer.decode(...)`).
 
     Returns:
         A dict with keys:
-            - ``"thinking"``: The chain-of-thought text, or ``None`` if no
+            - `"thinking"`: The chain-of-thought text, or `None` if no
               thinking delimiters were found.
-            - ``"answer"``: The final answer text.
+            - `"answer"`: The final answer text.
 
     Example::
 
@@ -75,6 +75,7 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
         >>> result = parse_thinking_output(output_text)
         >>> print(result["thinking"])  # chain-of-thought reasoning or None
         >>> print(result["answer"])    # final answer
+
     """
     if _THINKING_END_TAG in text:
         parts = text.split(_THINKING_END_TAG, 1)
@@ -104,10 +105,10 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
 
 
 def _strip_thought_label(text: str) -> str:
-    """Strip the spurious ``thought\\n`` label from the start of text.
+    """Strip the spurious `thought\\n` label from the start of text.
 
-    Only strips when ``thought`` appears as the very first word followed by
-    a newline — preserving the word ``thought`` in any other context.
+    Only strips when `thought` appears as the very first word followed by
+    a newline — preserving the word `thought` in any other context.
     """
     if text.startswith("thought\n"):
         return text[len("thought\n") :]
@@ -117,7 +118,7 @@ def _strip_thought_label(text: str) -> str:
 def _clean_answer(text: str) -> str:
     """Clean trailing sentinel tokens from the answer text.
 
-    Strips ``<turn|>``, ``<eos>``, and surrounding whitespace that the
+    Strips `<turn|>`, `<eos>`, and surrounding whitespace that the
     model appends at the end of its response.
     """
     text = text.strip()

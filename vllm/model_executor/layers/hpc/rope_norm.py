@@ -78,20 +78,10 @@ def hpc_rope_norm_forward(
     rope_norm._forward_impl(qkv, kv_cache, attn_metadata, attn_layer, output)
 
 
-def hpc_rope_norm_forward_fake(
-    qkv: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Fake impl for torch.compile trace; output is a mutated arg."""
-    return
-
-
 direct_register_custom_op(
     op_name="hpc_rope_norm_forward",
     op_func=hpc_rope_norm_forward,
     mutates_args=["output"],
-    fake_impl=hpc_rope_norm_forward_fake,
 )
 
 
@@ -100,13 +90,13 @@ class HpcRopeNorm(CustomOp, HpcModule):
     """HPC fused RoPE + QK-Norm + KV-Cache-Write (+ optional FP8 Q quant).
 
     Registered as a sub-module in model layers (e.g. HunYuanAttention).
-    Norm weights are extracted from fallback norm modules via
-    process_weights_after_loading() after all weights are loaded.
+    The QK-Norm weights are read directly from the fallback norm modules
+    (built in float32 when HPC is active), eliminating the derived copy.
 
     forward() is dispatched by CustomOp framework:
     - In compiled mode: forward_cuda() calls torch.ops.vllm.hpc_rope_norm_forward
       as a splitting point — internal Python control flow is opaque
-      to torch.compile and not captured by CUDA Graph.
+      to torch.compile (its kernel launches can still be CUDA-graph captured).
     - In eager/native mode: forward_native() falls back to forward_cuda().
     """
 
@@ -134,14 +124,10 @@ class HpcRopeNorm(CustomOp, HpcModule):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
 
-        self.use_qk_norm = use_qk_norm
-
         self.q_size = num_heads * head_dim
         self.kv_size = num_kv_heads * head_dim
 
-        # Register as a non-persistent buffer so it participates in sleep
-        # level-2 save/restore (CuMemAllocator) but is excluded from the
-        # checkpoint state_dict.
+        # Non-persistent: moves with the module but stays out of the state_dict.
         self.register_buffer("cos_sin_cache", cos_sin_cache.float(), persistent=False)
 
         self.fallback_qnorm = fallback_qnorm
@@ -149,31 +135,18 @@ class HpcRopeNorm(CustomOp, HpcModule):
 
         self.head_per_group = num_heads // num_kv_heads
 
-        # Pre-allocate norm weight tensors as Parameters so they are tracked by
-        # CuMemAllocator (for sleep/wake_up) and have stable addresses for CUDA
-        # Graph replay. process_weights_after_loading() updates them inplace via
-        # copy_() so refit does not invalidate captured graph tensor pointers.
-        # Shape is [head_dim] to match the HPC kernel's q/k_norm_weight layout.
-        if use_qk_norm and fallback_qnorm is not None:
-            self.qnorm_weight: torch.nn.Parameter | None = torch.nn.Parameter(
-                torch.empty(head_dim, dtype=torch.float32),
-                requires_grad=False,
-            )
-        else:
-            self.qnorm_weight = None
-        if use_qk_norm and fallback_knorm is not None:
-            self.knorm_weight: torch.nn.Parameter | None = torch.nn.Parameter(
-                torch.empty(head_dim, dtype=torch.float32),
-                requires_grad=False,
-            )
-        else:
-            self.knorm_weight = None
-
         self.use_fp8 = "fp8" in kv_cache_dtype
         # The RMSNorm/RoPE ordering is model dependent (e.g. HunYuan V3 applies
         # QK-Norm before RoPE -> NORM_THEN_ROPE), so it is supplied by the
         # caller. When QK-Norm is disabled the policy is forced to NONE.
         self.qk_norm_policy = qk_norm_policy if use_qk_norm else QkNormPolicy.NONE
+        if self.qk_norm_policy != QkNormPolicy.NONE and (
+            fallback_qnorm is None or fallback_knorm is None
+        ):
+            raise ValueError(
+                "QK-Norm is enabled but fallback_qnorm/fallback_knorm were not "
+                "supplied; the fused kernel reads their weights directly."
+            )
 
         # Register layer_name + add self to the global instance registry so the
         # module-level custom op (hpc_rope_norm_forward) can route back here.
@@ -225,20 +198,6 @@ class HpcRopeNorm(CustomOp, HpcModule):
         logger.info_once("enable hpc rope_norm")
         return True
 
-    def process_weights_after_loading(self, model: torch.nn.Module = None) -> None:
-        """Copy norm weights (float32) from fallback norm modules inplace.
-
-        Uses copy_() to preserve tensor addresses for CUDA Graph / refit
-        compatibility. Called by the model's load_weights() after all weights
-        are loaded (and generically from the model loader for DummyModelLoader
-        / sleep-wake_up reload paths).
-        """
-        if self.use_qk_norm:
-            if self.fallback_qnorm is not None and self.qnorm_weight is not None:
-                self.qnorm_weight.data.copy_(self.fallback_qnorm.weight.data.float())
-            if self.fallback_knorm is not None and self.knorm_weight is not None:
-                self.knorm_weight.data.copy_(self.fallback_knorm.weight.data.float())
-
     def register_layer_name(self, layer_name: str) -> None:
         """Register layer_name and add self to the global registry.
 
@@ -284,12 +243,12 @@ class HpcRopeNorm(CustomOp, HpcModule):
     def _kv_write_scratch(self, cache: torch.Tensor) -> torch.Tensor:
         """Throwaway dense K/V pages for the stride-aware fallback path.
 
-        ``hpc.rope_norm_store_kv[_fp8]`` always writes the paged cache itself
+        `hpc.rope_norm_store_kv[_fp8]` always writes the paged cache itself
         (rotated K/V *and* zero padding for the tail of every request's last
         block), addressing it densely. When the real pages are not dense those
         writes would land on unrelated blocks, so they are redirected here by
         pairing this scratch cache with an all-zero block table; the real data
-        is taken out through ``out_k``/``out_v`` instead.
+        is taken out through `out_k`/`out_v` instead.
 
         Returns a (2, 1, block_size, num_kv_heads, head_dim) tensor: index 0 is
         the key scratch page, index 1 the value scratch page.
@@ -319,14 +278,14 @@ class HpcRopeNorm(CustomOp, HpcModule):
         """Zero the unused tail slots of each request's last block.
 
         The HPC attention kernels read whole blocks, so the slots past
-        ``seq_len`` must be zero. The fused op normally does this itself; on the
+        `seq_len` must be zero. The fused op normally does this itself; on the
         fallback path its (densely addressed) padding writes are discarded, so
         the padding is reapplied here through the real, strided cache views.
 
         Shapes are static and no value is inspected on the host, so this stays
         CUDA-graph capturable. It is also self-contained: each request's last
         block is read, masked and written back, so slots that must be preserved
-        (and requests padded in for graph capture, whose ``seq_len`` is 0) keep
+        (and requests padded in for graph capture, whose `seq_len` is 0) keep
         their previous contents instead of being redirected somewhere.
         """
         block_size = key_cache.shape[1]
@@ -365,15 +324,15 @@ class HpcRopeNorm(CustomOp, HpcModule):
     ) -> None:
         """Write dense per-token K (or V) into a paged cache view.
 
-        Used on the stride-aware fallback path (see ``_forward_impl``).
-        ``cache`` is a (num_blocks, block_size, num_kv_heads, head_dim) view
-        with arbitrary block/token/head strides; ``src`` is the dense
+        Used on the stride-aware fallback path (see `_forward_impl`).
+        `cache` is a (num_blocks, block_size, num_kv_heads, head_dim) view
+        with arbitrary block/token/head strides; `src` is the dense
         (num_tokens, num_kv_heads, head_dim) buffer produced by the fused HPC
-        kernel. FP8 payloads are moved as raw bytes because ``index_copy_``
+        kernel. FP8 payloads are moved as raw bytes because `index_copy_`
         has no FP8 kernel.
 
-        Padded tokens carry ``PAD_SLOT_ID`` (-1); clamping sends them to the
-        reserved null block instead of tripping ``index_copy_``'s bounds check.
+        Padded tokens carry `PAD_SLOT_ID` (-1); clamping sends them to the
+        reserved null block instead of tripping `index_copy_`'s bounds check.
         This keeps the op CUDA-graph safe (static shape, no host sync), unlike
         masking the padded rows out.
         """
@@ -440,12 +399,14 @@ class HpcRopeNorm(CustomOp, HpcModule):
         k_scale = attn_layer._k_scale.reshape(1)
         v_scale = attn_layer._v_scale.reshape(1)
 
-        q_norm_weight = (
-            self.qnorm_weight if self.qk_norm_policy != QkNormPolicy.NONE else None
-        )
-        k_norm_weight = (
-            self.knorm_weight if self.qk_norm_policy != QkNormPolicy.NONE else None
-        )
+        if self.qk_norm_policy != QkNormPolicy.NONE:
+            assert self.fallback_qnorm is not None
+            assert self.fallback_knorm is not None
+            q_norm_weight = self.fallback_qnorm.weight
+            k_norm_weight = self.fallback_knorm.weight
+        else:
+            q_norm_weight = None
+            k_norm_weight = None
 
         # --- Prefill ---
         if num_prefill_reqs > 0:

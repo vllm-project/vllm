@@ -1,36 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    SparseAttnIndexer,
+    should_skip_indexer_scoring,
+)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
-
-
-class DeepseekV32MLASparseBackend(ROCMAiterMLASparseBackend):
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list:
-        return [16, 32]
-
-
-class DeepseekV32ROCmIndexerBackend(DeepseekV32IndexerBackend):
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list:
-        return [16, 32]
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
     def get_attn_backend(self):
-        return DeepseekV32ROCmIndexerBackend
+        return DeepseekV32IndexerBackend
+
+    @property
+    def uses_shuffled_layout(self) -> bool:
+        # aiter's gather/insert pair shuffles the cache above block size 1:
+        # [n_blocks, blk/16, head_dim/16, 16, 16] instead of [n_blocks, blk, head_dim].
+        return self.kv_cache.ndim == 3 and self.kv_cache.shape[1] != 1
 
 
 class DeepseekV32ROCmIndexer(DeepseekV32Indexer):
@@ -46,7 +48,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             config,
             prefix,
             topk_indices_buffer,
-            attn_backend=DeepseekV32MLASparseBackend,
+            attn_backend=ROCMAiterMLASparseBackend,
         )
 
         self.indexer_op: SparseAttnIndexer | None = None
@@ -60,7 +62,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
                 self.indexer.max_model_len,
                 self.indexer.max_total_seq_len,
                 topk_indices_buffer,
-                skip_k_cache_insert=True,
+                skip_k_cache_insert=not self.use_pcp,
             )
         self._fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_kv_needs_view = self._fp8_kv and self.kv_cache_dtype != "fp8_ds_mla"
@@ -100,14 +102,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         q_nope = q_nope.transpose(0, 1)  # (N, tokens, P)
 
         if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            ql_nope = batched_gemm_a16wfp4(
+            ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                 q_nope, self.W_K, self.W_K_scale, transpose_bm=True, prequant=True
             )
         elif self.is_aiter_triton_fp8_bmm_enabled:
-            from vllm._aiter_ops import rocm_aiter_ops
-
             ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                 q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
             )
@@ -120,11 +118,12 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         self,
         q_c: torch.Tensor,
         index_q_fp8: torch.Tensor | None,
+        index_k: torch.Tensor | None,
         index_weights_out: torch.Tensor | None,
     ) -> None:
         """Run the ROCm sparse indexer (forward_hip) if this layer has an indexer."""
         if self.indexer_op is not None:
-            self.indexer_op.forward_hip(q_c, index_q_fp8, None, index_weights_out)
+            self.indexer_op.forward_hip(q_c, index_q_fp8, index_k, index_weights_out)
 
     def _build_q_for_attn(
         self,
@@ -152,14 +151,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
 
         if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            batched_gemm_a16wfp4(
+            rocm_aiter_ops.batched_gemm_a16wfp4(
                 x, self.W_V, self.W_V_scale, out_view, transpose_bm=True, prequant=True
             )
         elif self.is_aiter_triton_fp8_bmm_enabled:
-            from vllm._aiter_ops import rocm_aiter_ops
-
             rocm_aiter_ops.triton_fp8_bmm(
                 x,
                 self.W_V,
@@ -191,6 +186,8 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         else:
             attn_metadata = attn_metadata_raw
 
+        attn_metadata = cast(MLACommonMetadata | None, attn_metadata)
+
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
@@ -202,6 +199,8 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_norm_eps = self.indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
             indexer_k_cache = self.indexer.k_cache.kv_cache
+            indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
+            index_k_out = torch.empty_like(index_k) if self.use_pcp else None
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
         else:
@@ -211,10 +210,13 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_norm_eps = 1e-6
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
+            indexer_cache_shuffled = False
+            index_k_out = None
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
-        if attn_metadata is None:
+        # PCP writes the caches after all-gathering every rank's tokens.
+        if attn_metadata is None or self.use_pcp:
             mla_kv_cache = None
             mla_k_scale = None
             indexer_k_cache = None
@@ -222,6 +224,19 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         else:
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
+
+        use_mha = attn_metadata is not None and self._use_sparse_mha(attn_metadata)
+        # The indexer K cache is still written by fused_norm_rope below.
+        skip_scoring = (
+            has_indexer
+            and use_mha
+            and bool(self._dense_mha_metadata_layer_name)
+            and should_skip_indexer_scoring(
+                attn_metadata, forward_context.cudagraph_runtime_mode
+            )
+        )
+        kv_c_out = torch.empty_like(kv_c) if use_mha or self.use_pcp else None
+        k_pe_out = torch.empty_like(k_pe) if use_mha or self.use_pcp else None
 
         q_c = fused_norm_rope(
             positions,
@@ -241,16 +256,28 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
             indexer_k_cache=indexer_k_cache,
+            indexer_cache_shuffled=indexer_cache_shuffled,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
+            skip_scale=self._k_scale_float == 1.0,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
+            kv_c_out=kv_c_out,
+            k_pe_out=k_pe_out,
+            index_k_out=index_k_out,
         )
 
-        ql_nope, q_pe = self._compute_ql_nope(q_c)
+        if use_mha:
+            q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            ql_nope = q_nope
+        else:
+            ql_nope, q_pe = self._compute_ql_nope(q_c)
 
-        if self.indexer is not None and not self.skip_topk:
+        if self.indexer is not None and not self.skip_topk and not skip_scoring:
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -261,28 +288,56 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             q_pe,
             self.rotary_emb.cos_sin_cache,
             index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            self.indexer_rope_emb.cos_sin_cache if index_q is not None else None,
             ql_nope,
             self._q_scale,
             index_weights,
             indexer_softmax_scale,
             indexer_n_head_scale,
-            has_indexer=has_indexer,
+            has_indexer=index_q is not None,
             index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_kv,
+            quantize_mqa=self._fp8_kv and not use_mha,
         )
 
-        if self.indexer is not None and not self.skip_topk:
-            self._run_indexer(q_c, index_q_fp8, index_weights_out)
+        if index_q is not None:
+            self._run_indexer(q_c, index_q_fp8, index_k_out, index_weights_out)
 
         if attn_metadata is None:
             output.zero_()
             return
 
+        if self.use_pcp:
+            assert kv_c_out is not None and k_pe_out is not None
+            self.update_kv_cache(
+                kv_c_out,
+                k_pe_out.unsqueeze(1),
+                self.kv_cache,
+                slot_mapping.get(self.layer_name),
+                attn_metadata,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
+            if attn_metadata.num_actual_tokens == 0:
+                output.zero_()
+                return
+
+        if use_mha:
+            assert kv_c_out is not None and k_pe_out is not None
+            mha_q = torch.cat((q_nope, mqa_q), dim=-1)
+            self.forward_impl(
+                mha_q,
+                kv_c_out,
+                k_pe_out.unsqueeze(1),
+                self.kv_cache,
+                attn_metadata,
+                output,
+            )
+            return
+
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
         kv_cache = self.kv_cache
         if self._fp8_kv_needs_view:
-            kv_cache = kv_cache.view(torch.float8_e4m3fn)
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
@@ -290,3 +345,5 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
 
         self._compute_uv_out(attn_out, output, num_actual)
+        if self.use_pcp and num_actual < output.shape[0]:
+            output[num_actual:].zero_()

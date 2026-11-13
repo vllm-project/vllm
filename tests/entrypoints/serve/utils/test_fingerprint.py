@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``system_fingerprint`` construction."""
+"""Unit tests for `system_fingerprint` construction."""
 
 from types import SimpleNamespace
 
 import pytest
 
+from vllm.config.utils import hash_factors
 from vllm.entrypoints.serve.utils import fingerprint as fp
 
+FACTORS = {"model": "a"}
+HASH8 = hash_factors(FACTORS)[:8]
 
-def _cfg(tp=1, pp=1, dp=1, ep=False, digest="a3b21f94deadbeef"):
+
+def _cfg(tp=1, pp=1, dp=1, ep=False):
     c = SimpleNamespace(
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
@@ -18,7 +22,7 @@ def _cfg(tp=1, pp=1, dp=1, ep=False, digest="a3b21f94deadbeef"):
             enable_expert_parallel=ep,
         )
     )
-    c.compute_hash = lambda: digest  # type: ignore[attr-defined]
+    c.compile_factors = lambda: FACTORS
     return c
 
 
@@ -34,8 +38,8 @@ def test_four_modes_produce_expected_shapes():
 
     cfg = _cfg(tp=8, ep=True)
 
-    assert fp.build_system_fingerprint(cfg, "full") == (f"vllm-{v}-tp8-ep-a3b21f94")
-    assert fp.build_system_fingerprint(cfg, "hash") == f"vllm-{v}-a3b21f94"
+    assert fp.build_system_fingerprint(cfg, "full") == (f"vllm-{v}-tp8-ep-{HASH8}")
+    assert fp.build_system_fingerprint(cfg, "hash") == f"vllm-{v}-{HASH8}"
     assert fp.build_system_fingerprint(cfg, "custom", "my-fp") == "my-fp"
     assert fp.build_system_fingerprint(cfg, "none") is None
 
@@ -44,11 +48,11 @@ def test_full_mode_emits_only_non_trivial_parallelism():
     from vllm import __version__ as v
 
     # Single-GPU: nothing between version and hash.
-    assert fp.build_system_fingerprint(_cfg(), "full") == f"vllm-{v}-a3b21f94"
+    assert fp.build_system_fingerprint(_cfg(), "full") == f"vllm-{v}-{HASH8}"
     # All parallelism axes.
     assert (
         fp.build_system_fingerprint(_cfg(tp=8, pp=2, dp=4, ep=True), "full")
-        == f"vllm-{v}-tp8-pp2-dp4-ep-a3b21f94"
+        == f"vllm-{v}-tp8-pp2-dp4-ep-{HASH8}"
     )
 
 
@@ -59,6 +63,7 @@ def test_get_respects_set_default():
 
     fp.set_default_fingerprint_mode("hash")
     hashed = fp.get_system_fingerprint(cfg)
+    assert hashed is not None
     assert hashed != full
     assert "tp8" not in hashed
 
@@ -69,8 +74,10 @@ def test_get_respects_set_default():
     assert fp.get_system_fingerprint(cfg) is None
 
 
-def test_compute_hash_failure_does_not_raise():
+def test_hash_failure_does_not_raise():
     cfg = _cfg()
-    cfg.compute_hash = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
-    assert fp.build_system_fingerprint(cfg, "full").endswith("-nohash")
-    assert fp.build_system_fingerprint(cfg, "hash").endswith("-nohash")
+    cfg.compile_factors = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    full_fp = fp.build_system_fingerprint(cfg, "full")
+    assert full_fp is not None and full_fp.endswith("-nohash")
+    hash_fp = fp.build_system_fingerprint(cfg, "hash")
+    assert hash_fp is not None and hash_fp.endswith("-nohash")

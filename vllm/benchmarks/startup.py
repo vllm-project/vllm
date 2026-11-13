@@ -107,8 +107,7 @@ def _metric_to_json(m: MetricStats) -> dict[str, Any]:
 
 @contextmanager
 def cold_startup():
-    """
-    Context manager to measure cold startup time:
+    """Context manager to measure cold startup time:
     1. Uses a temporary directory for vLLM cache to avoid any pollution
        between cold startup iterations.
     2. Uses inductor's fresh_cache to clear torch.compile caches.
@@ -132,8 +131,7 @@ def cold_startup():
 
 
 def run_startup_in_subprocess(engine_args, result_queue):
-    """
-    Run LLM startup in a subprocess and return timing metrics via a queue.
+    """Run LLM startup in a subprocess and return timing metrics via a queue.
     This ensures complete isolation between iterations.
     """
     try:
@@ -229,11 +227,9 @@ def main(args: argparse.Namespace):
     engine_args = EngineArgs.from_cli_args(args)
 
     def create_llm_and_measure_startup():
-        """
-        Create LLM instance in a subprocess and measure startup time.
+        """Create LLM instance in a subprocess and measure startup time.
         Returns timing metrics, using subprocess for complete isolation.
         """
-
         # Create a queue for inter-process communication
         result_queue: multiprocessing.Queue[Any] = multiprocessing.Queue()
         process = multiprocessing.Process(
@@ -264,7 +260,7 @@ def main(args: argparse.Namespace):
     # Collect cold startup iterations
     print("Measuring cold startup time...\n")
     cold_iterations = []
-    for i in tqdm(range(args.num_iters_cold), desc="Cold startup iterations"):
+    for _ in tqdm(range(args.num_iters_cold), desc="Cold startup iterations"):
         with cold_startup():
             cold_iterations.append(create_llm_and_measure_startup())
 
@@ -276,7 +272,7 @@ def main(args: argparse.Namespace):
     # Collect warm startup iterations
     print("\nMeasuring warm startup time...\n")
     warm_iterations = []
-    for i in tqdm(range(args.num_iters_warm), desc="Warm startup iterations"):
+    for _ in tqdm(range(args.num_iters_warm), desc="Warm startup iterations"):
         warm_iterations.append(create_llm_and_measure_startup())
 
     # Determine if encoder compilation occurred in any iteration

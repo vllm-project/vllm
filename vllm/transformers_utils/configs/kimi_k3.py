@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 multimodal configuration."""
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -10,7 +10,7 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 logger = init_logger(__name__)
 
 
-class KimiK3VisionConfig(PretrainedConfig):
+class KimiK3VisionConfig(PreTrainedConfig):
     model_type = "kimi_k3_vision"
 
     def __init__(
@@ -83,7 +83,7 @@ class KimiK3VisionConfig(PretrainedConfig):
         self.intermediate_size = vt_intermediate_size
 
 
-class KimiK3Config(PretrainedConfig):
+class KimiK3Config(PreTrainedConfig):
     model_type = "kimi_k3"
 
     def __init__(
@@ -124,6 +124,11 @@ class KimiK3Config(PretrainedConfig):
         self.ignore_index = ignore_index
         self.media_placeholder_token_id = media_placeholder_token_id
         self.image_placeholder = image_placeholder
+
+        # Sparse MLA reads index_topk from the composite config.
+        dsa_config = getattr(self.text_config, "dsa_config", None)
+        if dsa_config is not None:
+            self.index_topk = dsa_config.index_topk
 
         if getattr(self.text_config, "quantization_config", None) is not None:
             self.quantization_config = self.text_config.quantization_config

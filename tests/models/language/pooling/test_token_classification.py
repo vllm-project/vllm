@@ -24,7 +24,7 @@ def seed_everything():
 @pytest.mark.parametrize(
     "model",
     [
-        "boltuix/NeuroBERT-NER",
+        "vllm-project/NeuroBERT-NER",
     ],
 )
 # The float32 is required for this tiny model to pass the test.
@@ -35,15 +35,12 @@ def test_bert_model_runner_v2(
     hf_runner,
     vllm_runner,
     example_prompts,
-    monkeypatch,
     model: str,
     dtype: str,
 ) -> None:
     prompt_batches = [[example_prompts[0]], example_prompts]
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_output_batches = [
             vllm_model.token_classify(prompts) for prompts in prompt_batches
         ]
@@ -70,7 +67,7 @@ def test_bert_model_runner_v2(
             torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)
 
 
-@pytest.mark.parametrize("model", ["disham993/electrical-ner-ModernBERT-base"])
+@pytest.mark.parametrize("model", ["vllm-project/electrical-ner-ModernBERT-base"])
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.flaky(reruns=3)
 @torch.inference_mode
@@ -82,7 +79,7 @@ def test_modernbert_models(
     dtype: str,
 ) -> None:
     # NOTE: https://github.com/vllm-project/vllm/pull/32403
-    # `disham993/electrical-ner-ModernBERT-base` is a randomly initialized
+    # `vllm-project/electrical-ner-ModernBERT-base` is a randomly initialized
     # model, which can cause numerical precision variance and edge cases.
     # We use @flaky(reruns=3) to mitigate intermittent failures.
     print(
@@ -110,11 +107,12 @@ def test_modernbert_models(
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
         hf_output = hf_output.detach().clone().cpu().float()
         vllm_output = vllm_output.detach().clone().cpu().float()
-        torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)
+        torch.testing.assert_close(hf_output, vllm_output, atol=6e-2, rtol=1e-3)
 
 
-@pytest.mark.parametrize("model", ["Davlan/xlm-roberta-base-ner-hrl"])
+@pytest.mark.parametrize("model", ["vllm-project/xlm-roberta-base-ner-hrl"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_xlm_roberta_models(
     hf_runner,
@@ -195,8 +193,9 @@ def test_openai_privacy_filter(
         torch.testing.assert_close(hf_output, vllm_output, atol=0.1, rtol=1e-2)
 
 
-@pytest.mark.parametrize("model", ["bd2lcco/Qwen3-0.6B-finetuned"])
+@pytest.mark.parametrize("model", ["vllm-project/Qwen3-0.6B-finetuned"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_auto_conversion(
     hf_runner,

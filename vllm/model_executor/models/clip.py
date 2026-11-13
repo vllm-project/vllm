@@ -15,7 +15,7 @@ from transformers import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
@@ -67,12 +67,11 @@ from .vision import (
 
 
 class CLIPImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -125,10 +124,10 @@ def dual_encoder_has_text_tokens(
 ) -> bool:
     """Whether a dual-encoder pooling batch still contains text tokens.
 
-    ``embed_input_ids`` used to treat "the batch has any image embeddings" as
+    `embed_input_ids` used to treat "the batch has any image embeddings" as
     "the whole batch is vision-only". Mixed image+text batches then skipped
     the text encoder, so completion-style text embeddings collapsed (issue
-    #53091). Honor the per-token ``is_multimodal`` mask instead.
+    #53091). Honor the per-token `is_multimodal` mask instead.
     """
     if not has_mm_embeddings or is_multimodal is None:
         return not has_mm_embeddings
@@ -142,7 +141,7 @@ def merge_dual_encoder_text_and_vision(
 ) -> torch.Tensor:
     """Restore vision embeddings on multimodal tokens after the text encoder.
 
-    The model runner builds ``is_multimodal`` on CPU; text and vision features
+    The model runner builds `is_multimodal` on CPU; text and vision features
     are on the compute device.
     """
     if is_multimodal is None or not bool(is_multimodal.any().item()):
@@ -206,20 +205,16 @@ class CLIPDummyInputsBuilder(BaseDummyInputsBuilder[CLIPProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -417,8 +412,7 @@ class CLIPAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        """Input shape: Batch x Time x Channel"""
-
+        """Input shape: Batch x Time x Channel."""
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -506,12 +500,12 @@ class CLIPEncoderLayer(nn.Module):
 
 
 class CLIPEncoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers` self
+    """Transformer encoder consisting of `config.num_hidden_layers` self
     attention layers. Each layer is a [`CLIPEncoderLayer`].
 
     Args:
         config: CLIPConfig
+
     """
 
     def __init__(

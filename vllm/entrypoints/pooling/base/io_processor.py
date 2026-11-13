@@ -10,17 +10,17 @@ from vllm import (
     PoolingRequestOutput,
 )
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateConfig,
-)
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatTemplateConfig,
+)
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     EncodeChatRenderParams,
@@ -207,7 +207,10 @@ class PoolingIOProcessor:
         else:
             pooling_params = ctx.pooling_params
 
-        params_seq = self._params_to_seq(pooling_params, num_requests)
+        # Clone to avoid modifying the caller's pooling parameters.
+        params_seq = [
+            param.clone() for param in self._params_to_seq(pooling_params, num_requests)
+        ]
 
         for param in params_seq:
             if param.task is None:

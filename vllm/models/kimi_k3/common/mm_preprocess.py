@@ -9,7 +9,7 @@ from typing import Any, cast
 import torch
 from transformers import BatchFeature
 
-from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
+from vllm.config.multimodal import ImageDummyOptions, MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import (
@@ -30,6 +30,9 @@ from vllm.multimodal.processing import (
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k3 import KimiK3Processor
+from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+    KimiK25FusedVisionProcessor,
+)
 
 logger = init_logger(__name__)
 
@@ -90,9 +93,9 @@ def navit_resize_image(
 class KimiK3ProcessingInfo(BaseProcessingInfo):
     """Processing information for the image-only Kimi-K3 model.
 
-    K3 uses the standard ``image`` modality (unlike K2.5's unified
-    ``vision_chunk``), so it builds its own ``KimiK3Processor`` wrapper around
-    the checkpoint's image processor and resolves the ``<|media_pad|>`` token
+    K3 uses the standard `image` modality (unlike K2.5's unified
+    `vision_chunk`), so it builds its own `KimiK3Processor` wrapper around
+    the checkpoint's image processor and resolves the `<|media_pad|>` token
     id the same way K2.5 does.
     """
 
@@ -106,6 +109,7 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
             self.ctx.model_config.model,
             revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
+            processor_cls_overrides=KimiK25FusedVisionProcessor,
         )
 
         # Resolve token ID from the tokenizer because transformers v5
@@ -191,9 +195,9 @@ class KimiK3ProcessingInfo(BaseProcessingInfo):
 class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
     """Builds image-based dummy inputs for K3 profiling.
 
-    The dummy text is made of ``<|kimi_image_placeholder|>`` tokens — exactly
-    the placeholder that K3's ``_get_prompt_updates`` expands — and the dummy
-    mm data is a plain list of PIL images under the ``image`` key.
+    The dummy text is made of `<|kimi_image_placeholder|>` tokens — exactly
+    the placeholder that K3's `_get_prompt_updates` expands — and the dummy
+    mm data is a plain list of PIL images under the `image` key.
     """
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -204,7 +208,7 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: MultiModalDummyOptions | None = None,
     ) -> MultiModalDataDict:
         media_proc_cfg = self.info.image_processor.media_proc_cfg
         max_size = self.info.get_max_image_size(
@@ -214,7 +218,6 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
             media_proc_cfg["patch_limit_on_one_side"],
             media_proc_cfg["fixed_output_tokens"],
         )
-        num_images = mm_counts.get("image", 0)
         image_overrides = cast(
             ImageDummyOptions | None,
             mm_options.get("image") if mm_options else None,
@@ -223,7 +226,7 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
             "image": self._get_dummy_images(
                 width=max_size.width,
                 height=max_size.height,
-                num_images=num_images,
+                num_images=mm_counts.get("image", 0),
                 overrides=image_overrides,
             )
         }
@@ -239,9 +242,9 @@ class KimiK3MultiModalProcessor(BaseMultiModalProcessor[KimiK3ProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Slice the flattened patch tensor back into per-image items.
 
-        ``pixel_values`` holds all patches from every image concatenated; each
-        image's patch count is ``prod(grid_thws[i])``. ``grid_thws`` is one
-        ``[N_t, N_h, N_w]`` row per image.
+        `pixel_values` holds all patches from every image concatenated; each
+        image's patch count is `prod(grid_thws[i])`. `grid_thws` is one
+        `[N_t, N_h, N_w]` row per image.
         """
         grid_thws = hf_inputs.get("grid_thws", torch.empty((0, 3)))
         grid_sizes = grid_thws.prod(-1)
@@ -259,12 +262,12 @@ class KimiK3MultiModalProcessor(BaseMultiModalProcessor[KimiK3ProcessingInfo]):
     ) -> Sequence[PromptUpdate]:
         """Expand each K3 image placeholder into a resolution-aware update.
 
-        K3's prompt carries a single ``<|kimi_image_placeholder|>`` token per
+        K3's prompt carries a single `<|kimi_image_placeholder|>` token per
         image. This replaces that token with
-        ``<|media_begin|>image {w}x{h}<|media_content|>{pads}<|media_end|>``,
+        `<|media_begin|>image {w}x{h}<|media_content|>{pads}<|media_end|>`,
         embedding the per-image resolution in the prompt and marking only the
-        ``<|media_pad|>`` positions as embedding slots (the number of pads is
-        the feature size returned by ``media_tokens_calculator``).
+        `<|media_pad|>` positions as embedding slots (the number of pads is
+        the feature size returned by `media_tokens_calculator`).
         """
         media_token_id = self.info.media_token_id
         media_token = self.info.media_token
