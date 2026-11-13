@@ -853,6 +853,8 @@ steps:
   - tests/tools/test_check_test_tethering.py
   - tools/pre_commit/check_agent_files.py
   - tests/tools/test_check_agent_files.py
+  - tools/pre_commit/pip_compile_blessed.py
+  - tests/tools/test_pip_compile_blessed.py
   - tools/pre_commit/check_trust_remote_code.py
   - tests/tools/test_check_trust_remote_code.py
   - tools/pre_commit/check_github_actions_pins.py
@@ -879,6 +881,7 @@ steps:
   - pytest -v -s tools/test_check_agent_files.py
   - pytest -v -s tools/test_check_trust_remote_code.py
   - pytest -v -s tools/test_dependency_pins.py
+  - pytest -v -s tests/tools/test_pip_compile_blessed.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers

@@ -41,10 +41,14 @@ repos:
   hooks:
   - id: shellcheck
     args: ["-s", "bash", "--format=gcc", "--rcfile=tools/pre_commit/.shellcheckrc"]
-- repo: https://github.com/astral-sh/uv-pre-commit
-  rev: 46787482b9fb2003c56e0f7592e312ef381829d9  # frozen: 0.13.6
+- repo: local
   hooks:
     - id: pip-compile
+      name: pip-compile-cuda
+      language: python
+      entry: python tools/pre_commit/pip_compile_blessed.py
+      pass_filenames: false
+      additional_dependencies: [uv==0.13.6]
       args: [
         --generate-hashes,
         requirements/test/cuda.in,
@@ -62,6 +66,10 @@ repos:
     - id: pip-compile
       alias: pip-compile-kv-connectors
       name: pip-compile-kv-connectors
+      language: python
+      entry: python tools/pre_commit/pip_compile_blessed.py
+      pass_filenames: false
+      additional_dependencies: [uv==0.13.6]
       args: [
         requirements/test/kv_connectors_cuda.in,
         -c, requirements/cuda.txt,
@@ -82,6 +90,10 @@ repos:
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
+      language: python
+      entry: python tools/pre_commit/pip_compile_blessed.py
+      pass_filenames: false
+      additional_dependencies: [uv==0.13.6]
       args: [
         --generate-hashes,
         requirements/test/rocm.in,
@@ -153,6 +165,10 @@ repos:
     - id: pip-compile
       alias: pip-compile-xpu
       name: pip-compile-xpu
+      language: python
+      entry: python tools/pre_commit/pip_compile_blessed.py
+      pass_filenames: false
+      additional_dependencies: [uv==0.13.6]
       args: [
         --generate-hashes,
         requirements/test/xpu.in,
@@ -166,6 +182,10 @@ repos:
     - id: pip-compile
       alias: pip-compile-cpu
       name: pip-compile-cpu
+      language: python
+      entry: python tools/pre_commit/pip_compile_blessed.py
+      pass_filenames: false
+      additional_dependencies: [uv==0.13.6]
       args: [
         --generate-hashes,
         requirements/test/cuda.in,
@@ -180,6 +200,10 @@ repos:
     - id: pip-compile
       alias: pip-compile-docs
       name: pip-compile-docs
+      language: python
+      entry: python tools/pre_commit/pip_compile_blessed.py
+      pass_filenames: false
+      additional_dependencies: [uv==0.13.6]
       args: [
         --generate-hashes,
         requirements/docs.in,
