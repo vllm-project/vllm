@@ -31,7 +31,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, groups_with_metadata_builders
 
 logger = init_logger(__name__)
 
@@ -315,9 +315,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         # and `_get_sliding_window_configs` leaves it on or off depending on
         # whether the target also runs FlashAttention. Decide it here instead.
         for groups in self.attn_groups:
-            for group in groups:
-                if not group.metadata_builders:
-                    continue
+            for group in groups_with_metadata_builders(groups):
                 builder = group.get_metadata_builder()
                 kv_group = kv_cache_config.kv_cache_groups[group.kv_cache_group_id]
                 if getattr(builder, "aot_schedule", False) and issubclass(

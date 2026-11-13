@@ -332,6 +332,10 @@ def test_no_attn_metadata_layers_keep_their_layout_without_builders(monkeypatch)
     )
     assert workspaces == []
     assert cg_support.min_cg_support == AttentionCGSupport.ALWAYS
+    assert (
+        attn_utils.get_varlen_cudagraph_unsupported_backend(attn_groups, vllm_config, 4)
+        is None
+    )
     # The draft backend still limits the kernel block size.
     assert kernel_block_sizes == [64]
     draft_group = attn_groups[0][1]

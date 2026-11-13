@@ -672,6 +672,7 @@ def test_decode_metadata_update_needs_draft_decode_steps(
     speculator.attn_groups = [
         [
             SimpleNamespace(  # type: ignore[list-item]  # stand-in group
+                metadata_builders=[object()],
                 supports_draft_decode_metadata_update=True,
                 backend=SimpleNamespace(get_name=lambda: "CAPABLE"),
             )

@@ -449,10 +449,7 @@ class AttentionGroup:
 
     @property
     def supports_draft_decode_metadata_update(self) -> bool:
-        return (
-            not self.metadata_builders
-            or self.get_metadata_builder().supports_draft_decode_metadata_update
-        )
+        return self.get_metadata_builder().supports_draft_decode_metadata_update
 
     def update_draft_decode_metadata(
         self,
@@ -460,6 +457,14 @@ class AttentionGroup:
     ) -> None:
         metadata = attn_metadata[self.layer_names[0]]
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
+
+
+def groups_with_metadata_builders(
+    groups: Iterable[AttentionGroup],
+) -> list[AttentionGroup]:
+    """The groups that build attention metadata: groups made only of
+    init_attn_backend's no_attn_metadata_layer_names have no builders."""
+    return [group for group in groups if group.metadata_builders]
 
 
 def map_kv_caches_to_kernel_blocks(

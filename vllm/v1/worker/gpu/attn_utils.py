@@ -40,6 +40,7 @@ from vllm.v1.worker.utils import (
     allocate_kv_cache,
     bind_kv_cache_to_layers,
     customize_layer_config,
+    groups_with_metadata_builders,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
 )
@@ -317,9 +318,7 @@ def get_attn_cg_support(
     min_cg_support = AttentionCGSupport.ALWAYS
     min_cg_attn_backend = None
     for groups in attn_groups:
-        for group in groups:
-            if not group.metadata_builders:
-                continue
+        for group in groups_with_metadata_builders(groups):
             if checked_layer_names is not None and checked_layer_names.isdisjoint(
                 group.layer_names
             ):
@@ -372,7 +371,7 @@ def get_varlen_cudagraph_unsupported_backend(
     max_query_len. See AttentionMetadataBuilder.get_varlen_cudagraph_max_query_len().
     """
     for groups in attn_groups:
-        for group in groups:
+        for group in groups_with_metadata_builders(groups):
             if checked_layer_names is not None and checked_layer_names.isdisjoint(
                 group.layer_names
             ):
@@ -510,7 +509,7 @@ def build_attn_metadata(
     cached_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
-        groups = [g for g in attn_groups[i] if g.metadata_builders]
+        groups = groups_with_metadata_builders(attn_groups[i])
         if not groups:
             continue
         block_table = block_tables[i]
