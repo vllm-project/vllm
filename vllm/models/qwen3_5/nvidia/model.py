@@ -37,6 +37,7 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+import vllm.envs as envs
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -93,6 +94,7 @@ from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5MoeProcessingInfo,
     Qwen3_5ProcessingInfo,
 )
+from vllm.model_executor.models.qwen3_5_replicate import setup_replicated_ffn
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
@@ -368,6 +370,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     moe_config.skip_final_all_reduce = False
                 self.mlp_output_is_partial = moe_partial_ok
         elif config.model_type == "qwen3_5_text":
+            replicate_mlp = envs.VLLM_QWEN3_5_REPLICATE_FFN
             self.mlp = Qwen3NextMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
@@ -375,7 +378,11 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 reduce_results=not self.use_fused_allreduce_norm,
+                # Whole MLP on every rank: its output is complete, no all-reduce.
+                disable_tp=replicate_mlp,
             )
+            if replicate_mlp:
+                self.mlp_output_is_partial = False
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")
 
@@ -497,6 +504,8 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             vllm_config.model_config.hf_text_config
         )
         parallel_config = vllm_config.parallel_config
+        if envs.VLLM_QWEN3_5_REPLICATE_FFN:
+            setup_replicated_ffn(config, parallel_config)
 
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts

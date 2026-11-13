@@ -36,6 +36,7 @@ from transformers import (
     Qwen3_5TextConfig,
 )
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -58,6 +59,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.qwen3_5_replicate import setup_replicated_ffn
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -179,6 +181,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                # Whole MLP on every rank: its output is complete, no all-reduce.
+                disable_tp=envs.VLLM_QWEN3_5_REPLICATE_FFN,
             )
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")
@@ -237,6 +241,8 @@ class Qwen3_5Model(Qwen3NextModel):
             vllm_config.model_config.hf_text_config
         )
         parallel_config = vllm_config.parallel_config
+        if envs.VLLM_QWEN3_5_REPLICATE_FFN:
+            setup_replicated_ffn(config, parallel_config)
 
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts

@@ -519,6 +519,10 @@ class Worker(WorkerBase):
                 self.local_rank,
                 current_platform.dist_backend,
             )
+            # Cheap; also arms the sync when a model installs it itself.
+            from vllm.triton_utils import tp_synced_autotune
+
+            tp_synced_autotune.configure(self.vllm_config.parallel_config)
 
             warn_if_flashinfer_kernels_missing()
 
