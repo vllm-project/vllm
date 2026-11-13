@@ -5,13 +5,16 @@ from collections.abc import Iterable
 from typing import Any, cast
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm import envs
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
+    get_dcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
@@ -27,6 +30,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    KimiK3MergedQKVGateLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -70,15 +74,36 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.kimi_k3.amd.dsa import KimiK3DSAAttention
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
+from vllm.models.kimi_k3.amd.specialized_decode.hooks import SpecializedDecodeMixin
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
+    specialized_decode_config,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 logger = init_logger(__name__)
+
+
+# DSA indexer weight rename mapping. Specific rules must come before the
+# generic ".self_attn.indexer." rule: the loop breaks on the first match.
+_DSA_RENAME_PARAMS_MAPPING = [
+    (".self_attn.dsa_indexer.wq_index.", ".self_attn.indexer.wq_b."),
+    (".self_attn.dsa_indexer.wk_index.", ".self_attn.indexer.wk."),
+    (".self_attn.dsa_indexer.wv_index.", ".self_attn.indexer.weights_proj."),
+    (".self_attn.dsa_indexer.k_index_norm.", ".self_attn.indexer.k_norm."),
+    # Generic fallback for already-nested indexer names
+    (".self_attn.dsa_indexer.", ".self_attn.indexer."),
+]
 
 
 class KimiMLP(nn.Module):
@@ -131,6 +156,78 @@ class KimiMLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+
+class KimiRoutedInputLinear(ReplicatedLinear):
+    """Distribute large prefill projections over identical TP/DCP groups."""
+
+    # Measured crossover on MI355X: smaller batches lose to gather overhead.
+    min_sharded_tokens = 8192
+    _token_group = None
+
+    def enable_token_sharding(self) -> None:
+        from vllm.platforms.rocm import on_gfx950
+
+        config = get_current_vllm_config()
+        parallel = config.parallel_config
+        if (
+            not on_gfx950()
+            or config.lora_config is not None
+            or parallel.use_ubatching
+            or parallel.tensor_parallel_size != 8
+            or parallel.decode_context_parallel_size != 8
+            or self.input_size != 7168
+            or self.output_size != 3584
+        ):
+            return
+        tp, dcp = get_tp_group(), get_dcp_group()
+        if tp.ranks == dcp.ranks and tp.rank_in_group == dcp.rank_in_group:
+            self._token_group = dcp
+
+    def forward(self, x: torch.Tensor):
+        group = self._token_group
+        # Small batches keep replicated GEMM: gathering costs more than it saves.
+        if (
+            group is None
+            or x.ndim != 2
+            or x.dtype != torch.bfloat16
+            or x.shape[0] < self.min_sharded_tokens
+        ):
+            return super().forward(x)
+
+        projected, bias = self._project_local(x)
+        return group.all_gather(projected, dim=0)[: x.shape[0]], bias
+
+    def _project_local(self, x: torch.Tensor):
+        group = self._token_group
+        assert group is not None
+        tokens = x.shape[0]
+        chunk = (tokens + group.world_size - 1) // group.world_size
+        start = group.rank_in_group * chunk
+        local = x[start : min(start + chunk, tokens)]
+        if local.shape[0] != chunk:
+            local = F.pad(local, (0, 0, 0, chunk - local.shape[0]))
+        return super().forward(local)
+
+    def forward_quantized(self, x: torch.Tensor):
+        """Exchange the same MXFP4 activations consumed by the routed experts."""
+        from aiter import dtypes
+        from aiter.ops.quant import per_1x32_mx_quant_hip
+
+        group = self._token_group
+        assert group is not None
+        projected, bias = self._project_local(x)
+        assert bias is None
+        values, scales = per_1x32_mx_quant_hip(
+            projected, quant_dtype=dtypes.fp4x2, shuffle=False
+        )
+        packed = torch.cat((values.view(torch.uint8), scales.view(torch.uint8)), dim=1)
+        gathered = group.all_gather(packed.view(torch.int32), dim=0)
+        gathered = gathered.view(torch.uint8)[: x.shape[0]]
+        split = self.output_size // 2
+        values = gathered[:, :split].contiguous().view(dtypes.fp4x2)
+        scales = gathered[:, split:].contiguous().view(dtypes.fp8_e8m0)
+        return values, scales
 
 
 class KimiRoutedOutputTransform(nn.Module):
@@ -270,11 +367,21 @@ class KimiMoE(nn.Module):
         self.routed_expert_up_proj: ReplicatedLinear | ColumnParallelLinear | None
         self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
-            self.routed_expert_down_proj = ReplicatedLinear(
+            # The checkpoint stores this projection in BF16; only an explicit
+            # online quantization config may change its weight precision.
+            down_quant_config = quant_config
+            if quant_config is not None and quant_config.get_name() != "online":
+                down_quant_config = quant_config.online_quantization_config
+            input_linear = (
+                KimiRoutedInputLinear
+                if getattr(config, "dsa_config", None) is not None
+                else ReplicatedLinear
+            )
+            self.routed_expert_down_proj = input_linear(
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
-                quant_config=None,
+                quant_config=down_quant_config,
                 prefix=f"{prefix}.routed_expert_down_proj",
             )
             self.routed_expert_norm = (
@@ -341,6 +448,17 @@ class KimiMoE(nn.Module):
             routed_output_transform=self.routed_output_transform,
             runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
         )
+        moe_parallel = self.experts.moe_config.moe_parallel_config
+        if (
+            isinstance(self.routed_expert_down_proj, KimiRoutedInputLinear)
+            and not moe_parallel.is_sequence_parallel
+            and moe_parallel.dp_size
+            == moe_parallel.pcp_size
+            == moe_parallel.ep_size
+            == 1
+        ):
+            # The sharded path adds an all_gather, so all ranks must take it or none.
+            self.routed_expert_down_proj.enable_token_sharding()
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
             if w13_weight is None:
@@ -398,7 +516,20 @@ class KimiMLAAttention(nn.Module):
         self.use_nope = use_nope
         assert self.use_nope is True
         assert num_heads % tp_size == 0
-        if self.q_lora_rank is not None:
+        self.use_output_gate = config.mla_use_output_gate
+        if self.q_lora_rank is not None and self.use_output_gate:
+            self.fused_qkv_a_proj = KimiK3MergedQKVGateLinear(
+                hidden_size=self.hidden_size,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                total_num_heads=num_heads,
+                v_head_dim=self.v_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fused_qkv_a_proj",
+            )
+        elif self.q_lora_rank is not None:
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -454,8 +585,7 @@ class KimiMLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.use_output_gate = config.mla_use_output_gate
-        if self.use_output_gate:
+        if self.use_output_gate and self.q_lora_rank is None:
             projection_size = self.num_heads * self.v_head_dim
             self.g_proj = ColumnParallelLinear(
                 self.hidden_size,
@@ -517,6 +647,7 @@ class KimiDecoderLayer(nn.Module):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -555,23 +686,39 @@ class KimiDecoderLayer(nn.Module):
             assert qk_rope_head_dim is not None
             assert v_head_dim is not None
             assert kv_lora_rank is not None
-            assert mla_use_nope is not None
-            self.self_attn = KimiMLAAttention(
-                layer_idx=layer_idx,
-                hidden_size=self.hidden_size,
-                num_heads=config.num_attention_heads,
-                quant_config=quant_config,
-                cache_config=cache_config,
-                model_config=model_config,
-                prefix=f"{prefix}.self_attn",
-                config=config,
-                qk_nope_head_dim=qk_nope_head_dim,
-                qk_rope_head_dim=qk_rope_head_dim,
-                v_head_dim=v_head_dim,
-                q_lora_rank=config.q_lora_rank,
-                kv_lora_rank=kv_lora_rank,
-                use_nope=mla_use_nope,
-            )
+            assert mla_use_nope, "Kimi-K3 MLA (MultiHeadLatentAttention) is NoPE-only"
+            if config.is_dsa_layer(layer_idx):
+                self.self_attn = KimiK3DSAAttention(
+                    config=config,
+                    hidden_size=self.hidden_size,
+                    num_heads=config.num_attention_heads,
+                    qk_nope_head_dim=qk_nope_head_dim,
+                    qk_rope_head_dim=qk_rope_head_dim,
+                    v_head_dim=v_head_dim,
+                    q_lora_rank=config.q_lora_rank,
+                    kv_lora_rank=kv_lora_rank,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.self_attn",
+                    topk_indices_buffer=topk_indices_buffer,
+                )
+            else:
+                self.self_attn = KimiMLAAttention(
+                    layer_idx=layer_idx,
+                    hidden_size=self.hidden_size,
+                    num_heads=config.num_attention_heads,
+                    quant_config=quant_config,
+                    cache_config=cache_config,
+                    model_config=model_config,
+                    prefix=f"{prefix}.self_attn",
+                    config=config,
+                    qk_nope_head_dim=qk_nope_head_dim,
+                    qk_rope_head_dim=qk_rope_head_dim,
+                    v_head_dim=v_head_dim,
+                    q_lora_rank=config.q_lora_rank,
+                    kv_lora_rank=kv_lora_rank,
+                    use_nope=mla_use_nope,
+                )
 
         if (
             self.is_moe
@@ -745,11 +892,29 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        # Single model-level top-k buffer shared by all DSA layers; required
+        # by KimiK3DSAAttention.
+        self.topk_indices_buffer: torch.Tensor | None = None
+        if config.dsa_config is not None and any(
+            config.is_dsa_layer(layer_idx)
+            for layer_idx in range(config.num_hidden_layers)
+        ):
+            topk_buffer_device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.topk_indices_buffer = torch.empty(
+                (
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    config.dsa_config.index_topk,
+                ),
+                dtype=torch.int32,
+                device=topk_buffer_device,
+            )
+
         def get_layer(prefix: str):
             return KimiDecoderLayer(
                 config,
                 vllm_config,
                 prefix,
+                topk_indices_buffer=self.topk_indices_buffer,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -757,6 +922,22 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             get_layer,
             prefix=f"{prefix}.layers",
         )
+
+        if config.dsa_config is not None:
+            # A DSA layer silently built as dense MLA would be invisible in
+            # outputs; check the wiring matches dsa_config.
+            n_dsa_built = sum(
+                isinstance(layer.self_attn, KimiK3DSAAttention)
+                for layer in self.layers[self.start_layer : self.end_layer]
+            )
+            n_dsa_expected = sum(
+                config.is_dsa_layer(layer_idx)
+                for layer_idx in range(self.start_layer, self.end_layer)
+            )
+            assert n_dsa_built == n_dsa_expected, (
+                f"DSA wiring broken: built {n_dsa_built} DSA attention layers "
+                f"but dsa_config expects {n_dsa_expected}."
+            )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -781,6 +962,23 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
+
+    def _new_block_residual(
+        self, hidden_states: torch.Tensor, num_blocks: int
+    ) -> torch.Tensor:
+        num_tokens, hidden_size = hidden_states.shape
+        if not is_workspace_manager_initialized():
+            return hidden_states.new_empty(num_tokens, num_blocks, hidden_size)
+        bank = current_workspace_manager().get_persistent(
+            "kimi_k3_attn_res_block_residual",
+            (self.max_num_batched_tokens, num_blocks, hidden_size),
+            hidden_states.dtype,
+        )
+        assert num_tokens <= bank.shape[0]
+        return bank[:num_tokens]
 
     def make_empty_intermediate_tensors(
         self,
@@ -828,6 +1026,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        step=None,  # specialized_decode's plan
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
@@ -864,8 +1063,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                     {"hidden_states": hidden_states, "residual": residual}
                 )
 
-            # NOTE: the final norm is applied in compute_logits instead of here,
-            # so the MTP draft model receives the pre-norm hidden states.
+            # NOTE: the final norm is applied in compute_logits instead of here.
             if residual is not None:
                 hidden_states = hidden_states + residual
             if aux_hidden_states:
@@ -873,9 +1071,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             return hidden_states
 
         attn_res_block_num = cdiv(self.end_layer, self.config.attn_res_block_size)
-        block_residual = hidden_states.new_empty(
-            hidden_states.size(0), attn_res_block_num, hidden_states.size(1)
-        )
+        block_residual = self._new_block_residual(hidden_states, attn_res_block_num)
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
@@ -885,11 +1081,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            hidden_states, residual, prefix_delta = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                prefix_delta=prefix_delta,
+            kernel = step.layer(layer_idx) if step is not None else None
+            hidden_states, residual, prefix_delta = (kernel or layer)(
+                positions, hidden_states, residual, prefix_delta
             )
             if (layer_idx + 1) in self.aux_hidden_state_layers:
                 self._maybe_add_hidden_state(
@@ -913,8 +1107,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             attn_res_block_num,
             delta=prefix_delta,
         )
-        # NOTE: the final norm is applied in compute_logits instead of here, so
-        # the MTP draft model receives the pre-norm hidden states.
+        # NOTE: the final norm is applied in compute_logits instead of here.
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -950,6 +1143,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 (".fused_qkv_a_proj", ".q_a_proj", 0),
                 (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             ]
+            if self.config.mla_use_output_gate:
+                stacked_params_mapping.append((".fused_qkv_a_proj", ".g_proj", 2))
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
@@ -986,6 +1181,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
+                    continue
+                # DSA keeps its output gate separate from the fused Q/KV.
+                if weight_name == ".g_proj" and name in params_dict:
                     continue
                 # We have mlp.experts[0].gate_proj in the checkpoint.
                 # Since we handle the experts below in expert_params_mapping,
@@ -1032,6 +1230,28 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                     )
                     break
                 else:
+                    if self.config.dsa_config is not None:
+                        for param_name, weight_name in _DSA_RENAME_PARAMS_MAPPING:
+                            if weight_name in name:
+                                name = name.replace(weight_name, param_name)
+                                break
+                    # The bf16 indexer projections (wk/wv) cannot take an fp8
+                    # checkpoint weight: default_weight_loader would cast it
+                    # and silently drop the companion weight_scale_inv. (Only
+                    # wq_index is fp8-capable, via quant_config.)
+                    if name.endswith(
+                        (".dsa_indexer.wk_index.weight", ".dsa_indexer.wv_index.weight")
+                    ) and loaded_weight.dtype in (
+                        torch.float8_e4m3fn,
+                        torch.float8_e4m3fnuz,
+                        torch.float8_e5m2,
+                        torch.float8_e5m2fnuz,
+                    ):
+                        raise ValueError(
+                            f"{name}: fp8 indexer wk/wv checkpoint weights are "
+                            "not supported (bf16 projections; the scale would "
+                            "be dropped). Convert the checkpoint to bf16."
+                        )
                     # Skip loading extra bias for GPTQ models.
                     if (
                         name.endswith(".bias")
@@ -1057,10 +1277,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
 
 class KimiLinearForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+    nn.Module,
+    HasInnerState,
+    SupportsPP,
+    MixtureOfExperts,
+    IsHybrid,
+    SpecializedDecodeMixin,
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # raises for an unsupported deployment before any weight is allocated
+        decode_config = specialized_decode_config(vllm_config)
         super().__init__()
+        self.init_specialized_decode(decode_config)
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.config = self.model_config.hf_config
@@ -1102,8 +1330,9 @@ class KimiLinearForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
+        step = self.plan_specialized_decode(positions, intermediate_tensors)
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            input_ids, positions, intermediate_tensors, inputs_embeds, step, **kwargs
         )
         return hidden_states
 
@@ -1113,7 +1342,9 @@ class KimiLinearForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
@@ -1146,8 +1377,8 @@ class KimiLinearForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        # The model's final norm is applied here (not at the end of forward) so
-        # that the pre-norm hidden states can be fed to the MTP draft model.
+        # The model's final norm is applied here, not at the end of forward.
+        self.after_specialized_decode_step()
         hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
 

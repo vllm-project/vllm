@@ -59,6 +59,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.xpu.xpu_sparse import DeepseekV4XPUAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -540,10 +541,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             symm_buffer.topk_weights[:num_tokens],
         )
 
-        # This method must have been already called during the weight loading phase.
-        # We call it again here to cover the dummy weight loading case.
-        self.finalize_weights()
-
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
         deep_gemm.fp8_fp4_mega_moe(
@@ -638,7 +635,9 @@ class DeepseekV4MoE(nn.Module):
 
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        is_hash_moe = extract_layer_index(prefix) < config.mlp_layer_types.count(
+            "hash_moe"
+        )
         self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -1038,10 +1037,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         self.hc_head_op = HCHeadOp()
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -1149,14 +1145,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
-
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
@@ -1218,14 +1206,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                             name = name_mapped
                             break
                     loaded_params.add(name_mapped)
-                    continue
-                elif "attn_sink" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):
@@ -1383,9 +1363,10 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
-        return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

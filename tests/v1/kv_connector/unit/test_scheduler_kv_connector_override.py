@@ -66,7 +66,7 @@ class DummyKVConnector(KVConnectorBase_V1):
             block_ids_by_req=block_ids_by_req,
         )
 
-    def start_load_kv(self, kv_caches, finished_req_ids):
+    def start_load_kv(self, forward_context, **kwargs) -> None:
         pass
 
     def wait_for_layer_load(self, layer_name):
@@ -99,7 +99,7 @@ def _my_plugin():
         scheduler_output.block_hashes_by_req = block_hashes_by_req  # type: ignore[attr-defined]
         return connector.build_connector_meta(scheduler_output)
 
-    Scheduler._build_kv_connector_meta = _custom_build_kv_connector_meta
+    Scheduler._build_kv_connector_meta = _custom_build_kv_connector_meta  # type: ignore[method-assign]
 
 
 @pytest.fixture
@@ -157,7 +157,6 @@ def test_connector_receives_block_hashes(_load_plugin):
 def _make_model_runner_output(scheduler: Scheduler) -> ModelRunnerOutput:
     return ModelRunnerOutput(
         req_ids=[req.request_id for req in scheduler.running],
-        req_id_to_index={req.request_id: i for i, req in enumerate(scheduler.running)},
         sampled_token_ids=[[1000]] * len(scheduler.running),
         logprobs=None,
         prompt_logprobs_dict={},

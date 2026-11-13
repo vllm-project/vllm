@@ -6,14 +6,16 @@
 //! Port of `content_parsers.py`. Each parser takes a chunk of captured text and
 //! parses it into a single key in the output message dictionary.
 
-use regex_automata::meta::Regex;
-use regex_automata::util::syntax;
+use std::sync::Arc;
+
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror_ext::AsReport as _;
 
+use super::pcre;
 use super::spec::{ContentKind, deserialize};
-use super::{Result, invalid, unsupported};
+use super::{Result, invalid};
 use crate::tool::{convert_integer_text, convert_number_text};
 use crate::unified::{self, parsing_failed};
 
@@ -61,7 +63,8 @@ pub(super) struct JsonArgs {
 
 #[derive(Debug, Clone)]
 pub(super) struct XmlInlineArgs {
-    tag_pattern: Regex,
+    /// The pattern's source and compiled form.
+    tag_pattern: (String, Arc<pcre::Regex>),
     /// Index of the required `key` group.
     key_group: usize,
     /// Index of the `value` group, if the pattern declares one.
@@ -143,17 +146,19 @@ impl ContentParser {
             }
             ContentKind::XmlInline => {
                 let spec: XmlInlineSpec = deserialize(&args, &context)?;
-                let tag_pattern = compile_regex(scope, &spec.tag_pattern)?;
-                let group_info = tag_pattern.group_info();
-                let Some(key_group) = group_info.to_index(Default::default(), "key") else {
+                let regex = pcre::Regex::new(scope, &spec.tag_pattern)?;
+                let group = |group: &str| {
+                    regex.group_names().find_map(|(index, name)| (name == group).then_some(index))
+                };
+                let Some(key_group) = group("key") else {
                     return Err(invalid!(
                         "{scope}: xml-inline: tag_pattern must have a named group 'key'. Pattern: {}",
                         spec.tag_pattern
                     ));
                 };
-                let value_group = group_info.to_index(Default::default(), "value");
+                let value_group = group("value");
                 Self::XmlInline(XmlInlineArgs {
-                    tag_pattern,
+                    tag_pattern: (spec.tag_pattern, Arc::new(regex)),
                     key_group,
                     value_group,
                     value_parser: ValueParserSpec::compile(scope, spec.value_parser)?,
@@ -191,6 +196,14 @@ impl ContentParser {
             Self::Json(args) => args.parse(text),
             Self::XmlInline(args) => args.parse(text),
             Self::KvLines(args) => args.parse(text),
+        }
+    }
+
+    /// The source of an `xml-inline` tag pattern.
+    pub fn tag_pattern(&self) -> Option<&str> {
+        match self {
+            Self::XmlInline(args) => Some(&args.tag_pattern.0),
+            _ => None,
         }
     }
 }
@@ -258,15 +271,17 @@ impl XmlInlineArgs {
     /// Parse shallow XML-ish tags into a dict.
     fn parse(&self, text: &str) -> unified::Result<Value> {
         let mut out = Map::new();
-        for captures in self.tag_pattern.captures_iter(text) {
-            let key =
-                captures.get_group(self.key_group).map(|span| &text[span.range()]).ok_or_else(
-                    || parsing_failed!("xml-inline: named group 'key' did not participate"),
-                )?;
+        let tags =
+            self.tag_pattern.1.find_iter(text).map_err(|error| parsing_failed!("{error}"))?;
+        for tag in tags {
+            let group = |index: usize| tag.groups[index].clone().map(|span| &text[span]);
+            let key = group(self.key_group).ok_or_else(|| {
+                parsing_failed!("xml-inline: named group 'key' did not participate")
+            })?;
             let raw = match self.value_group {
                 // The pattern has no `value` group.
                 None => Some(""),
-                Some(index) => captures.get_group(index).map(|span| &text[span.range()]),
+                Some(index) => group(index),
             };
             let value = match raw {
                 Some(raw) => sub_parse(raw, self.value_parser.as_deref())?,
@@ -353,34 +368,7 @@ fn quote_bare_keys(text: &str) -> String {
     static BARE_KEY: std::sync::LazyLock<Regex> =
         std::sync::LazyLock::new(|| Regex::new(r"([{,])(\w+):").expect("valid regex"));
 
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for captures in BARE_KEY.captures_iter(text) {
-        let whole = captures.get_match().expect("match");
-        let separator = captures.get_group(1).expect("group 1");
-        let key = captures.get_group(2).expect("group 2");
-        out.push_str(&text[last..whole.start()]);
-        out.push_str(&text[separator.range()]);
-        out.push('"');
-        out.push_str(&text[key.range()]);
-        out.push_str("\":");
-        last = whole.end();
-    }
-    out.push_str(&text[last..]);
-    out
-}
-
-/// Compile a Python-syntax regex with `re.DOTALL`, as Transformers does.
-pub(super) fn compile_regex(scope: &str, pattern: &str) -> Result<Regex> {
-    Regex::builder()
-        .syntax(syntax::Config::new().dot_matches_new_line(true))
-        .build(pattern)
-        .map_err(|error| {
-            unsupported!(
-                "{scope}: regex {pattern:?} is not supported by the Rust regex engine: {}",
-                error.as_report()
-            )
-        })
+    BARE_KEY.replace_all(text, r#"$1"$2":"#).into_owned()
 }
 
 fn default_strip() -> bool {
@@ -491,6 +479,39 @@ mod tests {
     }
 
     #[test]
+    fn xml_inline_tags_may_end_where_the_pattern_looks_ahead() {
+        let xml = parser(
+            "xml-inline",
+            json!({
+                "tag_pattern": r#"<arg name="(?P<key>\w+)">(?P<value>.*?)\n(?:</arg>|(?=<arg name="))"#,
+            }),
+        );
+        let value = xml
+            .parse("<arg name=\"a\">1\n<arg name=\"b\">x <arg name=\"c\"> y\n</arg>")
+            .unwrap();
+        assert_eq!(value, json!({"a": "1", "b": "x <arg name=\"c\"> y"}));
+        assert_eq!(
+            xml.tag_pattern(),
+            Some(r#"<arg name="(?P<key>\w+)">(?P<value>.*?)\n(?:</arg>|(?=<arg name="))"#)
+        );
+
+        // Look-around anywhere, as in Python.
+        let middle = parser(
+            "xml-inline",
+            json!({"tag_pattern": r"(?P<key>\w+)(?=:)(?P<value>.*)"}),
+        );
+        assert_eq!(middle.parse("a:b").unwrap(), json!({"a": ":b"}));
+        let behind = parser(
+            "xml-inline",
+            json!({"tag_pattern": r"(?<=\n)(?P<key>\w+)=(?P<value>\w*)(?!\w)"}),
+        );
+        assert_eq!(
+            behind.parse("x=1\ny=2\nz=").unwrap(),
+            json!({"y": "2", "z": ""})
+        );
+    }
+
+    #[test]
     fn kv_lines_split_and_strip() {
         let kv = parser("kv-lines", json!({"value_parser": {"name": "int"}}));
         assert_eq!(
@@ -530,7 +551,8 @@ mod tests {
             error("kv-lines", json!({"value_parser": {"name": "yaml"}})),
         ]);
         assert!(matches!(
-            error("xml-inline", json!({"tag_pattern": r"(?<=a)b"})),
+            // Python's `regex` accepts unbounded lookbehinds; PCRE2 does not.
+            error("xml-inline", json!({"tag_pattern": r"(?<=a+)(?P<key>b)"})),
             super::super::HfTemplateError::Unsupported { .. }
         ));
     }

@@ -3,21 +3,21 @@
 """Inkling chat-encoding core.
 
 Pure implementation of Inkling chat rendering, kept deliberately free of
-vLLM imports: it depends only on the :class:`InklingTextTokenizer` protocol
+vLLM imports: it depends only on the `InklingTextTokenizer` protocol
 and speaks OpenAI-style message dicts. If a standalone Inkling
 input-processing library becomes available, this module is the unit to
-swap out — the swap point is marked in ``vllm/renderers/inkling.py``.
+swap out — the swap point is marked in `vllm/renderers/inkling.py`.
 
 Multimodal parts follow the contract of vLLM's Inkling multimodal processor
-(``InklingMultiModalProcessor`` anchors prompt updates on the bare
+(`InklingMultiModalProcessor` anchors prompt updates on the bare
 content-kind marker and inserts the per-patch placeholder run itself):
 
-* image parts emit only ``<|content_image|>`` — no seed placeholder id;
-* audio parts emit ``<|content_audio_input|><|audio_end|>`` — no seed
+* image parts emit only `<|content_image|>` — no seed placeholder id;
+* audio parts emit `<|content_audio_input|><|audio_end|>` — no seed
   placeholder id between them.
 
-``reasoning_effort`` (a float in [0, 0.99], sourced from
-``chat_template_kwargs`` only) renders the ``Thinking effort level:``
+`reasoning_effort` (a float in [0, 0.99], sourced from
+`chat_template_kwargs` only) renders the `Thinking effort level:`
 system control block after the tool declarations and initial system messages.
 """
 
@@ -102,7 +102,7 @@ def render_inkling_messages(
 
     PURE renderer: emits Inkling framing plus bare media markers; media
     encoding and placeholder expansion happen later in the MM processor.
-    ``add_generation_prompt`` appends the assistant turn opener so the
+    `add_generation_prompt` appends the assistant turn opener so the
     model continues into the response.
     """
     input_ids: list[int] = []
@@ -132,17 +132,52 @@ def render_inkling_messages(
             reasoning_effort = None
 
         if role == "tool":
-            tool_name = message.get("name") or tool_call_id_to_name.get(
-                str(message.get("tool_call_id") or ""), ""
+            tool_name = str(
+                message.get("name")
+                or tool_call_id_to_name.get(str(message.get("tool_call_id") or ""), "")
             )
-            _append_message(
-                input_ids,
-                tokenizer,
-                "tool",
-                "text",
-                _flatten_text_content(message.get("content")),
-                author_name=str(tool_name),
-            )
+            # Tool responses may carry media parts (e.g. screenshots). Emit one
+            # marker per media item for the MM processor, but coalesce adjacent
+            # text parts so text-only results keep the same framing as before.
+            tool_parts = list(_iter_render_parts(message.get("content")))
+            if not tool_parts:
+                # Keep an empty block so the tool call it answers is not left
+                # dangling.
+                tool_parts = [("text", "")]
+            text_parts: list[str] = []
+            for kind, text in tool_parts:
+                if kind == "thinking":
+                    raise ValueError("Inkling thinking parts require role='assistant'")
+                if kind == "text":
+                    text_parts.append(text)
+                    continue
+                if text_parts:
+                    _append_message(
+                        input_ids,
+                        tokenizer,
+                        "tool",
+                        "text",
+                        "".join(text_parts),
+                        author_name=tool_name,
+                    )
+                    text_parts.clear()
+                _append_message(
+                    input_ids,
+                    tokenizer,
+                    "tool",
+                    kind,
+                    text,
+                    author_name=tool_name,
+                )
+            if text_parts:
+                _append_message(
+                    input_ids,
+                    tokenizer,
+                    "tool",
+                    "text",
+                    "".join(text_parts),
+                    author_name=tool_name,
+                )
             continue
 
         if role == "assistant":

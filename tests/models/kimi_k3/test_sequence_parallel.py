@@ -142,9 +142,10 @@ def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
     layer.input_layernorm = _IdentityNorm()
     layer.post_attention_layernorm = _IdentityNorm()
     layer.mlp = _RecordingMoE()
-    layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+    monkeypatch.setattr(
         layer,
+        "_run_self_attn",
+        MethodType(lambda self, positions, hidden_states: hidden_states, layer),
     )
 
     _mock_sequence_parallel_collectives(monkeypatch)
@@ -188,9 +189,10 @@ def test_kimi_attn_residual_states_stay_sequence_sharded(monkeypatch):
     layer.self_attention_res_proj = _Projection()
     layer.mlp_res_proj = _Projection()
     layer.mlp = _RecordingMoE()
-    layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+    monkeypatch.setattr(
         layer,
+        "_run_self_attn",
+        MethodType(lambda self, positions, hidden_states: hidden_states, layer),
     )
 
     _mock_sequence_parallel_collectives(monkeypatch)

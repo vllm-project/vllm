@@ -12,19 +12,30 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_MXFP8_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
 )
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+    AiterFlyDSLMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.pytorch import TorchMxFp8LinearKernel
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.nvfp4.cutlass import CutlassNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.pytorch import TorchNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
@@ -68,7 +79,15 @@ SUPPORTING = {
     AiterPerTokenFp8ScaledMMLinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
+    RocmDotScaledMxfp8LinearKernel,
+    CutlassNvFp4LinearKernel,
+    TorchNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
+    FlashInferB12xNvFp4LinearKernel,
+    AiterFlyDSLMxfp8LinearKernel,
 }
+if current_platform.is_cuda():
+    SUPPORTING.add(TorchMxFp8LinearKernel)
 
 
 def _all_kernel_classes() -> list[type]:
@@ -120,9 +139,11 @@ def test_only_known_backends_support_prequantized_input():
 
 
 def test_supporting_backend_declares_consume_via_helper():
+    helper_names = NvFp4LinearKernel.prepare_input.__code__.co_names
+    assert "as_quantized_activation" in helper_names
     for cls in SUPPORTING:
-        fn = _resolved_apply_weights(cls)
-        assert "as_quantized_activation" in fn.__code__.co_names, cls.__name__
+        names = _resolved_apply_weights(cls).__code__.co_names
+        assert {"as_quantized_activation", "prepare_input"} & set(names), cls.__name__
 
 
 def test_bridge_marks_supporting_and_skips_others():

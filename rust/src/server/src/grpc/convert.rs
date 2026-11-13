@@ -4,12 +4,12 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
-use thiserror_ext::AsReport as _;
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
@@ -17,6 +17,7 @@ use vllm_text::{
 };
 
 use super::pb;
+use crate::model_names::ServedModelNames;
 
 fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
     KvHintsEnvelope {
@@ -50,15 +51,15 @@ fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
 
 /// Convert a gRPC `GenerateRequest` into the internal `TextRequest`.
 ///
-/// If `req.model` is non-empty, it must match one of `served_model_names`;
-/// otherwise the request is rejected with `NotFound`. An empty string is
-/// treated as "unset" (proto3 default) and accepted.
+/// `req.model` must be accepted by `served_model_names`; otherwise the request
+/// is rejected with `NotFound`. An empty string is treated as "unset" (proto3
+/// default) and accepted.
 pub fn to_text_request(
     req: pb::GenerateRequest,
     stream: bool,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<TextRequest, Status> {
-    if !req.model.is_empty() && !served_model_names.iter().any(|n| n == &req.model) {
+    if !served_model_names.accepts(Some(&req.model)) {
         return Err(Status::not_found(format!(
             "model `{}` not found",
             req.model
@@ -95,7 +96,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
-    sampling_params.watermarking = req.watermarking.unwrap_or(true);
+    sampling_params.watermarking = req.watermarking;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -123,6 +124,7 @@ pub fn to_text_request(
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
+        detokenize: response.and_then(|options| options.output_text).unwrap_or(true),
     };
 
     Ok(TextRequest {
@@ -300,9 +302,6 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
-    params
-        .validate()
-        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -338,11 +337,15 @@ pub fn to_prompt_info(
 }
 
 /// Convert a `DecodedTextEvent::TextDelta` into a gRPC `SequenceOutput`.
+///
+/// `sampling_mask` holds the whole request's rows, which only the terminal
+/// output carries.
 pub fn to_sequence_output(
     delta: &str,
     token_ids: &[u32],
     logprobs: Option<&DecodedLogprobs>,
     finished: Option<&Finished>,
+    sampling_mask: Option<&SamplingMask>,
     opts: &ResponseOpts,
 ) -> Result<pb::SequenceOutput, Status> {
     let finish_info = finished.map(|f| to_finish_info(f, token_ids)).transpose()?;
@@ -351,8 +354,7 @@ pub fn to_sequence_output(
         _ => (vec![], vec![], vec![]),
     };
 
-    let sampling_mask = finished
-        .and_then(|finished| finished.sampling_mask.as_ref())
+    let sampling_mask = sampling_mask
         .map(|mask| mask.rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
         .unwrap_or_default();
 
@@ -398,7 +400,13 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Error => return Err(Status::internal("engine failed during generation")),
+        FinishReason::Error(Some(error)) if error.is_validation_error() => {
+            return Err(Status::invalid_argument(error.message.clone()));
+        }
+        FinishReason::Error(Some(error)) if error.retryable => {
+            return Err(Status::unavailable(error.message.clone()));
+        }
+        FinishReason::Error(_) => return Err(Status::internal("engine failed during generation")),
         FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
     };
 
@@ -408,7 +416,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
-        num_cached_tokens: Some(finished.usage.cached_token_count as u32),
+        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
     })
 }
 
@@ -481,7 +489,7 @@ fn positions_to_proto(
 /// expecting ints (e.g. `image_grid_thw`) don't see `16.0`.
 const MAX_SAFE_INTEGER_F64: f64 = ((1u64 << 53) - 1) as f64;
 
-fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
+pub(super) fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(
         s.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect(),
     )
@@ -565,8 +573,9 @@ impl ResponseOpts {
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
-    use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
     };
@@ -576,6 +585,11 @@ mod tests {
     use super::{
         ResponseOpts, json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
     };
+    use crate::model_names::ServedModelNames;
+
+    fn served() -> ServedModelNames {
+        ServedModelNames::new(vec!["test-model".to_string()])
+    }
 
     fn base_request() -> pb::GenerateRequest {
         pb::GenerateRequest {
@@ -601,7 +615,7 @@ mod tests {
         let encoded = request.encode_to_vec();
         for stream in [false, true] {
             let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-            let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+            let text = to_text_request(decoded, stream, &served()).unwrap();
             let engine = vllm_text::lower_text_request(
                 text,
                 vec![1],
@@ -612,6 +626,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 &TestTokenizer::new(),
             )
             .unwrap()
@@ -664,7 +679,7 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let request = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(request, stream, &["test-model".to_string()])
+                let text = to_text_request(request, stream, &served())
                     .expect("reasoning controls accepted");
                 let engine = vllm_text::lower_text_request(
                     text,
@@ -676,6 +691,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .expect("reasoning controls lower to engine")
@@ -702,12 +718,8 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(decoded, stream, &["test-model".to_string()])
-                    .expect("convert request");
-                assert_eq!(
-                    text.sampling_params.watermarking,
-                    watermarking.unwrap_or(true)
-                );
+                let text = to_text_request(decoded, stream, &served()).expect("convert request");
+                assert_eq!(text.sampling_params.watermarking, watermarking);
             }
         }
     }
@@ -718,7 +730,7 @@ mod tests {
             temperature: Some(0.7),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.temperature, Some(0.7));
     }
 
@@ -738,7 +750,7 @@ mod tests {
             ..base_request()
         };
 
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         let hints = text.kv_hints.expect("kv hints");
         assert_eq!(hints.protocol_version, "0.1");
         assert_eq!(hints.message_id, "msg-1");
@@ -753,24 +765,9 @@ mod tests {
 
     #[test]
     fn unset_temperature_defaults_to_greedy() {
-        let text = to_text_request(base_request(), false, &["test-model".to_string()])
-            .expect("convert ok");
+        let text = to_text_request(base_request(), false, &served()).expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
-    }
-
-    #[test]
-    fn grpc_rejects_empty_grammar_before_engine() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        let req = pb::GenerateRequest {
-            decoding: Some(pb::DecodingParameters {
-                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
-        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
@@ -782,7 +779,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.seed, None);
     }
 
@@ -795,7 +792,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.seed, Some(0));
     }
 
@@ -839,8 +836,7 @@ mod tests {
                 }),
                 ..base_request()
             };
-            let text =
-                to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+            let text = to_text_request(req, false, &served()).expect("convert ok");
             let params = lower_sampling_params(
                 text.sampling_params,
                 SamplingHints::default(),
@@ -850,6 +846,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 1,
                 &TestTokenizer::new(),
             )
@@ -882,7 +879,7 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+                let text = to_text_request(decoded, stream, &served()).unwrap();
                 let engine = vllm_text::lower_text_request(
                     text,
                     vec![1],
@@ -898,6 +895,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .unwrap()
@@ -917,7 +915,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, Some(true));
     }
 
@@ -930,7 +928,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
         // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
@@ -941,12 +939,15 @@ mod tests {
             usage: vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
-            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+            routed_experts: None,
+            timestamps: Default::default(),
         }
     }
 
@@ -1016,17 +1017,46 @@ mod tests {
     }
 
     #[test]
+    fn engine_errors_map_to_status_codes() {
+        let error = RequestError {
+            code: "engine_paused".to_string(),
+            message: "Generation is paused.".to_string(),
+            retryable: true,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("retryable error");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let error = RequestError {
+            code: RequestError::VALIDATION_ERROR.to_string(),
+            message: "Invalid structured outputs: Grammar error: bad".to_string(),
+            retryable: false,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("invalid request");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "Invalid structured outputs: Grammar error: bad"
+        );
+
+        let fin = finished(FinishReason::Error(None));
+        let status = to_finish_info(&fin, &[]).expect_err("internal error");
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[test]
     fn to_sequence_output_threads_token_ids_into_eos_id() {
         let mut fin = finished(FinishReason::Stop(None));
         fin.usage.prompt_token_count = 8;
-        fin.usage.cached_token_count = 5;
+        fin.usage.prompt_cache_usage.cached_token_count = 5;
         let opts = ResponseOpts {
             output_text: true,
             output_token_ids: true,
             ..Default::default()
         };
 
-        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts)
+        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), None, &opts)
             .expect("sequence output");
         let out = pb::SequenceOutput::decode(out.encode_to_vec().as_slice()).unwrap();
 
@@ -1038,15 +1068,21 @@ mod tests {
 
     #[test]
     fn sequence_output_only_carries_sampling_mask_on_terminal_output() {
-        let mut fin = finished(FinishReason::Length);
-        fin.sampling_mask = Some(SamplingMask {
+        let fin = finished(FinishReason::Length);
+        let mask = SamplingMask {
             rows: vec![vec![1, 10], vec![2, 20]],
-        });
+        };
 
-        let terminal =
-            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())
-                .expect("terminal output");
-        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+        let terminal = to_sequence_output(
+            "",
+            &[10, 20],
+            None,
+            Some(&fin),
+            Some(&mask),
+            &ResponseOpts::default(),
+        )
+        .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, None, &ResponseOpts::default())
             .expect("intermediate output");
 
         assert_eq!(

@@ -21,7 +21,9 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address,
             advertised_host: "127.0.0.1".to_string(),
+            engine_start_index: 0,
             engine_count,
+            data_parallel_size: engine_count,
             ready_timeout: Duration::from_secs(5),
             local_input_address: None,
             local_output_address: None,
@@ -69,7 +71,7 @@ async fn connect_with_mock(
 fn sample_request(request_id: &str, max_tokens: u32) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: request_id.to_string(),
-        prompt_token_ids: Some(vec![1, 2, 3]),
+        prompt_token_ids: Some(vec![1, 2, 3].into()),
         sampling_params: Some(EngineCoreSamplingParams {
             max_tokens,
             ..EngineCoreSamplingParams::for_test()
@@ -138,6 +140,33 @@ async fn chunk_size_one_outputs_one_token_per_update() {
     assert_eq!(third.finish_reason, Some(EngineCoreFinishReason::Length));
     assert!(third.prefill_stats.is_none());
     assert!(stream.next().await.is_none());
+
+    shutdown_mock(client, shutdown, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_prompt_sent_in_aux_frame_is_served() {
+    let ipc = IpcNamespace::new().expect("ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 1).await;
+    // Far above the client's default zero-copy threshold (256 bytes), so the
+    // prompt token ids follow the payload in an auxiliary frame.
+    let request = EngineCoreRequest {
+        prompt_token_ids: Some((0..1024).collect::<Vec<u32>>().into()),
+        ..sample_request("req-long", 1)
+    };
+    let mut stream = client.call(request).await.expect("call").into_outputs();
+
+    let output = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("stream timeout")
+        .expect("output")
+        .expect("output ok");
+    assert_eq!(output.finish_reason, Some(EngineCoreFinishReason::Length));
+    assert_eq!(
+        output.prefill_stats.as_ref().unwrap().num_prompt_tokens,
+        1024
+    );
 
     shutdown_mock(client, shutdown, task).await;
 }

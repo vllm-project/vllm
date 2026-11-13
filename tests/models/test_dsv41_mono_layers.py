@@ -1,24 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
-DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, served with ``VLLM_ROCM_MONO_DECODE`` on
-and off on the same random weights: every decoder layer's outputs at every
-decode step must match. Unlike ``test_dsv41_mono_numerics.py``, which
-checks the kernels against vLLM's ops one stage at a time, this runs
-``DeepseekV4DecoderLayer.forward`` as the engine does -- the model's hooks,
-the per-step path choice, the weights taken off the layer, the metadata and
-the indexer's top-k -- so a change to the decoder layer that the kernels do
-not follow fails here.
+DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 on gfx942, served with
+`--monokernel` on and off on the same random weights: every decoder layer's
+outputs at every decode step must match. Unlike
+`test_dsv41_mono_numerics.py`, which checks the kernels against vLLM's ops
+one stage at a time, this runs `DeepseekV4DecoderLayer.forward` as the engine
+does -- the model's hooks, the per-step path choice, the weights taken off the
+layer, the metadata and the indexer's top-k -- so a change to the decoder layer
+that the kernels do not follow fails here.
 
-The five layers hold both kinds the mono path takes:
-- 0: sliding window only -> the FFN launch
-- 1: ratio-2 KV and index source -> the FFN launch
-- 2: ratio-2 consumer -> the whole layer (K1 + K2)
-- 3: ratio-1 KV, index and candidate source -> the FFN launch
-- 4: ratio-1 consumer -> the whole layer
+On gfx942 the indexer is vLLM's FP8 indexer, because the MXFP4 indexer cache
+needs CDNA4, and the kernels read the copies of the weights that the model
+makes when it loads them. A decode step of 8 rows there takes two GEMV passes
+of 6 rows, the second one padded, and a step of 42 rows, the most that the
+gfx942 kernels take, takes seven.
+
+Every layer takes the whole-layer path (K1 + K2); the five hold each variant:
+- 0: the first layer, sliding window only (K1 takes the embedding settled)
+- 1: ratio-2 KV and index source (vLLM's compressor and indexer between K1
+  and K2)
+- 2: ratio-2 consumer with an Engram (K1 takes the residual settled)
+- 3: ratio-1 KV, index and candidate source
+- 4: ratio-1 index source over 3's candidates and KV
 """
 
+import os
 import zlib
+from typing import Any
 
 import pytest
 import torch
@@ -34,22 +43,37 @@ TRUNCATED = {
     # one entry a layer, the three MTP layers' included
     "compress_ratios": [0, 2, 2, 1, 1, 0, 0, 0],
     "kv_source_layer_ids": [1, 3],
-    "index_source_layer_ids": [1, 3],
+    # 4: an indexer of its own over 3's candidates (a REINDEX layer)
+    "index_source_layer_ids": [1, 3, 4],
     "candidate_source_layer_id": 3,
-    "engram_layer_ids": [],
-    "engram_num_embeddings": [],
+    # an Engram on a whole layer (K1 then takes its residual settled), its
+    # tables shrunk: 24 prime-sized ranges from 1000
+    "engram_layer_ids": [2],
+    "engram_num_embeddings": [32768],
+    "engram_vocab_size": 1000,
     "dspark_target_layer_ids": [2, 3, 4],
 }
-WHOLE, FFN = (2, 4), (0, 1, 3)
+WHOLE, FFN = (0, 1, 2, 3, 4), ()
 STEPS = 5  # decode steps after the prefill's token
+MERGE_AB = "DSV41_MONO_MERGE_AB"
 
 
-def _on_cdna4() -> bool:
+def _arch() -> str:
+    """The GPU kind that the mono kernels build for, "cdna4" or "gfx942", or
+    an empty string on any other GPU."""
     if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import get_cdna_version
+        return ""
+    from vllm.platforms.rocm import get_cdna_version, on_gfx942
 
-    return get_cdna_version() == 4
+    if get_cdna_version() == 4:
+        return "cdna4"
+    return "gfx942" if on_gfx942() else ""
+
+
+# The (tensor parallel size, decode rows) cases of each GPU. The gfx942 kernels
+# build for TP4 only. 8 rows are two GEMV passes of 6 rows there, the second
+# one padded, and 42 rows are the most that they take.
+CASES = {"cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)], "gfx942": [(4, 8), (4, 42)]}
 
 
 @torch.no_grad()
@@ -122,7 +146,7 @@ class RandomWeightLoader(DummyModelLoader):
 
 
 class MonoProbe:
-    """Worker extension (``worker_extension_cls``): it also brings this module,
+    """Worker extension (`worker_extension_cls`): it also brings this module,
     and so the loader, into the workers."""
 
     def _decoder_layers(self) -> dict:
@@ -140,7 +164,7 @@ class MonoProbe:
         token taken in a decode-only step (the steps the mono path takes),
         keyed by (layer, prompt length, position): a request's step and row
         can differ between engines (requests reach the engine core while it
-        runs), its prompt length and position cannot. ``lens``: the prompt
+        runs), its prompt length and position cannot. `lens`: the prompt
         lengths, all distinct; a row's request is the longest prompt not past
         its position."""
         from vllm.forward_context import get_forward_context
@@ -206,10 +230,27 @@ class MonoProbe:
     def mono_layers(self) -> dict:
         from vllm.models.deepseek_v41.amd import mono_decode
 
+        def copies(m) -> bool:
+            """Whether the layer holds the gfx942 copies of its weights, which
+            the model makes when it loads them (`mono942`)."""
+            ffn = m.ffn
+            held = [
+                ffn.experts.routed_experts,
+                ffn.shared_experts.gate_up_proj,
+                ffn.shared_experts.down_proj,
+            ]
+            if not m.mono.ffn_only:
+                held += [getattr(m.attn, n) for n in mono_decode.ATTN_LINEARS_942]
+            return all(hasattr(t, "mono942") for t in held)
+
         layers = {
             i: None
             if m.mono is None
-            else ["ffn" if m.mono.ffn_only else "whole", m.mono._weights is not None]
+            else [
+                "ffn" if m.mono.ffn_only else "whole",
+                m.mono._weights is not None,
+                copies(m),
+            ]
             for i, m in self._decoder_layers().items()
         }
         runner = mono_decode._runner
@@ -218,18 +259,157 @@ class MonoProbe:
             "epoch": -1 if runner is None else int(runner.epoch[0]),
         }
 
+    def compare_merged_replays(self) -> None:
+        worker: Any = self
+        mr = worker.model_runner
+        tensors = list(mr.kv_caches)
+        for m in mr.vllm_config.compilation_config.static_forward_context.values():
+            kv = getattr(m, "kv_cache", None)
+            tensors += kv if isinstance(kv, list | tuple) else [kv]
+        caches = list(
+            {
+                (t.data_ptr(), t.nbytes): t
+                for t in tensors
+                if isinstance(t, torch.Tensor) and t.is_cuda and t.numel()
+            }.values()
+        )
+        self._merge_ab: dict[str, list] = {"target": [], "draft": []}
 
-def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
-    """Greedy decode of ``prompts`` with the mono path on or off: (each
+        def both(kind, mgr, outputs):
+            replay = mgr.run_fullgraph
+
+            def merged_then_unmerged(desc):
+                snap = [t.clone() for t in caches]
+                out = replay(desc)
+                on = [t.clone() for t in (*outputs(desc, out, False), *caches)]
+                for t, s in zip(caches, snap):
+                    t.copy_(s)
+                mgr.graphs, graphs = mgr.graphs_off, mgr.graphs
+                out = replay(desc)
+                mgr.graphs = graphs
+                off = (*outputs(desc, out, True), *caches)
+                self._merge_ab[kind].append(
+                    [
+                        i
+                        for i, pair in enumerate(zip(on, off))
+                        if not torch.equal(
+                            *(t.contiguous().view(torch.uint8) for t in pair)
+                        )
+                    ]
+                )
+                return out
+
+            mgr.run_fullgraph = merged_then_unmerged
+
+        both(
+            "target",
+            mr.cudagraph_manager,
+            lambda desc, out, off: (
+                [out] if isinstance(out, torch.Tensor) else [out[0], *out[1]]
+            ),
+        )
+        both(
+            "draft",
+            mr.speculator.query_cudagraph_manager,
+            lambda desc, out, off: [_draft_out[off, desc.num_tokens]],
+        )
+
+    def merged_replays(self) -> dict:
+        from vllm.models.deepseek_v41.amd import mono_decode
+
+        runners = (mono_decode._runner, mono_decode._draft_runner)
+        merged = [len(r._captured_blocks) for r in runners]
+        return {**self._merge_ab, "merged": merged}
+
+
+_draft_out: dict = {}
+
+
+def _patch_merge_ab() -> None:
+    from vllm.config import CUDAGraphMode
+    from vllm.models.deepseek_v41.amd import mono_decode as md
+    from vllm.models.deepseek_v41.amd.mono.runner import DSV41MonoLayer
+    from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+
+    off = [False]
+    merges, defers, select = (
+        DSV41MonoLayer.merges,
+        md.MonoDecodeLayer._defers,
+        md._select,
+    )
+    capture, run_model = CudaGraphManager.capture, DFlashSpeculator._run_model
+
+    def merges_unless_off(self, tokens):
+        return not off[0] and merges(self, tokens)
+
+    def defers_or_flushes(self, layer, runner, rows):
+        unlinked = self.next_layer is None and runner.merges(rows)
+        return unlinked or defers(self, layer, runner, rows)
+
+    def reproducible_select(layer, positions, normed, qr):
+        proj = layer.attn.indexer.weights_proj
+        w = proj.weight
+        proj.forward = lambda x: (
+            (x.float().unsqueeze(1) * w.float()).sum(-1).to(x.dtype),
+            None,
+        )
+        select(layer, positions, normed, qr)
+        del proj.forward
+        topk = layer.attn.topk_indices_buffer[: normed.shape[0]]
+        big = torch.iinfo(topk.dtype).max
+        rows = torch.where(topk < 0, big, topk).sort(dim=-1).values
+        topk.copy_(torch.where(rows == big, -1, rows))
+
+    def capture_twice(self, *args, **kwargs):
+        capture(self, *args, **kwargs)
+        full = self._capture_descs.get(CUDAGraphMode.FULL)
+        if full:
+            descs, self._capture_descs = self._capture_descs, {CUDAGraphMode.FULL: full}
+            graphs, self.graphs, off[0] = self.graphs, {}, True
+            capture(self, *args, **kwargs)
+            self.graphs_off, self.graphs = self.graphs, graphs
+            self._capture_descs, off[0] = descs, False
+
+    def keep_draft_out(self, num_tokens, *args, **kwargs):
+        out = run_model(self, num_tokens, *args, **kwargs)
+        _draft_out[off[0], num_tokens] = out
+        return out
+
+    DSV41MonoLayer.merges = merges_unless_off
+    md.MonoDecodeLayer._defers = defers_or_flushes
+    md._select = reproducible_select
+    CudaGraphManager.capture = capture_twice
+    DFlashSpeculator._run_model = keep_draft_out
+
+
+if os.environ.get(MERGE_AB):
+    _patch_merge_ab()
+
+
+def _decode(
+    vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
+):
+    """Greedy decode of `prompts` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
     for the decode tokens of decode-only steps, and vLLM's routing margins,
-    saved under ``path``."""
+    saved under `path`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
-    monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1" if mono else "0")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    # CDNA4 has the MXFP4 indexer cache with 128-token blocks. gfx942 keeps
+    # vLLM's FP8 indexer, which needs 64-token blocks.
+    indexer: dict = dict(block_size=64)
+    if arch == "cdna4":
+        indexer = dict(
+            attention_config={
+                "indexer_kv_dtype": "mxfp4",
+                "indexer_sparse_logits": True,
+            },
+            block_size=128,
+        )
     with vllm_runner(
         MODEL,
         tensor_parallel_size=tp,
@@ -237,15 +417,16 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
         hf_overrides=TRUNCATED,
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
+        monokernel=mono,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
-        attention_config={"indexer_kv_dtype": "mxfp4", "indexer_sparse_logits": True},
-        block_size=128,
+        **indexer,
         enforce_eager=True,
         max_model_len=4096,
         max_num_seqs=len(prompts),
-        # a prompt prefills in one step, so its decode tokens never share one
-        max_num_batched_tokens=16384,
+        # All prompts prefill in one step, so that no decode token shares a
+        # step with a prefill and every decode step has all the rows.
+        max_num_batched_tokens=max(16384, sum(len(p) for p in prompts)),
         enable_prefix_caching=False,
         gpu_memory_utilization=0.5,
     ) as runner:
@@ -263,29 +444,93 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a - b).norm() / b.norm()).item()
 
 
-@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
-@pytest.mark.parametrize("tp", [2, 4])
-def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
+def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    for name in (
+        MERGE_AB,
+        "VLLM_ROCM_USE_AITER",
+        "VLLM_ROCM_USE_AITER_MOE",
+        "VLLM_USE_BREAKABLE_CUDAGRAPH",
+    ):
+        monkeypatch.setenv(name, "1")
+    g = torch.Generator().manual_seed(0)
+    prompt = torch.randint(1000, 60000, (1000,), generator=g).tolist()
+    with vllm_runner(
+        MODEL,
+        tensor_parallel_size=8,
+        load_format=LOAD_FORMAT,
+        hf_overrides={
+            "engram_num_embeddings": [32768, 32768],
+            "engram_vocab_size": 1000,
+        },
+        worker_extension_cls=f"{__name__}.MonoProbe",
+        moe_backend="aiter",
+        monokernel=True,
+        language_model_only=True,
+        tokenizer_mode="deepseek_v41",
+        attention_config={"indexer_kv_dtype": "mxfp4", "indexer_sparse_logits": True},
+        block_size=128,
+        max_model_len=4096,
+        max_num_seqs=2,
+        max_num_batched_tokens=8192,
+        enable_prefix_caching=False,
+        kv_cache_memory_bytes=2 << 30,
+        speculative_config={"method": "dspark", "num_speculative_tokens": 6},
+        compilation_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+            "max_cudagraph_capture_size": 16,
+        },
+    ) as runner:
+        runner.llm.collective_rpc("compare_merged_replays")
+        params = SamplingParams(temperature=0.0, max_tokens=14, ignore_eos=True)
+        runner.llm.generate([TokensPrompt(prompt_token_ids=prompt)], params)
+        ranks = runner.llm.collective_rpc("merged_replays")
+    for r in ranks:
+        assert r["merged"] == [34, 2], r["merged"]
+        assert min(len(r["target"]), len(r["draft"])) >= STEPS, r
+        assert not any(r["target"] + r["draft"]), r
+
+
+@pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28)])
+def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
+    arch = _arch()
+    if not arch:
+        pytest.skip("the mono kernels target CDNA4 and gfx942")
+    if (tp, rows) not in CASES[arch]:
+        pytest.skip(f"not a case of {arch}")
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     g = torch.Generator().manual_seed(0)
-    # contexts past both ratios' 512 compressed entries, so top-k selects
-    lens = torch.randperm(1700, generator=g)[:8].add(300).tolist()  # distinct
+    # Contexts past both ratios' 512 compressed entries, so top-k selects.
+    # The captures key a decode token by (prompt length, position), so the
+    # lengths are more than STEPS apart: a request whose positions reached a
+    # longer prompt's length would share that prompt's keys. Skipping the
+    # lengths that are too close keeps the 8-row cases' lengths as they were.
+    lens: list[int] = []
+    for n in torch.randperm(1700, generator=g).add(300).tolist():
+        if all(abs(n - m) > STEPS for m in lens):
+            lens.append(n)
+        if len(lens) == rows:
+            break
     prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
     on, probe_on = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on"
+        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
     )
     off, probe_off = _decode(
-        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off"
+        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off", arch
     )
 
-    # both layer kinds took the mono path on every rank, at every decode step
+    # both layer kinds took the mono path on every rank, at every decode step,
+    # and on gfx942 from the weight copies made at load
     launches = len(WHOLE + FFN)  # one launch (pair) a layer a step
+    copies = arch == "gfx942"
     for rank in probe_on:
         assert rank["layers"] == {
-            i: ["whole" if i in WHOLE else "ffn", True] for i in WHOLE + FFN
+            i: ["whole" if i in WHOLE else "ffn", True, copies] for i in WHOLE + FFN
         }, rank
         assert rank["epoch"] >= launches * STEPS, rank
         assert rank["epoch"] % launches == 0, rank
@@ -300,16 +545,30 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
             same.add((len(prompt), len(prompt) + step))
 
     # each layer's outputs for those tokens, mono against vLLM's path, token by
-    # token. Layer 0 sees the same inputs on both paths at a request's first
-    # decode token: there the bound is test_dsv41_mono_numerics' (about 3x the
-    # kernels' 0.4%); its later tokens attend over KV each path wrote, 3%. Each
-    # later layer takes the previous one's slightly different output, which
-    # random weights amplify (2-4% by layer 4): 8%. A token whose top-6 routing
-    # is a near-tie on vLLM's path (6th / 7th score within 5e-3: a 0.4% input
-    # difference moves scores near 0.8 by about 3e-3) may pick another expert;
-    # once it has, its residual stream differs and the later layers are exempt
-    # for it. The residual stream: 3% (0.3% seen). A layer the kernels no
+    # token. Layer 0 sees the same inputs on both paths, but its FFN input
+    # differs by up to test_dsv41_mono_numerics' 1.2%, which random weights
+    # amplify through the MoE: 3%. Each later layer takes the previous one's
+    # slightly different output, which random weights amplify (2-4% by layer
+    # 4): 8%. A token whose top-6 routing is a near-tie on vLLM's path may pick
+    # another expert: a 0.4% input difference moves scores near 0.8 by about
+    # 3e-3, so 6th / 7th scores within 5e-3 at layer 0 and, past it, where the
+    # input carries the earlier layers' differences (0.4-0.7%), within 1e-2.
+    # Once it has, its residual stream differs and the later layers are exempt
+    # for it. The residual stream: 3% (0.5% seen). A layer the kernels no
     # longer follow is off by far more, on every token.
+    # On gfx942 vLLM's path runs the MoE with bf16 activations, while the
+    # kernels quantize them to MXFP8 before both expert GEMMs, as on CDNA4.
+    # With these random weights that alone moves the FFN output by 4.65%
+    # (5.0% at most over 256 tokens), so layer 0 gets 6% there (5.3% seen).
+    # The later layers' 8% holds on gfx942 too (5.6% seen). The residual
+    # stream then differs by 1.0% after layer 1 and by up to 2.5% after layer
+    # 4, still under its 3%. That moves scores near 0.8 by up to about 2e-2,
+    # so past layer 0 a near-tie is a gap within 2e-2 there (1.1e-2 seen).
+    # And 22% of the tokens flip an expert at some layer, at 8 and at 42 rows
+    # alike, so up to a third may flip there instead of a quarter.
+    first_bound = 0.06 if arch == "gfx942" else 0.03
+    later_tie = 2e-2 if arch == "gfx942" else 1e-2
+    flip_divisor = 3 if arch == "gfx942" else 4
     for rank in range(tp):
         got, _ = torch.load(f"{tmp_path}/on.rank{rank}")
         want, gaps = torch.load(f"{tmp_path}/off.rank{rank}")
@@ -317,8 +576,6 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
             same & {k[1:] for k in got} & {k[1:] for k in want}
         )
         assert len(keys) >= len(prompts), keys
-        # the bound that sees a 3% error: a request's first decode token
-        assert any(p == n for n, p in keys), keys
         flipped: set = set()
         for i in sorted(WHOLE + FFN):
             for k in keys:
@@ -327,9 +584,13 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp):
                 (x, res), (x_ref, res_ref) = got[(i, *k)], want[(i, *k)]
                 err = _rel(res, res_ref)
                 assert err < 0.03, (rank, i, k, "residual", err)
-                bound = (0.015 if k[1] == k[0] else 0.03) if i == 0 else 0.08
+                bound = first_bound if i == 0 else 0.08
                 err = _rel(x, x_ref)
                 if err >= bound:
-                    assert gaps[(i, *k)] < 5e-3, (rank, i, k, "x", err)
+                    tie = 5e-3 if i == 0 else later_tie
+                    assert gaps[(i, *k)] < tie, (rank, i, k, "x", err)
                     flipped.add(k)
-        assert len(flipped) <= len(keys) // 4, (rank, sorted(flipped))
+        assert len(flipped) <= len(keys) // flip_divisor, (rank, sorted(flipped))
+
+    if (tp, rows) == (8, 8):
+        _merged_matches_two_launches(vllm_runner, monkeypatch)
