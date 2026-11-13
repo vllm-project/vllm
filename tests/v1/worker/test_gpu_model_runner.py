@@ -21,9 +21,11 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.binding import fit_mamba_blocks_to_attention
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     KVCacheSpec,
     get_block_table_width,
 )
@@ -238,18 +240,20 @@ def test_mamba_blocks_divide_resized_attention_blocks(
     shrink to the largest 128-multiple of at most 576 that divides 768."""
     vllm_config = _align_qwen3_5_blocks(64)
     layers = vllm_config.compilation_config.static_forward_context
-    kv_cache_spec: dict[str, KVCacheSpec] = {
-        "mamba.0": layers["mamba.0"].get_kv_cache_spec(vllm_config)
+    layer_configs: dict[str, KVCacheLayerConfig] = {
+        "mamba.0": layers["mamba.0"].get_kv_cache_config(vllm_config)
     }
     for i, block_size in enumerate(attn_block_sizes):
-        kv_cache_spec[f"attn.{i}"] = FullAttentionSpec(
-            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float16
+        layer_configs[f"attn.{i}"] = FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float16
+            )
         )
 
-    kv_cache_spec = fit_mamba_blocks_to_attention(vllm_config, kv_cache_spec, layers)
+    layer_configs = fit_mamba_blocks_to_attention(vllm_config, layer_configs, layers)
 
     assert vllm_config.cache_config.mamba_block_size == mamba_block_size
-    assert kv_cache_spec["mamba.0"].block_size == mamba_block_size
+    assert layer_configs["mamba.0"].spec.block_size == mamba_block_size
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
