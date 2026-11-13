@@ -962,8 +962,12 @@ def flydsl_kernel(tiers: list[tuple[int, str | None]], M: int) -> str | None:
 
 
 def flydsl_preshuffle(weight: torch.Tensor) -> torch.Tensor | None:
-    """The (16, 16)-preshuffled copy of an [N, K] e4m3 weight that the FlyDSL
-    kernels read, or None without AITER."""
+    """(16, 16)-preshuffled copy of an [N, K] e4m3 weight for the FlyDSL kernels;
+    None without AITER or off gfx950 (the tiers name gfx950 kernels)."""
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        return None
     try:
         from aiter.ops.shuffle import shuffle_weight
     except ImportError:
