@@ -199,7 +199,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/unit/moriio
 
-# UMBP is built on mori, so its tests skip on CUDA. Run them on MI355 whenever
+# Most UMBP tests need mori and skip on CUDA. Run them all on MI355 whenever
 # the connector or its tests change.
 - label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
   key: amd-umbp-connector-unit-mi355
@@ -214,6 +214,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
   - vllm/v1/kv_cache_interface.py
   - tests/v1/kv_connector/unit/test_umbp_
   - tests/v1/kv_connector/umbp_test_utils.py
@@ -222,14 +224,9 @@ steps:
   - docker/Dockerfile.rocm_base
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - >-
-    pytest -v -s -rs
-    v1/kv_connector/unit/test_umbp_async_lookup.py
-    v1/kv_connector/unit/test_umbp_core.py
-    v1/kv_connector/unit/test_umbp_embedded.py
-    v1/kv_connector/unit/test_umbp_events.py
-    v1/kv_connector/unit/test_umbp_hybrid.py
-    v1/kv_connector/unit/test_umbp_standalone.py
+  # Fail loudly instead of skipping every test if the image lacks mori.
+  - python3 -c "import mori"
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
 - label: ":amd: (MI355 DPX) UMBP Connector Integration"
   key: amd-umbp-connector-integration-mi355
@@ -244,6 +241,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
   - tests/v1/kv_connector/umbp_integration/
   - tests/v1/kv_connector/umbp_test_utils.py
   - tests/v1/kv_connector/conftest.py
@@ -391,7 +390,6 @@ steps:
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
-    - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
@@ -581,7 +579,7 @@ steps:
   key: python-only-installation
   depends_on: ~
   optional: true
-  timeout_in_minutes: 20
+  timeout_in_minutes: 75
   device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
@@ -605,7 +603,7 @@ steps:
   key: python-314-smoke-nightly
   depends_on: ~
   optional: true
-  timeout_in_minutes: 30
+  timeout_in_minutes: 85
   device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh

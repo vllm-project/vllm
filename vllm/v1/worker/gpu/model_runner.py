@@ -82,13 +82,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.conf_compute_utils import install as install_conf_compute_copy_patches
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    MambaSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-    get_block_table_width,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -115,7 +109,7 @@ from vllm.v1.worker.gpu.async_utils import (
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
-    get_kv_cache_spec,
+    get_kv_cache_layer_configs,
     init_attn_backend,
     init_kv_cache,
 )
@@ -648,17 +642,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_runner = getattr(self.model_state, "encoder_runner", None)
         return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
 
-    def get_kv_cache_spec(self):
-        kv_cache_spec = get_kv_cache_spec(self.vllm_config)
+    def get_kv_cache_layer_configs(self):
+        configs = get_kv_cache_layer_configs(self.vllm_config)
         # A draft running at DCP=1 under a DCP target keeps a replicated cache.
         if (
             isinstance(self.speculator, DraftModelSpeculator)
             and self.speculator.dcp_size == 1
             and self.dcp_size > 1
         ):
-            for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
-                kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
-        return kv_cache_spec
+            for name in self.speculator.draft_attn_layer_names & configs.keys():
+                config = configs[name]
+                configs[name] = replace(
+                    config, spec=replace(config.spec, dcp_sharded=False)
+                )
+        return configs
 
     def initialize_kv_cache(
         self,
@@ -695,37 +692,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 getattr(self.model_config.hf_config, "max_source_positions", 0),
             )
 
-        block_sizes = []
-        max_num_blocks_per_group = []
-        slot_mapping_enabled = []
-        dcp_sharded = []
-        sliding_window_reach = []
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            spec = kv_cache_group.kv_cache_spec
-            block_sizes.append(spec.block_size)
-            layer_spec = (
-                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-            )
-            slot_mapping_enabled.append(spec.uses_slot_mapping)
-            dcp_sharded.append(spec.dcp_sharded)
-            sliding_window_reach.append(
-                layer_spec.num_retained_tokens
-                if isinstance(layer_spec, SlidingWindowSpec)
-                else 0
-            )
-            # Let each cache type account for CP. Attention KV is DCP-sharded,
-            # while Mamba/GDN recurrent state is replicated across DCP ranks.
-            max_num_blocks = spec.max_num_blocks_per_req(
-                self.vllm_config, block_table_max_model_len
-            )
-            # Preserve each cache type's alignment requirements after applying
-            # its topology-aware block-table width.
-            max_num_blocks = get_block_table_width(
-                max_num_blocks,
-                spec.block_size,
-                token_alignment=spec.block_table_token_alignment,
-            )
-            max_num_blocks_per_group.append(max_num_blocks)
+        kv_cache_groups = kv_cache_config.kv_cache_groups
+        max_num_blocks_per_group = [
+            g.block_table_width(self.vllm_config, block_table_max_model_len)
+            for g in kv_cache_groups
+        ]
 
         target_attn_layer_names = None
         if isinstance(self.speculator, DraftModelSpeculator):
@@ -770,14 +741,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.block_tables = BlockTables(
-            block_sizes=block_sizes,
+            block_sizes=[g.block_size for g in kv_cache_groups],
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
-            slot_mapping_enabled=slot_mapping_enabled,
-            dcp_sharded=dcp_sharded,
-            sliding_window_reach=sliding_window_reach,
+            slot_mapping_enabled=[g.uses_slot_mapping for g in kv_cache_groups],
+            dcp_sharded=[g.dcp_sharded for g in kv_cache_groups],
+            sliding_window_reach=[g.sliding_window_reach for g in kv_cache_groups],
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -2345,6 +2316,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
 
+        num_drafted_tokens_per_req, num_verified_tokens_per_req = (
+            self._get_num_drafted_and_verified(input_batch)
+        )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
@@ -2354,6 +2328,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            num_drafted_tokens_per_req=num_drafted_tokens_per_req,
+            num_verified_tokens_per_req=num_verified_tokens_per_req,
         )
 
         # Collect KV transfer results now; finalize saves after the drafter runs.
@@ -2447,6 +2423,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output
+
+    def _get_num_drafted_and_verified(
+        self, input_batch: InputBatch
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Drafted and verified draft tokens per request.
+
+        Must run before the drafter overwrites the draft tokens being verified.
+        """
+        if self.speculator is None or input_batch.num_draft_tokens_per_req is None:
+            return None, None
+        draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
+        # -1 marks a draft slot without a draft token.
+        num_drafted = (draft_tokens != -1).sum(dim=-1)
+        num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+        num_in_forward = input_batch.cu_num_logits.diff() - num_bonus_tokens
+        num_verified = torch.minimum(num_in_forward, num_drafted)
+        return num_drafted, num_verified
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
