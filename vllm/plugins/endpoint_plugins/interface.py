@@ -272,7 +272,13 @@ async def _stop_endpoint_plugin(
     """Await one stop hook until it completes or its deadline expires."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    task = asyncio.create_task(plugin.stop(state))
+    try:
+        # Calling the hook can raise before it is awaited, for example when its
+        # signature does not accept `state`.
+        task = asyncio.create_task(plugin.stop(state))
+    except Exception:
+        logger.exception("Endpoint plugin %s failed to stop", name)
+        return
     while not task.done() and (remaining := deadline - loop.time()) > 0:
         try:
             # Not `asyncio.wait_for`, which awaits the cancelled hook.

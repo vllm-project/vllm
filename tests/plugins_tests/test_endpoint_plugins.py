@@ -544,7 +544,8 @@ async def test_plugins_stop_in_reverse_with_errors_isolated(
 ):
     """Plugins start in load order before serving; every eligible plugin,
     including a stop-only one, stops once in reverse order even when a peer's
-    `stop` raises; native transcription cleanup runs last."""
+    `stop` raises or cannot be called; native transcription cleanup runs
+    last."""
     events: list[str] = []
 
     class _Erroring(DummyAdminEndpointPlugin):
@@ -561,11 +562,18 @@ async def test_plugins_stop_in_reverse_with_errors_isolated(
             await super().stop(state)
             raise asyncio.CancelledError
 
+    class _BadSignature(DummyAdminEndpointPlugin):
+        name = "bad_signature"
+
+        async def stop(self) -> None:  # type: ignore[override]
+            raise AssertionError("a stop without `state` cannot be called")
+
     plugins = [
         _dummy("first", events),
         _StopOnlyPlugin(events, "second"),
         _Erroring(events),
         _Cancelling(events),
+        _BadSignature(events),
     ]
     app = await _build_plugin_app(monkeypatch, plugins, None, _NativeServing(events))
 
@@ -576,6 +584,7 @@ async def test_plugins_stop_in_reverse_with_errors_isolated(
         "start:first",
         "start:erroring",
         "start:cancelling",
+        "start:bad_signature",
         "serving",
         "stop:cancelling",
         "stop:erroring",
@@ -728,7 +737,7 @@ class _PrintedEvents(list):
         print(f"EVENT={event}", flush=True)
 
 
-_STOP_CASES = ("held_stop", "hung_stop", "stop_ignores_cancel")
+_STOP_CASES = ("held_stop", "hung_stop", "stop_ignores_cancel", "stop_bad_signature")
 
 
 async def _serve_in_child(
@@ -744,7 +753,8 @@ async def _serve_in_child(
     shutdown once the server is serving, and its `stop` is held: `held_stop`
     sends itself `stop_signals`, returning once each is handled; `hung_stop`
     waits until cancelled; `stop_ignores_cancel` never returns and repeats
-    SIGTERM once everything else has been cleaned up.
+    SIGTERM once everything else has been cleaned up. In `stop_bad_signature`
+    its `stop` does not accept `state`, so calling it raises.
     """
     # As the launchers do, so that the parent can read this process's warnings.
     configure_logging_from_args(_build_args())
@@ -802,6 +812,12 @@ async def _serve_in_child(
                 await handled.wait()
                 handled.clear()
 
+    class _BadSignature(_Blocking):
+        async def stop(self) -> None:  # type: ignore[override]
+            raise AssertionError("a stop without `state` cannot be called")
+
+    blocking = _BadSignature if case == "stop_bad_signature" else _Blocking
+
     # The real launcher's engine context outlives `serve_http`, including when
     # Uvicorn raises SystemExit on startup failure.
     @asynccontextmanager
@@ -813,7 +829,7 @@ async def _serve_in_child(
 
     async with engine_context(), contextlib.AsyncExitStack() as stack:
         monkeypatch = stack.enter_context(pytest.MonkeyPatch.context())
-        plugins = [_dummy("A", events), _Blocking(events), _dummy("C", events)]
+        plugins = [_dummy("A", events), blocking(events), _dummy("C", events)]
         app = await _build_plugin_app(
             monkeypatch, plugins, engine, _NativeServing(events)
         )
@@ -905,6 +921,12 @@ def _held_stop(trigger: str, *stop_signals: str, **serve_kwargs: Any) -> dict:
         ),
         ("hung_stop", {}, 0, _STOPPED),
         ("stop_ignores_cancel", {}, _SIGTERM_EXIT, _STOPPED),
+        (
+            "stop_bad_signature",
+            {},
+            0,
+            [event for event in _STOPPED if event != "stop:B"],
+        ),
     ],
 )
 def test_shutdown_during_plugin_lifecycle(
@@ -916,7 +938,8 @@ def test_shutdown_during_plugin_lifecycle(
     repeated SIGTERM or SIGINT after engine shutdown exits the process instead
     of hanging. Only a signal number the process has already received counts
     as repeated, and never for a server that a parent supervises. A `stop`
-    that outlives its deadline is cancelled and does not hold up the rest."""
+    that outlives its deadline is cancelled and does not hold up the rest,
+    and neither does one that cannot be called."""
     code = (
         "import runpy, uvloop; "
         f"scope = runpy.run_path({__file__!r}); "
