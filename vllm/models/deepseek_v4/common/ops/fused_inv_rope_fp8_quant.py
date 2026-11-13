@@ -220,7 +220,7 @@ class FusedInvRopeFP8QuantKernel(
             )
             tl.store(scale_addrs, scales)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         heads_per_group: int,
