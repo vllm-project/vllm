@@ -240,8 +240,8 @@ steps:
       automatic_shard: true
       label: ":amd: (MI355) ReplaySSM E2E"
       dind: false
-      device: mi355_2
-      num_devices: 2
+      device: mi355_1
+      num_devices: 1
       timeout_in_minutes: 30
       working_dir: "/vllm-workspace/tests"
       depends_on:
@@ -249,7 +249,9 @@ steps:
       source_file_dependencies:
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s v1/e2e/test_replayssm_decode.py
+      - >-
+        pytest -v -s v1/e2e/test_replayssm_decode.py
+        -k "matches_baseline and not prefix_cache and not tp2"
 
 - label: ":nvidia: (H100) ReplaySSM E2E TP2"
   device: h100
@@ -281,6 +283,22 @@ steps:
       VLLM_TEST_REQUIRE_REPLAYSSM=1
       pytest -v -s v1/e2e/test_replayssm_decode.py
       -k "decode_matches_baseline_tp2"
+  mirror:
+    amd:
+      label: ":amd: (MI355) ReplaySSM E2E TP2"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      commands:
+      - >-
+        pytest -v -s v1/e2e/test_replayssm_decode.py
+        -k "decode_matches_baseline_tp2"
 
 - label: ":nvidia: (H100) [Nightly] ReplaySSM E2E Prefix Cache and MTP"
   device: h100
@@ -314,6 +332,23 @@ steps:
       VLLM_TEST_REQUIRE_REPLAYSSM=1
       pytest -v -s v1/e2e/test_replayssm_decode.py
       -k "not ((matches_baseline and not prefix_cache and not tp2) or decode_matches_baseline_tp2)"
+  mirror:
+    amd:
+      automatic_shard: true
+      label: ":amd: (MI355) [Nightly] ReplaySSM E2E Prefix Cache and MTP"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      commands:
+      - >-
+        pytest -v -s v1/e2e/test_replayssm_decode.py
+        -k "not ((matches_baseline and not prefix_cache and not tp2) or decode_matches_baseline_tp2)"
 
 - label: ":nvidia: (L4) [Nightly] V1 E2E"
   key: v1-e2e-2-gpus
