@@ -160,14 +160,14 @@ ResponseInputOutputMessage: TypeAlias = (
 
 class _EasyInputMessageWithAudioParam(_TypedDict, total=False):
     """Extension of EasyInputMessageParam that additionally accepts
-    ``input_audio`` content parts.
+    `input_audio` content parts.
 
-    The openai SDK's ``ResponseInputMessageContentListParam`` only permits
-    text, image, and file content parts; ``ResponseInputAudioParam`` is
+    The openai SDK's `ResponseInputMessageContentListParam` only permits
+    text, image, and file content parts; `ResponseInputAudioParam` is
     intentionally absent.  As a result, audio messages that are accepted by
-    ``/v1/chat/completions`` fail Pydantic validation on ``/v1/responses``
+    `/v1/chat/completions` fail Pydantic validation on `/v1/responses`
     with an opaque 422 error.  This TypedDict mirrors EasyInputMessageParam
-    while extending the content union to include ``ResponseInputAudioParam``,
+    while extending the content union to include `ResponseInputAudioParam`,
     so both endpoints accept the same audio-bearing user messages (#47659).
     """
 
