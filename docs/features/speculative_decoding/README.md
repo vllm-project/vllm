@@ -20,6 +20,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Adaptive Verification](adaptive_verification.md)
 - [FLy Verification (Lossy)](fly.md)
 - [Per-Request Acceptance Metrics](acceptance_metrics.md)
+- [Kimi DSpark context projection sharding](#kimi-dspark-context-projection-sharding)
 
 ## Method Selection at a Glance
 
@@ -39,6 +40,44 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
+
+## Kimi DSpark context projection sharding
+
+Kimi's dense MLA DSpark draft can shard its target-context projection over
+tensor-parallel (TP) ranks on ROCm. It is **off by default**. Enable it with
+`--additional-config '{"dspark_context_projection_sharding": true}'` alongside
+your existing Kimi DSpark configuration.
+
+Merge this key into any existing `--additional-config` JSON so other settings,
+such as `kda_prefill_backend`, are preserved:
+
+```bash
+vllm serve <kimi-target-model> \
+  --tensor-parallel-size 8 \
+  --speculative-config '{
+    "method": "dspark",
+    "model": "<kimi-mla-draft-model>",
+    "draft_tensor_parallel_size": 8,
+    "num_speculative_tokens": 6
+  }' \
+  --additional-config '{"dspark_context_projection_sharding": true}'
+```
+
+The draft must be unquantized, use TP greater than one with its hidden size
+divisible by TP, and have a configured TP size matching the active group.
+Prefill context parallelism and sequence-parallel MoE are not supported by this
+option. All ranks in the TP group must receive the same context token rows;
+do not combine it with a path that projects sequence-sharded auxiliary states.
+Unsupported settings raise an error when constructing the Kimi draft. Other
+draft architectures do not use this option.
+
+The checkpoint format stays unchanged. The native column-parallel loader
+partitions the projection's output features and gathers them before RMSNorm.
+For an output width of 7,168 at TP8, each rank stores 896 output rows of the
+weight instead of all 7,168. This reduces replicated matrix work and weight
+storage but adds an all-gather, so latency depends on context size and the
+interconnect. Compare end-to-end performance and model accuracy against the
+default on your workload before adopting it.
 
 ## Custom Speculators (Experimental)
 

@@ -9,8 +9,10 @@ import torch.nn as nn
 
 import vllm._custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
 )
@@ -30,6 +32,7 @@ from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -156,13 +159,43 @@ class K3DSparkModel(nn.Module):
         # The frozen target embedding is aliased after the draft checkpoint loads.
         self.embed_tokens: nn.Module | None = None
 
-        self.context_proj = ReplicatedLinear(
+        additional_config = vllm_config.additional_config
+        shard_context = (
+            additional_config.get("dspark_context_projection_sharding", False)
+            if isinstance(additional_config, dict)
+            else False
+        )
+        if not isinstance(shard_context, bool):
+            raise ValueError("dspark_context_projection_sharding must be a boolean")
+        if shard_context:
+            parallel = vllm_config.parallel_config
+            tp_size = get_tensor_model_parallel_world_size()
+            if (
+                not current_platform.is_rocm()
+                or self.quant_config is not None
+                or tp_size <= 1
+                or parallel.tensor_parallel_size != tp_size
+                or self.config.hidden_size % tp_size != 0
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.use_sequence_parallel_moe
+            ):
+                raise ValueError(
+                    "DSpark context projection sharding requires ROCm, an "
+                    "unquantized draft, matching configured and active TP > 1, "
+                    "a TP-divisible draft hidden size, PCP=1 and no sequence "
+                    "parallel MoE. Context rows must be replicated within TP."
+                )
+        # Gather feature shards before RMSNorm; all TP ranks hold the same rows.
+        context_cls = ColumnParallelLinear if shard_context else ReplicatedLinear
+        context_kwargs = {"gather_output": True} if shard_context else {}
+        self.context_proj = context_cls(
             self.config.target_hidden_size * self.config.num_target_layers,
             self.config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "context_proj"),
+            **context_kwargs,
         )
         self.context_norm = RMSNorm(
             self.config.hidden_size, eps=self.config.rms_norm_eps
