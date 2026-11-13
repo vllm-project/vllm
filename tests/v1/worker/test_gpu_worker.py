@@ -1042,3 +1042,80 @@ def test_startup_heap_frozen_before_weight_loading(monkeypatch):
     monkeypatch.setattr(DefaultModelLoader, "load_weights", spy_load_weights)
     LLM("facebook/opt-125m", enforce_eager=True)
     assert frozen_at_load > frozen_before
+
+
+def test_compile_warmup_caps_sizes_at_max_model_len(monkeypatch: pytest.MonkeyPatch):
+    """Warmup must stay within max_num_seqs * max_model_len."""
+    from vllm.config import CompilationMode, CUDAGraphMode
+    from vllm.config.utils import Range
+    from vllm.v1.worker.gpu_worker import Worker
+
+    dummy_sizes: list[int] = []
+
+    def fake_dummy_run(num_tokens, *args, **kwargs):
+        dummy_sizes.append(num_tokens)
+
+    monkeypatch.setattr(gpu_worker, "has_compiled_submodule", lambda model: True)
+    monkeypatch.setattr(gpu_worker, "kernel_warmup", lambda worker: None)
+    monkeypatch.setattr(
+        gpu_worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False)
+    )
+    monkeypatch.setattr(
+        gpu_worker, "CompilationTimes", lambda **kwargs: SimpleNamespace(**kwargs)
+    )
+    monkeypatch.setattr(gpu_worker, "set_random_seed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gpu_worker, "freeze_gc_heap", lambda: None)
+    monkeypatch.setattr(gpu_worker, "maybe_attach_gc_debug_callback", lambda: None)
+    monkeypatch.setattr(gpu_worker, "enable_gpu_sync_check", lambda: None)
+
+    compilation_config = SimpleNamespace(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        compile_sizes=[16, 600],
+        cudagraph_capture_sizes=[1, 8, 512],
+        get_compile_ranges=lambda: [
+            Range(start=1, end=8),
+            Range(start=9, end=32),
+            Range(start=33, end=1000),
+            Range(start=500, end=1000),
+        ],
+        traced_files=set(),
+        compilation_time=0.0,
+    )
+    vllm_config = SimpleNamespace(
+        compilation_config=compilation_config,
+        model_config=SimpleNamespace(max_model_len=448),
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
+        kernel_config=SimpleNamespace(enable_jit_warmup=False),
+    )
+    worker = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            enable_extensible_kv_cache=False, kv_cache_memory_bytes=1
+        ),
+        vllm_config=vllm_config,
+        model_config=SimpleNamespace(
+            enable_return_routed_experts=False, enforce_eager=True, seed=0
+        ),
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE,
+            mode=CompilationMode.NONE,
+            compilation_time=0.0,
+            encoder_compilation_time=0.0,
+        ),
+        randomize_dummy_inputs=False,
+        _maybe_activate_jit_monitor=lambda: None,
+        model_runner=SimpleNamespace(
+            get_model=lambda: object(),
+            _dummy_run=fake_dummy_run,
+            maybe_remove_all_loras=lambda lora_config: None,
+            lora_config=None,
+            capture_model=lambda: 0.0,
+            is_pooling_model=True,
+        ),
+    )
+
+    Worker._compile_or_warm_up_model(worker)
+    # 600 (>448) filtered out, 512 (>448) filtered out of cg_capture_sizes,
+    # [33, 1000] clamped to 448, and [500, 1000] skipped entirely.
+    assert dummy_sizes == [448, 16]
