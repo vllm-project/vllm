@@ -42,7 +42,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else CUDAGraphMode.NONE
         )
         self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config, self.device, decode_mode, decode_query_len=1
+            self.vllm_config,
+            self.device,
+            decode_mode,
+            decode_query_lens={1: self.max_num_reqs},
+            decode_request_sizes=(
+                self.vllm_config.get_draft_decode_cudagraph_request_sizes()
+            ),
         )
 
     @abstractmethod
@@ -112,7 +118,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     def capture(self) -> None:
         logger.info("Capturing autoregressive speculator...")
         self.last_token_indices.zero_()
-        self.idx_mapping.zero_()
+        # As in dummy runs, -1 keeps draft steps from writing KV through a
+        # request-state row's stale block ids.
+        self.idx_mapping.fill_(-1)
         self.current_draft_step.zero_()
 
         assert self.prefill_cudagraph_manager is not None

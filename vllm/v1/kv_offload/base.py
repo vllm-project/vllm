@@ -161,6 +161,16 @@ class LookupResult(Enum):
     RETRY = auto()
 
 
+class StoreTrigger(Enum):
+    """Why the connector asks the manager to store the keys."""
+
+    # The chunks are complete. The eager store.
+    ON_COMPUTE = auto()
+    # The KV cache manager hands off a state block that is about to be reused.
+    # The source is short-lived, so the store cannot be postponed.
+    ON_HANDOFF = auto()
+
+
 class OffloadPolicy(Enum):
     # Offload only newly-computed chunks as they arrive; prefix-hit
     # chunks (already offloaded by a prior request) are skipped.
@@ -353,7 +363,7 @@ class OffloadingManager(ABC):
     ) -> CacheHitSource:
         """Return the cache tier that supplied a successful lookup.
 
-        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        This is queried only after `lookup` resolves to `HIT`. Composing
         managers can override it to retain the origin across asynchronous
         promotion into a primary tier. The default keeps out-of-tree managers
         compatible while making unknown provenance explicit.
@@ -397,6 +407,8 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         """Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
@@ -405,6 +417,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: why the connector asks for the store.
 
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
@@ -419,6 +432,8 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
         success: bool = True,
     ):
         """Marks blocks which were previously prepared to be stored, as stored.
@@ -429,6 +444,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: the trigger given to the matching prepare_store.
             success: whether the blocks were stored successfully.
 
         """
@@ -523,7 +539,7 @@ class OffloadingManager(ABC):
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources.
 
-        The one exception to the rule that callers hold ``lock``: call this
+        The one exception to the rule that callers hold `lock`: call this
         without it. A manager with a background thread stops that thread here
         and may need the lock to do so.
         """

@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -104,14 +105,14 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     """
 
     def get_finished_count(self) -> int:
-        """Number of ``finished_sending`` notifications expected per request.
+        """Number of `finished_sending` notifications expected per request.
 
         Only TP rank 0 writes hidden states to disk, so each request yields a
-        single notification. The default (``None``) makes ``KVOutputAggregator``
+        single notification. The default (`None`) makes `KVOutputAggregator`
         wait for every worker in the world size; since ranks 1..N-1 never submit
         a copy, the request would never be reported as finished and its blocks
         would be leaked forever (the scheduler then spins on
-        ``has_finished_requests()``).
+        `has_finished_requests()`).
         """
         return 1
 
@@ -130,7 +131,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         group_ids = [
             gid
             for gid, group in enumerate(groups)
-            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+            if any(
+                isinstance(spec, HiddenStateCacheSpec)
+                for spec in group.kv_cache_specs.values()
+            )
         ]
         if len(group_ids) == 1:
             return group_ids[0]
@@ -156,7 +160,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         if kv_cache_config is None:
             return vllm_config.cache_config.block_size
         cache_group = kv_cache_config.kv_cache_groups[cache_kv_group_id]
-        return cache_group.kv_cache_spec.block_size
+        return cache_group.block_size
 
     def __init__(
         self,
@@ -334,9 +338,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         """Thread worker: wait for async DtoH copy, write to disk, release lock.
 
-        ``lock_fd`` is an open file descriptor on the companion ``.lock``
-        file with ``LOCK_EX`` already held.  Closing it releases the lock,
-        which unblocks any client sleeping on ``LOCK_SH``.
+        `lock_fd` is an open file descriptor on the companion `.lock`
+        file with `LOCK_EX` already held.  Closing it releases the lock,
+        which unblocks any client sleeping on `LOCK_SH`.
         """
         try:
             event.synchronize()
@@ -540,9 +544,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         if kv_params.get("include_output_tokens", False):
             # Exclude the final token — it was the model's output, never an
             # input to a forward pass, so its hidden state is not in the cache.
-            token_ids = torch.tensor(list(request.all_token_ids)[:-1])
+            token_ids = token_ids_to_tensor(request._all_token_ids)[:-1]
         elif request.prompt_token_ids is not None:
-            token_ids = torch.tensor(request.prompt_token_ids)
+            token_ids = token_ids_to_tensor(request.prompt_token_ids)
         else:
             logger.warning(
                 "Request %s has no prompt_token_ids (prompt_embeds only). "

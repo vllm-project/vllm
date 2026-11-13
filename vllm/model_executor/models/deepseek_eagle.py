@@ -197,9 +197,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         quant_config = vllm_config.quant_config
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = DeepseekV2Model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),

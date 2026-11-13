@@ -209,6 +209,16 @@ class PreloadSubcommand(CLISubcommand):
             help="Shared secret for daemon-to-daemon requests. The JSON "
             "connection is unencrypted; use a trusted network.",
         )
+        parser.add_argument(
+            "--warmup-cache-stores",
+            type=str,
+            default=None,
+            help="Comma-separated shared store backends mirroring the "
+            "warmup caches (e.g. 'mooncake', connected via "
+            "MOONCAKE_CONFIG_PATH). The local disk cache is always the "
+            "first tier; these add shared tiers that reads fall back to "
+            "and tuned tables are published to.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -216,6 +226,7 @@ class PreloadSubcommand(CLISubcommand):
         from vllm.model_executor.model_loader.weight_cache.daemon import (
             _reject_unsupported_parallelism,
             _run_daemon,
+            daemon_serves_model,
             get_draft_daemon_config,
             plan_local_ranks,
         )
@@ -249,7 +260,6 @@ class PreloadSubcommand(CLISubcommand):
         world_size = dp_size * pp_size * tp_size
 
         placements = plan_local_ranks(parallel_config)
-        local_world_size = len(placements)
         if dp_size == 1:
             nnodes = parallel_config.nnodes
             node_rank = parallel_config.node_rank
@@ -315,8 +325,14 @@ class PreloadSubcommand(CLISubcommand):
             for (is_draft, _, _), (_, dp_rank, pp_rank, tp_rank) in product(
                 groups, placements
             )
+            if daemon_serves_model(is_draft, pp_rank, pp_size)
         }
         _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
+        warmup_cache_stores = [
+            name.strip()
+            for name in (args.warmup_cache_stores or "").split(",")
+            if name.strip()
+        ]
 
         def _seed_endpoint(
             host: str | None, base_port: int | None, offset: int
@@ -327,6 +343,7 @@ class PreloadSubcommand(CLISubcommand):
             return host, base_port + offset
 
         procs: list[BaseProcess] = []
+        serving: list[BaseProcess] = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
             # Draft daemons live past the target group's port block so both
             # roles can be reached over a single seed host:base_port.
@@ -357,6 +374,7 @@ class PreloadSubcommand(CLISubcommand):
                             dp_rank,
                             pp_rank,
                             seed_config,
+                            warmup_cache_stores,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
@@ -364,7 +382,9 @@ class PreloadSubcommand(CLISubcommand):
                         ),
                     )
                 )
-        health_state = _HealthState(procs)
+                if daemon_serves_model(is_draft, pp_rank, pp_size):
+                    serving.append(procs[-1])
+        health_state = _HealthState(serving)
         health_server = None
         health_thread = None
         if args.weight_cache_health_port is not None:
@@ -394,7 +414,12 @@ class PreloadSubcommand(CLISubcommand):
 
             ready: set[tuple[str, int]] = set()
             while not shutdown_requested:
-                dead = [p for p in procs if p.exitcode is not None]
+                # Daemons that serve no model exit cleanly after the rendezvous.
+                dead = [
+                    p
+                    for p in procs
+                    if p.exitcode is not None and (p in serving or p.exitcode != 0)
+                ]
                 if dead:
                     logger.error(
                         "Weight cache daemon rank(s) exited during %s "
@@ -408,7 +433,7 @@ class PreloadSubcommand(CLISubcommand):
                     exit_code = 128 - failure if failure < 0 else failure
                     break
                 if ready == expected_ready:
-                    wait([p.sentinel for p in procs], timeout=1.0)
+                    wait([p.sentinel for p in serving], timeout=1.0)
                     continue
                 try:
                     ready.add(ready_queue.get(timeout=1.0))
@@ -421,11 +446,10 @@ class PreloadSubcommand(CLISubcommand):
                     )
                     logger.info_once(
                         "===== Weight cache daemon READY: node %d/%d serving %d "
-                        "local rank(s) x %d role(s) in %s =====",
+                        "daemon(s) in %s =====",
                         node_rank,
                         nnodes,
-                        local_world_size,
-                        len(groups),
+                        len(expected_ready),
                         socket_dir_msg,
                     )
         finally:
