@@ -31,9 +31,16 @@ else()
   # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
-  # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE.
-  # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "a7a927731b109fdfec770df7c2a5be5d7e2216b5")
+  # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
+  # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40), plus
+  # fp4_fp4_mega_moe and fused post-expert RMSNorm for Muse Spark Open
+  # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
+  # (vllm-project/DeepGEMM#43), plus the restored FP32 MQA logits and their
+  # `logits_dtype` switch (vllm-project/DeepGEMM#46) and the mega_mhc
+  # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48), plus the SM90
+  # FP8 x FP4 Mega MoE kernel (vllm-project/DeepGEMM#44).
+  # Targets the PyTorch 2.11 stable ABI (requires PyTorch 2.14+ headers at build time) and CPython 3.10 limited API.
+  set(_DEEPGEMM_UPSTREAM_TAG "0f7698fe89811f5626266a1b79a53d1014b91cf0")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)

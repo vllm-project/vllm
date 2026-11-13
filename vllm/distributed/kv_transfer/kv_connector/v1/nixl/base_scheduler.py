@@ -113,6 +113,9 @@ class NixlBaseConnectorScheduler:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Payloads the listener serves; a republish after a wake-up updates them.
+        self._handshake_data: dict[tuple[int, int], bytes] = {}
+        self._registration_generation = 0
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -261,7 +264,7 @@ class NixlBaseConnectorScheduler:
         speculative scratch slots and everything before the running state
         (null placeholders and the previous step's superseded state) go.
 
-        Use this at every block-id exchange point. Pass ``clip_ssm=False``
+        Use this at every block-id exchange point. Pass `clip_ssm=False`
         for per-step partial lists (host-buffer save), where the SSM strip
         does not apply.
         """
@@ -299,7 +302,6 @@ class NixlBaseConnectorScheduler:
             metadata (dict): the handshake metadata to set.
 
         """
-        encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
         for (pp_rank, tp_rank), rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
@@ -307,12 +309,16 @@ class NixlBaseConnectorScheduler:
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            encoded_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
+            encoded = encoder.encode(rank_metadata)
+            if self._handshake_data.get((pp_rank, tp_rank)) != encoded:
+                # Peers must handshake again to load the changed registration.
+                self._registration_generation += 1
+            self._handshake_data[(pp_rank, tp_rank)] = encoded
             logger.debug(
                 "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,
                 tp_rank,
-                str(len(encoded_data[(pp_rank, tp_rank)])),
+                str(len(self._handshake_data[(pp_rank, tp_rank)])),
             )
 
         # Only start the listener when we have metadata to serve.
@@ -321,7 +327,7 @@ class NixlBaseConnectorScheduler:
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
                 args=(
-                    encoded_data,
+                    self._handshake_data,
                     ready_event,
                     self._stop_event,
                     self.side_channel_host,
@@ -395,7 +401,7 @@ class NixlBaseConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
-        Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
+        Stops short of the trailing `_prefill_backoff()` tokens that the decoder
         will recompute locally."""
         backoff = self._prefill_backoff()
         if backoff and num_prompt_tokens > backoff:
@@ -403,12 +409,12 @@ class NixlBaseConnectorScheduler:
         return num_prompt_tokens
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the trailing ``_prefill_backoff()`` prompt tokens
+        """P-side only: drop the trailing `_prefill_backoff()` prompt tokens
         so the prefiller stops short of what the decoder recomputes locally.
         For Mamba that is the single token needed to yield h(N-1); for
         multi-module MTP it is the drafter's whole lookahead window.
 
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         backoff = self._prefill_backoff()
         params = request.kv_transfer_params
@@ -418,9 +424,9 @@ class NixlBaseConnectorScheduler:
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > backoff
-            # A request that skips reading the prefix cache (prompt logprobs)
-            # loads nothing on the decoder, which recomputes its whole prompt.
-            and not request.get_skip_reading_prefix_cache()
+            # A request that skips reading external KV (prompt logprobs)
+            # loads nothing on the decoder, which recomputes past its local hit.
+            and not request.skip_reading_external_kv
         ):
             if request.prompt_token_ids is not None:
                 del request.prompt_token_ids[-backoff:]
@@ -432,6 +438,11 @@ class NixlBaseConnectorScheduler:
             del request._all_token_ids[-backoff:]
             request.num_prompt_tokens -= backoff
             request.max_tokens = 1
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            request.truncate_block_hashes(
+                hash_block_size, self.vllm_config.num_hash_lookahead_tokens
+            )
             params["_p_side_truncated"] = True
 
     def _build_save_meta(

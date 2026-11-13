@@ -125,7 +125,7 @@ MIN_TOKENS_TEST_CASES = [
         id="min_tokens_with_simple_char_stop",
     ),
     # === EOS TOKEN WITH MIN_TOKENS (potential LogitsProcessor bug) ===
-    # These test the MinTokensLogitsProcessor handling of EOS tokens
+    # These test the min_tokens handling of EOS tokens
     pytest.param(
         MinTokensTestCase(
             name="min_equals_max_eos_only",

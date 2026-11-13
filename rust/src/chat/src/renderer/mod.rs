@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+use tracing::warn;
 use vllm_text::Prompt;
 
 use crate::error::Result;
@@ -14,6 +15,7 @@ mod deepseek;
 pub mod deepseek_v32;
 pub mod deepseek_v4;
 pub mod deepseek_v41;
+mod glm5_next;
 pub mod harmony;
 pub mod hf;
 mod inkling;
@@ -25,9 +27,10 @@ mod test_utils;
 pub use deepseek_v4::DeepSeekV4ChatRenderer;
 pub use deepseek_v32::DeepSeekV32ChatRenderer;
 pub use deepseek_v41::DeepSeekV41ChatRenderer;
+pub use glm5_next::Glm5NextChatRenderer;
 pub use harmony::HarmonyChatRenderer;
 pub use inkling::InklingChatRenderer;
-pub use kimi_k3::KimiK3ChatRenderer;
+pub use kimi_k3::{KimiK3ChatRenderer, KimiK3Variant};
 pub use selection::RendererSelection;
 
 /// Location of one multimodal content part in the source chat request.
@@ -53,11 +56,38 @@ pub struct RenderedPrompt {
     pub effective_template_kwargs: HashMap<String, Value>,
 }
 
+/// Decode the `arguments` of an assistant tool call replayed in the history,
+/// coercing anything but a JSON object to an empty object.
+///
+/// The model produced this string in an earlier turn, and OpenAI carries it as
+/// a string, so rejecting it would fail every later turn of the conversation.
+/// Renderers whose reference encoding defines its own handling of such strings
+/// keep it instead of calling this.
+fn tool_call_arguments_or_empty(arguments: &str) -> Map<String, Value> {
+    let problem = match serde_json::from_str(arguments) {
+        Ok(Value::Object(arguments)) => return arguments,
+        Ok(Value::Null) => return Map::new(),
+        Ok(_) => "decoded to a non-object JSON value",
+        Err(_) => "are not valid JSON",
+    };
+    warn!(
+        bytes = arguments.len(),
+        "tool call arguments {problem}; coercing to an empty object so the conversation can continue"
+    );
+    Map::new()
+}
+
 /// Minimal chat-prompt renderer used by `vllm-chat`.
 pub trait ChatRenderer: Send + Sync {
     /// Render one chat request into the text prompt submitted to the text
     /// backend.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt>;
+
+    /// Whether [`render`](Self::render) renders a request's `chat_template`
+    /// override. Requests carrying one are rejected for other renderers.
+    fn renders_request_chat_template(&self) -> bool {
+        false
+    }
 }
 
 /// Shared trait-object form of [`ChatRenderer`].
