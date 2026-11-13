@@ -76,8 +76,8 @@ def test_cosmos3_new_checkpoint_weights_mapper():
 
 def test_cosmos3_modelopt_quantizer_weights_mapper():
     """ModelOpt/Diffusers FP8 checkpoints ship native fake-quant buffers
-    (``*_quantizer._amax`` / ``._scale``) alongside the vLLM-consumable
-    ``weight_scale`` / ``input_scale`` sidecars. vLLM must drop the former
+    (`*_quantizer._amax` / `._scale`) alongside the vLLM-consumable
+    `weight_scale` / `input_scale` sidecars. vLLM must drop the former
     (it has no parameter for them) while keeping the latter."""
     from vllm.model_executor.models.cosmos3 import Cosmos3ForConditionalGeneration
 
@@ -186,8 +186,8 @@ def test_cosmos3_edge_checkpoint_weights_mapper():
 
 def test_cosmos3_edge_modelopt_quantizer_weights_mapper():
     """ModelOpt/Diffusers FP8 checkpoints ship native fake-quant buffers
-    (``*_quantizer._amax`` / ``._scale``) alongside the vLLM-consumable
-    ``weight_scale`` / ``input_scale`` sidecars. vLLM must drop the former
+    (`*_quantizer._amax` / `._scale`) alongside the vLLM-consumable
+    `weight_scale` / `input_scale` sidecars. vLLM must drop the former
     (it has no parameter for them) while keeping the latter."""
     from vllm.model_executor.models.cosmos3_edge import (
         Cosmos3EdgeForConditionalGeneration,

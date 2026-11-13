@@ -139,7 +139,6 @@ def _get_speculative_compatibility_factors(
         "model": draft_model_config.model,
         "revision": draft_model_config.revision,
         "code_revision": draft_model_config.code_revision,
-        "parallel_drafting": speculative_config.parallel_drafting,
         "kv_cache_dtype": str(kv_cache_dtype),
         "auxiliary_layer_ids": (
             tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Grouped ``wo_a`` output projection for DeepSeek-V4."""
+"""Grouped `wo_a` output projection for DeepSeek-V4."""
 
 import torch
 
@@ -13,10 +13,10 @@ from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
 
 
 class DeepseekV4GroupedWoA(ColumnParallelLinear):
-    """``wo_a`` as one projection per attention head group.
+    """`wo_a` as one projection per attention head group.
 
-    Group ``g`` of the inverse-rotated attention output only meets output rows
-    ``g * o_lora_rank : (g + 1) * o_lora_rank``.
+    Group `g` of the inverse-rotated attention output only meets output rows
+    `g * o_lora_rank : (g + 1) * o_lora_rank`.
     """
 
     def __init__(
@@ -36,7 +36,7 @@ class DeepseekV4GroupedWoA(ColumnParallelLinear):
         nope_dim: int,
         rope_dim: int,
     ) -> torch.Tensor:
-        """The BF16 inverse-rotated groups, ``[num_tokens, n_groups, group_dim]``."""
+        """The BF16 inverse-rotated groups, `[num_tokens, n_groups, group_dim]`."""
         x, _ = fused_inv_rope_fp8_quant(
             o,
             positions,
@@ -63,7 +63,7 @@ class DeepseekV4GroupedWoA(ColumnParallelLinear):
         einsum_recipe: tuple[int, int, int],
         tma_aligned_scales: bool,
     ) -> torch.Tensor:
-        """Inverse RoPE plus grouped GEMM: ``[num_tokens, n_groups, o_lora_rank]``."""
+        """Inverse RoPE plus grouped GEMM: `[num_tokens, n_groups, o_lora_rank]`."""
         # NVIDIA-only; the shared attention layer must not import nvidia/ops.
         from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
 

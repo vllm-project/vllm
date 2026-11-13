@@ -63,7 +63,7 @@ def _verify_num_sequences(value: int, parameter_name: str) -> None:
 
 
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
-    """Validate ``thinking_token_budget``; return ``None`` if unset."""
+    """Validate `thinking_token_budget`; return `None` if unset."""
     if value is None:
         return None
     if isinstance(value, (bool, float)) or not isinstance(value, int):
@@ -285,7 +285,7 @@ class SamplingParams(
     n: int = 1
     """Number of outputs to return for the given prompt request.
 
-    The maximum allowed value is controlled by the ``VLLM_MAX_N_SEQUENCES``
+    The maximum allowed value is controlled by the `VLLM_MAX_N_SEQUENCES`
     environment variable (default: 16384).
 
     NOTE:
@@ -311,7 +311,7 @@ class SamplingParams(
     means greedy sampling."""
     watermarking: bool | None = None
     """Whether to apply the engine's configured watermark to this request.
-    ``None`` defaults to enabled."""
+    `None` defaults to enabled."""
     top_p: float = 1.0
     """Controls the cumulative probability of the top tokens to consider. Must
     be in (0, 1]. Set to 1 to consider all tokens."""
@@ -917,7 +917,6 @@ class SamplingParams(
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
-        self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
@@ -1183,20 +1182,6 @@ class SamplingParams(
                 "allowed_token_ids contains out-of-vocab token id!",
                 parameter="allowed_token_ids",
                 value=invalid_token_ids,
-            )
-
-    def _validate_spec_decode(
-        self,
-        speculative_config: SpeculativeConfig | None,
-    ) -> None:
-        if speculative_config is None:
-            return
-
-        # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_p > _SAMPLING_EPS or self.logit_bias:
-            raise VLLMValidationError(
-                "The min_p and logit_bias sampling parameters "
-                "are not yet supported with speculative decoding."
             )
 
     def _validate_diffusion(self, model_config: ModelConfig) -> None:
@@ -1542,9 +1527,6 @@ class BeamSearchParams(
         if config.model_config.is_diffusion:
             # The diffusion sampler does not consume logprob_token_ids.
             raise ValueError("Beam allowlists with diffusion models are not supported")
-        if not config.use_v2_model_runner:
-            # V1 exact-ID logprobs overwrite other rows in a mixed batch.
-            raise ValueError("Beam allowlists require the V2 model runner")
         # Score the original distribution without applying a sampling mask.
         sampling_params.logprobs = None
         sampling_params.logprob_token_ids = ids

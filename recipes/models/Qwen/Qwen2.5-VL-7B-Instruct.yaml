@@ -197,7 +197,7 @@ guide: |
   - `--max-model-len 16384` is a safe default on a single v6e chip (native context is 128K); raise it if you have headroom.
   - `--limit-mm-per-prompt` caps incoming multimodal requests per prompt.
   - `--mm-processor-kwargs '{"max_pixels":1003520}'` bounds the per-image resolution to control encoder cost.
-  - vLLM uses 90% of device memory by default; on TPU the recipe pushes `--gpu-memory-utilization 0.98` to maximize KV cache.
+  - On TPU, the recipe raises `--gpu-memory-utilization` to 0.98 to maximize KV cache.
   - `--disable-chunked-mm-input` is recommended on TPU for stable multimodal batching.
 
   ## Benchmarking

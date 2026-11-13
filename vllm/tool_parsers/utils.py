@@ -43,7 +43,7 @@ CUSTOM_TOOL_INPUT_KEY = "input"
 
 
 def custom_tool_parameters() -> dict[str, Any]:
-    """Schema of the single-string function shim a ``custom`` tool is shown as."""
+    """Schema of the single-string function shim a `custom` tool is shown as."""
     return {
         "type": "object",
         "properties": {
@@ -75,7 +75,7 @@ def safe_literal_eval(text: str):
 def partial_tag_overlap(text: str, tag: str) -> int:
     """Length of the longest prefix of *tag* that matches a suffix of *text*.
 
-    E.g. text ending in ``"<tool_"`` returns 6 when tag is ``"<tool_call>"``.
+    E.g. text ending in `"<tool_"` returns 6 when tag is `"<tool_call>"`.
     Returns 0 when there is no overlap.
     """
     max_check = min(len(tag) - 1, len(text))
@@ -179,8 +179,8 @@ def is_complete_json(input_str: str) -> bool:
 def _is_json_finite(obj: Any) -> bool:
     """Whether *obj* can be serialized to valid JSON.
 
-    ``json.dumps(..., allow_nan=False)`` raises ``ValueError`` on any
-    non-finite float (``inf``/``-inf``/``nan``) anywhere in the value, so this
+    `json.dumps(..., allow_nan=False)` raises `ValueError` on any
+    non-finite float (`inf`/`-inf`/`nan`) anywhere in the value, so this
     detects non-finite floats nested inside parsed lists/dicts too.
     """
     try:
@@ -216,7 +216,7 @@ def get_function_tools(
 
     This is the single source for both the chat template's tool list and the
     tools a tool-call grammar constrains, so the two cannot drift apart.
-    Namespace functions are flattened to ``<namespace>__<name>``; custom tools
+    Namespace functions are flattened to `<namespace>__<name>`; custom tools
     become a single-string function shim. Other Responses tool types are never
     rendered for the model and are dropped.
     """
@@ -247,10 +247,10 @@ def get_function_tools(
 def require_function_tools(
     tools: Sequence[Tool],
 ) -> list[ChatCompletionToolsParam | FunctionTool]:
-    """Return ``get_function_tools(tools)``, rejecting a request that has none.
+    """Return `get_function_tools(tools)`, rejecting a request that has none.
 
     Raises:
-        VLLMValidationError: ``tools`` has no tool the model can call, so a
+        VLLMValidationError: `tools` has no tool the model can call, so a
             tool choice that requires a call can never be satisfied.
 
     """
@@ -592,12 +592,12 @@ def get_parameter_value(val: ast.expr) -> Any:
 
 
 def _ast_callable_dotted_name(node: ast.expr) -> str:
-    """Return the dotted name for a call target, walking ``ast.Attribute``
-    chains so ``a.b.c(...)`` becomes ``"a.b.c"``.
+    """Return the dotted name for a call target, walking `ast.Attribute`
+    chains so `a.b.c(...)` becomes `"a.b.c"`.
 
     Raises:
         UnexpectedAstError: If the chain does not bottom out in an
-            ``ast.Name`` (e.g. subscript or call expression as receiver).
+            `ast.Name` (e.g. subscript or call expression as receiver).
 
     """
     parts: list[str] = []
@@ -614,8 +614,8 @@ def _ast_callable_dotted_name(node: ast.expr) -> str:
 def handle_single_tool(call: ast.Call) -> ToolCall:
     """Convert a single AST function call node into a ToolCall object.
 
-    Accepts both bare names (``foo(...)``) and dotted attribute chains
-    (``a.b.c(...)``); the resulting tool call ``name`` field preserves the
+    Accepts both bare names (`foo(...)`) and dotted attribute chains
+    (`a.b.c(...)`); the resulting tool call `name` field preserves the
     dotted form.
 
     Raises:
@@ -646,11 +646,11 @@ def escape_ctrl_chars_in_strings(text: str) -> str:
     """Escape literal control chars inside string literals of pythonic text.
 
     Models emitting pythonic tool calls frequently place raw newlines inside a
-    string argument (e.g. ``exec(command='line1\\nline2')`` written with a real
-    line break). That is invalid Python — ``ast.parse`` fails with "unterminated
+    string argument (e.g. `exec(command='line1\\nline2')` written with a real
+    line break). That is invalid Python — `ast.parse` fails with "unterminated
     string literal" — so the call would be dropped even though the intent is
-    unambiguous. A NUL byte is worse: ``ast.parse`` rejects it anywhere in the
-    source with ``ValueError``. Escaping ``\\n``/``\\r``/``\\t``/``\\x00`` only
+    unambiguous. A NUL byte is worse: `ast.parse` rejects it anywhere in the
+    source with `ValueError`. Escaping `\\n`/`\\r`/`\\t`/`\\x00` only
     *inside* string literals makes the text parseable while preserving the
     argument value exactly (the escape sequences evaluate back to the original
     control chars).
@@ -694,14 +694,14 @@ _RESERVED_KW_SUFFIX = "_pyreservedkw_"
 def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
     """Rename Python-keyword parameter names so pythonic tool text parses.
 
-    Tools legitimately name parameters ``from``, ``in``, ``class`` — but
-    ``memory_get(from=1)`` is a Python ``SyntaxError``, so the whole call
-    would be dropped. Rename ``from=`` to ``from_pyreservedkw_=`` (outside
+    Tools legitimately name parameters `from`, `in`, `class` — but
+    `memory_get(from=1)` is a Python `SyntaxError`, so the whole call
+    would be dropped. Rename `from=` to `from_pyreservedkw_=` (outside
     string literals only, and only in keyword-argument position: preceded by
-    ``(`` or ``,`` and followed by a single ``=``), parse, then restore the
-    original name with :func:`restore_reserved_kwarg_names`.
+    `(` or `,` and followed by a single `=`), parse, then restore the
+    original name with `restore_reserved_kwarg_names`.
 
-    Returns (rewritten_text, changed). Keyword *values* (``x=True``) and
+    Returns (rewritten_text, changed). Keyword *values* (`x=True`) and
     keywords inside string arguments are never touched.
     """
     out: list[str] = []
@@ -757,7 +757,7 @@ def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
 
 
 def restore_reserved_kwarg_names(arguments: dict) -> dict:
-    """Undo :func:`rename_reserved_kwargs` on a decoded arguments dict.
+    """Undo `rename_reserved_kwargs` on a decoded arguments dict.
 
     Only keys that carry the rename suffix *and* whose stem is a Python
     keyword are restored, making this an exact inverse of the rename.
@@ -778,13 +778,13 @@ def restore_reserved_kwarg_names(arguments: dict) -> dict:
 def normalize_leading_zero_ints(text: str) -> str:
     """Strip leading zeros from decimal integer literals so the text parses.
 
-    Models emit zero-padded integers (``month=07``), which Python rejects
+    Models emit zero-padded integers (`month=07`), which Python rejects
     ("leading zeros in decimal integer literals are not permitted"), so the
-    whole call would be dropped. Rewrite ``07`` to ``7`` outside string
+    whole call would be dropped. Rewrite `07` to `7` outside string
     literals only. Tokens that are already valid Python are left alone:
-    all-zero literals (``00``), floats and fractional parts (``07.5``,
-    ``1.07``), exponents (``1e07``, consumed as a name run), and ``0x``/
-    ``0o``/``0b`` prefixes (the digit run stops at the prefix letter).
+    all-zero literals (`00`), floats and fractional parts (`07.5`,
+    `1.07`), exponents (`1e07`, consumed as a name run), and `0x`/
+    `0o`/`0b` prefixes (the digit run stops at the prefix letter).
     """
     out: list[str] = []
     quote: str | None = None
@@ -844,15 +844,15 @@ def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
     """Close a broken string literal at the only closing quote that works.
 
     Models emitting shell commands frequently nest unescaped same-style
-    quotes inside a string argument — ``command='sed -n '360,450p' f.py'``,
-    or a quoted ``python3 -c`` payload that itself contains quoted strings —
+    quotes inside a string argument — `command='sed -n '360,450p' f.py'`,
+    or a quoted `python3 -c` payload that itself contains quoted strings —
     which Python reads as juxtaposed garbage, so the call is dropped even
     though the intent is unambiguous. A string is treated as broken when
     its first unescaped quote cannot syntactically close it (what follows
-    is none of ``,``, ``)``, ``]``, ``}``, ``:``). For a broken string,
+    is none of `,`, `)`, `]`, `}`, `:`). For a broken string,
     every syntactically plausible closing quote is tried: interior quotes
     escaped, the rest of the text kept verbatim, and the result (with
-    control chars escaped) validated with ``ast.parse``. Exactly one
+    control chars escaped) validated with `ast.parse`. Exactly one
     candidate parsing means recovery — the decoded value is exactly the
     text the model wrote. Zero or several parsing candidates means the
     nesting is genuinely ambiguous and the text is returned unchanged
@@ -963,13 +963,13 @@ def contains_broken_string_literal(text: str) -> bool:
 
 
 def _is_escaped(text: str, index: int) -> bool:
-    """Whether the character at ``index`` is backslash-escaped.
+    """Whether the character at `index` is backslash-escaped.
 
     A character is escaped iff it is preceded by an *odd* number of consecutive
     backslashes. Checking only the single preceding character is wrong for even
-    runs: in ``'ab\\'`` the closing quote follows an escaped backslash (``\\\\``)
+    runs: in `'ab\\'` the closing quote follows an escaped backslash (`\\\\`)
     and is therefore NOT escaped — it closes the string. Common in regex/code
-    arguments such as ``r'\\\\b'``.
+    arguments such as `r'\\\\b'`.
     """
     backslashes = 0
     j = index - 1
@@ -1080,8 +1080,8 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
 def extract_types_from_schema(schema: Any) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
-    Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
+    Handles `type` (string or list), `enum` value inference, and
+    recursive `anyOf`/`oneOf`/`allOf`.  Returns `["string"]`
     when no type information can be determined.
     """
     if schema is None or not isinstance(schema, dict):
@@ -1160,7 +1160,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     Args:
         value: The raw string value from the model output.
         schema_type: One or more JSON Schema type strings
-            (e.g. ``"string"`` or ``["string", "null"]``).
+            (e.g. `"string"` or `["string", "null"]`).
 
     """
     if isinstance(schema_type, str):

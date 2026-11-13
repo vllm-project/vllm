@@ -44,7 +44,7 @@ def bench_graph(fn, *, graph_calls: int, replays: int) -> float:
         for _ in range(3):
             fn()
     torch.cuda.current_stream().wait_stream(warmup_stream)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -52,7 +52,7 @@ def bench_graph(fn, *, graph_calls: int, replays: int) -> float:
             fn()
     for _ in range(3):
         graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     begin, end = (
         torch.cuda.Event(enable_timing=True),

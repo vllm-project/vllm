@@ -245,7 +245,11 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
     ],
 )
 @pytest.mark.parametrize("PAGE_SIZE", [16])
-def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SIZE):
+# 36: a DSpark draft layer's window (rows attend to their last 36 keys).
+@pytest.mark.parametrize("sliding_window", [None, 36])
+def test_decode_attention_cross_layer_view(
+    H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SIZE, sliding_window
+):
     """The kernel must honor the cache's page-dim stride, not assume pages are
     packed back-to-back. A per-layer view into a cross-layer (block-major)
     cache has stride(0) inflated by num_layers; outputs must match a
@@ -317,6 +321,7 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
             sm_scale,
             PAGE_SIZE,
             is_mla=is_mla,
+            sliding_window=sliding_window,
         )
         return o, lse
 
@@ -399,9 +404,9 @@ def test_decode_attention_int64_logits_offset(B, H_Q, H_KV, D_QK, D_V, is_mla):
 
 
 def _verify_reference(q, cache, block_table, seq_lens, real_seq_lens, qlen, scale):
-    """Causal MLA verify in the dtype of ``cache``: row t of a request attends
+    """Causal MLA verify in the dtype of `cache`: row t of a request attends
     its first min(L - qlen + 1 + t, L_real) tokens; a row with none comes back
-    zero. A bf16 ``cache`` also rounds P to bf16 before the PV product, as the
+    zero. A bf16 `cache` also rounds P to bf16 before the PV product, as the
     kernel does."""
     kv_lora_rank = 512
     page_size = cache.shape[1]
@@ -601,7 +606,7 @@ def test_decode_attention_fwd_verify_int64_page_offset(num_heads):
 )
 @pytest.mark.parametrize("sliding_window", [5, 64, 2055])
 def test_decode_attention_sliding_window(H_Q, H_KV, D_QK, D_V, is_mla, sliding_window):
-    """Each row attends to its last ``sliding_window`` keys only, also when the
+    """Each row attends to its last `sliding_window` keys only, also when the
     window splits unevenly over the KV splits (stage 2 must skip the same empty
     splits as stage 1)."""
     PAGE_SIZE = 16

@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm._cpu_ops  # noqa: F401
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -79,8 +80,10 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         except AttributeError:
             return (
                 False,
-                f"PyTorch {torch.__version__} does not support "
-                "_dyn_quant_* 4bit ops. Install a newer version",
+                (
+                    f"PyTorch {torch.__version__} does not support "
+                    "_dyn_quant_* 4bit ops. Install a newer version"
+                ),
             )
 
         return mk.FusedMoEExperts.is_supported_config(

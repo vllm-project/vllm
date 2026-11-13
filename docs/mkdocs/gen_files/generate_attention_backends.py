@@ -1297,7 +1297,7 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
 def _apply_fp8_support(kv_cache_dtypes: str, supports_fp8: bool) -> str:
     """Add or remove fp8 dtypes from a comma-separated kv_cache_dtypes string.
 
-    The base FLASH_ATTN backend lists fp8 dtypes in ``supported_kv_cache_dtypes``,
+    The base FLASH_ATTN backend lists fp8 dtypes in `supported_kv_cache_dtypes`,
     but actual support varies by FA version (e.g. FA2 has no fp8 support), so each
     variant's row is normalized to match its own capability.
     """
@@ -1493,9 +1493,9 @@ def parse_cuda_priority_lists() -> dict[str, list[str]]:
 def _get_backends_from_return(stmts: list) -> list[str]:
     """Extract backend names from return statements in a list of statements.
 
-    Handles starred unpacking (e.g. ``*sparse_backends``) by resolving the
+    Handles starred unpacking (e.g. `*sparse_backends`) by resolving the
     variable from assignments found in the same statement list.  When the
-    variable is conditionally assigned (inside an ``if/else``), the ``else``
+    variable is conditionally assigned (inside an `if/else`), the `else`
     branch value is used as the representative default.
     """
     # Collect variable assignments so we can resolve starred expressions.
@@ -1727,7 +1727,7 @@ def build_blocks() -> dict[str, str]:
     """Build the generated table blocks keyed by their `gen:` marker name.
 
     Only the tables are generated here; the surrounding prose lives in the
-    handwritten ``docs/design/attention_backends.md`` page.
+    handwritten `docs/design/attention_backends.md` page.
     """
     attention_backends_map = parse_registry()
     priorities = parse_cuda_priority_lists()
