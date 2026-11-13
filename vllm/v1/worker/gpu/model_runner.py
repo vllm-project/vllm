@@ -905,15 +905,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert num_tokens % self.decode_query_len == 0
         elif self.speculator is not None:
             assert self.speculative_config is not None
+            draft_slots = self.speculative_config.max_num_new_slots_for_drafting
+            # Every request needs its query tokens plus its draft slots, so cap
+            # the requests first; otherwise the slots of max_num_reqs requests
+            # can leave fewer tokens than requests (or none at all).
             num_reqs = min(
-                num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
+                num_reqs,
+                self.max_num_tokens
+                // (self.speculator.num_query_per_req + draft_slots),
             )
             # Keep room for each request's draft slots.
-            num_tokens = min(
-                num_tokens,
-                self.max_num_tokens
-                - num_reqs * self.speculative_config.max_num_new_slots_for_drafting,
-            )
+            num_tokens = min(num_tokens, self.max_num_tokens - num_reqs * draft_slots)
 
         assert num_tokens <= self.max_num_tokens, (
             f"Dummy run with {num_tokens} tokens exceeds max_num_batched_tokens "
