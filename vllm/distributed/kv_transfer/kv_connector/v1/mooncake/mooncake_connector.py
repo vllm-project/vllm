@@ -451,36 +451,26 @@ def _align_transfer_regions(
                     f"{remote_region.layer_index}."
                 ),
             )
-        if local_region.group_index != remote_region.group_index:
-            return (
-                [],
-                [],
-                (
-                    "Mooncake registered group index mismatch for "
-                    f"{local_region.layer_name}: producer="
-                    f"{local_region.group_index}, consumer="
-                    f"{remote_region.group_index}."
-                ),
-            )
-        if (
-            local_region.shared_group_ids
-            and remote_region.shared_group_ids
-            and local_region.shared_group_ids != remote_region.shared_group_ids
-        ):
-            return (
-                [],
-                [],
-                (
-                    "Mooncake shared-group set mismatch for "
-                    f"{local_region.layer_name}: producer="
-                    f"{local_region.shared_group_ids}, consumer="
-                    f"{remote_region.shared_group_ids}."
-                ),
-            )
         aligned_local.append(local_region)
         aligned_remote.append(remote_region)
 
     return aligned_local, aligned_remote, None
+
+
+def _groups_match(
+    local_regions: list[TransferRegion],
+    remote_regions: list[TransferRegion],
+) -> bool:
+    """Whether paired regions can use the ordinary group-indexed planner."""
+    return all(
+        local.group_index == remote.group_index
+        and (
+            not local.shared_group_ids
+            or not remote.shared_group_ids
+            or local.shared_group_ids == remote.shared_group_ids
+        )
+        for local, remote in zip(local_regions, remote_regions)
+    )
 
 
 def _coalesce_contiguous_transfer_regions(
@@ -2048,7 +2038,7 @@ class MooncakeConnectorWorker:
         local_regions: list[TransferRegion],
         remote_regions: list[TransferRegion],
     ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
-        src_ptrs = []
+        src_ptrs: list[int] = []
         dst_ptrs = []
         lengths = []
         err_reqs: list[ReqId] = []
@@ -2056,135 +2046,45 @@ class MooncakeConnectorWorker:
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
 
         for d_req_id, send_meta in ready_reqs:
-            _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
-
-            if not remote_block_ids_per_group or all(
-                len(g) == 0 for g in remote_block_ids_per_group
-            ):
-                continue
-
-            if len(send_meta.local_block_ids) != len(remote_block_ids_per_group):
-                logger.error(
-                    "req %s: KV group count mismatch: local=%d, remote=%d",
+            try:
+                remote_block_ids = agent_meta.req_blocks[d_req_id][1]
+                # Full D hits still acknowledge every rank to release P's pages.
+                if not any(remote_block_ids):
+                    continue
+                region_runs = self._get_request_block_runs(
+                    d_req_id, send_meta, agent_meta, local_regions, remote_regions
+                )
+            except (ValueError, IndexError, KeyError) as error:
+                logger.exception(
+                    "Failed to plan Mooncake transfer for request %s "
+                    "(transfer_id=%s) to %s: local TP rank=%d/%d, "
+                    "remote TP rank=%d/%d, local blocks per group=%s, "
+                    "remote blocks per group=%s: %s",
                     d_req_id,
-                    len(send_meta.local_block_ids),
-                    len(remote_block_ids_per_group),
+                    send_meta.transfer_id,
+                    remote_session,
+                    self.tp_rank,
+                    self.tp_size,
+                    agent_meta.remote_tp_rank,
+                    agent_meta.remote_tp_size,
+                    [len(group) for group in send_meta.local_block_ids],
+                    [
+                        len(group)
+                        for group in agent_meta.req_blocks.get(d_req_id, ("", []))[1]
+                    ],
+                    error,
                 )
                 err_reqs.append(d_req_id)
                 if err_msg is None:
-                    err_msg = "KV group count mismatch"
+                    err_msg = str(error)
                 continue
-
-            # Keep KV-cache group identity. Hybrid/HMA groups can carry
-            # different semantics (e.g. full-attention KV pages vs GDN/Mamba
-            # inner-state slots), so their block IDs must not be flattened and
-            # reused for every registered region.
-            local_block_ids_by_group: list[list[int]] = []
-            remote_block_ids_by_group: list[list[int]] = []
-            has_block_error = False
-            group_specs = self.kv_cache_config.transfer_groups
-            for group_index, (local_group, remote_group) in enumerate(
-                zip(send_meta.local_block_ids, remote_block_ids_per_group)
+            descriptor_start = len(src_ptrs)
+            for local_region, remote_region, runs in zip(
+                local_regions, remote_regions, region_runs
             ):
-                is_mamba_group = isinstance(
-                    group_specs[group_index].kv_cache_spec,
-                    MambaSpec,
-                )
-                if is_mamba_group:
-                    # Mamba/GDN prefix caching can use null blocks only as
-                    # align-mode placeholders. They do not carry transferable
-                    # state, so skip them on both producer and consumer sides.
-                    local_group = [
-                        block_id
-                        for block_id in local_group
-                        if block_id != NULL_BLOCK_ID
-                    ]
-                    remote_group = [
-                        block_id
-                        for block_id in remote_group
-                        if block_id != NULL_BLOCK_ID
-                    ]
-
-                n_local = len(local_group)
-                n_remote = len(remote_group)
-                if n_local < n_remote:
-                    logger.error(
-                        "req %s: local blocks(%d) < remote blocks(%d) "
-                        "in a KV cache group (is_mamba_group=%s)",
-                        d_req_id,
-                        n_local,
-                        n_remote,
-                        is_mamba_group,
-                    )
-                    has_block_error = True
-                    break
-                elif n_local > n_remote:
-                    # Partial prefix cache hit: just read uncomputed blocks.
-                    local_group = local_group[-n_remote:] if n_remote > 0 else []
-                local_block_ids_by_group.append(local_group)
-                remote_block_ids_by_group.append(remote_group)
-
-            if has_block_error:
-                err_reqs.append(d_req_id)
-                if err_msg is None:
-                    err_msg = "P num blocks less than D"
-                continue
-
-            if not any(local_block_ids_by_group):
-                continue
-
-            # Normalize before kernel expansion so _contiguous_runs can
-            # coalesce the resulting ascending kernel runs.
-            for group_index, (local_group, remote_group) in enumerate(
-                zip(local_block_ids_by_group, remote_block_ids_by_group)
-            ):
-                if local_group:
-                    (
-                        local_block_ids_by_group[group_index],
-                        remote_block_ids_by_group[group_index],
-                    ) = _normalize_paired_block_order(local_group, remote_group)
-
-            local_block_ids_by_group = self._logical_to_kernel_block_ids(
-                local_block_ids_by_group
-            )
-            remote_block_ids_by_group = self._logical_to_kernel_block_ids(
-                remote_block_ids_by_group
-            )
-
-            # Regions of the same KV group share block ids; group them once.
-            block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
-            for local_region, remote_region in zip(local_regions, remote_regions):
-                assert local_region.group_index == remote_region.group_index, (
-                    "Aligned Mooncake transfer regions must belong to the same "
-                    "KV group."
-                )
-                group_key = (local_region.group_index, local_region.shared_group_ids)
-                if group_key not in block_runs:
-                    local_ids = np.asarray(
-                        _block_ids_for_region(
-                            local_block_ids_by_group,
-                            local_region.group_index,
-                            local_region.shared_group_ids,
-                        ),
-                        dtype=np.int64,
-                    )
-                    remote_ids = np.asarray(
-                        _block_ids_for_region(
-                            remote_block_ids_by_group,
-                            remote_region.group_index,
-                            local_region.shared_group_ids,
-                        ),
-                        dtype=np.int64,
-                    )
-                    block_runs[group_key] = (
-                        local_ids,
-                        remote_ids,
-                        *_contiguous_runs(local_ids, remote_ids),
-                    )
-                local_ids, remote_ids, run_starts, run_lens = block_runs[group_key]
+                local_ids, remote_ids, run_starts, run_lens = runs
                 if len(local_ids) == 0:
                     continue
-
                 (
                     should_transfer,
                     src_region_offset,
@@ -2238,15 +2138,190 @@ class MooncakeConnectorWorker:
                         + (remote_region.base_addr + dst_region_offset)
                     ).tolist()
                 )
-
             logger.debug(
-                "Sending kv_caches for request %s (%d blocks) to %s",
+                "Sending kv_caches for request %s (%d descriptors) to %s",
                 d_req_id,
-                sum(len(group) for group in local_block_ids_by_group),
+                len(src_ptrs) - descriptor_start,
                 remote_session,
             )
 
         return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
+
+    def _get_request_block_runs(
+        self,
+        d_req_id: ReqId,
+        send_meta: SendBlockMeta,
+        agent_meta: MooncakeXferMetadata,
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+    ) -> list[tuple[np.ndarray, ...]]:
+        """Pair pages once per endpoint group pair, retaining region order."""
+        remote_block_ids_per_group = agent_meta.req_blocks[d_req_id][1]
+        local_block_ids_by_group = send_meta.local_block_ids
+        remote_block_ids_by_group = remote_block_ids_per_group
+        groups_match = _groups_match(local_regions, remote_regions)
+        if groups_match:
+            if len(send_meta.local_block_ids) != len(remote_block_ids_per_group):
+                raise ValueError("KV group count mismatch")
+            # Keep KV-cache group identity. Hybrid/HMA groups can carry
+            # different semantics (e.g. full-attention KV pages vs GDN/Mamba
+            # inner-state slots), so their block IDs must not be flattened and
+            # reused for every registered region.
+            local_block_ids_by_group = []
+            remote_block_ids_by_group = []
+            group_specs = self.kv_cache_config.transfer_groups
+            for group_index, (local_group, remote_group) in enumerate(
+                zip(send_meta.local_block_ids, remote_block_ids_per_group)
+            ):
+                is_mamba_group = isinstance(
+                    group_specs[group_index].kv_cache_spec,
+                    MambaSpec,
+                )
+                if is_mamba_group:
+                    # Mamba/GDN prefix caching can use null blocks only as
+                    # align-mode placeholders. They do not carry transferable
+                    # state, so skip them on both producer and consumer sides.
+                    local_group = [
+                        block_id
+                        for block_id in local_group
+                        if block_id != NULL_BLOCK_ID
+                    ]
+                    remote_group = [
+                        block_id
+                        for block_id in remote_group
+                        if block_id != NULL_BLOCK_ID
+                    ]
+
+                n_local = len(local_group)
+                n_remote = len(remote_group)
+                if n_local < n_remote:
+                    logger.error(
+                        "req %s: local blocks(%d) < remote blocks(%d) "
+                        "in a KV cache group (is_mamba_group=%s)",
+                        d_req_id,
+                        n_local,
+                        n_remote,
+                        is_mamba_group,
+                    )
+                    raise ValueError("P num blocks less than D")
+                elif n_local > n_remote:
+                    # Partial prefix cache hit: just read uncomputed blocks.
+                    local_group = local_group[-n_remote:] if n_remote > 0 else []
+                local_block_ids_by_group.append(local_group)
+                remote_block_ids_by_group.append(remote_group)
+
+            # Normalize before kernel expansion so _contiguous_runs can
+            # coalesce the resulting ascending kernel runs.
+            for group_index, (local_group, remote_group) in enumerate(
+                zip(local_block_ids_by_group, remote_block_ids_by_group)
+            ):
+                if local_group:
+                    (
+                        local_block_ids_by_group[group_index],
+                        remote_block_ids_by_group[group_index],
+                    ) = _normalize_paired_block_order(local_group, remote_group)
+
+            local_block_ids_by_group = self._logical_to_kernel_block_ids(
+                local_block_ids_by_group
+            )
+            remote_block_ids_by_group = self._logical_to_kernel_block_ids(
+                remote_block_ids_by_group
+            )
+
+        block_runs: dict[
+            tuple[int, tuple[int, ...], int, tuple[int, ...]],
+            tuple[np.ndarray, ...],
+        ] = {}
+        region_runs: list[tuple[np.ndarray, ...]] = []
+        for local_region, remote_region in zip(local_regions, remote_regions):
+            group_key = (
+                local_region.group_index,
+                local_region.shared_group_ids,
+                remote_region.group_index,
+                remote_region.shared_group_ids,
+            )
+            if group_key not in block_runs:
+                if not groups_match:
+                    source_group = local_region.group_index
+                    destination_group = remote_region.group_index
+                    if source_group < 0 or destination_group < 0:
+                        raise ValueError(
+                            "Opaque groups cannot use region-mapped planning"
+                        )
+                    local_ids = local_block_ids_by_group[source_group]
+                    remote_ids = remote_block_ids_by_group[destination_group]
+                    if len(local_ids) < len(remote_ids):
+                        raise ValueError(
+                            "Producer has fewer pages than the destination"
+                        )
+                    if any(block <= 0 for block in local_ids + remote_ids):
+                        raise ValueError(
+                            "Region-mapped imports cannot transfer null pages"
+                        )
+                    local_ids = local_ids[-len(remote_ids) :] if remote_ids else []
+                    local_ids, remote_ids = _normalize_paired_block_order(
+                        local_ids, remote_ids
+                    )
+                else:
+                    local_ids = _block_ids_for_region(
+                        local_block_ids_by_group,
+                        local_region.group_index,
+                        local_region.shared_group_ids,
+                    )
+                    remote_ids = _block_ids_for_region(
+                        remote_block_ids_by_group,
+                        remote_region.group_index,
+                        local_region.shared_group_ids,
+                    )
+                local_array = np.asarray(local_ids, dtype=np.int64)
+                remote_array = np.asarray(remote_ids, dtype=np.int64)
+                block_runs[group_key] = (
+                    local_array,
+                    remote_array,
+                    *_contiguous_runs(local_array, remote_array),
+                )
+            region_runs.append(block_runs[group_key])
+        return region_runs
+
+    def _validate_region_mapped_layout(
+        self,
+        meta: MooncakeXferMetadata,
+        local: list[TransferRegion],
+        remote: list[TransferRegion],
+    ) -> str | None:
+        if (
+            self.pp_size != 1
+            or meta.remote_pp_size != 1
+            or self._physical_blocks_per_logical_kv_block != 1
+            or not self.use_mla
+        ):
+            return "Region-mapped imports require PP1 and unsplit MLA pages"
+        if len(local) != len(remote):
+            return "Region-mapped imports require the same layers on both endpoints"
+        for region in local + remote:
+            if region.group_index < 0 or region.shared_group_ids not in (
+                (),
+                (region.group_index,),
+            ):
+                return "Region-mapped imports do not support opaque multi-group regions"
+        local_by_name = {region.layer_name: region for region in local}
+        if len(local_by_name) != len(local):
+            return "Region-mapped MLA imports require one region per layer"
+        for destination in remote:
+            source = local_by_name.get(destination.layer_name)
+            if source is None:
+                return "Destination has no matching producer layer"
+            if source.kv_block_len != destination.kv_block_len:
+                return (
+                    "Region-mapped source and destination payloads differ "
+                    f"for layer {destination.layer_name}: "
+                    f"source={source.kv_block_len}, "
+                    f"destination={destination.kv_block_len}"
+                )
+            spec = self._layer_specs[source.layer_name]
+            if not isinstance(spec, MLAAttentionSpec):
+                return "Region-mapped imports require MLA layers"
+        return None
 
     def _bind_sender_thread_device(self) -> None:
         """ThreadPoolExecutor initializer — binds each pool thread to the
@@ -2313,6 +2388,7 @@ class MooncakeConnectorWorker:
         num_blocks = (
             self.kv_cache_config.num_blocks * self._physical_blocks_per_logical_kv_block
         )
+        skip_host = self.kv_cache_config.hisparse_shared_host_pool and self.tp_rank != 0
 
         for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
@@ -2329,7 +2405,8 @@ class MooncakeConnectorWorker:
             group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
-            if storage_addr not in seen_storage_ptrs:
+            host_group = self.kv_cache_config.transfer_groups[group_index].host_resident
+            if not (skip_host and host_group) and storage_addr not in seen_storage_ptrs:
                 seen_storage_ptrs.add(storage_addr)
                 kv_data_ptrs.append(storage_addr)
                 kv_data_lens.append(storage.nbytes())
@@ -3154,6 +3231,13 @@ class MooncakeConnectorWorker:
         )
         if align_err is not None:
             return finish([], [], align_err)
+        groups_match = _groups_match(local_regions, remote_regions)
+        if not groups_match:
+            layout_err = self._validate_region_mapped_layout(
+                meta, pre_align_local, pre_align_remote
+            )
+            if layout_err is not None:
+                return finish([], [], layout_err)
         # Head checks must see every layer name. Coalesce keeps only the first.
         head_err = self._validate_head_resharding_layout(
             meta.remote_tp_size, local_regions
@@ -3166,7 +3250,7 @@ class MooncakeConnectorWorker:
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if tp_ratio == 1 or self._producer_cache_is_replicated():
+        if groups_match and (tp_ratio == 1 or self._producer_cache_is_replicated()):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
@@ -3225,10 +3309,20 @@ class MooncakeConnectorWorker:
         *,
         include_layout: bool,
     ) -> MooncakeXferMetadata:
-        req_blocks = {
-            req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
-            for req_id, pull_meta in pull_metas.items()
-        }
+        skip_host = self.kv_cache_config.hisparse_shared_host_pool and self.tp_rank != 0
+        # Filter the wire request only; all ranks retain their completion state.
+        req_blocks = {}
+        for req_id, pull_meta in pull_metas.items():
+            block_ids = pull_meta.local_block_ids
+            if skip_host:
+                block_ids = [
+                    [] if group.host_resident else ids
+                    for group, ids in zip(
+                        self.kv_cache_config.transfer_groups,
+                        block_ids,
+                    )
+                ]
+            req_blocks[req_id] = (pull_meta.transfer_id, block_ids)
         if not include_layout:
             return MooncakeXferMetadata(
                 remote_hostname=self.hostname,
