@@ -89,6 +89,8 @@ steps:
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_mono.py
+  - tests/models/test_muse_spark_rocm_ulysses_sp.py
+  - tests/models/test_muse_spark_rocm_fp8_dense.py
   commands:
     - >-
       pytest -v -s
@@ -109,6 +111,8 @@ steps:
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
       models/test_muse_spark_rocm_mono.py
+      models/test_muse_spark_rocm_ulysses_sp.py
+      models/test_muse_spark_rocm_fp8_dense.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -144,6 +148,8 @@ steps:
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
       - tests/models/test_muse_spark_rocm_mono.py
+      - tests/models/test_muse_spark_rocm_ulysses_sp.py
+      - tests/models/test_muse_spark_rocm_fp8_dense.py
       commands:
       - >-
         pytest -v -s
@@ -166,6 +172,8 @@ steps:
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
         models/test_muse_spark_rocm_mono.py
+        models/test_muse_spark_rocm_ulysses_sp.py
+        models/test_muse_spark_rocm_fp8_dense.py
         models/test_utils.py::test_merge_multimodal_embeddings_no_sync
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py

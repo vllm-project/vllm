@@ -737,6 +737,33 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     its [DFlash](../features/speculative_decoding/README.md) path.
 
 !!! note
+    On ROCm gfx950 (MI355X) with AITER and tensor parallelism,
+    `MuseSparkForConditionalGeneration` can run large eager prefill steps with Ulysses
+    sequence parallelism on top of the token-sharded residual stream
+    (`VLLM_ROCM_MUSE_SP_MIN_TOKENS`): attention exchanges tokens for heads with two
+    all-to-all exchanges instead of gathering and reduce-scattering the hidden
+    states, and the MoE input is gathered as MXFP4. It is off by default; enable it
+    with `--additional-config '{"ulysses_prefill": true}'`. Every token-sharded eager
+    step then uses it, large decode batches included. On these steps the QKV and
+    output projections run in FP8 (per-channel weights, per-token activations) from
+    FP8 copies of the full BF16/FP16 weights kept on every rank, which leaves less
+    memory for the KV cache. It cannot be combined with LoRA.
+
+!!! note
+    On ROCm gfx950 (MI355X), `MuseSparkForConditionalGeneration` runs the
+    [online](../features/quantization/online.md) `fp8_per_channel` quantization of
+    the target decoder's fused QKV-gate projection and MoE pooler and unpooler on
+    its own FP8 W8A8 GEMMs, with the per-token activations quantized by the
+    preceding norm. Enable it with
+    `--quantization-config '{"linear": "fp8_per_channel", "ignore": ["*o_proj"]}'`.
+    Other online targets are rejected on these layers. Keep `o_proj` in BF16: FP8
+    costs more accuracy there, and the Ulysses prefill requires it. The DSpark
+    draft (it does not take `--quantization-config`), the router and `lm_head`
+    stay BF16. It lowers decode step time and frees BF16 weight memory for the KV
+    cache, at a small accuracy cost. It cannot be combined with LoRA,
+    `--monokernel` or `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`/`INT3`.
+
+!!! note
     Both Nemotron Nano architecture names and `NemotronH_Omni_Reasoning_V3` map to
     the same vLLM implementation.
     Audio inputs are only supported by the Omni variants; `NemotronH_Nano_VL_V2`
