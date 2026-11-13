@@ -365,8 +365,6 @@ class KVCacheManager:
         boundary if the connector supplies it, so the caller must fall back to
         `get_computed_blocks` to reconcile when no external tokens are found.
 
-        Attention groups (including the draft) must agree on the local prefix:
-        unlike Mamba state, their missing blocks are not always transferred.
         Non-hybrid models and divergent attention hits use the reconciled lookup.
 
         Returns:
@@ -398,10 +396,8 @@ class KVCacheManager:
             if group.kv_cache_spec.prefix_cacheable
             and not isinstance(group.kv_cache_spec, MambaSpec)
         ):
-            # A lagging group hit deeper than full attention means its
-            # full-attention blocks were evicted; use the reconciled boundary
-            # that every group agrees on. A shorter attention hit needs the
-            # same fallback: only a shorter Mamba state can be restored safely.
+            # Attention KV must cover the local boundary; only a shorter Mamba
+            # state can be supplied by the connector.
             return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
