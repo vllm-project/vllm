@@ -628,11 +628,14 @@ class Qwen3_VisionTransformer(nn.Module):
             self.num_heads, head_dim
         )
 
+        # HF computes the vision RoPE frequencies and rotation in FP32, so keep
+        # the cos/sin cache in FP32 instead of the model's default dtype.
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
             max_position=8192,
             is_neox_style=True,
             rope_parameters={"partial_rotary_factor": 0.5},
+            dtype=torch.float32,
         )
 
         self.merger = Qwen3_VisionPatchMerger(
@@ -678,6 +681,10 @@ class Qwen3_VisionTransformer(nn.Module):
                 for layer_idx in range(vision_config.depth)
             ]
         )
+        # Rotate Q/K in FP32 to match the FP32 cache above, then cast back to
+        # the model dtype (as BailingMoeV3VisionTransformer already does).
+        for block in self.blocks:
+            block.attn.apply_rotary_emb.enable_fp32_compute = True
 
     @property
     def dtype(self) -> torch.dtype:
