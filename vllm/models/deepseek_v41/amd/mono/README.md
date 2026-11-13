@@ -31,8 +31,10 @@ new, reading vLLM's KV records and weights as loaded.
   on gfx950 compile paths tuned for those step widths, bit-exact against the
   generic code that every other build compiles unchanged; they have a scratch
   layout of their own. At TP4 and TP8 every layer's K1 (the DSpark draft's too)
-  takes its tuned paths (`MonoBuild.tuned_front`). `MonoBuild.generic` builds
-  the generic code for them too: the numerics test's bit-for-bit reference.
+  takes its tuned paths (`MonoBuild.tuned_front`), and so does the FFN seam of
+  K2 and of the FFN launch (`MonoBuild.tuned_seam`, on the generic layout).
+  `MonoBuild.generic` builds the generic code for them too: the numerics
+  test's bit-for-bit reference.
 - Contract: a drop-in for `DeepseekV4DecoderLayer.forward`:
   in  `x` (the previous FFN output, reduced, bf16 [M, 5120]), `residual`
       (bf16 [M, 4, 5120]), `post_mix` [M, 4, 1], `res_mix` [M, 4, 4],
@@ -51,7 +53,8 @@ new, reading vLLM's KV records and weights as loaded.
     K2  attention back (attention/back.py): split attention, combine + inverse
         RoPE, wo_a, wo_b; the bf16 wo_b partial pushed to every rank
         FFN seam: reduce (the ranks' partials summed in rank order, fp32 ->
-        bf16: the attention output), slice, gate, norm -> the MoE input
+        bf16: the attention output), slice, gate, norm -> the MoE input (a
+        tuned seam: reduce fused into the slice, then norm, then gate)
         MoE (stages/moe.py): xq, router (bf16 GEMV, f32 logits), route
         (sqrtsoftplus + bias, top-6, renormalized x 1.5), shared expert (MXFP8
         GEMVs, clamped SiLU), ug (MXFP4 x MXFP8 per expert of the step's

@@ -58,8 +58,6 @@ model:
     - "8192"
     - "--max-num-seqs"
     - "128"
-    - "--gpu-memory-utilization"
-    - "0.85"
   base_env:
     # Cold starts (weight load + DeepGEMM warmup + CUDA graph capture) took
     # 1300-1800 s, past the 600 s default.

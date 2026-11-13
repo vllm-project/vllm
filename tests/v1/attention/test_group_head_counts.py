@@ -16,7 +16,7 @@ from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 requires_cpu = pytest.mark.skipif(
     not current_platform.is_cpu(), reason="CPU attention backend"
@@ -278,7 +278,7 @@ def test_flashinfer_kernel_pages_use_layer_heads(
     layers = {}
     if layer_heads is not None:
         layers["draft"] = SimpleNamespace(num_heads=layer_heads)
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=512,
         num_kv_heads=spec_kv_heads,
         head_size=128,
@@ -301,7 +301,7 @@ def test_connector_groups_layers_by_query_heads():
         get_current_attn_backends_and_specs,
     )
 
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=512, num_kv_heads=4, head_size=128, dtype=torch.bfloat16
     )
     backend = object()
@@ -310,14 +310,22 @@ def test_connector_groups_layers_by_query_heads():
         for name, heads in [("target.0", 24), ("draft", 4), ("target.1", 24)]
     }
     kv_cache_config = SimpleNamespace(
-        transfer_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=list(layers))]
+        transfer_groups=[
+            SimpleNamespace(
+                kv_cache_specs=dict.fromkeys(layers, spec), layer_names=list(layers)
+            )
+        ]
+    )
+    layout = SimpleNamespace(is_block_outermost=False)
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
     )
     with patch(
         "vllm.distributed.kv_transfer.kv_connector.utils.get_layers_from_vllm_config",
         return_value=layers,
     ):
         backends, specs, layer_names = get_current_attn_backends_and_specs(
-            MagicMock(), kv_cache_config, []
+            vllm_config, kv_cache_config, []
         )
     assert backends == [backend, backend]
     assert specs == [spec, spec]
@@ -347,7 +355,7 @@ def _triton_builder(
     else:
         vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
         vllm_config.compilation_config.cudagraph_capture_sizes = capture_sizes
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=16,
         num_kv_heads=spec_num_kv_heads,
         head_size=spec_head_size,
@@ -408,3 +416,38 @@ def test_triton_softmax_scratch_matches_the_kernel_stride():
         )
         assert builder.headdim == head_size
         assert builder.softmax_segm_output.shape[-1] == next_power_of_2(head_size)
+
+
+@pytest.mark.parametrize("spec_kv_heads", [4, 40])
+def test_flashinfer_cudagraph_support_ignores_model_heads(monkeypatch, spec_kv_heads):
+    """A draft layer's KV heads need not divide the target's 24 query heads. Its
+    group keeps full CUDA graphs, as the target's own group does."""
+    pytest.importorskip("flashinfer")
+    import vllm.v1.attention.backends.flashinfer as backend
+
+    monkeypatch.setattr(backend, "_use_fa2_native_decode", lambda: False)
+    monkeypatch.setattr(backend, "force_use_trtllm_attention", lambda: None)
+    monkeypatch.setattr(backend, "supports_trtllm_attention", lambda **_: True)
+    monkeypatch.setattr(
+        backend,
+        "can_use_trtllm_attention",
+        lambda num_qo_heads, num_kv_heads, **_: num_qo_heads % num_kv_heads == 0,
+    )
+    monkeypatch.setattr(
+        backend.current_platform, "is_device_capability", lambda _: False
+    )
+    monkeypatch.setattr(
+        backend.current_platform, "is_device_capability_family", lambda f: f == 100
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(use_non_causal=False),
+        model_config=SimpleNamespace(
+            get_num_attention_heads=lambda _: 24, get_num_kv_heads=lambda _: 4
+        ),
+    )
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=spec_kv_heads, head_size=128, dtype=torch.bfloat16
+    )
+    support = backend.FlashInferMetadataBuilder.get_cudagraph_support(config, spec)
+    assert support == backend.AttentionCGSupport.UNIFORM_BATCH
