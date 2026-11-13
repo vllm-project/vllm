@@ -50,8 +50,9 @@ CTRL_BYTES = 8192
 HEADER_BYTES, SGE_BYTES = 64, 16
 # WRs per posted chain at most; the requester's GPU signals each chain's last.
 MAX_CHAIN = 64
-# Spin this long after the last activity, then nap between checks.
-SPIN_S, NAP_S = 200e-6, 30e-6
+# Spin this long after the last activity, then nap between checks; nap longer
+# once idle for longer than a step, so an idle engine costs ~no CPU.
+SPIN_S, NAP_S, IDLE_S, IDLE_NAP_S = 50e-6, 30e-6, 20e-3, 200e-6
 _PR_SET_PDEATHSIG, _PR_SET_TIMERSLACK = 1, 29
 # Completion ids of this proxy's own posts; owners' WRs carry the requester.
 _REQUEST, _ARRIVAL = -1, -2
@@ -223,8 +224,8 @@ class Proxy:
                 words[DONE] = -seq
             if busy:
                 idle = time.monotonic()
-            elif time.monotonic() - idle > SPIN_S:
-                time.sleep(NAP_S)
+            elif (quiet := time.monotonic() - idle) > SPIN_S:
+                time.sleep(IDLE_NAP_S if quiet > IDLE_S else NAP_S)
 
     def post(self, qp: int, wr: int) -> None:
         while self.inflight[qp] >= self.capacity:
@@ -236,22 +237,21 @@ class Proxy:
 
     def request(self, seq: int) -> None:
         """Hand each owner its WRs of this fetch."""
-        words, world = self.words, self.world
-        starts = words[STARTS : STARTS + world + 1].tolist()
-        wr_starts = words[WR_STARTS : WR_STARTS + world + 1].tolist()
+        words = self.words
         sges_at = self.desc + self.max_wrs * verbs.SEND_WR_BYTES
         lkey = self.desc_lkey << 32
         for peer in self.qps:
-            num_wrs = wr_starts[peer + 1] - wr_starts[peer]
+            first_wr = words[WR_STARTS + peer]
+            num_wrs = words[WR_STARTS + peer + 1] - first_wr
             if not num_wrs:
                 continue
             wrs, sges, header, _, _, _ = self.posts[peer]
             chain = chain_length(num_wrs, len(self.qps[peer]))
-            rows = starts[peer + 1] - starts[peer]
-            sges[0] = self.desc + wr_starts[peer] * verbs.SEND_WR_BYTES
+            first = words[STARTS + peer]
+            sges[0] = self.desc + first_wr * verbs.SEND_WR_BYTES
             sges[1] = num_wrs * verbs.SEND_WR_BYTES | lkey
-            sges[2] = sges_at + starts[peer] * SGE_BYTES
-            sges[3] = rows * SGE_BYTES | lkey
+            sges[2] = sges_at + first * SGE_BYTES
+            sges[3] = (words[STARTS + peer + 1] - first) * SGE_BYTES | lkey
             # One word, so an owner never sees half a request.
             header[0] = (seq & 0xFFFFFFFF) << 32 | chain << 24 | num_wrs
             self.post(self.qps[peer][0], ctypes.addressof(wrs))
