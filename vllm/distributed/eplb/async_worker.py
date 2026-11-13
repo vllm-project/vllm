@@ -63,10 +63,7 @@ def run_rebalance_experts(
     # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,
-        eplb_stats.num_replicas,
-        eplb_stats.num_groups,
-        eplb_stats.num_nodes,
-        eplb_stats.num_gpus,
+        eplb_stats,
         physical_to_logical_map_cpu,
     )
     assert new_physical_to_logical_map.device == torch.device("cpu")

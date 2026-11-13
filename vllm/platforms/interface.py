@@ -19,7 +19,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
@@ -1268,6 +1268,65 @@ class Platform:
     def get_device_communicator_cls(cls) -> str:
         """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def supports_eplb(cls) -> bool:
+        """Whether this platform can run expert parallel load balancing."""
+        return cls._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
+
+    @classmethod
+    def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
+        """Choose and validate the platform's EPLB policy and communicator.
+
+        Out-of-tree overrides validate their own policy and communicator names.
+        """
+        eplb_config = parallel_config.eplb_config
+        from vllm.distributed.eplb.policy import EPLB_POLICIES
+
+        if eplb_config.policy is None:
+            eplb_config.policy = "default"
+        if eplb_config.policy not in EPLB_POLICIES:
+            raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
+        if eplb_config.communicator is None:
+            # Prefer NIXL when available: zero-copy RDMA reads, compatible
+            # with both async EPLB and elastic EP.
+            # Fallbacks: pynccl for elastic EP (stateless groups need it),
+            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
+            # is incompatible with async EPLB (multi-stream conflicts) and
+            # batched isend/irecv hangs under high load.
+            # See https://github.com/pytorch/pytorch/issues/174288
+            from vllm.distributed.nixl_utils import is_nixl_available
+
+            if cls._enum == PlatformEnum.XPU:
+                # On XPU, use the device-native XCCL P2P backend.
+                eplb_config.communicator = "torch_xccl"
+            elif is_nixl_available():
+                eplb_config.communicator = "nixl"
+            elif parallel_config.enable_elastic_ep:
+                eplb_config.communicator = "pynccl"
+            else:
+                eplb_config.communicator = "torch_gloo"
+
+        if eplb_config.communicator not in (
+            "torch_nccl",
+            "torch_gloo",
+            "torch_xccl",
+            "nixl",
+            "pynccl",
+            "symm_mem",
+        ):
+            raise ValueError(f"Unknown EPLB communicator: {eplb_config.communicator}")
+
+        if eplb_config.use_async and eplb_config.communicator in (
+            "torch_nccl",
+            "pynccl",
+        ):
+            raise ValueError(
+                f"{eplb_config.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
