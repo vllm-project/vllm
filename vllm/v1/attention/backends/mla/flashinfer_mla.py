@@ -22,6 +22,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -301,8 +302,12 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 "FlashInferMLAImpl"
             )
 
-        self.bmm1_scale: float | None = None
-        self.bmm2_scale: float | None = None
+        # With a quantized KV cache, trtllm-gen decode reads its bmm scales from
+        # these fp32 device tensors at launch, so FULL CUDA graphs follow a
+        # reload that changes the q/k scales. Refilled in place (same address)
+        # by process_kv_scales_after_loading.
+        self._bmm1_scale_device: torch.Tensor | None = None
+        self._bmm2_scale_device: torch.Tensor | None = None
         # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
         # counter buffer (see _get_multi_ctas_kv_counter_buffer). Captured here
         # (config is in scope during construction) so the byte size can be
@@ -313,6 +318,16 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             _sched.max_num_batched_tokens or _sched.max_num_seqs
         )
         self._mla_counter_bytes: int | None = None
+
+    def process_kv_scales_after_loading(self, layer: AttentionLayer) -> None:
+        if not is_quantized_kv_cache(self.kv_cache_dtype):
+            return
+        device = layer._k_scale.device
+        for name, value in zip(
+            ("_bmm1_scale_device", "_bmm2_scale_device"), self.host_bmm_scales(layer)
+        ):
+            new = torch.full((1,), value, dtype=torch.float32, device=device)
+            refill_derived(self, name, new)
 
     def forward_mqa(
         self,
@@ -378,16 +393,6 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             # trtllm API requires extra dimension q_len_per_request for MTP
             q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
 
-        if self.bmm1_scale is None:
-            self.bmm1_scale = self.scale
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-
-        if self.bmm2_scale is None:
-            self.bmm2_scale = 1.0
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm2_scale *= layer._k_scale_float
-
         return_lse = self.need_to_return_lse_for_decode
         workspace_buffer = _get_workspace_buffer(return_lse)
         # Parallel gathers can change the runtime Q heads from TP-local num_heads.
@@ -422,6 +427,17 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             )
             extra_kwargs["cum_seq_lens_q"] = cum_seq_lens_q
             extra_kwargs["max_q_len"] = max_q_len
+        bmm1_scale: float | torch.Tensor
+        bmm2_scale: float | torch.Tensor
+        if decode_backend is None and self._bmm1_scale_device is not None:
+            # auto resolves to trtllm-gen here: it is the only MLA decode
+            # backend that takes tensor scales (cute-dsl rejects them).
+            assert self._bmm2_scale_device is not None
+            bmm1_scale = self._bmm1_scale_device
+            bmm2_scale = self._bmm2_scale_device
+        else:
+            # Host floats follow a reload only outside FULL CUDA graphs.
+            bmm1_scale, bmm2_scale = self.host_bmm_scales(layer)
         if decode_backend:
             extra_kwargs["backend"] = decode_backend
         elif kv_c_and_k_pe_cache.shape[-2] in (32, 64):
@@ -451,8 +467,8 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             block_tables=block_table,
             seq_lens=seq_lens,
             max_seq_len=attn_metadata.max_seq_len,
-            bmm1_scale=self.bmm1_scale,
-            bmm2_scale=self.bmm2_scale,
+            bmm1_scale=bmm1_scale,
+            bmm2_scale=bmm2_scale,
             return_lse=return_lse,
             **extra_kwargs,
         )

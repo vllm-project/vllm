@@ -591,7 +591,6 @@ def draft_forward_mqa(
         FlashInferMLAImpl,
         _get_workspace_buffer,
     )
-    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
     if not isinstance(impl, FlashInferMLAImpl) or isinstance(q, tuple):
         return None
@@ -601,14 +600,7 @@ def draft_forward_mqa(
     k = foldable(attn_metadata, q.shape[0], causal_ok=causal)
     if k == 0:
         return None
-    if impl.bmm1_scale is None:
-        impl.bmm1_scale = impl.scale
-        if is_quantized_kv_cache(impl.kv_cache_dtype):
-            impl.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-    if impl.bmm2_scale is None:
-        impl.bmm2_scale = 1.0
-        if is_quantized_kv_cache(impl.kv_cache_dtype):
-            impl.bmm2_scale *= layer._k_scale_float
+    bmm1_scale, bmm2_scale = impl.host_bmm_scales(layer)
     return_lse = impl.need_to_return_lse_for_decode
     decode = attn_metadata.decode
     if causal:
@@ -639,8 +631,8 @@ def draft_forward_mqa(
         kv_lora_rank=impl.kv_lora_rank,
         qk_nope_head_dim=impl.qk_nope_head_dim,
         qk_rope_head_dim=impl.qk_rope_head_dim,
-        bmm1_scale=impl.bmm1_scale,
-        bmm2_scale=impl.bmm2_scale,
+        bmm1_scale=bmm1_scale,
+        bmm2_scale=bmm2_scale,
         workspace=_cake_workspace(q.device)
         if cake
         else _get_workspace_buffer(return_lse),
@@ -651,21 +643,6 @@ def draft_forward_mqa(
         max_reqs=impl._mla_counter_max_batch,
         table_cache=decode.__dict__.setdefault("_draft_fold_tables", {}),
     )
-
-
-def _scales(impl, layer):
-    """The stock decode's bmm1 / bmm2 scales (`FlashInferMLAImpl.forward_mqa`)."""
-    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
-
-    if impl.bmm1_scale is None:
-        impl.bmm1_scale = impl.scale
-        if is_quantized_kv_cache(impl.kv_cache_dtype):
-            impl.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
-    if impl.bmm2_scale is None:
-        impl.bmm2_scale = 1.0
-        if is_quantized_kv_cache(impl.kv_cache_dtype):
-            impl.bmm2_scale *= layer._k_scale_float
-    return impl.bmm1_scale, impl.bmm2_scale
 
 
 LOG2E = 1.4426950408889634
@@ -904,7 +881,7 @@ class DraftDcp:
         )
         query = mailbox[:n].view(torch.float8_e4m3fn)
         impl, decode = attn.impl, metadata.decode
-        bmm1, bmm2 = _scales(impl, attn)
+        bmm1, bmm2 = impl.host_bmm_scales(attn)
         from vllm.v1.attention.backends.mla.flashinfer_mla import _get_workspace_buffer
 
         reqs = n // k

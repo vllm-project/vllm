@@ -2202,7 +2202,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     ) -> "QuantizeMethodBase | None":
         """Return quantize-method based on layer."""
         # KV-cache quantization
-        if isinstance(layer, Attention):
+        if isinstance(layer, (Attention, MLAAttention)):
             if self.kv_cache_quant_method:
                 return ModelOptKVCacheMethod(self)
             return None

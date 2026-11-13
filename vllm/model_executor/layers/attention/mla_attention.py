@@ -898,8 +898,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             kv_cache_dtype,
             k_scale,
-            kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
-            and self._k_scale_float == 1.0,
         )
 
     def prepare_kv_cache_update(
@@ -1396,6 +1394,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)
+        # The KV-cache quant method has set this layer's scales by now.
+        cast(MLAAttentionImpl, self.impl).process_kv_scales_after_loading(self)
 
         if self.is_amx_bmm_enabled:
             # AMXMLAImpl already packed its own W_UK/W_UV above, for both
@@ -3093,6 +3093,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+
+    def host_bmm_scales(self, layer: AttentionLayer) -> tuple[float, float]:
+        """Decode bmm1 (softmax) and bmm2 (output) scales from `layer`'s host
+        q/k scales. V is the latent kv_c, quantized with k_scale."""
+        bmm1_scale = self.scale
+        bmm2_scale = 1.0
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+            bmm2_scale *= layer._k_scale_float
+        return bmm1_scale, bmm2_scale
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor

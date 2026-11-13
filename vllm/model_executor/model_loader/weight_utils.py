@@ -1783,6 +1783,13 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
     # would otherwise double-apply the `.attn` prefix and drop the weight.
     if name in params_dict:
         return name
+    # The cache-scale mapper's `.attn.{q,k,v}_scale`, for an attention layer
+    # that holds its scales itself (e.g. DeepSeek V3.2's MLA `self_attn`).
+    if (
+        name.endswith((".q_scale", ".k_scale", ".v_scale"))
+        and (unnested := re.sub(r"\.attn(\.[qkv]_scale)$", r"\1", name)) in params_dict
+    ):
+        return unnested
     if name.endswith(".kv_scale"):
         logger.warning_once(
             "DEPRECATED. Found kv_scale in the checkpoint. "
@@ -1833,9 +1840,15 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.([kv])_cache\.scale$", r".self_attn.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
-        (r"\.([qkv])_scale$", r".attn.\1_scale"),
-        (r"\.([qkv])_zero_point$", r".attn.\1_zero_point"),
+        (r"\.([qkv])_scale$", rf".{attn_str}.\1_scale"),
+        (r"\.([qkv])_zero_point$", rf".{attn_str}.\1_zero_point"),
     ]
+    if attn_str != "attn":
+        # The quant config's cache-scale mapper has already rewritten MLA
+        # scale names to `.attn.{q,k,v}_scale`; move them to the MLA layer.
+        scale_mapping_patterns.insert(
+            0, (r"\.attn\.([qkv])_(scale|zero_point)$", rf".{attn_str}.\1_\2")
+        )
 
     # Check if name ends with k_scale or v_scale
     if name.endswith(
@@ -1851,8 +1864,6 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
             ".v_cache.scale",
         )
     ):
-        import regex as re
-
         for pattern, replacement in scale_mapping_patterns:
             if re.search(pattern, name):
                 remapped_name = re.sub(pattern, replacement, name)
