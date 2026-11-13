@@ -225,13 +225,13 @@ def _local_block_fp8_expert_weights(
 
 
 def _mxfp4(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Packed E2M1 (low nibble first) with unit E8M0 scales: exact for the grid
-    weights, which are all E2M1 values."""
+    """Pack E2M1 grid weights with unit E8M0 scales."""
     magnitudes = torch.tensor((0.0, *E2M1_CODES), device=weight.device)
     experts, rows, cols = weight.shape
     packed = torch.empty(
         experts, rows, cols // 2, dtype=torch.uint8, device=weight.device
     )
+    # Bound the float32 values and int64 codes to one expert.
     for expert in range(experts):
         values = weight[expert].float()
         codes = torch.searchsorted(magnitudes, values)
@@ -363,6 +363,7 @@ def _check_sm90_modular_kernel(
         )
         kernel_dtype = torch.float8_e4m3fn
     else:
+        assert sm90_format == "mxfp4"
         weights = _local_mxfp4_expert_weights(
             geometry, rank, moe.num_local_experts, device
         )
@@ -459,17 +460,16 @@ def _init_warmup_forward(
         moe = _moe_config(
             vllm_config, geometry, world_size, device, backend, sm90_format
         )
+        weight_key, activation_key = kMxfp4Static, None
         if sm90_format == "fp8_block":
             weight_key, activation_key = kFp8Static128BlockSym, kFp8Dynamic128Sym
             make_weights = _local_block_fp8_expert_weights
             sentinel = X_SENTINEL_FP8
         elif sm90_format == "mxfp4":
             # The kernel scales FP8 activations per token: 448 pins it to 1.
-            weight_key, activation_key = kMxfp4Static, None
             make_weights = _local_mxfp4_expert_weights
             sentinel = X_SENTINEL_FP8
         else:
-            weight_key, activation_key = kMxfp4Static, None
             make_weights = _local_expert_weights
             sentinel = X_SENTINEL
         supported, reason = FlashInferMoeEpExperts.is_supported_config(

@@ -266,7 +266,7 @@ def test_mxfp4_weights_run_packed_on_hopper_without_eplb(
     """Hopper runs MXFP4 checkpoints on the CuTeDSL megakernel as loaded.
 
     FlashInfer keeps a per-expert scale of those weights that EPLB cannot move,
-    so EPLB is rejected there; DeepGEMM's megakernel is Blackwell only.
+    so EPLB is rejected. FlashInfer's DeepGEMM kernel targets Blackwell.
     """
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
     cutedsl = _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL)
@@ -274,7 +274,7 @@ def test_mxfp4_weights_run_packed_on_hopper_without_eplb(
     _, reason = _is_supported(
         _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
     )
-    assert "MXFP4 weights on this GPU" in reason
+    assert "FlashInfer DeepGEMM kernel on Hopper" in reason
 
     tensors = tuple(torch.zeros(2, 2, dtype=torch.uint8) for _ in range(4))
     weights = fi_ep.mxfp4_moe_ep_weights(FLASHINFER_MOE_EP_CUTEDSL, *tensors)

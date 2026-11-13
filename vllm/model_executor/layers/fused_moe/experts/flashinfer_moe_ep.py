@@ -143,7 +143,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 f"{self.moe_config.moe_backend} with {sm90_format} weights on "
                 "Hopper does not support apply_router_weight_on_input"
             )
-        # Layer parameters alias the megakernel's weight and block-scale buffers.
+        # Alias kernel buffers so supported EPLB paths permute the live weights.
         # Block-FP8 layers may name their scales weight_scale_inv.
         scale = (
             "weight_scale_inv"

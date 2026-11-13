@@ -162,16 +162,17 @@ def flashinfer_moe_ep_unsupported_reasons(
     bf16 activations itself) but marks a W4A16 recipe for NVFP4 weights.
     """
     spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)
+    capability = _current_capability()
     unsupported: list[str] = []
     weight_format = _WEIGHT_FORMATS.get(weight_key)
     if weight_format is None:
         unsupported.append(f"weight scheme {weight_key}")
     elif weight_format not in spec.weight_formats:
         unsupported.append(f"{weight_format.upper()} weights")
-    elif _current_capability() not in _FORMAT_CAPABILITIES[weight_format] or (
-        spec.kernel == "deep_gemm" and _current_capability() == _SM90
-    ):
+    elif capability not in _FORMAT_CAPABILITIES[weight_format]:
         unsupported.append(f"{weight_format.upper()} weights on this GPU")
+    elif spec.kernel == "deep_gemm" and capability == _SM90:
+        unsupported.append("FlashInfer DeepGEMM kernel on Hopper")
     if weight_key == kNvfp4Static and activation_key is None:
         unsupported.append("A16 activations with NVFP4 weights")
     if weight_key == kFp8Static128BlockSym and activation_key != kFp8Dynamic128Sym:
@@ -198,8 +199,7 @@ def flashinfer_moe_ep_unsupported_reasons(
     # FlashInfer keeps a per-expert scale of the Hopper MXFP4 weights outside
     # the layer parameters, where EPLB cannot move it.
     if vllm_config.parallel_config.enable_eplb and (
-        spec.kernel == "deep_gemm"
-        or (weight_format == "mxfp4" and _current_capability() == _SM90)
+        spec.kernel == "deep_gemm" or (weight_format == "mxfp4" and capability == _SM90)
     ):
         unsupported.append("EPLB")
     return tuple(unsupported)
@@ -403,8 +403,8 @@ class FlashInferMoeEp:
         api = _load_flashinfer_moe_ep_api()
         if sm90_format == "mxfp4" and api.Sm90Mxfp4MegaMoeConfig is None:
             raise RuntimeError(
-                "FlashInfer MoE-EP with MXFP4 weights on Hopper requires a "
-                "FlashInfer build with the SM90 MXFP4 MegaMoE "
+                "FlashInfer MoE-EP with MXFP4 weights on Hopper requires "
+                "FlashInfer 0.7.3 or newer with the SM90 MXFP4 MegaMoE "
                 "(flashinfer-ai/flashinfer#4843)"
             )
         if epilogue is None:
