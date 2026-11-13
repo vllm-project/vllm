@@ -177,8 +177,7 @@ def test_compile_mm_encoder(
 
 
 def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
-    """Idefics3 only records outputs in its decoder, which its top-level model
-    calls without forwarding them, so EAGLE-3 must call the decoder directly."""
+    """EAGLE-3 runs on a composite VLM whose decoder records the aux hidden states."""
     model = "HuggingFaceTB/SmolVLM-256M-Instruct"
     draft_config = AutoConfig.from_pretrained(model).text_config
     draft_config.architectures = ["LlamaForCausalLMEagle3"]
