@@ -510,7 +510,6 @@ def runner_output(
     (100) per request unless ``sampled_token_ids`` says otherwise."""
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=(
             [[100] for _ in req_ids] if sampled_token_ids is None else sampled_token_ids
         ),

@@ -5,7 +5,6 @@ the test speculators of the ``vllm_add_test_speculators`` plugin."""
 
 import asyncio
 import json
-import os
 from contextlib import ExitStack
 from typing import Any
 
@@ -25,13 +24,7 @@ from .utils import (
     require_test_speculators,
 )
 
-pytestmark = [
-    pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA"),
-    pytest.mark.skipif(
-        os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "1") == "0",
-        reason="the round contract is the V2 model runner's",
-    ),
-]
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 
 
 @pytest.fixture(autouse=True, scope="module")

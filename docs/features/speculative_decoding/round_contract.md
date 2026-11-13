@@ -1,7 +1,7 @@
 # The Speculative Round Contract (Experimental)
 
-This page is for authors of [custom speculators](README.md#custom-speculators-experimental)
-on the V2 model runner. A speculator may choose the rows the target verifies, how
+This page is for authors of [custom speculators](README.md#custom-speculators-experimental).
+A speculator may choose the rows the target verifies, how
 many candidates the next round takes, the accepted path through a tree, and the
 layers and kernels that verify and commit trees. Every part has a default, and a speculator
 overrides only the parts it needs. vLLM describes and checks what each part is

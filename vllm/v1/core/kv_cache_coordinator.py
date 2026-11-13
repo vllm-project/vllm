@@ -16,6 +16,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
     MambaManager,
+    SingleTypeKVCacheManager,
     SlidingWindowManager,
     create_single_type_manager,
 )
