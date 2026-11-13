@@ -296,3 +296,17 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_zmq_socket_ctx_propagates_keyboard_interrupt():
+    # The API server turns SIGTERM during startup into KeyboardInterrupt while
+    # launch_core_engines waits for the engines inside this context.
+    with (
+        pytest.raises(KeyboardInterrupt),
+        network_utils.zmq_socket_ctx(
+            network_utils.get_open_zmq_ipc_path(), zmq.ROUTER, bind=True
+        ) as sock,
+    ):
+        raise KeyboardInterrupt("terminated")
+
+    assert sock.closed

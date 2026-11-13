@@ -1558,6 +1558,9 @@ def test_models_fse_init(
     if model_type == "glm5_next":
         from vllm.models.glm5next.common import model as glm5_next_model
 
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here.
+        vllm_config.additional_config = {"decode_backend": "stock"}
         for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
             monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
         # The gate allows fusion only at TP4/TP8 on gfx950, and this test
@@ -1575,7 +1578,8 @@ def test_models_fse_init(
     if model_type == "glm4_moe_lite":
         from vllm.model_executor.models import glm4_moe_lite as glm4_moe_lite_model
 
-        # Only the MoE/shared-expert wiring is under test here; the MLA backend
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here. the MLA backend
         # does not accept this test's default dtype.
         for attention in ("Glm4MoeLiteAttention", "Glm4MoeLiteMLAAttention"):
             monkeypatch.setattr(glm4_moe_lite_model, attention, _StubGlm5NextAttention)
@@ -1590,7 +1594,8 @@ def test_models_fse_init(
     if model_type == "qwen4_exp":
         from vllm.models.qwen4_exp.amd import model as qwen4_exp_model
 
-        # Only the MoE/shared-expert wiring is under test here.
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here.
         monkeypatch.setattr(
             qwen4_exp_model, "Qwen3NextAttention", _StubGlm5NextAttention
         )
