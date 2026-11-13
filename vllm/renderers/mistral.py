@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from typing import Any
+
+import regex as re
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -51,38 +52,47 @@ def safe_apply_chat_template(
 
 
 _VALID_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
-_INVALID_TOOL_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 
 
-def _sanitize_tool_call_names(
+def _has_invalid_name(tool_call: Any) -> bool:
+    function = tool_call.get("function") if isinstance(tool_call, dict) else None
+    name = function.get("name") if isinstance(function, dict) else None
+    return isinstance(name, str) and not _VALID_TOOL_NAME.fullmatch(name)
+
+
+def _replace_invalid_tool_call_names(
     messages: list[ChatCompletionMessageParam],
 ) -> list[ChatCompletionMessageParam]:
-    """Clean the tool call names that mistral-common rejects.
+    """Replace the tool call names that mistral-common rejects by `invalid_tool_call`.
 
-    Invalid characters are dropped (`invalid_tool_call` if none is left).
     Messages without an invalid name are returned unchanged.
     """
-    sanitized: list[ChatCompletionMessageParam] = []
+    replaced: list[ChatCompletionMessageParam] = []
     for message in messages:
-        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
-        if not isinstance(tool_calls, list):
-            sanitized.append(message)
+        if not isinstance(message, dict):
+            replaced.append(message)
             continue
-        fixed = []
-        changed = False
-        for call in tool_calls:
-            function = call.get("function") if isinstance(call, dict) else None
-            name = function.get("name") if isinstance(function, dict) else None
-            if isinstance(name, str) and not _VALID_TOOL_NAME.fullmatch(name):
-                clean = _INVALID_TOOL_NAME_CHARS.sub("", name)[:64]
-                function = {**function, "name": clean or "invalid_tool_call"}
-                call = {**call, "function": function}
-                changed = True
-            fixed.append(call)
-        if changed:
-            message = {**message, "tool_calls": fixed}  # type: ignore[assignment]
-        sanitized.append(message)
-    return sanitized
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not any(
+            _has_invalid_name(call) for call in tool_calls
+        ):
+            replaced.append(message)
+            continue
+        replaced.append(
+            {
+                **message,
+                "tool_calls": [
+                    {
+                        **call,
+                        "function": {**call["function"], "name": "invalid_tool_call"},
+                    }
+                    if _has_invalid_name(call)
+                    else call
+                    for call in tool_calls
+                ],
+            }
+        )
+    return replaced
 
 
 def _get_chat_template_kwargs(params: ChatParams) -> dict[str, Any]:
@@ -125,7 +135,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
 
         prompt_raw = safe_apply_chat_template(
             tokenizer,
-            _sanitize_tool_call_names(messages),
+            _replace_invalid_tool_call_names(messages),
             **_get_chat_template_kwargs(params),
         )
 
@@ -153,7 +163,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
 
         prompt_raw = await self._apply_chat_template_async(
             tokenizer,
-            _sanitize_tool_call_names(messages),
+            _replace_invalid_tool_call_names(messages),
             **_get_chat_template_kwargs(params),
         )
 
