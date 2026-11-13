@@ -356,6 +356,7 @@ def _start_decode_diagnostics(worker):
     manager = worker.model_runner.cudagraph_manager
     replay_code = manager.run_fullgraph.__func__.__code__ if manager else None
     worker.decode_graph_replays = Counter()
+    worker.decode_prefill_graph_replays = 0
     worker.decode_graph_steps = deque(maxlen=512)
     worker.decode_previous_profile = sys.getprofile()
 
@@ -363,6 +364,8 @@ def _start_decode_diagnostics(worker):
         if event == "return" and arg is not None and frame.f_code is replay_code:
             desc = frame.f_locals["desc"]
             worker.decode_graph_replays[(desc.num_tokens, desc.num_reqs)] += 1
+            input_batch = frame.f_back.f_locals["input_batch"]
+            worker.decode_prefill_graph_replays += int(input_batch.has_prefill)
             if runtime is not None and runtime.history:
                 ids, step = runtime.history[-1]
                 worker.decode_graph_steps.append((ids, step, desc.num_tokens))
@@ -403,6 +406,7 @@ def _finish_decode_diagnostics(worker):
             f"{tokens}x{reqs}": count
             for (tokens, reqs), count in worker.decode_graph_replays.items()
         },
+        "prefill_graph_replays": worker.decode_prefill_graph_replays,
         "graph_steps": [
             (ids, asdict(step), padded)
             for ids, step, padded in worker.decode_graph_steps
@@ -431,7 +435,7 @@ def _run_transition_requests(llm):
             latest[output.request_id] = output
         count = len(latest["anchor"].outputs[0].token_ids) if "anchor" in latest else 0
         if count >= 2 and not added_pair:
-            # A one-token prompt must run prefill despite matching a decode bucket.
+            # A fresh one-token prompt remains prefill in the stock runner.
             for i in range(2):
                 engine.add_request(f"pair_{i}", {"prompt_token_ids": [100]}, short)
             added_pair = True
@@ -483,6 +487,7 @@ def test_xpu_qwen3_5_default_specialized_state_transitions(
             max_num_batched_tokens=128,
             enable_chunked_prefill=True,
             max_num_seqs=16,
+            async_scheduling=False,
             kv_cache_memory_bytes=512 * 1024 * 1024,
             enable_prefix_caching=False,
             compilation_config=CompilationConfig(
@@ -513,6 +518,7 @@ def test_xpu_qwen3_5_default_specialized_state_transitions(
                     else:
                         assert sum(report["graph_replays"].values()) > 0
                         assert report["captured_native_layers"] == 40
+                        assert report["prefill_graph_replays"] > 0
                         assert all(
                             step["reason"] is None
                             and step["padded_rows"] == padded <= 8
@@ -526,11 +532,13 @@ def test_xpu_qwen3_5_default_specialized_state_transitions(
                             for req_id in ids
                         )
                     ]
-                    assert any(s["reason"] == "prefill_or_mixed" for s in steps)
                     assert any(
-                        s["actual_rows"] == 1 and s["reason"] == "prefill_or_mixed"
+                        s["actual_rows"] > 8 and s["reason"] == "token_rows"
                         for s in steps
-                    ), "A one-token prompt tail must retain the stock prefill path"
+                    ), "Large prefill steps must retain stock MoE"
+                    assert any(
+                        s["actual_rows"] == 1 and s["reason"] is None for s in steps
+                    ), "A one-token prompt tail must use the eligible MoE path"
                     boundary = next(
                         (
                             i

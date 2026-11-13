@@ -568,6 +568,105 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 
 @functools.cache
+def has_flashinfer_topk_varlen_gvr2() -> bool:
+    """Return `True` if FlashInfer ships the `gvr_2` varlen top-k backend
+    (self-sampling GVR V2, `flashinfer.top_k_varlen(backend="gvr_2")`).
+
+    Feature-detected on the production entry `run_varlen` (FlashInfer >=
+    0.7.2: per-row `kv_lens`, a capture-stable `max_seq_len` and the
+    hint-free `top_k`) and the band-aware `warmup_varlen` (`row_stride`)
+    that the dispatcher calls.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.topk_varlen.kernels import gvr2_topk_host
+
+        run_params = inspect.signature(gvr2_topk_host.run_varlen).parameters
+        warmup_params = inspect.signature(gvr2_topk_host.warmup_varlen).parameters
+    except Exception:
+        # The module imports the CuTe DSL; anything it raises means unusable.
+        return False
+    return {"kv_lens", "max_seq_len", "top_k"} <= set(run_params) and {
+        "num_rows_list",
+        "row_stride",
+    } <= set(warmup_params)
+
+
+@functools.cache
+def has_flashinfer_msa() -> bool:
+    """Return `True` if FlashInfer MiniMax Sparse Attention (MSA) ops are
+    available. Which architectures they serve depends on the build."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.msa_ops import (
+            msa_proxy_score,
+            msa_sparse_attention,
+            msa_sparse_decode_attention,
+            msa_topk_select,
+        )
+    except ImportError:
+        return False
+    return all(
+        callable(fn)
+        for fn in (
+            msa_proxy_score,
+            msa_topk_select,
+            msa_sparse_attention,
+            msa_sparse_decode_attention,
+        )
+    )
+
+
+@functools.cache
+def has_flashinfer_msa_packed_kv() -> bool:
+    """Return `True` if the FlashInfer MSA attention kernels accept K/V
+    views split from vLLM's packed-content KV cache, advertised by the
+    `SUPPORTS_PACKED_KV` flag on `flashinfer.msa_ops`."""
+    if not has_flashinfer_msa():
+        return False
+    import flashinfer.msa_ops as msa_ops
+
+    return bool(getattr(msa_ops, "SUPPORTS_PACKED_KV", False))
+
+
+@functools.cache
+def has_flashinfer_msa_sm90() -> bool:
+    """Return `True` if the FlashInfer MSA attention kernels serve SM90
+    (Hopper). Detected from the `out` parameter both attention ops gained
+    with their SM90 backend, since flashinfer exposes no capability flag for
+    it."""
+    if not has_flashinfer_msa():
+        return False
+    import inspect
+
+    from flashinfer.msa_ops import msa_sparse_attention, msa_sparse_decode_attention
+
+    return all(
+        "out" in inspect.signature(fn).parameters
+        for fn in (msa_sparse_attention, msa_sparse_decode_attention)
+    )
+
+
+@functools.cache
+def has_flashinfer_msa_per_token_topk() -> bool:
+    """Return `True` if `flashinfer.msa_ops.msa_topk_select` accepts a
+    per-token `num_valid_pages` tensor. Detected from the parameter's type
+    annotation, since flashinfer exposes no capability flag for it."""
+    if not has_flashinfer_msa():
+        return False
+    import inspect
+
+    from flashinfer.msa_ops import msa_topk_select
+
+    ann = inspect.signature(msa_topk_select).parameters["num_valid_pages"].annotation
+    return "Tensor" in str(ann)
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return `True` if FlashInfer cutedsl module is available."""
     return (

@@ -245,7 +245,8 @@ troubleshooting:
     body: |
       `--mm-encoder-tp-mode data` places a copy of the vision encoder on every
       GPU, which takes extra memory. If the server runs out of memory, lower
-      `--gpu-memory-utilization`.
+      `--max-num-seqs` or `--max-num-batched-tokens`, or drop
+      `--mm-encoder-tp-mode data`.
 
 guide: |
   ## Overview

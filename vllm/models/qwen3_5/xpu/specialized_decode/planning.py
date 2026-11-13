@@ -33,14 +33,12 @@ class DecodeRuntime:
 
     def prepare_step(self, batch: "InputBatch") -> DecodeStep:
         reason = None
-        if batch.has_prefill:
-            reason = "prefill_or_mixed"
-        elif batch.num_draft_tokens or not (batch.num_scheduled_tokens == 1).all():
-            reason = "not_ordinary_decode"
+        if batch.num_draft_tokens:
+            reason = "draft_tokens"
         elif (
             not 0
             < batch.num_reqs
-            == batch.num_tokens
+            <= batch.num_tokens
             <= batch.num_tokens_after_padding
             <= MAX_DECODE_ROWS
         ):

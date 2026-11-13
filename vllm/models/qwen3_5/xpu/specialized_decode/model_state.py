@@ -13,11 +13,6 @@ class Qwen3_5XPUModelState(MambaHybridModelState):
         language_model = getattr(model, "language_model", model)
         self.decode_runtime = language_model._xpu_moe_decode_runtime
 
-    def supports_decode_cudagraph_batch(self, *, has_prefill: bool) -> bool:
-        # The stock runner can reinterpret a one-token prompt tail as decode.
-        # Such a step must not replay a graph captured with specialized MoE.
-        return not has_prefill
-
     def prepare_inputs(self, input_batch, req_states):
         inputs = super().prepare_inputs(input_batch, req_states)
         self.decode_runtime.prepare_step(input_batch)

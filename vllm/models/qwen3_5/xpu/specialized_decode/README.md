@@ -24,7 +24,7 @@ model construction. The initial qualified envelope is deliberately narrow:
 | Parallelism | TP2, PP1, DP1, EP1, context parallel sizes 1; single-host mp, standard TP reduction |
 | Numerics | FP16 activations, online `fp8_per_tensor`, FP8-e4m3 weights, FP32 scales; KV/conv state inferred, recurrent state FP32 |
 | Execution | Model Runner V2 through XPUModelRunner; compilation mode 0; graph NONE or FULL_DECODE_ONLY |
-| Workload | Ordinary decode, q_i=1, 1 <= B=T_actual <= T_padded <= 8; configured context limit <=40960 |
+| Workload | Decode or small prefill/mixed batches, 1 <= B <= T_actual <= T_padded <= 8; configured context limit <=40960 |
 
 Routed experts must use `XPUExpertsFp8`; shared projections must use
 `XPUW8A16FP8LinearKernel`. Static guards also check routing semantics, sharding,
@@ -73,13 +73,12 @@ L_i is the existing context/KV length of request i before the step, bounded by
 the configured model limit. Context length does not change this MoE stage's
 scratch requirement; the stock runner retains context and cache handling.
 
-Prefill, chunked prefill, mixed batches, drafts, zero rows and batches outside
-the qualified row range select stock MoE before native execution.
-`XPUModelRunner.gather_batch_req_state` consults the optional XPU ModelState's
-decode-graph policy before graph selection. It keeps even a one-token prompt
-tail out of a graph captured for specialized ordinary decode without changing
-the shared runner or request metadata used for KV/SSM handling. B3 may replay a
-qualified four-row graph; B9 uses stock. No device-to-host read is added for planning.
+Decode, prefill and mixed batches use the same MoE row qualification. Drafts,
+zero rows and batches outside the qualified row range select stock MoE before
+native execution. Graph eligibility follows the stock runner: a one-token prompt
+tail over existing context may replay a decode graph, while other prefill steps
+retain the runner's existing handling. B3 may replay a qualified four-row graph;
+B9 uses stock. No device-to-host read is added for planning.
 
 Both paths use the stock routing/top-k selection and one TP all-reduce for the
 combined routed/shared output. Initialization decisions agree across TP ranks;
@@ -128,8 +127,8 @@ checkpoint/configuration. The CI layer smoke test checks B1 native dispatch,
 numerical agreement with stock MoE and provider reuse after loading. Broader
 local validation covers prompt/padding boundaries, TP reduction and reload
 graphs. Real-model validation must exercise a single
-request across default prefill -> specialized decode -> default decode ->
-specialized decode, including mixed and >8-row batches.
+request across >8-row stock steps, eligible small-row prefill/mixed steps and
+specialized decode, including graph padding and the return from stock to fused.
 
 Compare opt-in and auto on the same source revision, hardware, numerical
 formats and graph mode. Report decode latency/TPOT, throughput, TTFT, warmup,
@@ -148,7 +147,7 @@ checkpoint, speculative mode or numerical format.
 - `hooks.py`: optional, idempotent post-load initialization.
 - `weights.py`: static guards and canonical parameter preparation.
 - `planning.py`: host-only batch plan and bounded diagnostics.
-- `model_state.py`: stock hybrid state integration and graph eligibility.
+- `model_state.py`: stock hybrid state integration and batch planning.
 - `moe.py`: bound provider, runtime tensor guards, native call and TP reduction.
 
 Layer smoke test: `tests/kernels/moe/test_moe.py -k xpu_qwen3_5`.
