@@ -82,11 +82,13 @@ def gib(n: float) -> int:
 
 
 def gpu_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
-    """GPU KV bytes for one BLOCK_SIZE-token block, whole model.
+    """Atomic GPU KV block size in bytes: one layer's page for one block.
 
     Ground truth: builds a TP=1 engine with dummy weights (uniproc executor,
     worker in-process) and reads the allocated cache tensors from the model
-    runner directly. Needs a GPU. Engine logs go to a file, not the terminal.
+    runner directly. All layers are page-size-unified during planning, so any
+    single tensor's bytes over its block count is the atomic block size.
+    Needs a GPU. Engine logs go to a file, not the terminal.
     """
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     from vllm import LLM
@@ -110,8 +112,10 @@ def gpu_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
         )
         worker = llm.llm_engine.engine_core.engine_core.model_executor.driver_worker
         runner = worker.model_runner
-        total = sum(t.numel() * t.element_size() for t in runner.kv_caches)
-    return total // runner.kv_cache_config.num_blocks
+        blocks = runner.kv_cache_config.num_blocks
+        sizes = {t.numel() * t.element_size() // blocks for t in runner.kv_caches}
+        assert len(sizes) == 1, f"kv cache tensors disagree on block size: {sizes}"
+    return sizes.pop()
 
 
 def _cell(v: object) -> str:
@@ -143,13 +147,13 @@ class Capacity:
         assert self.bytes is not None, "not materialized"
         return self.bytes
 
-    def materialize(self, per_request_bytes: float) -> None:
+    def materialize(self, max_per_request_bytes: float) -> None:
         if self.bytes is None:
             assert self.requests is not None
-            self.bytes = int(self.requests * per_request_bytes)
+            self.bytes = int(self.requests * max_per_request_bytes)
         if self.requests is None:
             assert self.bytes is not None
-            self.requests = int(self.bytes // per_request_bytes)
+            self.requests = int(self.bytes // max_per_request_bytes)
 
     def is_materialized(self) -> bool:
         return all([x is not None for x in [self.bytes, self.requests]])
@@ -170,24 +174,32 @@ class Scenario:
     phase: str = "prefill"  # PHASES key
     _block_bytes: float | None = None
 
-    def per_request_bytes(self, block_bytes: float) -> float:
-        """Last-turn KV footprint of a single request."""
+    def max_per_request_bytes(self, block_bytes: float) -> float:
+        """Worst-case KV bytes resident for one request at its last turn.
+
+        For gpt-oss-120b,
+        FA group: full token history at BLOCK_SIZE tokens per block.
+        SWA group: bounded by the 128-token sliding window (2 blocks), no
+        matter how many turns ran.
+        """
         osl = PHASES[self.phase]
         turns = BENCH_TURNS - 1
-        tokens = self.prefix_tokens + turns * self.isl_tokens + turns * osl
-        return tokens / BLOCK_SIZE * block_bytes
+        fa_tokens = self.prefix_tokens + turns * self.isl_tokens + turns * osl
+        fa_blocks = fa_tokens / BLOCK_SIZE
+        swa_blocks = 2
+        return (fa_blocks + swa_blocks) * block_bytes
 
     def materialize(self, block_bytes: float) -> None:
         """Resolve each tier's bytes/requests; all four values set after."""
         self._block_bytes = block_bytes
-        per_request = self.per_request_bytes(block_bytes)
-        self.gpu.materialize(per_request)
-        self.cpu.materialize(per_request)
+        max_per_request = self.max_per_request_bytes(block_bytes)
+        self.gpu.materialize(max_per_request)
+        self.cpu.materialize(max_per_request)
 
     def kv_size_roofline(self) -> int:
         """Worst-case KV bytes: last-turn footprint per request x concurrency."""
         assert self._block_bytes is not None
-        return int(self.concurrency * self.per_request_bytes(self._block_bytes))
+        return int(self.concurrency * self.max_per_request_bytes(self._block_bytes))
 
     def describe(self) -> None:
         """Print what the scenario holds; unmaterialized fields show as '?'."""
