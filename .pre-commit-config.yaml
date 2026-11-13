@@ -41,6 +41,12 @@ repos:
   hooks:
   - id: shellcheck
     args: ["-s", "bash", "--format=gcc", "--rcfile=tools/pre_commit/.shellcheckrc"]
+- repo: https://github.com/astral-sh/ty-pre-commit
+  rev: adf4d7a4e31d08d5f724660646c3f10e0084348d  # frozen: v0.0.101
+  hooks:
+  - id: ty
+    args: [--no-project] # Don't build vLLM to resolve its dynamic dependencies
+    additional_dependencies: ["pydantic==2.13.5"]
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 46787482b9fb2003c56e0f7592e312ef381829d9  # frozen: 0.13.6
   hooks:
@@ -236,13 +242,6 @@ repos:
     additional_dependencies: [PyYAML, regex]
     verbose: true # full-scan `note:` lines are advisory, so the hook passes
     require_serial: true # one full scan, not one per pre-commit file batch
-  - id: mypy # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for the oldest supported Python version
-    entry: python tools/pre_commit/mypy.py "3.11"
-    language: python
-    types_or: [python, pyi]
-    require_serial: true
-    additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, "pydantic==2.13.5"]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh
