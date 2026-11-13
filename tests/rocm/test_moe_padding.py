@@ -22,6 +22,12 @@ This file verifies:
 2. End to end, AITER only (per #54966's "Test padding" ask):
    `AiterExperts.apply()` matches an independent reference regardless of
    the flag, and persisted parameter storage size is unaffected by it.
+3. End to end, TRITON on ROCm: the padded layout persists on the
+   parameters after `process_weights_after_loading`, the experts still
+   match the reference, and a later weight update (RL weight sync) keeps
+   both the padded layout and the parameter addresses that CUDA graphs
+   captured. Copying the padded view back into the original storage would
+   silently drop the padding (#46009), so this guards the stride itself.
 
 Logical `hidden_dim_unpadded`/`intermediate_size_per_partition_unpadded`
 padding and HIP-graph token-padding are separate mechanisms, covered in
@@ -90,6 +96,19 @@ def _set_padding_env_with_aiter(monkeypatch: pytest.MonkeyPatch, padding: bool) 
     _set_padding_env(monkeypatch, padding)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.refresh_env_variables()
+
+
+def _set_padding_env_with_triton(
+    monkeypatch: pytest.MonkeyPatch, padding: bool
+) -> None:
+    """Also disables AITER MoE, so RoutedExperts selects the TRITON backend."""
+    _set_padding_env(monkeypatch, padding)
+    monkeypatch.delenv("VLLM_ROCM_USE_AITER", raising=False)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
 
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -503,13 +522,12 @@ def test_aiter_moe_padding_rl_reload_address_stable(
     default_vllm_config,
     workspace_init,
 ) -> None:
-    """`process_weights_after_loading` must `.copy_()` the padded weight
-    into the existing parameter storage rather than rebinding `.data`: an RL
-    in-place weight reload (same `RoutedExperts` layer, new weight values)
-    has to leave `w13_weight`/`w2_weight`'s storage address unchanged, or it
-    would silently break CUDA-graph address capture. Covers the AITER path,
-    where VLLM_ROCM_MOE_PADDING's padded storage is transient (see module
-    docstring) but still goes through this same copy_-not-rebind step."""
+    """`process_weights_after_loading` must not rebind `.data` on a weight
+    update: an RL in-place weight reload (same `RoutedExperts` layer, new
+    weight values) has to leave `w13_weight`/`w2_weight`'s storage address
+    unchanged, or it would silently break CUDA-graph address capture. Covers
+    the AITER path, where VLLM_ROCM_MOE_PADDING's padded storage is transient
+    (see module docstring); the TRITON path is covered in section 3."""
     assert default_vllm_config is not None
     assert workspace_init is None
     _set_padding_env_with_aiter(monkeypatch, True)
@@ -557,3 +575,106 @@ def test_aiter_moe_padding_rl_reload_address_stable(
         f"{cos_sim:.4f}); reload must reflect the new (seed=2) weights, not "
         "stale seed=1 values"
     )
+
+
+# --- 3. TRITON on ROCm: padding persists across load and weight update ------
+
+
+def _assert_backend_is_triton(layer: RoutedExperts) -> None:
+    selected = layer.quant_method.unquantized_backend
+    assert selected is UnquantizedMoeBackend.TRITON, (
+        f"expected TritonExperts to be selected, got backend={selected!r}"
+    )
+
+
+def _assert_weight_row_strides(layer: RoutedExperts, padding: bool) -> None:
+    num_pad = PAD_BYTES // DTYPE.itemsize if padding else 0
+    # w13: [E, 2 * intermediate, hidden]; w2: [E, hidden, intermediate].
+    assert layer.w13_weight.stride(-1) == 1
+    assert layer.w13_weight.stride(-2) == HIDDEN_SIZE + num_pad
+    assert layer.w2_weight.stride(-1) == 1
+    assert layer.w2_weight.stride(-2) == INTERMEDIATE_SIZE + num_pad
+
+
+def _assert_close_to_reference(
+    layer: RoutedExperts,
+    seed: int,
+    x: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> None:
+    output = _forward(layer, x, topk_weights, topk_ids)
+    reference = _reference_moe_forward(
+        seed=seed,
+        hidden_size=HIDDEN_SIZE,
+        intermediate_size=INTERMEDIATE_SIZE,
+        x=x,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+    )
+    cos_sim = F.cosine_similarity(
+        output.flatten().float(), reference.flatten().float(), dim=0
+    )
+    assert cos_sim > 0.99, (
+        f"output diverged from reference (cosine similarity {cos_sim:.4f})"
+    )
+
+
+@pytest.mark.parametrize("padding", [True, False], ids=["padding-on", "padding-off"])
+@torch.inference_mode()
+def test_triton_moe_padding_persists_after_loading(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+    workspace_init,
+    padding: bool,
+) -> None:
+    """With the flag on, the persisted TRITON parameters keep the padded row
+    stride (that is what the kernel reads); with it off they stay dense."""
+    assert default_vllm_config is not None
+    assert workspace_init is None
+    _set_padding_env_with_triton(monkeypatch, padding)
+
+    with torch.device(DEVICE):
+        layer = _make_routed_experts(HIDDEN_SIZE, INTERMEDIATE_SIZE)
+        _load_and_process_weights(
+            layer, seed=1, hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE
+        )
+    _assert_backend_is_triton(layer)
+    _assert_weight_row_strides(layer, padding)
+
+    x, topk_weights, topk_ids = _make_static_inputs(HIDDEN_SIZE)
+    _assert_close_to_reference(layer, 1, x, topk_weights, topk_ids)
+
+
+@torch.inference_mode()
+def test_triton_moe_padding_survives_weight_update(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+    workspace_init,
+) -> None:
+    """Reloading weights in place and re-running process_weights_after_loading
+    (RL weight sync) must keep the parameter storage addresses (captured by
+    CUDA graphs) *and* the padded layout, and must apply the new values."""
+    assert default_vllm_config is not None
+    assert workspace_init is None
+    _set_padding_env_with_triton(monkeypatch, True)
+
+    with torch.device(DEVICE):
+        layer = _make_routed_experts(HIDDEN_SIZE, INTERMEDIATE_SIZE)
+        _load_and_process_weights(
+            layer, seed=1, hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE
+        )
+    _assert_backend_is_triton(layer)
+    _assert_weight_row_strides(layer, padding=True)
+    pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
+
+    with torch.device(DEVICE):
+        _load_and_process_weights(
+            layer, seed=2, hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE
+        )
+
+    assert (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr()) == pointers
+    _assert_weight_row_strides(layer, padding=True)
+
+    x, topk_weights, topk_ids = _make_static_inputs(HIDDEN_SIZE)
+    _assert_close_to_reference(layer, 2, x, topk_weights, topk_ids)

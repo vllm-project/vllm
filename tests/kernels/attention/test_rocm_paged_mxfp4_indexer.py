@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
 )
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+    DecodeRowShard,
     RocmMxfp4IndexerMetadata,
     RocmMxfp4VarlenDecode,
     native_decode,
@@ -207,7 +208,7 @@ def _forward_context(monkeypatch, metadata):
     monkeypatch.setattr(ops, "get_forward_context", lambda: context)
 
 
-def _decode_metadata(case, rows, ratio, query_lens, varlen=False):
+def _decode_metadata(case, rows, ratio, query_lens, world=1, rank=0, *, varlen=False):
     lens = torch.tensor([(p + 1) // ratio for _, p in rows], dtype=torch.int32)
     lens = lens.to(DEVICE)
     block_table = case.block_table[[req for req, _ in rows]].contiguous()
@@ -224,6 +225,10 @@ def _decode_metadata(case, rows, ratio, query_lens, varlen=False):
             context_lens,
             case.block_table[: len(query_lens)].contiguous(),
         )
+    unit = 1 if native is None else native.next_n
+    shard = DecodeRowShard.plan(len(rows), unit, world, rank, 2 * len(rows))
+    if shard is not None:
+        lens, block_table, native = shard.narrow(lens, block_table, native)
     schedule = torch.empty(
         ops.rocm_mxfp4_decode_schedule_words(HEADS, HEAD_DIM, entries, next_n),
         dtype=torch.int32,
@@ -252,6 +257,7 @@ def _decode_metadata(case, rows, ratio, query_lens, varlen=False):
             native,
             varlen=decode_varlen,
         ),
+        decode_shard=shard,
     )
 
 
@@ -490,12 +496,17 @@ def test_varlen_decode_layers_match_reference(monkeypatch, block, query_lens):
         for req, (n, q) in enumerate(zip(case.seq_lens, query_lens))
         for j in range(q)
     ]
-    assert _decode_metadata(case, rows, 1, query_lens, True).decode_varlen is not None
+    assert (
+        _decode_metadata(case, rows, 1, query_lens, varlen=True).decode_varlen
+        is not None
+    )
     _run_layers(
         monkeypatch,
         case,
         rows,
-        lambda r, gather=False: _decode_metadata(case, rows, r, query_lens, True),
+        lambda r, gather=False: _decode_metadata(
+            case, rows, r, query_lens, varlen=True
+        ),
     )
 
     # The varlen launches select the same entries as the per-row ones they
@@ -507,7 +518,7 @@ def test_varlen_decode_layers_match_reference(monkeypatch, block, query_lens):
     for varlen in (False, True):
         out = torch.full((len(rows), TOPK), 7, dtype=torch.int32, device=DEVICE)
         _forward_context(
-            monkeypatch, _decode_metadata(case, rows, 2, query_lens, varlen)
+            monkeypatch, _decode_metadata(case, rows, 2, query_lens, varlen=varlen)
         )
         ops.rocm_mxfp4_sparse_attn_indexer(
             hidden,
@@ -525,7 +536,7 @@ def test_varlen_decode_layers_match_reference(monkeypatch, block, query_lens):
         source = torch.full((len(rows), TOPK), 7, dtype=torch.int32, device=DEVICE)
         pool = torch.full((len(rows), POOL_BLOCKS), 5, dtype=torch.int32, device=DEVICE)
         _forward_context(
-            monkeypatch, _decode_metadata(case, rows, 1, query_lens, varlen)
+            monkeypatch, _decode_metadata(case, rows, 1, query_lens, varlen=varlen)
         )
         ops.rocm_mxfp4_sparse_attn_indexer(
             hidden,
@@ -738,3 +749,97 @@ def test_selection_from_bf16_matches_torch(monkeypatch, step, ratio, block):
         )
         agree.append(_recall(out[mine], ref))
     assert torch.cat(agree).mean().item() >= 0.99
+
+
+@pytest.mark.parametrize("world", [2, 4, 8])
+@pytest.mark.parametrize(
+    "query_lens",
+    [[7] * 8 + [0], [7] * 8 + [0] * 2, [7, 3, 5, 1, 6, 2, 4] * 5 + [0]],
+    ids=["below-gate", "native-padded", "flat-padded"],
+)
+def test_decode_row_shard_matches_replicated(monkeypatch, world, query_lens):
+    set_random_seed(0)
+    next_n = max(query_lens)
+    case = _Case([q and 24 + 211 * i % 1500 for i, q in enumerate(query_lens)], 128)
+    rows = [
+        (req, n - q + j if q else -1)
+        for req, (n, q) in enumerate(zip(case.seq_lens, query_lens))
+        for j in range(q or next_n)
+    ]
+    num_rows = len(rows)
+    q, q_scale, weights, _ = _queries(num_rows)
+    hidden = torch.empty(num_rows, 1, device=DEVICE)
+
+    def layers(tp, rank, pool):
+        def run(op, ratio, *args, **kwargs):
+            metadata = _decode_metadata(case, rows, ratio, query_lens, tp, rank)
+            metadata.decode_use_gather = True
+            _forward_context(monkeypatch, metadata)
+            out = torch.arange(2 * num_rows * TOPK, device=DEVICE).int().view(-1, TOPK)
+            op(
+                hidden,
+                "indexer",
+                case.cache[ratio],
+                q,
+                q_scale,
+                weights,
+                TOPK,
+                HEAD_DIM,
+                MAX_LEN // ratio,
+                out,
+                *args,
+                **kwargs,
+            )
+            return out
+
+        return [
+            run(ops.rocm_mxfp4_sparse_attn_indexer, 2, compress_ratio=2),
+            run(
+                ops.rocm_mxfp4_sparse_attn_indexer,
+                1,
+                compress_ratio=1,
+                candidate_blocks=pool,
+                candidate_block_size=CAND_BLOCK,
+                candidate_write=True,
+            ),
+            run(
+                ops.rocm_mxfp4_sparse_mqa_indexer,
+                1,
+                1,
+                pool,
+                CAND_BLOCK,
+                POOL_BLOCKS * CAND_BLOCK,
+            ),
+        ]
+
+    def sets(t):
+        return t.sort(dim=-1).values
+
+    pool = torch.empty(2 * num_rows, POOL_BLOCKS, dtype=torch.int32, device=DEVICE)
+    ref = layers(1, 0, pool)
+    shard = _decode_metadata(case, rows, 1, query_lens, world).decode_shard
+    assert (shard is not None) == (num_rows >= 64)
+    span = 0 if shard is None else shard.span
+    sent: list[list[torch.Tensor]] = [[] for _ in range(world)]
+    for exchange in (False, True):
+        gathered: list[torch.Tensor] = [torch.cat(layer) for layer in zip(*sent)]
+        for rank in range(world):
+            pending = iter(gathered)
+
+            def all_gather(local, dim, rank=rank, exchange=exchange, pending=pending):
+                local = local.view(torch.int32)
+                assert dim == 0 and local.shape == (span, TOPK)
+                if not exchange:
+                    sent[rank].append(local.clone())
+                    return local.new_zeros(world * span, TOPK).view(torch.float32)
+                out = next(pending).clone()
+                out[rank * span : (rank + 1) * span] = local
+                return out.view(torch.float32)
+
+            group = types.SimpleNamespace(all_gather=all_gather)
+            monkeypatch.setattr(ops, "get_tp_group", lambda group=group: group)
+            outs = layers(world, rank, torch.randint_like(pool, 0, 200))
+            assert len(sent[rank]) == (3 if shard else 0)
+            if exchange:
+                for got, want in zip(outs, ref):
+                    assert torch.equal(sets(got), sets(want))

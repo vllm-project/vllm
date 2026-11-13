@@ -4,7 +4,7 @@ meta:
   provider: "MiMo (Xiaomi)"
   description: "Xiaomi's efficiency-balanced omnimodal MoE (309B total / 15B active) with hybrid attention, FP8-compute/mxfp4-stored weights, 1M context, and a DFlash speculative decoder — the default MOPD checkpoint fixes the RL release's tool-call repetition"
   date_added: 2026-09-22
-  date_updated: 2026-10-07
+  date_updated: 2026-11-11
   tasks:
     - text
     - multimodal
@@ -56,8 +56,15 @@ features:
       - "--speculative-config"
       - '{"method":"dflash","model":"$DFLASH_DIR","num_speculative_tokens":7}'
 
+  encoder_parallel:
+    description: "Run the vision encoder data-parallel instead of sharding it across TP ranks"
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
 opt_in_features:
   - spec_decoding
+  - encoder_parallel
 
 variants:
   # MOPD supersedes the RL release as the default served checkpoint (same
@@ -74,17 +81,25 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "4"
-      - "--gpu-memory-utilization"
-      - "0.95"
     hardware_overrides:
       mi300x:
         extra_args:
           - "--moe-backend"
           - "aiter_triton_mxfp4_bf16"
+          # Faster than the DiffKV default; see vllm#64064.
+          - "--attention-backend"
+          - "ROCM_AITER_UNIFIED_ATTN"
+          - "--block-size"
+          - "16"
       mi325x:
         extra_args:
           - "--moe-backend"
           - "aiter_triton_mxfp4_bf16"
+          # Faster than the DiffKV default; see vllm#64064.
+          - "--attention-backend"
+          - "ROCM_AITER_UNIFIED_ATTN"
+          - "--block-size"
+          - "16"
   rl:
     # The original 2026-09-22 RL checkpoint. No `model_id` override: it serves
     # the recipe's own repo, like DeepSeek-V4-Pro's "FP8 (Preview)" variant.
@@ -97,17 +112,25 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "4"
-      - "--gpu-memory-utilization"
-      - "0.95"
     hardware_overrides:
       mi300x:
         extra_args:
           - "--moe-backend"
           - "aiter_triton_mxfp4_bf16"
+          # Faster than the DiffKV default; see vllm#64064.
+          - "--attention-backend"
+          - "ROCM_AITER_UNIFIED_ATTN"
+          - "--block-size"
+          - "16"
       mi325x:
         extra_args:
           - "--moe-backend"
           - "aiter_triton_mxfp4_bf16"
+          # Faster than the DiffKV default; see vllm#64064.
+          - "--attention-backend"
+          - "ROCM_AITER_UNIFIED_ATTN"
+          - "--block-size"
+          - "16"
 
 compatible_strategies:
   - single_node_tp
@@ -122,6 +145,11 @@ hardware_overrides:
     extra_args:
       - "--kv-cache-dtype"
       - "fp8"
+      # Faster than the DiffKV default; see vllm#64064.
+      - "--attention-backend"
+      - "ROCM_AITER_UNIFIED_ATTN"
+      - "--block-size"
+      - "16"
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
@@ -202,7 +230,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Flash-MOPD \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --reasoning-parser mimo \
     --tool-call-parser mimo \
@@ -219,6 +246,8 @@ guide: |
     --tensor-parallel-size 4 \
     --trust-remote-code \
     --kv-cache-dtype fp8 \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    --block-size 16 \
     --max-model-len auto \
     --reasoning-parser mimo \
     --tool-call-parser mimo \
@@ -227,6 +256,11 @@ guide: |
   ```
 
   MI355X also runs TP2 just fine.
+
+  `--attention-backend ROCM_AITER_UNIFIED_ATTN --block-size 16` is faster than
+  the DiffKV default for this model, with matching accuracy and
+  speculative-decoding acceptance
+  ([vllm-project/vllm#64064](https://github.com/vllm-project/vllm/pull/64064)).
 
   ### AMD (MI300X / MI325X, gfx942)
 
@@ -252,6 +286,8 @@ guide: |
     --tool-call-parser mimo \
     --enable-auto-tool-choice \
     --moe-backend aiter_triton_mxfp4_bf16 \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    --block-size 16 \
     --generation-config vllm
   ```
   With DFlash speculative decoding (drafter ships inside the checkpoint).
@@ -272,7 +308,6 @@ guide: |
   vllm serve XiaomiMiMo/MiMo-V2.6-Flash-MOPD \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
     --max-model-len auto \
     --speculative-config "{\"method\":\"dflash\",\"model\":\"$DFLASH_DIR\",\"num_speculative_tokens\":7}" \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -314,5 +349,6 @@ guide: |
   - [vLLM PR #57784 — mxfp4 MoE / bf16 router / DFlash for MiMo V2](https://github.com/vllm-project/vllm/pull/57784)
   - [vLLM PR #57933 — MiMo tool-call/reasoning parsers for the Rust frontend](https://github.com/vllm-project/vllm/pull/57933)
   - [vLLM PR #58262 — MiMo-V2.6 MXFP4 on gfx942 (`--moe-backend aiter_triton_mxfp4_bf16`)](https://github.com/vllm-project/vllm/pull/58262)
+  - [vLLM PR #64064 — ROCM_AITER_UNIFIED_ATTN for MiMo-V2.6 (`--attention-backend ROCM_AITER_UNIFIED_ATTN`)](https://github.com/vllm-project/vllm/pull/64064)
   - [SGLang MiMo cookbook](https://docs.sglang.io/cookbook/autoregressive/Xiaomi/MiMo-V2.5)
   - [vLLM ROCm GPU install docs](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/?device=rocm)

@@ -56,7 +56,6 @@ logger = init_logger(__name__)
 # get it via ``_maybe_override_draft_max_position_embeddings`` (#63909).
 _ROPE_HF_OVERRIDE_KEYS = frozenset(
     {
-        "rope_scaling",
         "rope_parameters",
         "original_max_position_embeddings",
         "rope_theta",
@@ -151,6 +150,26 @@ def _rope_only_sizes_cache(hf_config: PreTrainedConfig) -> bool:
         params.get("rope_type", "default") in _CACHE_ONLY_ROPE_TYPES
         for params in iter_rope_parameters(hf_config)
     )
+
+
+# RoPE types whose cos_sin_cache holds original_max_position_embeddings * factor
+# positions, whatever max_position_embeddings is.
+_YARN_ROPE_TYPES = frozenset({"yarn", "deepseek_yarn", "deepseek_llama_scaling"})
+
+
+def _yarn_cache_positions(hf_config: PreTrainedConfig) -> int | None:
+    positions = []
+    for params in iter_rope_parameters(hf_config):
+        original = params.get("original_max_position_embeddings")
+        factor = params.get("factor")
+        if (
+            params.get("rope_type") not in _YARN_ROPE_TYPES
+            or not original
+            or not factor
+        ):
+            return None
+        positions.append(int(original * factor))
+    return min(positions, default=None)
 
 
 _MINIMAX_M3_MODEL_TYPES = ("minimax_m3_vl", "minimax_m3_text")
@@ -441,14 +460,10 @@ def _validate_qwen3_omni_dspark(
             f"draft input vocabulary [0, {draft_input_vocab_size - 1}]."
         )
 
-    rope_configs = (
-        getattr(draft_hf_config, "rope_parameters", None),
-        getattr(draft_hf_config, "rope_scaling", None),
-    )
+    rope_parameters = getattr(draft_hf_config, "rope_parameters", None)
     has_mrope = getattr(draft_hf_config, "mrope_section", None) is not None
-    has_mrope = has_mrope or any(
-        isinstance(rope_config, Mapping) and "mrope_section" in rope_config
-        for rope_config in rope_configs
+    has_mrope = has_mrope or (
+        isinstance(rope_parameters, Mapping) and "mrope_section" in rope_parameters
     )
     if has_mrope:
         raise ValueError(
@@ -504,6 +519,11 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    draft_decode_context_parallel_size: int | None = Field(default=None, ge=1)
+    """The degree of decode context parallelism for the draft model. Can only be
+    1 or the same as the target model's decode context parallel size. Defaults to
+    the target's, except for DFlash/DSpark drafts, which default to 1 unless they
+    are full-attention MLA."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""
@@ -651,6 +671,15 @@ class SpeculativeConfig:
     enable_adaptive_verification: bool = False
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
+
+    prefill_context_kv_only: bool = False
+    """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
+    to only store the drafter's context K/V, which the decode instance reads:
+    no drafts, no lookahead KV slots, and, for draft models that support it,
+    the draft weights only drafting reads are freed. Requests that decode there
+    run without speculation. Keep the rest of the speculative config as on the
+    decode instance; adaptive verification and dynamic speculative decoding are
+    turned off."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -837,6 +866,15 @@ class SpeculativeConfig:
                 }
             )
             return hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        if getattr(text_config, "model_type", None) == "mistral_large_4" and getattr(
+            text_config, "mtp_config", None
+        ):
+            from vllm.transformers_utils.configs.mistral import (
+                get_mistral_large_4_dspark_config,
+            )
+
+            return get_mistral_large_4_dspark_config(text_config)
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -1375,11 +1413,11 @@ class SpeculativeConfig:
         target is instantiated at full size even when the target is shrunk.
 
         Dict overrides are mostly target-specific key patches, but
-        rope-relevant keys (`rope_parameters` / `rope_scaling` /
-        `rope_theta`, including nested `text_config`) must reach the
-        draft or a YaRN-style target override leaves the draft on native
-        rope (#58080). `max_position_embeddings` stays target-only so the
-        draft max-model-len clamp keeps holding (#63909).
+        rope-relevant keys (`rope_parameters` / `rope_theta`, including nested
+        `text_config`) must reach the draft or a YaRN-style target override
+        leaves the draft on native rope (#58080). `max_position_embeddings`
+        stays target-only so the draft max-model-len clamp keeps holding
+        (#63909).
 
         The composed override must stay picklable: the draft `ModelConfig`
         is sent to spawned engine-core processes, so a local closure would
@@ -1470,6 +1508,24 @@ class SpeculativeConfig:
                     f"{self.custom_method or self.method!r}."
                 )
         config_cls.apply_options(self)
+
+        if self.prefill_context_kv_only:
+            if not config_cls.supports_prefill_context_kv_only:
+                raise ValueError(
+                    "prefill_context_kv_only is not supported with speculative "
+                    f"method {self.custom_method or self.method!r}."
+                )
+            if (
+                self.enable_adaptive_verification
+                or self.uses_dynamic_speculative_decoding()
+            ):
+                logger.warning_once(
+                    "prefill_context_kv_only schedules no drafts to verify. "
+                    "Disabling adaptive verification and dynamic speculative "
+                    "decoding."
+                )
+                self.enable_adaptive_verification = False
+                self.num_speculative_tokens_per_batch_size = None
 
         if (
             config_cls.adaptive_verification_uses_draft_logits
@@ -1618,6 +1674,19 @@ class SpeculativeConfig:
                 f"other value than 1 or target model tensor_parallel_size"
             )
         return speculative_draft_tensor_parallel_size
+
+    @staticmethod
+    def _verify_and_get_draft_dcp(
+        target_parallel_config: ParallelConfig, draft_dcp: int | None
+    ) -> int:
+        """Default the draft's DCP to the target's; an explicit value must be 1
+        or the target's."""
+        target_dcp = target_parallel_config.decode_context_parallel_size
+        if draft_dcp is None:
+            return target_dcp
+        if draft_dcp not in (1, target_dcp):
+            raise ValueError(f"{draft_dcp=} must be 1 or {target_dcp}.")
+        return draft_dcp
 
     def update_arch_(self):
         """EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
@@ -1773,6 +1842,25 @@ class SpeculativeConfig:
             logger.warning_once(
                 "FLy verification is a lossy speculative decoding method and "
                 "may degrade model outputs."
+            )
+        elif (
+            self.rejection_sample_method == "synthetic"
+            and self.fly_window_size is not None
+        ):
+            # FLy cost overlay: pays FLy's per-step compute while acceptance
+            # stays exactly the synthetic one.
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires num_speculative_tokens >= 2."
+                )
+            if self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires fly_window_size < "
+                    "num_speculative_tokens."
+                )
+            logger.warning_once(
+                "FLy cost overlay enabled with synthetic acceptance: "
+                "entropy is computed but never used to defer rejections."
             )
 
         self.verify_equal_vocab_size_if_draft_model()

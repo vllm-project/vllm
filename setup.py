@@ -605,7 +605,7 @@ class precompiled_wheel_utils:
     def detect_system_cuda_variant() -> str:
         """Auto-detect CUDA variant from torch, nvidia-smi, or env default."""
         # Map CUDA major version to hosted wheel variants on wheels.vllm.ai
-        supported = {12: "cu129", 13: "cu130"}
+        supported = {12: "cu129", 13: "cu132"}
 
         # Respect explicitly set VLLM_MAIN_CUDA_VERSION
         if envs.is_set("VLLM_MAIN_CUDA_VERSION"):
@@ -1734,7 +1734,7 @@ setup(
         # only; also needs system GStreamer + libv4l (see docs).
         "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
-        "b12x": ["b12x==1.5.1"],
+        "b12x": [],  # Kept for backwards compatibility
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
