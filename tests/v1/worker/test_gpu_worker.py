@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -305,6 +306,35 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     with pytest.raises(Profiled):
         gpu_worker.Worker.determine_available_memory(worker)
     assert get_current_vllm_config_or_none() is None
+
+
+def test_rocm_expandable_segments_disabled_after_warmup(monkeypatch):
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.distributed.device_communicators import base_device_communicator
+
+    conf = "expandable_segments:True,max_split_size_mb:64"
+    expected = "expandable_segments:False,max_split_size_mb:64"
+    writes: list[str] = []
+    guard_calls: list[None] = []
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: True)
+    monkeypatch.setenv("PYTORCH_HIP_ALLOC_CONF", conf)
+    monkeypatch.setattr(
+        gpu_worker, "current_alloc_conf", lambda: writes[-1] if writes else conf
+    )
+    monkeypatch.setattr(gpu_worker, "set_alloc_conf", writes.append)
+    monkeypatch.setattr(
+        base_device_communicator,
+        "set_rocm_expandable_segments_steady_state_disabled",
+        lambda: guard_calls.append(None),
+    )
+
+    gpu_worker._disable_rocm_expandable_segments_after_warmup()
+
+    assert writes == [expected]
+    assert os.environ["PYTORCH_HIP_ALLOC_CONF"] == expected
+    assert guard_calls == [None]
 
 
 @pytest.mark.parametrize(

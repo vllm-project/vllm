@@ -27,6 +27,14 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator.alloc_conf import (
+    ALLOC_CONF_ENV_VARS,
+    EXPANDABLE_SEGMENTS,
+    conf_flag_enabled,
+    current_alloc_conf,
+    set_alloc_conf,
+    with_conf_flag,
+)
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -146,6 +154,47 @@ def _num_workspace_lanes(vllm_config: VllmConfig) -> int:
     return (
         2 if spec_config is not None and spec_config.uses_separate_workspace_lane else 1
     )
+
+
+def _rocm_expandable_segments_should_disable_after_warmup() -> bool:
+    if not current_platform.is_rocm():
+        return False
+
+    from vllm.platforms.rocm import on_gfx1151
+
+    if not on_gfx1151():
+        return False
+
+    return conf_flag_enabled(current_alloc_conf(), EXPANDABLE_SEGMENTS)
+
+
+def _disable_rocm_expandable_segments_after_warmup() -> None:
+    if not _rocm_expandable_segments_should_disable_after_warmup():
+        return
+
+    conf = current_alloc_conf()
+    if not conf_flag_enabled(conf, EXPANDABLE_SEGMENTS):
+        return
+    updated_conf = with_conf_flag(conf, EXPANDABLE_SEGMENTS, False)
+
+    logger.info_once(
+        "Disabling PyTorch expandable segments after ROCm gfx1151 warmup; "
+        "startup/profile allocations were kept intact, while steady-state "
+        "serving avoids the VMM page-table growth path."
+    )
+    set_alloc_conf(updated_conf)
+
+    authoritative_env = next(
+        (name for name in ALLOC_CONF_ENV_VARS if os.environ.get(name)),
+        ALLOC_CONF_ENV_VARS[0],
+    )
+    os.environ[authoritative_env] = updated_conf
+
+    from vllm.distributed.device_communicators.base_device_communicator import (
+        set_rocm_expandable_segments_steady_state_disabled,
+    )
+
+    set_rocm_expandable_segments_steady_state_disabled()
 
 
 def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
@@ -1240,6 +1289,8 @@ class Worker(WorkerBase):
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
 
+        _disable_rocm_expandable_segments_after_warmup()
+
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
         freeze_gc_heap()
@@ -1292,9 +1343,11 @@ class Worker(WorkerBase):
             self.profiler = create_graph_capture_profiler(
                 self.profiler_config, global_rank=self.rank
             )
-            if self.profiler is None:
-                return nullcontext()
-        return self.profiler.capture_cuda_graphs()
+        return (
+            nullcontext()
+            if self.profiler is None
+            else self.profiler.capture_cuda_graphs()
+        )
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
