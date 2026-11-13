@@ -121,7 +121,7 @@ class _Engine:
         return request
 
 
-@pytest.fixture(params=[1, 2], ids=["tp1", "tp2"])
+@pytest.fixture(params=[1, 2, 4], ids=["tp1", "tp2", "tp4"])
 def engine(request, monkeypatch):
     role = moriio_common.get_role()
     moriio_common.set_role(moriio_common.ROLE.CONSUMER)
@@ -191,14 +191,15 @@ def test_blocks_freed_once_every_rank_has_its_write_done(engine):
     request = engine.add_waiting_request()
     held = engine.pool.get_num_free_blocks()
 
-    # Rank 0's write lands before the timeout, rank 1's after it.
-    engine.step(write_done=frozenset({request.request_id}), ranks={0})
+    # The even ranks' writes land before the timeout, the odd ranks' after it.
+    ranks = range(len(engine.workers))
+    engine.step(write_done=frozenset({request.request_id}), ranks=set(ranks[::2]))
     engine.clock.now += TIMEOUT_S + 1
     engine.step()
     assert request.status == RequestStatus.FINISHED_ERROR
     assert engine.pool.get_num_free_blocks() == held
 
-    engine.step(write_done=frozenset({request.request_id}), ranks={1})
+    engine.step(write_done=frozenset({request.request_id}), ranks=set(ranks[1::2]))
     assert request.request_id not in engine.scheduler.requests
     assert engine.pool.get_num_free_blocks() == free_before
 
