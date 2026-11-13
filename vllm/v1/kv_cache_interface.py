@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token blob,
+# so the page size is not derivable from head_size.
+DS_MLA_STATE_CONTENT_BYTES = {"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}
+
 _SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
 
 
@@ -502,7 +506,13 @@ class HiSparseHotSpec(KVCacheSpec):
         return self.page_size
 
     def get_block_stride_alignment(self) -> int:
-        return math.lcm(self.page_size, super().get_block_stride_alignment())
+        from vllm.v1.attention.backend import MultipleOf
+
+        row_bytes = self.page_size // self.block_size
+        alignment = self.block_stride_alignment
+        if isinstance(alignment, MultipleOf):
+            return math.gcd(alignment.base, self.block_size) * row_bytes
+        return math.lcm(row_bytes, alignment or 1)
 
     @property
     def block_table_token_alignment(self) -> int | None:
@@ -1421,7 +1431,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     @property
     def uses_slot_mapping(self) -> bool:
-        return self.first_spec.uses_slot_mapping
+        return any(spec.uses_slot_mapping for spec in self.kv_cache_specs.values())
 
 
 def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:

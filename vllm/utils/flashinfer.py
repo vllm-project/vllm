@@ -499,6 +499,59 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 
 
 @functools.cache
+def has_flashinfer_prims_ts_sparse_mla() -> bool:
+    """Return `True` if FlashInfer ships the task-scheduled (prims_ts) sparse
+    MLA decode wrapper with the plan API vLLM calls. Its quantized formats are
+    probed separately by `prims_ts_sparse_mla_format_error` once a device is
+    available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.attention.prims_ts import (
+            BatchSparseMLADecodePagedTSWrapper,
+            get_prims_ts_sparse_mla_decode_workspace_size,
+        )
+    except ImportError:
+        return False
+    if not callable(get_prims_ts_sparse_mla_decode_workspace_size):
+        return False
+    # vLLM passes the plan arguments of FlashInfer after 0.7.3 (max_q_len,
+    # q_dtype); 0.7.3's prims_ts still names them max_seq_len_q, q_data_type.
+    plan_args = inspect.signature(BatchSparseMLADecodePagedTSWrapper.plan).parameters
+    return "max_q_len" in plan_args
+
+
+@functools.cache
+def prims_ts_sparse_mla_format_error(kv_cache_format: str) -> str | None:
+    """Why the installed FlashInfer cannot plan prims_ts sparse MLA (D576, 128
+    E4M3 query heads, LSE) over `kv_cache_format` on this GPU, else None.
+
+    Asks the public workspace-size query, which resolves the plan without
+    allocating or compiling (FlashInfer >= the nightly with PR 7410 for
+    "nvfp4.fp8rope")."""
+    if not has_flashinfer_prims_ts_sparse_mla():
+        return "FlashInfer has no prims_ts sparse MLA decode"
+    from flashinfer.attention.prims_ts import (
+        get_prims_ts_sparse_mla_decode_workspace_size,
+    )
+
+    try:
+        get_prims_ts_sparse_mla_decode_workspace_size(
+            torch.device("cuda", torch.accelerator.current_device_index()),
+            1,
+            128,
+            max_topk=2048,
+            q_dtype=torch.float8_e4m3fn,
+            qk_rope_head_dim=64,
+            kv_cache_format=kv_cache_format,
+            return_lse=True,
+        )
+    except (ValueError, NotImplementedError, KeyError, TypeError) as e:
+        return f"FlashInfer prims_ts sparse MLA rejects {kv_cache_format!r}: {e}"
+    return None
+
+
+@functools.cache
 def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool:
     """Return whether FlashInfer ships an SM120 DSV4 decode specialization.
 
@@ -512,6 +565,105 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
     mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
     dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
     return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
+
+
+@functools.cache
+def has_flashinfer_topk_varlen_gvr2() -> bool:
+    """Return `True` if FlashInfer ships the `gvr_2` varlen top-k backend
+    (self-sampling GVR V2, `flashinfer.top_k_varlen(backend="gvr_2")`).
+
+    Feature-detected on the production entry `run_varlen` (FlashInfer >=
+    0.7.2: per-row `kv_lens`, a capture-stable `max_seq_len` and the
+    hint-free `top_k`) and the band-aware `warmup_varlen` (`row_stride`)
+    that the dispatcher calls.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.topk_varlen.kernels import gvr2_topk_host
+
+        run_params = inspect.signature(gvr2_topk_host.run_varlen).parameters
+        warmup_params = inspect.signature(gvr2_topk_host.warmup_varlen).parameters
+    except Exception:
+        # The module imports the CuTe DSL; anything it raises means unusable.
+        return False
+    return {"kv_lens", "max_seq_len", "top_k"} <= set(run_params) and {
+        "num_rows_list",
+        "row_stride",
+    } <= set(warmup_params)
+
+
+@functools.cache
+def has_flashinfer_msa() -> bool:
+    """Return `True` if FlashInfer MiniMax Sparse Attention (MSA) ops are
+    available. Which architectures they serve depends on the build."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.msa_ops import (
+            msa_proxy_score,
+            msa_sparse_attention,
+            msa_sparse_decode_attention,
+            msa_topk_select,
+        )
+    except ImportError:
+        return False
+    return all(
+        callable(fn)
+        for fn in (
+            msa_proxy_score,
+            msa_topk_select,
+            msa_sparse_attention,
+            msa_sparse_decode_attention,
+        )
+    )
+
+
+@functools.cache
+def has_flashinfer_msa_packed_kv() -> bool:
+    """Return `True` if the FlashInfer MSA attention kernels accept K/V
+    views split from vLLM's packed-content KV cache, advertised by the
+    `SUPPORTS_PACKED_KV` flag on `flashinfer.msa_ops`."""
+    if not has_flashinfer_msa():
+        return False
+    import flashinfer.msa_ops as msa_ops
+
+    return bool(getattr(msa_ops, "SUPPORTS_PACKED_KV", False))
+
+
+@functools.cache
+def has_flashinfer_msa_sm90() -> bool:
+    """Return `True` if the FlashInfer MSA attention kernels serve SM90
+    (Hopper). Detected from the `out` parameter both attention ops gained
+    with their SM90 backend, since flashinfer exposes no capability flag for
+    it."""
+    if not has_flashinfer_msa():
+        return False
+    import inspect
+
+    from flashinfer.msa_ops import msa_sparse_attention, msa_sparse_decode_attention
+
+    return all(
+        "out" in inspect.signature(fn).parameters
+        for fn in (msa_sparse_attention, msa_sparse_decode_attention)
+    )
+
+
+@functools.cache
+def has_flashinfer_msa_per_token_topk() -> bool:
+    """Return `True` if `flashinfer.msa_ops.msa_topk_select` accepts a
+    per-token `num_valid_pages` tensor. Detected from the parameter's type
+    annotation, since flashinfer exposes no capability flag for it."""
+    if not has_flashinfer_msa():
+        return False
+    import inspect
+
+    from flashinfer.msa_ops import msa_topk_select
+
+    ann = inspect.signature(msa_topk_select).parameters["num_valid_pages"].annotation
+    return "Tensor" in str(ann)
 
 
 @functools.cache

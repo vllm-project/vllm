@@ -365,3 +365,45 @@ def test_push_recv_rows_match_receiver_rows(
         landings.update((rank, expert, row) for expert, row in communicator.landings)
 
     assert pushes == landings
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("seed", range(4))
+def test_move_from_buffer_cuda_matches_per_row_copies(seed: int) -> None:
+    """The batched CUDA copy-back writes the same bytes as the per-row CPU path,
+    including duplicate rows and rows whose length is not a multiple of 16."""
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+    world, num_local, ep_rank = 4, 6, int(rng.integers(4))
+    num_logical = world * num_local - 3
+    old = rng.permutation(np.arange(world * num_local) % num_logical)
+    new = rng.integers(num_logical, size=world * num_local)
+    new[rng.random(new.shape) < 0.1] = -1
+    weights = [
+        torch.randint(0, 256, (num_local, 64), dtype=torch.uint8),
+        torch.randint(0, 256, (num_local, 3, 5), dtype=torch.uint8),
+        torch.randn(num_local, 7).to(torch.bfloat16),
+        torch.randn(num_local),
+    ]
+    buffers = [torch.randint_like(w, 256) for w in weights]
+    metadata = move_to_buffer(
+        num_local_experts=num_local,
+        old_indices=old,
+        new_indices=new,
+        expert_weights=weights,
+        expert_weights_buffers=buffers,
+        stream=None,
+        ep_rank=ep_rank,
+        communicator=_MockEplbCommunicator(),
+    )
+    cuda_weights = [w.cuda() for w in weights]
+    for ws, bs in ((weights, buffers), (cuda_weights, [b.cuda() for b in buffers])):
+        move_from_buffer(
+            expert_weights=ws,
+            expert_weights_buffers=bs,
+            transfer_metadata=metadata,
+            new_indices=new,
+            ep_rank=ep_rank,
+        )
+    for w, cw in zip(weights, cuda_weights):
+        assert torch.equal(w, cw.cpu())

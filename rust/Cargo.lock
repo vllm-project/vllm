@@ -5662,6 +5662,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
@@ -5683,6 +5684,7 @@ dependencies = [
  "native-tls",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "thiserror-ext",
  "tokio",
@@ -5860,6 +5862,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "clap",
+ "easy-ext",
  "educe",
  "expect-test",
  "futures",
@@ -5936,6 +5939,7 @@ dependencies = [
  "trait-set",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-tokenizer",
 ]
 
@@ -5967,8 +5971,15 @@ dependencies = [
 name = "vllm-tracing"
 version = "0.1.0"
 dependencies = [
+ "expect-test",
+ "indexmap 2.13.0",
+ "serde",
+ "serde-json-fmt",
+ "serde_json",
+ "serde_with",
  "time",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 
@@ -6465,9 +6476,9 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "xgrammar-structural-tag"
-version = "0.4.1+xgrammar.0.2.8.9778737"
+version = "0.5.0+xgrammar.0.2.9.8f9a127"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06637fe6ff753ef929b4cea2933b9432f78335255c6931dc748957122b9b492c"
+checksum = "eb1c580c3b8ce497447f7cf3a65307226a4be44c84e649b111cdf5d2b19015e4"
 dependencies = [
  "auto_impl",
  "serde",
