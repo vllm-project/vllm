@@ -17,6 +17,19 @@ input norm and qkv_proj. Up to 2 rows (`runtime.layers.MONO_GDN_MAX`) a GDN
 layer whose in_proj_qkvz is plain MXFP4 (out_proj not Hadamard-rotated) runs
 `mono.blocks.gdn_block` instead of its split launch.
 
+With MTP speculative decoding (`--speculative-config '{"method": "mtp",
+...}'`) every specialized step is a pure verify step of whole uniform
+requests of `num_speculative_tokens + 1` rows each, at the capture sizes in
+1-64 that are multiples of it. A GDN layer runs vLLM's in_proj, GDN core
+(on the spec-decode metadata) and gated norm on the stock forward's route
+(the fused GDN spec decode kernel, else AITER's Triton core), then
+`gdn_back` (the core's
+MXFP4 quantization for an MXFP4 out_proj, out_proj onwards as above), or up
+to 16 rows vLLM's residual add + input norm before and `layer_block` after.
+Attention layers run as above, vLLM's attention on the verify metadata. The
+drafter stays vLLM's, as do verify steps of other widths, ragged verify
+steps, steps without drafts and mixed steps.
+
 The embedding, the head and sampling stay vLLM's. Prefill and mixed steps,
 and decode steps wider than 64 rows, run vLLM's forward: from 65 rows up
 stock's MoE streams the experts near the HBM floor, and the wide kernels
@@ -44,12 +57,14 @@ width that holds it (vLLM's graph padding).
 Default-deny, in three stages, each reporting every reason in one error
 (`runtime/__init__.py`, `runtime/guards.py`): the config (TP other than 8,
 PP, DP, EP, EPLB, MoE sequence parallelism, LoRA, KV connectors,
-routed-expert capture, speculative decoding, sleep mode, CPU weight offload,
+routed-expert capture, speculative decoding other than MTP, adaptive
+verification, dynamic speculative decoding, sleep mode, CPU weight offload,
 weight updates, GDN prefix caching, other GDN cache dtypes, an unfused shared
-expert, `STOCK_TORCH_COMPILE`, other model shapes, no capture size in 1-64, a
-platform other than unpartitioned gfx950); the loaded model (every layer's
-modules, quantization methods, weight layouts and shapes); the GDN caches at
-every bind. The TP ranks agree on every stage.
+expert, `STOCK_TORCH_COMPILE`, other model shapes, no capture size in 1-64
+(with MTP a multiple of `num_speculative_tokens + 1`), a platform other than
+unpartitioned gfx950); the loaded model (every layer's modules, quantization
+methods, weight layouts and shapes; with MTP, neither the fused GDN spec
+decode kernel nor AITER's Triton GDN kernels); the GDN caches at every bind. The TP ranks agree on every stage.
 
 ## Numerics
 
@@ -95,5 +110,7 @@ model is built) builds every wide launch with per-phase clock stamps
 
 `tests/models/qwen3_5/amd_specialized_decode/` checks the launches at TP8
 against a float64 reference with the stock rounding points (`test_layer.py`:
-the wide widths; `test_split.py`: the split widths, and the GDN launch's
-MXFP4 rows bit-exact against AITER's quantization on one GPU).
+the wide widths, with an MTP verify step's `gdn_back`; `test_split.py`: the
+split widths, and the GDN launch's MXFP4 rows bit-exact against AITER's
+quantization on one GPU; `test_verify.py`: MTP widths, verify routing and
+refusals on the host).

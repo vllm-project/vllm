@@ -11,6 +11,10 @@ and the final norm is vLLM's (`gemma_norm`); up to `MONO_GDN_MAX` rows a
 GDN layer whose in_proj_qkvz is plain MXFP4 runs `mono.blocks.gdn_block`
 instead of its split launch (`Launcher.mono_gdn`).
 
+With MTP (`Launcher.verify`) every step is a verify step: a GDN layer runs
+vLLM's in_proj, GDN core and gated norm (`gdn_verify_core`), then its
+`gdn_back` launch, or up to `L.SPLIT_MAX` rows its `layer_block`.
+
 `Launcher` holds the per-rank state every launch reads: the scratch every
 width shares (launches of a step run in order), the two barrier slots the
 launches of a step alternate (`wide.grid`), the fold counters, the
@@ -72,10 +76,13 @@ def _scales(linear):
 class Launcher:
     """Per-rank launch state and the launches of every layer of a step."""
 
-    def __init__(self, model, widths, tp: int, rank: int, group, dev):
+    def __init__(
+        self, model, widths, tp: int, rank: int, group, dev, verify: bool = False
+    ):
         from vllm.models.qwen3_5.amd.specialized_decode.runtime.peer import PeerBuffer
 
         self.model, self.widths, self.tp, self.rank = model, widths, tp, rank
+        self.verify = verify
         self.rip = experts_rip(model.layers[0].mlp)
         # zeroed: the tagged hand-offs are compared against step tags
         self.scratch = torch.zeros(
@@ -111,7 +118,7 @@ class Launcher:
         # the wide launches of a step at each width (their barrier slots)
         self.launch_count = {}
         for s in widths:
-            n = sum(not self.mono_gdn_layer(i, s) for i in range(len(model.layers)))
+            n = sum(self.wide_launch(i, s) for i in range(len(model.layers)))
             if n == 1:
                 raise ValueError(f"one wide launch a step at {s} rows")
             self.launch_count[s] = n
@@ -243,6 +250,14 @@ class Launcher:
                     "ssm_stride": rstate.stride(0),
                 }
 
+    def wide_launch(self, i: int, rows: int) -> bool:
+        """Whether layer `i` runs a wide launch (`key`) at `rows`: not a
+        `gdn_block` one, nor a verify step's split GDN layer (vLLM's GDN
+        front, then `layer_block`)."""
+        if self.verify and rows <= L.SPLIT_MAX and _is_gdn(self.model.layers[i]):
+            return False
+        return not self.mono_gdn_layer(i, rows)
+
     def key(self, i: int, rows: int) -> K.LayerBuild:
         """Layer `i`'s build at `rows`."""
         layers = self.model.layers
@@ -251,7 +266,8 @@ class Launcher:
             return self._split_key(i, rows)
         nxt = layers[i + 1] if i + 1 < len(layers) else None
         next_q4 = "none"
-        if nxt is not None and _is_gdn(nxt):
+        # a verify step's next GDN layer projects vLLM's way, from `x`
+        if nxt is not None and _is_gdn(nxt) and not self.verify:
             nq = checked_format(nxt.linear_attn.in_proj_qkvz)
             next_q4 = K.q4_of(nq.fmt, nq.shuffled) or "none"
         common = dict(
@@ -267,6 +283,13 @@ class Launcher:
             return K.LayerBuild(kind="attn", **common)
         g = layer.linear_attn
         qkvz, out = checked_format(g.in_proj_qkvz), checked_format(g.out_proj)
+        if self.verify:
+            return K.LayerBuild(
+                kind="gdn_back",
+                out=out.fmt,
+                out_shuffled=out.shuffled,
+                **common,
+            )
         first_q4 = "none"
         if i == 0:
             first_q4 = K.q4_of(qkvz.fmt, qkvz.shuffled) or "none"
@@ -345,7 +368,7 @@ class Launcher:
         a plain MXFP4 in_proj_qkvz (gdn_block's only format) and an out_proj
         that reads an unrotated core."""
         layer = self.model.layers[i]
-        if rows > MONO_GDN_MAX or not _is_gdn(layer):
+        if self.verify or rows > MONO_GDN_MAX or not _is_gdn(layer):
             return False
         g = layer.linear_attn
         return (
@@ -472,6 +495,48 @@ def attention_core(attn, qkv, positions) -> tuple[torch.Tensor, torch.Tensor]:
     return out.reshape(rows, -1).contiguous(), gate.reshape(rows, -1).contiguous()
 
 
+def gdn_verify_core(a, x) -> torch.Tensor:
+    """`QwenGatedDeltaNetAttention.forward_hip` up to out_proj's input on an
+    MTP verify step (vLLM's GDN core applies the spec-decode metadata: each
+    draft's state slot, the accepted-token offsets) -> the gated norm's
+    output [S, VALUE_DIM] bf16, on the stock forward's route: the fused GDN
+    spec decode kernel (`enable_fused_gdn_spec_decode`), else AITER's
+    Triton GDN core and the gated norm (`guards` refuses the others)."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        _encode_layer_name,
+    )
+
+    n = x.size(0)
+    qkvz, _ = a.in_proj_qkvz(x)
+    ba, _ = a.in_proj_ba(x)
+    heads = a.num_v_heads // a.tp_size
+    if a.enable_fused_gdn_spec_decode:
+        core = torch.zeros(n, heads, a.head_v_dim, dtype=x.dtype, device=x.device)
+        torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
+            qkvz, ba, core, layer_name=_encode_layer_name(a.prefix)
+        )
+        return core.view(n, -1)
+    core = x.new_empty(n, heads, a.head_v_dim)
+    z = torch.empty_like(core)
+    torch.ops.vllm.qwen_gdn_attention_core(
+        qkvz.view(n, -1),
+        ba.view(n, -1),
+        z,
+        core,
+        layer_name=_encode_layer_name(a.prefix),
+        use_aiter=True,
+    )
+    return a.norm(core, z).reshape(n, -1).contiguous()
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def _gemma_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """`GemmaRMSNorm.forward_native(x)` in one launch."""
+    t = x.float()
+    t = t * torch.rsqrt(t.pow(2).mean(dim=-1, keepdim=True) + eps)
+    return (t * (weight.float() + 1.0)).to(x.dtype)
+
+
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _gemma_add_rms_norm(
     x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
@@ -485,5 +550,8 @@ def _gemma_add_rms_norm(
 
 
 def gemma_norm(norm, x, residual) -> tuple[torch.Tensor, torch.Tensor]:
-    """A `GemmaRMSNorm` with the residual add -> (x, the residual)."""
+    """A `GemmaRMSNorm` with the residual add (None: the first layer's, `x`
+    the residual) -> (x, the residual)."""
+    if residual is None:
+        return _gemma_rms_norm(x, norm.weight, norm.variance_epsilon), x
     return _gemma_add_rms_norm(x, residual, norm.weight, norm.variance_epsilon)

@@ -25,6 +25,8 @@ every row of the step.
   `o_proj` with the output gate applied as its activations are staged) in
   two K slices a 64-column group, folded by the group's last arriver, which
   pushes the group to the TP exchange.
+- `quant_core`: an MTP verify step's core, computed by vLLM, quantized for
+  an MXFP4 `out_proj` as `recur` publishes its own.
 
 Up to `tiled.RESIDENT_MAX` rows (the split launch, `layout.SPLIT_MAX`) the
 projection and the recurrence are one phase: the projection's outputs reach
@@ -50,6 +52,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.layout import (
     NK,
     NV,
     QKVZ,
+    THREADS,
     VALUE_DIM,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.ops import (
@@ -687,13 +690,39 @@ def publish(g, b, lds, row, vh, core: str):
             for m in range_constexpr(mx.GROUP // 4):
                 y4 = lds_ld(lds + Y_AT + g.tid * mx.GROUP + 4 * m, 4, fx.Float32)
                 vals += [bf16_round(y4[e]) for e in range(4)]
-            if const_expr(h32):
-                vals = [bf16_round(v) for v in norm.hadamard32(vals)]
-            code = mx.scale_code(mx.amax(vals), rceil)
-            words = mx.quant_f32_group(vals, code)
             el = row * VALUE_DIM + vh * GDN_DV + g.tid * mx.GROUP
-            st(b.core, el // 8, fx.Vector.from_elements(words, fx.Int32), CM_DEV)
-            st(b.core_s, el // mx.GROUP, code, CM_DEV)
+            _store_mx(b, el, vals, h32, rceil)
+
+
+def _store_mx(b, el, vals, h32: bool, rceil: bool):
+    """A 32-group of bf16 values (as f32), Hadamard-rotated for `h32`
+    (rounded to bf16 again), as MXFP4 codes at element `el` of `b.core`
+    and its scale at `b.core_s`."""
+    if const_expr(h32):
+        vals = [bf16_round(v) for v in norm.hadamard32(vals)]
+    code = mx.scale_code(mx.amax(vals), rceil)
+    words = mx.quant_f32_group(vals, code)
+    st(b.core, el // 8, fx.Vector.from_elements(words, fx.Int32), CM_DEV)
+    st(b.core_s, el // mx.GROUP, code, CM_DEV)
+
+
+@traced
+def quant_core(g, src, b, rows: int, core: str):
+    """A verify step's core for an MXFP4 out_proj: vLLM's gated-norm output
+    (`src`, [rows, VALUE_DIM] bf16) to `b.core` / `b.core_s` as `publish`
+    leaves the recurrence's (`core` "mxfp4*"), a thread a 32-group."""
+    h32, rceil = core.startswith("mxfp4_h32"), not core.endswith("_t")
+    groups = rows * VALUE_DIM // mx.GROUP
+    assert groups <= BLOCKS * THREADS
+    gid = g.bid * THREADS + g.tid
+    if gid < groups:
+        el = gid * mx.GROUP
+        vals = []
+        for q in range_constexpr(mx.GROUP // 8):
+            words = ld(src, el // 2 + 4 * q, fx.Int32, 4)
+            for e in range_constexpr(4):
+                vals += list(_halves(words[e]))
+        _store_mx(b, el, vals, h32, rceil)
 
 
 # --------------------------------------------------------------------------

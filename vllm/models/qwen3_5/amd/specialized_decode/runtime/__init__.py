@@ -23,15 +23,31 @@ NAME = "Qwen3.8-2.4T specialized decode (--monokernel)"
 @dataclass(frozen=True)
 class DecodeConfig:
     """`widths`: the step widths (rows) the wide kernels are built for, the
-    deployment's CUDA graph capture sizes in [MIN_TOKENS, MAX_TOKENS]; a step
-    of another width runs vLLM's decode."""
+    deployment's CUDA graph capture sizes in [MIN_TOKENS, MAX_TOKENS] (with
+    MTP the multiples of `q`); a step of another width runs vLLM's decode.
+    `q`: the rows a request: 1, or with MTP an MTP verify step's
+    `num_speculative_tokens + 1`."""
 
     widths: tuple[int, ...]
+    q: int = 1
+
+    @property
+    def verify(self) -> bool:
+        return self.q > 1
 
 
-def decode_widths(vllm_config) -> tuple[int, ...]:
+def verify_rows(vllm_config) -> int:
+    sc = vllm_config.speculative_config
+    return 1 if sc is None else sc.num_speculative_tokens + 1
+
+
+def decode_widths(vllm_config, q: int = 1) -> tuple[int, ...]:
     sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
-    return tuple(sorted(s for s in set(sizes) if L.MIN_TOKENS <= s <= L.MAX_TOKENS))
+    return tuple(
+        sorted(
+            s for s in set(sizes) if L.MIN_TOKENS <= s <= L.MAX_TOKENS and s % q == 0
+        )
+    )
 
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
@@ -41,11 +57,13 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     if not vllm_config.kernel_config.monokernel:
         return None
     reasons = unsupported(vllm_config)
-    widths = decode_widths(vllm_config)
+    q = verify_rows(vllm_config)
+    widths = decode_widths(vllm_config, q)
     if not widths:
         reasons.append(
-            f"no CUDA graph capture size in {L.MIN_TOKENS}-{L.MAX_TOKENS}: the wide "
-            "kernels serve FULL decode graphs of those widths"
+            f"no CUDA graph capture size in {L.MIN_TOKENS}-{L.MAX_TOKENS}"
+            + (f" that is a multiple of {q}" if q > 1 else "")
+            + ": the wide kernels serve FULL decode graphs of those widths"
         )
     if reasons:
         raise ValueError(
@@ -58,7 +76,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             "use FULL decode graphs",
             NAME,
         )
-    return DecodeConfig(widths=widths)
+    return DecodeConfig(widths=widths, q=q)
 
 
 def unsupported(vllm_config) -> list[str]:
@@ -109,8 +127,6 @@ def unsupported(vllm_config) -> list[str]:
             "CPU weight offload",
         ),
         (vllm_config.weight_transfer_config is not None, "weight updates"),
-        # the GDN phase runs plain decode rows, one token a request
-        (vllm_config.speculative_config is not None, "speculative decoding"),
         # the GDN phase reads and writes one state slot a request in place
         (
             cc.mamba_cache_mode != "none",
@@ -145,6 +161,7 @@ def unsupported(vllm_config) -> list[str]:
         ),
     )
     reasons = [why for bad, why in checks if bad]
+    reasons += spec_reasons(vllm_config.speculative_config)
     text = mc.hf_text_config
     shapes = text_shapes(text)
     if shapes != L.SHAPES:
@@ -163,6 +180,25 @@ def unsupported(vllm_config) -> list[str]:
     if layers > L.MAX_LAYERS:
         reasons.append(f"{layers} decoder layers (at most {L.MAX_LAYERS})")
     return reasons + platform_reasons()
+
+
+def spec_reasons(sc) -> list[str]:
+    """Speculative decoding: MTP only, whose verify steps run the kernels
+    with vLLM's GDN core (`decode.SpecializedDecode.run`); the drafter
+    stays vLLM's."""
+    if sc is None:
+        return []
+    if sc.method != "mtp":
+        return [f"speculative method {sc.method!r} (MTP only)"]
+    out = []
+    if sc.num_speculative_tokens + 1 > L.MAX_TOKENS:
+        out.append(f"{sc.num_speculative_tokens} speculative tokens")
+    # a verify step of mixed lengths a request is not uniform
+    if sc.enable_adaptive_verification:
+        out.append("adaptive verification")
+    if sc.uses_dynamic_speculative_decoding():
+        out.append("dynamic speculative decoding")
+    return out
 
 
 def text_shapes(text) -> tuple:

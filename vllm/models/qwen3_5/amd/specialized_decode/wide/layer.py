@@ -11,6 +11,9 @@ full-attention layer after vLLM's attention (`LayerBuild.kind`):
           [-> the next (attention) layer's qkv_proj]
     attn  o_proj (gated) -> TP exchange -> post-attention combine
           -> the MLP half as above
+    gdn_back  (an MTP verify step's GDN layer, after vLLM's in_proj, GDN
+          core and gated norm -> `core_out`) [MXFP4 out_proj: the core's
+          quantization] -> out_proj -> the MLP half as above
 
 Phases are separated by grid barriers; an exchange's readers wait on its line
 flags instead. A launch reads the residual and the normed rows `x` the
@@ -67,7 +70,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import (
     tiled,
 )
 
-KINDS = ("gdn", "attn")
+KINDS = ("gdn", "attn", "gdn_back")
 ATTN, MLP = 0, 1  # a layer's two exchanges
 FORMATS = ("bf16", "mxfp4", "mxfp4_h32")  # a GDN projection's weight format
 # fold counter bases: the GDN projection's and out_proj's share a phase
@@ -118,6 +121,8 @@ class LayerBuild:
             raise ValueError(f"GDN projection formats {self.qkvz!r}, {self.out!r}")
         if self.first and self.kind != "gdn":
             raise ValueError("the step's first layer is a GDN layer")
+        if self.kind == "gdn_back" and self.split:
+            raise ValueError(f"gdn_back at {self.tokens} rows (past {SPLIT_MAX})")
         for q in (self.first_q4, self.next_q4):
             if q != "none" and q not in norm.Q4_MODES:
                 raise ValueError(f"MXFP4 rows {q!r}")
@@ -192,6 +197,8 @@ def phase_names(key) -> list[str]:
     out = ["start"] + (["first_combine"] if key.first else [])
     if key.kind == "gdn":
         out += ["gdn_proj+conv", "gdn_recur", "out"]
+    elif key.kind == "gdn_back":
+        out += (["core_quant"] if key.out != "bf16" else []) + ["out"]
     else:
         out += ["o_proj"]
     out += ["allreduce+combine"]
@@ -518,6 +525,15 @@ def build(key: LayerBuild):
                 if const_expr(key.out != "bf16"):
                     source = tiled.Mx4Source(scr.core, scr.core_s, VALUE_DIM)
                 back(out_w, source, VALUE_DIM)
+        if const_expr(key.kind == "gdn_back"):
+            out_w = gdn.out_weights(w_out, w_out_s, key.out, key.out_shuffled)
+            if const_expr(key.out == "bf16"):
+                back(out_w, tiled.Source(core_out, VALUE_DIM), VALUE_DIM)
+            else:
+                b = gdn.Bufs(core=scr.core, core_s=scr.core_s)
+                gdn.quant_core(g, core_out, b, S, core_of(key))
+                end_phase("core_quant")
+                back(out_w, tiled.Mx4Source(scr.core, scr.core_s, VALUE_DIM), VALUE_DIM)
         if const_expr(key.kind == "attn" and key.split):
             out = norm.Out(scr.res, scr.x, scr.x4, scr.x4s, None)
             norm.combine(g, None, out, n_in, aux_f32, S, key.eps, emb, res_in)

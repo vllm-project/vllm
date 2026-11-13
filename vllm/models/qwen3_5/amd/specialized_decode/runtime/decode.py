@@ -33,7 +33,15 @@ A step of up to `L.SPLIT_MAX` rows runs each layer's MLP half on
                 (vLLM) q / k norms, RoPE, attention -> output, gate
                 layer_block   o_proj (gated) + ... as above
 
-and the final norm is vLLM's."""
+and the final norm is vLLM's.
+
+With MTP every planned step is a verify step of whole requests,
+num_speculative_tokens + 1 consecutive tokens each. A GDN layer runs vLLM's
+in_proj, GDN core (on the spec-decode metadata) and gated norm on the rows
+the previous launch normed (`gdn_verify_core`), then its `gdn_back` launch
+(out_proj onwards), or at a split width vLLM's residual add + input norm
+first and `layer_block` after; vLLM's attention takes the verify metadata
+as is. The drafter reads the final norm's rows, the step's output."""
 
 from typing import Any, NamedTuple
 
@@ -46,17 +54,22 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    block_hadamard_rotate,
+)
 from vllm.models.qwen3_5.amd.specialized_decode import layout as L
 from vllm.models.qwen3_5.amd.specialized_decode.abi import FAILED
 from vllm.models.qwen3_5.amd.specialized_decode.runtime import NAME, DecodeConfig
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
     FailStop,
     cache_reasons,
+    checked_format,
     model_reasons,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.layers import (
     Launcher,
     attention_core,
+    gdn_verify_core,
     gemma_norm,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.routing import step_reason
@@ -66,10 +79,12 @@ logger = init_logger(__name__)
 
 
 class Step(NamedTuple):
-    """A planned step: `width` rows, one decode token a request."""
+    """A planned step: `width` rows, one decode token a request, or (MTP,
+    `verify`) whole requests of num_speculative_tokens + 1 rows."""
 
     width: int
     attn_metadata: dict[str, Any]  # by layer name
+    verify: bool = False
 
 
 def agree(reasons: list[str], group, what: str) -> None:
@@ -107,7 +122,11 @@ class SpecializedDecode:
 
     def __init__(self, model, config: DecodeConfig):
         tp = get_tp_group()
-        agree(model_reasons(model, tp.world_size), tp.cpu_group, "the loaded model")
+        agree(
+            model_reasons(model, tp.world_size, config.q),
+            tp.cpu_group,
+            "the loaded model",
+        )
         self.model, self.config = model, config
         self.gdn_prefix = next(
             ly.linear_attn.prefix
@@ -116,10 +135,18 @@ class SpecializedDecode:
         )
         dev = model.embed_tokens.weight.device
         self.launch = Launcher(
-            model, config.widths, tp.world_size, tp.rank_in_group, tp.cpu_group, dev
+            model,
+            config.widths,
+            tp.world_size,
+            tp.rank_in_group,
+            tp.cpu_group,
+            dev,
+            verify=config.verify,
         )
         self.keys = {s: self._keys(s) for s in config.widths}
-        builds = sorted({k for ks in self.keys.values() for k in ks}, key=repr)
+        builds = sorted(
+            {k for ks in self.keys.values() for k in ks if k is not None}, key=repr
+        )
         for key in builds:
             K.compile_only(key)
         failed = [self.launch.health[FAILED : FAILED + 1]]
@@ -133,17 +160,20 @@ class SpecializedDecode:
         self.counted = torch.zeros(1, dtype=torch.int32, pin_memory=True)
         self.counted_event: torch.cuda.Event | None = None
         self.counted_at = 0
-        k0 = self.keys[config.widths[0]][0]
+        g0 = model.layers[0].linear_attn
         logger.info(
-            "%s: %d layers, widths %s, %d builds, %d launches a step, GDN "
+            "%s: %d layers, widths %s%s, %d builds, %d launches a step, GDN "
             "projections %s / %s; other steps run vLLM's decode",
             NAME,
             len(model.layers),
             ",".join(map(str, config.widths)),
+            f" (MTP verify steps of {config.q} rows a request)"
+            if config.verify
+            else "",
             len(builds),
             self.launch.launches,
-            k0.qkvz,
-            k0.out,
+            checked_format(g0.in_proj_qkvz).fmt,
+            checked_format(g0.out_proj).fmt,
         )
 
     def _compile_split(self, dev) -> list:
@@ -172,11 +202,18 @@ class SpecializedDecode:
             for s in (1, 2):
                 x = torch.zeros(s, L.HIDDEN, dtype=torch.bfloat16, device=dev)
                 gemma_norm(self.model.norm, x, x)
+                if la.verify:
+                    gemma_norm(self.model.norm, x, None)
         return sorted(keys, key=repr) + sorted(gdn_keys, key=repr)
 
     def _keys(self, rows: int) -> list:
-        """Every layer's build at `rows`, in step order."""
-        return [self.launch.key(i, rows) for i in range(len(self.model.layers))]
+        """Every layer's build at `rows`, in step order (None: the layer has
+        no wide launch, `Launcher.wide_launch`)."""
+        la = self.launch
+        return [
+            la.key(i, rows) if la.wide_launch(i, rows) else None
+            for i in range(len(self.model.layers))
+        ]
 
     def _kv_key(self) -> tuple[int, int] | None:
         layer = next(
@@ -196,7 +233,11 @@ class SpecializedDecode:
         if self._kv_key() is None:
             return
         tp = get_tp_group()
-        agree(cache_reasons(self.model, tp.world_size), tp.cpu_group, "the KV caches")
+        agree(
+            cache_reasons(self.model, tp.world_size, self.config.q),
+            tp.cpu_group,
+            "the KV caches",
+        )
         self.launch.bind_caches()
         self._kv = self._kv_key()
 
@@ -215,7 +256,8 @@ class SpecializedDecode:
           graphs, and taking one would leave them uncaptured for the prefills
           of that size;
         - widths without a build (`DecodeConfig.widths`);
-        - steps that are not pure decode steps (`step_reason`).
+        - steps that are not pure decode steps, with MTP not pure verify steps
+          of whole uniform requests (`step_reason`).
 
         Eager steps of a built width run the kernels too. Every predicate is the
         same on all TP ranks: the kernels' exchanges need every rank on one
@@ -230,7 +272,8 @@ class SpecializedDecode:
         if width not in self.config.widths:
             return None
         md = get_forward_context().attn_metadata
-        if step_reason(md, self.gdn_prefix, width) is not None:
+        q = self.config.q
+        if step_reason(md, self.gdn_prefix, width, q) is not None:
             return None
         assert isinstance(md, dict)
         if self._kv_key() != self._kv:
@@ -239,7 +282,7 @@ class SpecializedDecode:
                 "(ModelState.initialize_kv_cache)"
             )
         logger.info_once("%s: first specialized step (%d rows)", NAME, width)
-        return Step(width, md)
+        return Step(width, md, q > 1)
 
     def run(
         self,
@@ -261,7 +304,14 @@ class SpecializedDecode:
         keys = self.keys[rows]
         seq = 0
         for i, layer in enumerate(model.layers):
-            if layer.layer_type == "linear_attention":
+            if layer.layer_type == "linear_attention" and step.verify:
+                x = la.view("x", rows, L.HIDDEN)
+                if i == 0:
+                    x, res = gemma_norm(layer.input_layernorm, inputs_embeds, None)
+                    la.view("res", rows, L.HIDDEN).copy_(res)
+                core = gdn_verify_core(layer.linear_attn, x)
+                dyn = {"core_out": core}
+            elif layer.layer_type == "linear_attention":
                 dyn = {
                     "emb": inputs_embeds if i == 0 else 0,
                     "st_idx": md[
@@ -288,6 +338,15 @@ class SpecializedDecode:
         for i, layer in enumerate(model.layers):
             gate = None
             dyn = {"emb": h, "res_in": 0 if res is None else res}
+            if layer.layer_type == "linear_attention" and step.verify:
+                x, residual = gemma_norm(layer.input_layernorm, h, res)
+                core = gdn_verify_core(layer.linear_attn, x)
+                out_proj = layer.linear_attn.out_proj
+                if checked_format(out_proj).fmt == "mxfp4_h32":
+                    # layer_block reads the rotated core
+                    core = block_hadamard_rotate(core, out_proj.input_hadamard)
+                h, res = la.mono_layer(i, core, gate, residual)
+                continue
             if la.mono_gdn_layer(i, rows):
                 st_idx = md[layer.linear_attn.prefix].non_spec_state_indices_tensor
                 core, residual = la.mono_gdn(i, h, res, st_idx)

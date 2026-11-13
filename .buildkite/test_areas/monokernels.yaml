@@ -205,3 +205,4 @@ steps:
     pytest -v -s
     tests/models/qwen3_5/amd_specialized_decode/test_layer.py
     tests/models/qwen3_5/amd_specialized_decode/test_split.py
+    tests/models/qwen3_5/amd_specialized_decode/test_verify.py

@@ -247,8 +247,24 @@ def _layer_reasons(layer) -> list[str]:
     return out
 
 
-def model_reasons(model, tp: int) -> list[str]:
-    """Every reason the kernels cannot serve the loaded `Qwen3_5Model`."""
+def _verify_reasons(a) -> list[str]:
+    """A GDN layer's verify step runs `layers.gdn_verify_core`: `forward_hip`
+    up to out_proj's input on its fused GDN spec decode route or its AITER
+    Triton one."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        GDN_AITER_TRITON_AVAILABLE,
+    )
+
+    if not (a.enable_fused_gdn_spec_decode or GDN_AITER_TRITON_AVAILABLE):
+        return [
+            "MTP without the fused GDN spec decode kernel or AITER's Triton GDN kernels"
+        ]
+    return []
+
+
+def model_reasons(model, tp: int, q: int = 1) -> list[str]:
+    """Every reason the kernels cannot serve the loaded `Qwen3_5Model` (with
+    MTP, `q` > 1, on verify steps)."""
     reasons = []
     if tp != L.TP:
         reasons.append(f"TP {tp}")
@@ -271,17 +287,22 @@ def model_reasons(model, tp: int) -> list[str]:
         reasons.append(f"experts padded differently by layer: {sorted(rips)}")
     by_reason: dict[str, list[int]] = {}
     for layer in model.layers:
-        for why in _layer_reasons(layer):
-            by_reason.setdefault(why, []).append(layer.layer_idx)
+        why = _layer_reasons(layer)
+        if q > 1 and layer.layer_type == "linear_attention" and not why:
+            why = _verify_reasons(layer.linear_attn)
+        for w in why:
+            by_reason.setdefault(w, []).append(layer.layer_idx)
     reasons += [f"{why} (layers {_compact(idx)})" for why, idx in by_reason.items()]
     return reasons
 
 
-def cache_reasons(model, tp: int) -> list[str]:
-    """Every reason the kernels cannot update the GDN states vLLM bound."""
+def cache_reasons(model, tp: int, q: int = 1) -> list[str]:
+    """Every reason the kernels cannot update the GDN states vLLM bound (with
+    MTP, `q` > 1, the conv state also keeps the drafts' entries)."""
     by_reason: dict[str, list[int]] = {}
     if is_conv_state_dim_first():
         return ["conv states stored dim-first"]
+    conv = (L.CONV_TAPS - 1 + q - 1, L.CONV_DIM)
     for layer in model.layers:
         if layer.layer_type != "linear_attention":
             continue
@@ -289,13 +310,12 @@ def cache_reasons(model, tp: int) -> list[str]:
         why = []
         if (
             conv_state.dtype != torch.bfloat16
-            or tuple(conv_state.shape[1:]) != (L.CONV_TAPS - 1, L.CONV_DIM)
+            or tuple(conv_state.shape[1:]) != conv
             or tuple(conv_state.stride()[1:]) != (L.CONV_DIM, 1)
         ):
             why.append(
                 f"conv state {conv_state.dtype} {tuple(conv_state.shape[1:])} "
-                f"{tuple(conv_state.stride()[1:])}, needs bf16 dense "
-                f"({L.CONV_TAPS - 1}, {L.CONV_DIM})"
+                f"{tuple(conv_state.stride()[1:])}, needs bf16 dense {conv}"
             )
         if (
             rstate.dtype != torch.float32

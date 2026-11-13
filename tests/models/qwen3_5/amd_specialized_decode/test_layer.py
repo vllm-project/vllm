@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The wide decode's layer kernels at the widths past `layout.SPLIT_MAX`, at
 TP8 on 8 MI355X against the float64 references (`reference`) with the stock
-path's rounding points: three
+path's rounding points: four
 launches on synthetic per-rank weights, a GDN layer that is the step's first
 (the embedding's input norm, the next attention layer's qkv_proj), an
-attention layer (o_proj and the MLP half) and a GDN layer closing with the
-final norm, each launch's reference fed the kernels' previous outputs.
+attention layer (o_proj and the MLP half), a GDN layer and an MTP verify
+step's GDN layer (`gdn_back`: out_proj onwards from a given core) closing
+with the final norm, each launch's reference fed the kernels' previous
+outputs.
 
 Tolerances are relative Frobenius errors. The MoE is checked on the kernels'
 own MXFP4 input rows (`x4`): the references' inputs differ from the kernels'
@@ -132,10 +134,11 @@ def _worker(rank, rows, variant, port, out_q):
             r2s=w2s.view(e, L.HIDDEN, -1),
         )
 
-    norms = [rn(L.HIDDEN, scale=0.1, g=shared) for _ in range(7)]
+    norms = [rn(L.HIDDEN, scale=0.1, g=shared) for _ in range(9)]
     g0k, g0r = gdn_weights()
     g2k, g2r = gdn_weights()
-    moes = [moe_weights() for _ in range(3)]
+    g3k, g3r = gdn_weights()
+    moes = [moe_weights() for _ in range(4)]
     w_qkv = rn(L.QKV, L.HIDDEN, scale=0.02)
     w_o = rn(L.HIDDEN, L.ATTN_CORE, scale=0.02)
     emb = rn(S, L.HIDDEN, g=shared)
@@ -338,7 +341,7 @@ def _worker(rank, rows, variant, port, out_q):
     note("L1 residual", rel(kres, res4), 1e-2)
     note("L1 x", rel(kx, x4), 1e-2)
 
-    # GDN layer 2, closing with the final norm
+    # GDN layer 2
     k2 = K.LayerBuild(
         kind="gdn",
         tokens=S,
@@ -359,8 +362,31 @@ def _worker(rank, rows, variant, port, out_q):
     note("L2 ssm state", rel(ssm2, rssm), 1e-2)
     res5 = R.bf(kres.double() + allsum(outp))
     res6, x6 = mlp_ref(res5, R.gemma_norm(res5, norms[5], eps), 2, norms[6], "L2", True)
-    note("L2 residual", rel(sview("res", L.HIDDEN), res6), 1e-2)
-    note("L2 x (final norm)", rel(sview("x", L.HIDDEN), x6), 1e-2)
+    kres = sview("res", L.HIDDEN).clone()
+    note("L2 residual", rel(kres, res6), 1e-2)
+    note("L2 x", rel(sview("x", L.HIDDEN), x6), 1e-2)
+
+    # MTP verify GDN layer 3 (gdn_back) on a given core (vLLM's gated norm
+    # output), closing with the final norm
+    k3 = K.LayerBuild(kind="gdn_back", tokens=S, tp=TP, out=fmt, out_shuffled=shuffled)
+    core3 = rn(S, L.VALUE_DIM)
+    launch(
+        k3,
+        args(
+            3,
+            3,
+            n_post=norms[7],
+            n_next=norms[8],
+            w_out=g3k["out"],
+            w_out_s=g3k["out_s"],
+            core_out=core3,
+        ),
+    )
+    outp = R.linear(core3.double(), g3r["out"], fmt, shuffled)
+    res7 = R.bf(kres.double() + allsum(outp))
+    res8, x8 = mlp_ref(res7, R.gemma_norm(res7, norms[7], eps), 3, norms[8], "L3", True)
+    note("L3 residual", rel(sview("res", L.HIDDEN), res8), 1e-2)
+    note("L3 x (final norm)", rel(sview("x", L.HIDDEN), x8), 1e-2)
     out_q.put((rank, log, time.time() - t0))
     dist.barrier()
     peers.close()
