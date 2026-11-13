@@ -67,8 +67,10 @@ The identity follows weights changed at runtime. While the engine cannot identif
 
 A weight version identifies the weights only as well as the caller assigns it: engines that loaded the same files and set the same version match, so use a version for exactly one set of weights. Setting a version while a weight update is incomplete does not change the identity.
 
-!!! note
-    `enforce_kv_identity` enforces the identity the engine started with. Connectors do not follow weight changes yet.
+With `enforce_kv_identity`, before publishing a new identity the engine resets the caches computed with the previous weights: the prefix cache, which preempts running requests, the connector's cache, and the encoder cache. If the reset fails, for example while requests wait for KV from a remote instance, the identity stays unknown until the next weight change or version. Then:
+
+- NixlConnector advertises the new identity in its handshake, and instances check each other again before their next transfer.
+- OffloadingConnector stores and looks up files under the new identity, and P2P peers reconnect and are checked again. While the identity is unknown, secondary tiers are neither read nor written.
 
 Change weights while generation is paused, as in the RL weight-transfer API, so that no KV is computed while the weights change. Methods of a custom `--worker-extension-cls` that change weights are not detected: pause generation, change the weights, and set the weight version before resuming.
 
