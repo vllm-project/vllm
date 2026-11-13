@@ -7,6 +7,7 @@
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 
@@ -21,6 +22,7 @@ def _runner_for_scale_test(
     runner = MoERunner.__new__(MoERunner)
     runner.routed_scaling_factor = routed_scaling_factor
     runner.routed_scale_prefolded = routed_scale_prefolded
+    runner.routed_scale_mode = RoutedScaleMode.ROUTER
     return runner
 
 

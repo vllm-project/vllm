@@ -430,7 +430,13 @@ class MoERunner(MoERunnerInterface):
         if self.routed_scaling_factor != 1.0:
             if self.routed_scale_prefolded and fused_output.dtype != torch.float16:
                 return shared_output, fused_output
-            if (
+            if self.routed_scale_prefolded and shared_output is not None:
+                # fused_output's contribution is already baked into the
+                # prefolded weights, but FP16 range is tight, so invert the
+                # scale on shared_output instead (decoder layer compensates
+                # with a matching division), regardless of routed_scale_mode.
+                shared_output *= 1.0 / self.routed_scaling_factor
+            elif (
                 self.routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
                 and shared_output is not None
                 and fused_output.dtype == torch.float16
