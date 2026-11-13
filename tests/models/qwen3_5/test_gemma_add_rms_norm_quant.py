@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3.5 Gemma add-RMSNorm + input quant vs the unfused production chain
-(flashinfer gemma norm, then scaled_fp8_quant / scaled_fp4_quant), plus the
-unquantized `gemma_add_rms_norm` (pre-SM80 fallback) vs a naive fp32
-reference."""
+(flashinfer gemma norm, then static or per-token scaled_fp8_quant /
+scaled_fp4_quant), plus the unquantized `gemma_add_rms_norm` (pre-SM80
+fallback) vs a naive fp32 reference."""
 
 import pytest
 import torch
@@ -51,11 +51,11 @@ def _swizzled_sf_rows(sf: torch.Tensor, m: int, h: int) -> torch.Tensor:
     not current_platform.has_device_capability(100),
     reason="fused Gemma norm + FP8/NVFP4 quant targets SM100+",
 )
-@pytest.mark.parametrize("nvfp4", [False, True])
+@pytest.mark.parametrize("quant", ["fp8", "fp8_token", "nvfp4"])
 @pytest.mark.parametrize("has_residual", [True, False])
 @torch.inference_mode()
 def test_gemma_add_rms_norm_quant_matches_chain(
-    H: int, num_tokens: int, nvfp4: bool, has_residual: bool
+    H: int, num_tokens: int, quant: str, has_residual: bool
 ):
     from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
@@ -63,6 +63,7 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         gemma_add_rms_norm_quant,
     )
 
+    nvfp4 = quant == "nvfp4"
     g = torch.Generator(device="cuda").manual_seed(num_tokens)
     # Checkpoint-like Gemma weights: (1 + w) from ~0 (w near -1) to 3.5.
     w = (torch.rand(H, generator=g, device="cuda") * 3.5 - 1.0).bfloat16()
@@ -70,8 +71,11 @@ def test_gemma_add_rms_norm_quant_matches_chain(
     x = torch.randn(num_tokens, H, generator=g, device="cuda").bfloat16()
     residual = (torch.randn(num_tokens, H, generator=g, device="cuda") * 4).bfloat16()
     residual[:, 7] *= 50  # outlier channel
-    # FP8: static input scale. NVFP4: global scale (input_global_scale_inv).
-    scale = torch.tensor([1 / 0.0013 if nvfp4 else 0.11], device="cuda")
+    # FP8: static input scale, or None for per-token. NVFP4: global scale
+    # (input_global_scale_inv).
+    scale = None
+    if quant != "fp8_token":
+        scale = torch.tensor([1 / 0.0013 if nvfp4 else 0.11], device="cuda")
 
     ref_res = residual.clone()
     if has_residual:
@@ -83,6 +87,8 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         ref_q, ref_sf = ops.scaled_fp4_quant(
             ref_y, scale, True, backend="flashinfer-cutedsl"
         )
+    elif quant == "fp8_token":
+        ref_q, ref_sf = ops.scaled_fp8_quant(ref_y, use_per_token_if_dynamic=True)
     else:
         ref_q, _ = ops.scaled_fp8_quant(ref_y, scale, group_shape=(-1, -1))
 
@@ -105,6 +111,15 @@ def test_gemma_add_rms_norm_quant_matches_chain(
             ref_sf, num_tokens, H
         )
         assert sf_mismatch.float().mean().item() <= 1e-4
+    elif quant == "fp8_token":
+        assert sf.shape == (num_tokens, 1) and sf.dtype == torch.float32
+        # Rows whose normed values match the chain bitwise get the same token
+        # scale and codes; a 1-ulp difference can only move them slightly.
+        same_row = (y == ref_y).all(dim=-1)
+        torch.testing.assert_close(sf[same_row], ref_sf[same_row], atol=0, rtol=0)
+        torch.testing.assert_close(sf, ref_sf, rtol=2**-7, atol=0)
+        dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
+        assert dist[same_row].max().item() == 0
     else:
         assert sf is scale
         dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()

@@ -46,6 +46,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+    flashinfer_allreduce_gemma_rms_norm_applies,
     flashinfer_trtllm_fused_allreduce_norm,
     fused_allreduce_gemma_rms_norm,
 )
@@ -70,6 +71,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -145,7 +147,7 @@ def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
     them (requires_unquantized_input).
     """
     key = get_input_quant_key(linear)
-    if key == kFp8StaticTensorSym:
+    if key in (kFp8StaticTensorSym, kFp8DynamicTokenSym):
         return key
     # The norm writes block scales for exactly K = hidden_size, in whole
     # 4-column scale tiles (weights only require K % 32 == 0).
@@ -244,6 +246,14 @@ class Qwen3_5RMSNorm(nn.Module):
         """
         allreduce = self.reduce_inputs and residual is not None
         key = None if linear is None else _norm_quant_key(linear)
+        # FlashInfer has no per-token FP8 AR+norm+quant pattern, so keep its
+        # AR+norm (and the linear's own quant) where it applies.
+        if (
+            key == kFp8DynamicTokenSym
+            and allreduce
+            and flashinfer_allreduce_gemma_rms_norm_applies(x)
+        ):
+            key = None
         if key is None:
             if allreduce:
                 assert residual is not None
@@ -254,16 +264,21 @@ class Qwen3_5RMSNorm(nn.Module):
 
         assert linear is not None
         nvfp4 = key == kNvfp4Dynamic
-        scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
+        if key == kFp8DynamicTokenSym:
+            scale = None
+        else:
+            scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
         if allreduce:
             assert residual is not None
-            out = fused_allreduce_gemma_rms_norm_quant(
-                x, residual, self.weight, self.variance_epsilon, scale, key
-            )
-            if out is not None:
-                return out
-            # Above the FlashInfer workspace budget: explicit all-reduce, then
-            # the Triton norm-quant.
+            if scale is not None:
+                out = fused_allreduce_gemma_rms_norm_quant(
+                    x, residual, self.weight, self.variance_epsilon, scale, key
+                )
+                if out is not None:
+                    return out
+            # No FlashInfer AR+norm+quant (unavailable, above its workspace
+            # budget, or per-token FP8): explicit all-reduce, then the Triton
+            # norm-quant.
             x = tensor_model_parallel_all_reduce(x)
         q, block_scale, y = gemma_add_rms_norm_quant(
             x, residual, self.weight, self.variance_epsilon, scale, nvfp4, write_y

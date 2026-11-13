@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gemma (1 + w) add-RMSNorm fused with the consumer linear's input quant.
 
-Replaces `gemma_fused_add_rmsnorm` followed by a standalone static FP8
-(`scaled_fp8_quant`) or NVFP4 (`scaled_fp4_quant`) kernel. The quantized
-values are computed from the bf16-rounded normed activation with the same
-scale arithmetic as those kernels, so codes match the unfused chain.
+Replaces `gemma_fused_add_rmsnorm` followed by a standalone static FP8 or
+dynamic per-token FP8 (`scaled_fp8_quant`) or NVFP4 (`scaled_fp4_quant`)
+kernel. The quantized values are computed from the bf16-rounded normed
+activation with the same scale arithmetic as those kernels, so codes match
+the unfused chain.
 
 `gemma_add_rms_norm` is the same kernel without the quant epilogue, used
 as the pre-SM80 fallback where flashinfer's norm module cannot JIT-build.
@@ -19,6 +20,8 @@ from vllm.utils.math_utils import round_up
 
 FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = tl.constexpr(448.0)
+# min_scaling_factor in csrc/quantization/utils.cuh: 1 / (448 * 512).
+FP8_MIN_SCALE = tl.constexpr(1.0 / (448.0 * 512.0))
 
 
 @triton.jit
@@ -68,7 +71,7 @@ def _gemma_add_rms_norm_quant_kernel(
     eps,
     H: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
-    QUANT: tl.constexpr,  # "none" (plain norm) | "fp8" | "nvfp4"
+    QUANT: tl.constexpr,  # "none" (plain norm) | "fp8" | "fp8_token" | "nvfp4"
     WRITE_Y: tl.constexpr,
     launch_pdl: tl.constexpr,
     TRIGGER_EARLY: tl.constexpr,
@@ -94,7 +97,7 @@ def _gemma_add_rms_norm_quant_kernel(
     if HAS_RESIDUAL:
         r = tl.load(res_ptr + row * H + cols, mask=mask, other=0.0)
     w = tl.load(w_ptr + cols, mask=mask, other=0.0)
-    if QUANT != "none":
+    if QUANT == "fp8" or QUANT == "nvfp4":
         scale = tl.load(scale_ptr)
 
     h = x.to(tl.float32)
@@ -138,6 +141,16 @@ def _gemma_add_rms_norm_quant_kernel(
         inv_scale = tl.math.div_rn(1.0, scale)
         q = tl.clamp(y.to(tl.float32) * inv_scale, -FP8_MAX, FP8_MAX)
         tl.store(q_ptr + row * H + cols, q, mask=mask)
+    elif QUANT == "fp8_token":
+        # dynamic_per_token_scaled_fp8_quant numerics: IEEE divisions by
+        # max(amax / 448, min scale). Masked columns are 0, so amax is exact.
+        y32 = y.to(tl.float32)
+        token_scale = tl.maximum(
+            tl.math.div_rn(tl.max(tl.abs(y32)), FP8_MAX), FP8_MIN_SCALE
+        )
+        q = tl.clamp(tl.math.div_rn(y32, token_scale), -FP8_MAX, FP8_MAX)
+        tl.store(q_ptr + row * H + cols, q, mask=mask)
+        tl.store(sf_ptr + row, token_scale)
 
     if launch_pdl and not TRIGGER_EARLY:
         tl.extra.cuda.gdc_launch_dependents()
@@ -148,7 +161,7 @@ def gemma_add_rms_norm_quant(
     residual: torch.Tensor | None,
     weight: torch.Tensor,
     eps: float,
-    scale: torch.Tensor,
+    scale: torch.Tensor | None,
     nvfp4: bool,
     write_y: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -159,16 +172,17 @@ def gemma_add_rms_norm_quant(
         residual: same shape as x, or None. Updated in place to x + residual.
         weight: (hidden,) Gemma norm weight; the norm scales by (1 + weight).
         eps: RMS norm epsilon.
-        scale: FP8: the static per-tensor input scale. NVFP4: the global
-            scale (`input_global_scale_inv`).
+        scale: FP8: the static per-tensor input scale, or None for dynamic
+            per-token FP8. NVFP4: the global scale (`input_global_scale_inv`).
         nvfp4: quantize to NVFP4 with swizzled 128x4 block scales instead of
-            static FP8.
+            FP8.
         write_y: also return the bf16 normed activation.
 
     Returns:
         `(q, block_scale, y)`: quantized data (fp8, or packed fp4 uint8),
         NVFP4 block scales (fp8, `(round_up(M, 128), round_up(H // 16, 4))`;
-        rows >= M are left unwritten) or `scale` for FP8, and the normed
+        rows >= M are left unwritten), `scale` for static FP8 or the
+        `(M, 1)` fp32 token scales for dynamic FP8, and the normed
         activation (or None).
 
     """
@@ -176,9 +190,15 @@ def gemma_add_rms_norm_quant(
     assert x.dtype in (torch.bfloat16, torch.float16)
     assert residual is None or (residual.shape == x.shape and residual.is_contiguous())
     assert weight.shape == (x.shape[1],) and weight.is_contiguous()
-    assert scale.numel() == 1 and scale.dtype == torch.float32
+    per_token = scale is None
+    if scale is not None:
+        assert scale.numel() == 1 and scale.dtype == torch.float32
+    assert not (per_token and nvfp4)
     M, H = x.shape
-    if nvfp4:
+    if per_token:
+        q = torch.empty((M, H), dtype=FP8_DTYPE, device=x.device)
+        block_scale = torch.empty((M, 1), dtype=torch.float32, device=x.device)
+    elif nvfp4:
         # Whole 4-column scale tiles: padded scale columns are not written.
         assert H % 64 == 0
         q = torch.empty((M, H // 2), dtype=torch.uint8, device=x.device)
@@ -201,14 +221,14 @@ def gemma_add_rms_norm_quant(
         x,
         residual if residual is not None else x,
         weight,
-        scale,
+        block_scale if scale is None else scale,  # unread for dynamic FP8
         q,
         block_scale,
         y if y is not None else x,
         eps,
         H=H,
         HAS_RESIDUAL=residual is not None,
-        QUANT="nvfp4" if nvfp4 else "fp8",
+        QUANT="fp8_token" if per_token else "nvfp4" if nvfp4 else "fp8",
         WRITE_Y=write_y,
         num_warps=16 if max_m_16_warps >= M else 4,
         launch_pdl=current_platform.is_arch_support_pdl(),

@@ -112,6 +112,12 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
     return True, max_token_num
 
 
+def flashinfer_allreduce_gemma_rms_norm_applies(hidden_states: torch.Tensor) -> bool:
+    """Whether `fused_allreduce_gemma_rms_norm` runs the FlashInfer kernel."""
+    tp_size = get_tensor_model_parallel_world_size()
+    return tp_size > 1 and _can_use_flashinfer(hidden_states, tp_size)[0]
+
+
 def _can_use_aiter_fused_ar_rms(hidden_states: torch.Tensor) -> bool:
     if not current_platform.is_rocm():
         return False
