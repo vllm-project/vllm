@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -224,7 +225,14 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             or moe_parallel_config.use_deepep_v2_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
             or moe_parallel_config.use_fi_nvl_two_sided_kernels
-        ) and not moe_parallel_config.enable_eplb
+        ) and (
+            not moe_parallel_config.enable_eplb
+            # The modular kernel takes the router's EPLB-mapped physical ids with
+            # num_experts / local_expert_offset in physical units, and the
+            # BlockMajorK weights / block scales stay expert-major, so EPLB's
+            # per-expert dim-0 moves are valid. Opt-in until more widely tested.
+            or envs.VLLM_TRTLLM_FP8_ALLOW_EPLB
+        )
 
     @staticmethod
     def _supports_quant_scheme(
