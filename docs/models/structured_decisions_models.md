@@ -427,6 +427,12 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   renders the whole chat as one user message. A question's `instructions`
   carry the reference's ask when absent or null; an explicit empty value
   (`""`, `[]` or `{}`) renders as empty, as the reference server does.
+- The reads score the labels in the serving dtype. Under bf16 the label
+  logprobs move in steps of 0.125, so close options can tie exactly: a
+  noul of exactly 0.5 is a tie, not a signal. The reference serves FP8
+  weights with an fp32 LM head (`--quantization fp8` and
+  `"head_dtype": "float32"` in `--hf-overrides`); against that setting
+  the picks differ only on near-ties.
 - Labels run `A` to `Z`, then two-letter labels from `AA`, skipping any
   that is not one token right after `Answer:`. A choice can have up to 255
   options and a score up to 255 levels. With the checkpoint's tokenizer,
@@ -440,7 +446,9 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   kernel by kernel, several times slower. The `--compilation-config` above
   appends the mamba block's multiples to the default capture sizes, up to
   the 16,384-token chunked-prefill budget; size the list to your own
-  budget.
+  budget. Under the V2 runner, `prefill_cudagraph_capture_token_sizes`
+  and `max_prefill_cudagraph_capture_tokens` are the prefill-specific
+  keys.
 - The read asks for the labels' logprobs over the whole vocabulary, so
   `diagnostics.label_mass` is the labels' share and `argmax_is_label`
   reports the model's actual first token. One read can ask for up to 256
