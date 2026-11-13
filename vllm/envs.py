@@ -228,6 +228,8 @@ if TYPE_CHECKING:
     VLLM_K3_ATTN_RES_REGTILE: bool = True
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_K3_LATENT_NORM_UP_PROJ: bool = True
+    VLLM_K3_SP_PREFILL: bool = False
+    VLLM_K3_SP_PREFILL_MIN_TOKENS: int = 4096
     VLLM_K3_FUSED_INDEXER_PREP: bool = True
     VLLM_KIMI_SD_DSA: Literal["off", "split", "fused", "auto"] = "auto"
     VLLM_KIMI_SD_DSA_SPLITS: int = 16
@@ -1790,6 +1792,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # 192 tokens, replacing the RMSNorm and hipBLASLt addmm launches).
     "VLLM_K3_LATENT_NORM_UP_PROJ": lambda: bool(
         int(os.getenv("VLLM_K3_LATENT_NORM_UP_PROJ", "1"))
+    ),
+    # Kimi-K3 on ROCm (TP8 + DCP8): keep the residual stream token-sharded across
+    # TP for batches of at least VLLM_K3_SP_PREFILL_MIN_TOKENS tokens, replacing
+    # each layer's three all-reduces by reduce-scatters / all-gathers around
+    # the attention core and the routed experts
+    # (vllm/models/kimi_k3/amd/sequence_parallel.py).
+    "VLLM_K3_SP_PREFILL": lambda: bool(int(os.getenv("VLLM_K3_SP_PREFILL", "0"))),
+    "VLLM_K3_SP_PREFILL_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_K3_SP_PREFILL_MIN_TOKENS", "4096")
     ),
     # Kimi-K3.1 MXFP4 indexer on ROCm: fold the key LayerNorm and the top-k
     # -1 fill into the key quantize/store launch, and the FP32 head weight

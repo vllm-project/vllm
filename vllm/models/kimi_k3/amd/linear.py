@@ -73,6 +73,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.kimi_k3.amd import sequence_parallel
 from vllm.models.kimi_k3.amd.dsa import KimiK3DSAAttention
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
@@ -1007,6 +1008,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         step=None,  # specialized_decode's plan
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        num_tokens = (
+            inputs_embeds.shape[0]
+            if inputs_embeds is not None
+            else (input_ids.shape[0] if input_ids is not None else 0)
+        )
+        if sequence_parallel.eligible(self, num_tokens, intermediate_tensors, step):
+            return sequence_parallel.forward(self, input_ids, positions, inputs_embeds)
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
