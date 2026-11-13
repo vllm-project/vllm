@@ -58,6 +58,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.v1.attention.ops.shardq import ShardQMetadata
 
 logger = init_logger(__name__)
 
@@ -342,6 +343,46 @@ def get_prefill_workspace_size(vllm_config: VllmConfig) -> int:
     factor = vllm_config.attention_config.sparse_mla_prefill_workspace_factor
     assert factor is not None
     return vllm_config.model_config.max_model_len * factor
+
+
+def _localize_prefill_chunks(
+    query_start_loc_cpu: torch.Tensor,
+    num_decodes: int,
+    chunks: list["FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk"],
+    local_ids: np.ndarray,
+) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
+    """Map a ShardQ rank's prefill tokens onto the full batch's chunks.
+
+    Returns this rank's per-token prefill request id and, for every full chunk
+    that owns at least one local token, ``(chunk index, start, stop)`` in the
+    rank's token order. Request ranges, staged block tables and workspace
+    offsets stay those of the full batch.
+    """
+    bounds = query_start_loc_cpu[num_decodes:].numpy()
+    bounds = bounds - bounds[0]
+    request_ids = np.searchsorted(bounds[1:], local_ids, side="right").astype(
+        np.int32
+    )
+
+    ranges = []
+    for index, chunk in enumerate(chunks):
+        start = int(np.searchsorted(request_ids, chunk.req_start_idx, side="left"))
+        end = int(
+            np.searchsorted(
+                request_ids,
+                chunk.req_start_idx + len(chunk.block_table),
+                side="left",
+            )
+        )
+        if end != start:
+            ranges.append((index, start, end))
+
+    covered = sum(end - start for _, start, end in ranges)
+    assert covered == len(local_ids), (
+        "ShardQ prefill chunks must cover every local token: "
+        f"covered {covered}, local {len(local_ids)}"
+    )
+    return request_ids, ranges
 
 
 class FlashMLASparseMetadataBuilder(
@@ -686,6 +727,61 @@ class FlashMLASparseMetadataBuilder(
 
         return fp8_metadata
 
+    def _build_fp8_separate_prefill_decode_local(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        metadata: FlashMLASparseMetadata,
+        shardq: "ShardQMetadata",
+    ) -> "FlashMLASparseMetadata.FP8SeparatePrefillDecode":
+        """Narrow the separate prefill metadata to a ShardQ rank's tokens.
+
+        HiSparse stages host KV rows per full-batch prefill request, so the
+        chunk list (request ranges, staged block tables and workspace offsets)
+        is reused as-is. Only the chunk token ranges and the per-token request
+        ids change.
+        """
+        assert not self.pcp_dcp_kv_gather
+        full = metadata.fp8_extra_metadata
+        assert isinstance(full, FlashMLASparseMetadata.FP8SeparatePrefillDecode)
+        prefill = full.prefill
+        assert prefill is not None
+        local_ids = shardq.local_token_ids_cpu
+        assert local_ids is not None
+
+        num_decodes = metadata.num_decodes
+        local_request_ids, chunk_ranges = _localize_prefill_chunks(
+            common_attn_metadata.query_start_loc_cpu,
+            num_decodes,
+            prefill.chunks,
+            local_ids,
+        )
+
+        FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
+        chunks = []
+        for index, start, end in chunk_ranges:
+            chunk = prefill.chunks[index]
+            chunks.append(
+                FP8Meta.Prefill.Chunk(
+                    tokens_slice=slice(start, end),
+                    block_table=chunk.block_table,
+                    req_start_idx=chunk.req_start_idx,
+                    workspace_starts=chunk.workspace_starts,
+                    chunk_tot_seqlen=chunk.chunk_tot_seqlen,
+                    seq_lens=chunk.seq_lens,
+                )
+            )
+        assert chunks, "ShardQ prefill produced no local tokens"
+
+        return FP8Meta(
+            num_prefills=full.num_prefills,
+            num_prefill_tokens=len(local_ids),
+            prefill=FP8Meta.Prefill(
+                request_ids=async_tensor_h2d(local_request_ids, device=self.device),
+                workspace_starts=prefill.workspace_starts,
+                chunks=chunks,
+            ),
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -703,18 +799,31 @@ class FlashMLASparseMetadataBuilder(
                     common_attn_metadata, metadata
                 )
         if metadata.shardq is not None:
-            # ShardQ's tokens run in their own mixed-batch kernel call, with
-            # all heads, so they need their own lazily initialized scheduler.
+            # ShardQ's tokens run in their own kernel call, with all heads, so
+            # they need their own lazily initialized metadata.
             shardq_metadata = metadata.shardq.attn_metadata
             assert isinstance(shardq_metadata, FlashMLASparseMetadata)
-            shardq_metadata.fp8_use_mixed_batch = True
-            shardq_metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill()
+            if self.vllm_config.attention_config.hisparse_config is not None:
+                # Host-backed KV cannot feed the mixed-batch kernel. Keep the
+                # separate prefill path, narrowed to this rank's tokens.
+                shardq_metadata.fp8_use_mixed_batch = False
+                shardq_metadata.fp8_extra_metadata = (
+                    self._build_fp8_separate_prefill_decode_local(
+                        common_attn_metadata, metadata, metadata.shardq
+                    )
+                )
+            else:
+                shardq_metadata.fp8_use_mixed_batch = True
+                shardq_metadata.fp8_extra_metadata = (
+                    self._build_fp8_mixed_decode_prefill()
+                )
 
         return metadata
 
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     supports_shardq: ClassVar[bool] = True
+    supports_shardq_with_hisparse: ClassVar[bool] = True
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
@@ -822,9 +931,18 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 )
             prefill_query_heads = num_heads
             if self.pcp_dcp_kv_gather and self.dcp_world_size > self.pcp_world_size:
+                # PCP+DCP all-gathers the query heads before the prefill kernel.
                 prefill_query_heads *= parallel_config.tensor_parallel_size
+            # ShardQ exchanges a token shard so every rank's heads run in the
+            # prefill kernel; the padded output workspace must fit them.
+            padded_query_heads = max(
+                prefill_query_heads,
+                num_heads * parallel_config.tensor_parallel_size
+                if self.use_shardq
+                else 0,
+            )
             padded_prefill_query_heads = round_up(
-                prefill_query_heads, self.prefill_padding
+                padded_query_heads, self.prefill_padding
             )
             self.workspace_specs.extend(
                 (shape, torch.bfloat16)
@@ -1141,7 +1259,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             _, prefill_bf16_workspace, *_, padded_out, compact_out = (
                 current_workspace_manager().get_simultaneous(*self.workspace_specs)
             )
-            attn_out = compact_out[:num_mqa_tokens]
+            if q.shape[1] == self.num_heads:
+                attn_out = compact_out[:num_mqa_tokens]
+            else:
+                # ShardQ's local-token call runs with every rank's heads, so
+                # its output is as wide as padded_out, not compact_out.
+                assert q.shape[1] <= padded_out.shape[1]
+                attn_out = padded_out[:num_mqa_tokens]
 
             if num_decode_tokens > 0:
                 attn_out[:num_decode_tokens] = _fp8_decode(

@@ -64,7 +64,9 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
         block_size=16,
         device=torch.device("cpu"),
     )
-    attention_config = SimpleNamespace(sparse_mla_shard_q_min_tokens=9100)
+    attention_config = SimpleNamespace(
+        sparse_mla_shard_q_min_tokens=9100, hisparse_config=None
+    )
     hf_config = SimpleNamespace(index_topk=5299)
     vllm_config = SimpleNamespace(
         speculative_config=(
@@ -91,6 +93,45 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
         device=torch.device("cpu"),
     )
     assert build_shardq_split(short, vllm_config) is None
+
+
+@pytest.mark.parametrize("query_lens", [[4, 2, 4096], [4, 4, 4096]])
+def test_build_shardq_split_skips_mixed_spec_verify_under_hisparse(
+    monkeypatch, query_lens
+):
+    """HiSparse forces the sparse-MLA builder to treat only 1-token requests as
+    decodes with uniform lengths, so speculative-verification tokens in a mixed
+    batch are prefills there. ShardQ's 1 + num_spec boundary would count them as
+    decodes and disagree with both the indexer's token-sharded top-k layout and
+    the separate prefill path, so it must be skipped for that step."""
+    monkeypatch.setattr(
+        shardq, "get_tp_group", lambda: SimpleNamespace(world_size=4, rank_in_group=1)
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+        attention_config=SimpleNamespace(
+            hisparse_config=object(), sparse_mla_shard_q_min_tokens=1024
+        ),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+    )
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[q + 300 for q in query_lens], query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    assert build_shardq_split(metadata, vllm_config) is None
+
+    # A regular decode step batched with a long prefill has the same boundary in
+    # both derivations and still shards.
+    regular = create_common_attn_metadata(
+        BatchSpec(seq_lens=[301, 301, 4396], query_lens=[1, 1, 4096]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    split = build_shardq_split(regular, vllm_config)
+    assert split is not None
+    assert split.num_decode_tokens == 2
+    assert split.num_tokens_per_rank.sum() == 4096
 
 
 def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
