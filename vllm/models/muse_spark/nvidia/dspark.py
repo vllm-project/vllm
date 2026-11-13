@@ -393,7 +393,10 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         )
         if self._rotary_emb is not None:
             positions = context_positions.repeat(num_layers)
-            all_k_flat, _ = self._rotary_emb(
+            # With the RoPE custom op disabled, calling the module dispatches to
+            # forward_native, which replaces the FP32 table (shared with draft
+            # layer 0) with a BF16 copy.
+            all_k_flat, _ = self._rotary_emb.forward_cuda(
                 positions,
                 all_k_flat,
                 # CUDA RoPE updates both operands in place. Aliasing the same

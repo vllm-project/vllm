@@ -237,7 +237,9 @@ class RotaryEmbedding(RotaryEmbeddingBase):
 
         from vllm import _custom_ops as ops
 
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache.device != query.device:
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
 
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
@@ -257,8 +259,14 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_aiter and key is None:
+            # AITER's paired RoPE op requires a key; use the native op for
+            # key-only rotation instead of allocating a dummy key.
+            return self.forward_cuda(positions, query, key)
         if self.use_aiter:
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            cos_sin_cache = self.cos_sin_cache
+            if cos_sin_cache.device != query.device:
+                cos_sin_cache = self._match_cos_sin_cache_dtype(query)
             self.rocm_aiter_triton_rotary_embedding(
                 positions,
                 query,
