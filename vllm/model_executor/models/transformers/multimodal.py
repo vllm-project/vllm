@@ -1368,20 +1368,22 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        has_deepstack = hasattr(self, "deepstack_input_embeds")
+        has_mm = multimodal_embeddings is not None and len(multimodal_embeddings) > 0
         deepstack_flat = None
-        if hasattr(self, "deepstack_input_embeds"):
-            # Cleared here rather than after `forward`, which full CUDA graphs skip
-            if self.deepstack_num_tokens:
-                self.deepstack_input_embeds[:, 0, : self.deepstack_num_tokens].zero_()
-                self.deepstack_num_tokens = 0
-            if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
-                multimodal_embeddings, deepstack_flat = self._split_deepstack_embeds(
-                    multimodal_embeddings
-                )
-        # Merge first so a placeholder count mismatch raises its usual error
+        if has_deepstack and has_mm:
+            multimodal_embeddings, deepstack_flat = self._split_deepstack_embeds(
+                multimodal_embeddings
+            )
         inputs_embeds = super().embed_input_ids(
             input_ids, multimodal_embeddings, is_multimodal=is_multimodal
         )
+        if not has_deepstack:
+            return inputs_embeds
+        # Cleared here rather than after `forward`, which full CUDA graphs skip
+        if self.deepstack_num_tokens:
+            self.deepstack_input_embeds[:, 0, : self.deepstack_num_tokens].zero_()
+            self.deepstack_num_tokens = 0
         if deepstack_flat is not None:
             is_multimodal = _require_is_multimodal(is_multimodal)
             num_tokens = is_multimodal.numel()
