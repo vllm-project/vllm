@@ -244,6 +244,16 @@ class SchedulerStats:
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
 
     spec_decoding_stats: SpecDecodingStats | None = None
+    # K is the draft depth selected by the dynamic schedule for this step. It
+    # does not necessarily equal the number of draft tokens actually requested
+    # or produced: the model runner proposes none in a step where no scheduled
+    # request can use drafts (skip_drafts). None when dynamic SD is not in use
+    # or when the step scheduled no request work, since such a step never
+    # consults the schedule.
+    # spec_decoding_stats counts per request the drafts a step verifies, which
+    # can include drafts proposed before a K=0 step, so it does not show the
+    # K=0 selection itself.
+    spec_decode_scheduled_k: int | None = None
     kv_connector_stats: dict[str, Any] | None = None
     ec_connector_stats: dict[str, Any] | None = None
 

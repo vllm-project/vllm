@@ -69,6 +69,23 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 ```
 
+## Observing the schedule
+
+`vllm:spec_decode_scheduled_steps_total` counts scheduler steps that scheduled
+request work, labelled by the K the schedule selected (`num_spec_tokens`),
+including 0. K is the draft depth selected by the dynamic schedule. It does not
+necessarily equal the number of draft tokens actually requested or produced: in
+a step where no scheduled request can use drafts (`skip_drafts`), the model
+runner proposes none even when the schedule selected K > 0. Drafts proposed in
+a step are verified in the next step. The per-request spec-decode counters such as
+`vllm:spec_decode_num_drafts_total` (see
+[acceptance metrics](acceptance_metrics.md)) record the drafts a step verifies. A
+step that selects K=0 can still verify earlier drafts, so those counters do not
+show the K=0 selection itself. They count per request, while this counter counts
+scheduler steps, so the two do not reconcile. The counter is
+exported by the Python frontend only; the Rust frontend
+(`VLLM_USE_RUST_FRONTEND=1`) does not report it.
+
 ## Limitations
 
 * Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
