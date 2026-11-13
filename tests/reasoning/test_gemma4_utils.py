@@ -29,6 +29,14 @@ pytestmark = pytest.mark.cpu_test
             {"thinking": "2+2", "answer": "prefix"},
         ),
         (
+            "<|channel>thought\n2+2<turn|>",
+            {"thinking": "2+2", "answer": ""},
+        ),
+        (
+            "<|channel>thought\n2+2<eos>",
+            {"thinking": "2+2", "answer": ""},
+        ),
+        (
             "thought\n4<turn|>",
             {"thinking": None, "answer": "4"},
         ),

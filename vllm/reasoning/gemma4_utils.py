@@ -97,7 +97,7 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
         # `answer`.
         before_start, thinking = text.split(_THINKING_START_TAG, 1)
         return {
-            "thinking": _clean_thinking(thinking),
+            "thinking": _clean_answer(_clean_thinking(thinking)),
             "answer": _clean_answer(before_start),
         }
 
