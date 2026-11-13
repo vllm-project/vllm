@@ -180,7 +180,9 @@ def replace_parameter(
 
     Custom attributes set on `new_tensor` (e.g. kernel dispatch flags such as
     `is_shuffled`) are carried over to the parameter, except `weight_loader`,
-    which is always taken from the existing parameter.
+    which is always taken from the existing parameter, and the direct-reload
+    attributes `_ckpt` and `fill_on_reload`, which belong to the parameter they
+    were set on.
 
     Under direct reload, a `new_tensor` larger than the parameter at cold start
     may be written into the parameter's existing storage on a reload, so do not
