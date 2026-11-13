@@ -399,6 +399,9 @@ def _compute_slot_mappings_kernel(
             is_local = ~sharded | is_local
 
         block_indices = tl.where(mapping_enabled, local_positions // kv_block_size, 0)
+        # A position past the row must not read the next row: pad it.
+        in_row = block_indices < block_table_stride
+        block_indices = tl.where(in_row, block_indices, 0)
         block_offsets = local_positions % kv_block_size
         block_numbers = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + block_indices,
@@ -409,5 +412,5 @@ def _compute_slot_mappings_kernel(
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
-        slot_ids = tl.where(mapping_enabled & is_real_req, slot_ids, PAD_ID)
+        slot_ids = tl.where(mapping_enabled & is_real_req & in_row, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)

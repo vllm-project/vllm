@@ -455,3 +455,31 @@ def test_larger_draft_batch_uses_null_kpool_slots(
     else:
         slots = compute_slots()
     assert slots.tolist() == [24, 9, 42, 19, 36, -1, -1, -1]
+
+
+def test_position_past_block_table_row_maps_to_pad():
+    """A position past the request's row maps to the pad slot instead of
+    resolving through the next row's block ids."""
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[4],
+        max_num_reqs=2,
+        max_num_batched_tokens=16,
+        max_num_blocks_per_group=[2],
+        device=device,
+    )
+    block_tables.append_block_ids(req_index=0, new_block_ids=([7, 8],), overwrite=True)
+    block_tables.append_block_ids(
+        req_index=1, new_block_ids=([20, 21],), overwrite=True
+    )
+    block_tables.apply_staged_writes()
+    # Request 0 has a 2-block row (positions 0..7); positions 8 and 9 overrun it.
+    query_start_loc = torch.tensor([0, 4], dtype=torch.int32, device=device)
+    positions = torch.tensor([6, 7, 8, 9], dtype=torch.int64, device=device)
+    slots = block_tables.compute_slot_mappings(
+        torch.tensor([0], dtype=torch.int32, device=device),
+        query_start_loc,
+        positions,
+        num_tokens_padded=4,
+    )
+    assert slots[0].tolist() == [8 * 4 + 2, 8 * 4 + 3, PAD_SLOT_ID, PAD_SLOT_ID]
