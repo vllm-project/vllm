@@ -31,6 +31,7 @@ vllm serve <hybrid-model> \
 ```
 
 `--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. For hybrid Mamba models that is the block size itself, so no sub-block boundary exists and the flag has no effect.
+With `--prefix-match-unit` set explicitly, sliding-window groups, such as those of a DFlash drafter, also hit at this granularity as long as the blocks their window reads below the hit are still cached; not yet with speculative methods that drop the last cached block (EAGLE, EAGLE3, MTP). Finer hits keep more blocks cached per request, so with little free KV cache they can lose hits that block-aligned lookups keep.
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
