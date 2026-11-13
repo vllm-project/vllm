@@ -271,7 +271,10 @@ class EngineCore:
         enable_envs_cache()
 
     def _set_kv_identity(self, vllm_config: VllmConfig) -> None:
-        identity = compute_kv_identity(vllm_config)
+        checkpoint_digests: list[dict[str, str] | None] = self.collective_rpc(
+            "get_checkpoint_digest"
+        )
+        identity = compute_kv_identity(vllm_config, checkpoint_digests)
         vllm_config.cache_config.kv_identity = identity.digest
         vllm_config.cache_config.kv_identity_components = identity.components
         self.collective_rpc(

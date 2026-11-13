@@ -819,6 +819,7 @@ class EngineArgs:
     kv_cache_dtype_skip_layers: list[str] = get_field(
         CacheConfig, "kv_cache_dtype_skip_layers"
     )
+    kv_identity_hash_local_weights: bool = CacheConfig.kv_identity_hash_local_weights
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
@@ -1439,6 +1440,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--swa-bounded-replay", **cache_kwargs["swa_bounded_replay"]
+        )
+        cache_group.add_argument(
+            "--kv-identity-hash-local-weights",
+            **cache_kwargs["kv_identity_hash_local_weights"],
         )
         cache_group.add_argument(
             "--mamba-cache-dtype", **cache_kwargs["mamba_cache_dtype"]
@@ -2352,6 +2357,7 @@ class EngineArgs:
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             swa_bounded_replay=self.swa_bounded_replay,
+            kv_identity_hash_local_weights=self.kv_identity_hash_local_weights,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,

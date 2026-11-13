@@ -106,7 +106,7 @@ async def test_kv_identity(server: RemoteOpenAIServer):
     identities = response.json()
     assert list(identities) == ["0"]
     identity = identities["0"]
-    assert identity["components"]["weights_source"] == "path"
+    assert identity["components"]["weights_source"] == "hf_cache"
     metrics = requests.get(server.url_for("metrics")).text
     assert f'kv_identity="{identity["kv_identity"]}"' in metrics
 

@@ -20,6 +20,7 @@ from vllm.model_executor.layers.linear import StackedColumnParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.checkpoint_digest import record_checkpoint_files
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_eplb_local_expert_ids,
     compute_local_expert_ids,
@@ -265,9 +266,12 @@ class DefaultModelLoader(BaseModelLoader):
         return hf_folder, hf_weights_files, use_safetensors, index_file
 
     def _get_weights_iterator(
-        self, source: Source
+        self, source: Source, owner: str | None = None
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
-        """Get an iterator for the model weights based on the load format."""
+        """Get an iterator for the model weights based on the load format.
+
+        `owner` is the model the weights belong to, for its checkpoint digest.
+        """
         extra_config = self.load_config.model_loader_extra_config
         hf_folder, hf_weights_files, use_safetensors, index_file = (
             self._prepare_weights(
@@ -278,6 +282,8 @@ class DefaultModelLoader(BaseModelLoader):
                 source.allow_patterns_overrides,
             )
         )
+        if owner is not None:
+            record_checkpoint_files(owner, hf_folder, hf_weights_files)
         if (
             self._encoder_only_lm_prefixes is not None
             and use_safetensors
@@ -390,14 +396,14 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
             is_unused_weight=getattr(model, "is_unused_checkpoint_weight", None),
         )
-        yield from self._get_weights_iterator(primary_weights)
+        yield from self._get_weights_iterator(primary_weights, model_config.model)
 
         secondary_weights = cast(
             Iterable[DefaultModelLoader.Source],
             getattr(model, "secondary_weights", ()),
         )
         for source in secondary_weights:
-            yield from self._get_weights_iterator(source)
+            yield from self._get_weights_iterator(source, model_config.model)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(

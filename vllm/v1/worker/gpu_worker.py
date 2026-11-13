@@ -71,6 +71,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.checkpoint_digest import CheckpointRecording
 from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
@@ -592,14 +593,24 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        # Rank 0 digests the checkpoint for the KV identity of the engine.
+        recording = CheckpointRecording(
+            self.model_config.model,
+            hash_local_files=self.cache_config.kv_identity_hash_local_weights,
+        )
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
             self._external_weight_charges.track(),
+            recording if self.rank == 0 else nullcontext(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        if self.rank == 0:
+            self.checkpoint_digest = recording.digest(
+                self.model_config, self.load_config
+            )
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()

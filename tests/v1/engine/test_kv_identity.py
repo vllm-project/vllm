@@ -8,6 +8,7 @@ import dataclasses
 import pytest
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.v1.kv_identity import (
     CACHE_FACTORS_OUTSIDE_KV,
     MODEL_FACTORS_OUTSIDE_KV,
@@ -15,6 +16,7 @@ from vllm.v1.kv_identity import (
 )
 
 MODEL = "facebook/opt-125m"
+WEIGHTS = {"weights": "0" * 64, "weights_source": "hf_cache"}
 
 
 def _identity(model: str = MODEL, **cache_kwargs) -> str:
@@ -23,7 +25,7 @@ def _identity(model: str = MODEL, **cache_kwargs) -> str:
         model_config=ModelConfig(model, **model_kwargs),
         cache_config=CacheConfig(**cache_kwargs),
     )
-    return compute_kv_identity(config).digest
+    return compute_kv_identity(config, [WEIGHTS, WEIGHTS]).digest
 
 
 def test_factors_outside_kv_name_config_fields():
@@ -60,12 +62,20 @@ def test_settings_that_change_kv_change_identity(kwargs):
     assert _identity(**kwargs) != _identity()
 
 
+def test_local_snapshot_matches_hub_id():
+    """The checkpoint is identified by content: serving the same files from a
+    local path keeps the identity."""
+    snapshot = hf_api().snapshot_download(MODEL, allow_patterns=["*.json"])
+
+    assert _identity(snapshot) == _identity()
+
+
 def test_engine_reports_identity(vllm_runner):
-    """The engine reports the identity to the frontend and on
-    `vllm:cache_config_info`."""
+    """The engine identifies Hub weights by content and reports the identity
+    to the frontend and on `vllm:cache_config_info`."""
     with vllm_runner(MODEL, max_model_len=256, enforce_eager=True) as runner:
         cache_config = runner.llm.llm_engine.vllm_config.cache_config
 
         assert cache_config.kv_identity is not None
-        assert cache_config.kv_identity_components["weights_source"] == "path"
+        assert cache_config.kv_identity_components["weights_source"] == "hf_cache"
         assert cache_config.metrics_info()["kv_identity"] == cache_config.kv_identity
