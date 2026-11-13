@@ -145,6 +145,18 @@ def test_measure_kv_cache_bytes():
         )
         == 5 * gib
     )
+    # So is a larger growth of torch's reservation over the same steps
+    # (fragmentation), without raising the margin, which scales with the
+    # allocated peak alone.
+    assert (
+        measure_kv_cache_bytes(
+            requested_memory=20 * gib,
+            transient_peak_bytes=gib,
+            torch_reserve_growth_bytes=2 * gib,
+            **{**common, "margin_fraction": 1.0},
+        )
+        == 4 * gib
+    )
     # The margin is a share of that peak with a floor, taken off the headroom
     # (floor or fraction, whichever is larger), never off an explicit budget
     # that already leaves it free.
@@ -181,6 +193,32 @@ def test_measure_kv_cache_bytes():
     assert measure_kv_cache_bytes(requested_memory=2 * gib, **common) == 0
 
 
+@requires_cuda
+def test_sizing_step_measures_torch_reserve_growth():
+    """A step whose large transient no longer fits the segment freed by the
+    previous one (split by a buffer the step keeps) grows torch's reservation
+    by both, while its allocated transient shows only one."""
+    from vllm.v1.worker.gpu.warmup import _measure_sizing_step
+
+    mib = 1 << 20
+    kv_cache = ExtensibleKVCache.__new__(ExtensibleKVCache)
+    kv_cache.reserved_headroom_bytes = 0
+    kv_cache.torch_reserve_growth_bytes = 0
+    kv_cache.buffer = SimpleNamespace(device=torch.device("cuda"))
+    runner = SimpleNamespace(extensible_kv_cache=kv_cache, device=torch.device("cuda"))
+    kept = []
+    with _measure_sizing_step(runner):  # type: ignore[arg-type]
+        workspace = torch.empty(512 * mib, dtype=torch.uint8, device="cuda")
+        del workspace
+        kept.append(torch.empty(100 * mib, dtype=torch.uint8, device="cuda"))
+        workspace = torch.empty(512 * mib, dtype=torch.uint8, device="cuda")
+        del workspace
+
+    assert kv_cache.reserved_headroom_bytes == 512 * mib
+    # Two 512 MiB segments, less the 100 MiB the step leaves allocated.
+    assert kv_cache.torch_reserve_growth_bytes == 924 * mib
+
+
 def test_measured_sizing_caps_torch_memory(monkeypatch):
     """Torch's caching allocator may grow into what stays free once the cache
     is extended, less multimodal IPC memory and the non-torch reserve,
@@ -189,6 +227,7 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     limits: list[int | None] = []
     kv_cache = SimpleNamespace(
         reserved_headroom_bytes=gib,
+        torch_reserve_growth_bytes=0,
         physical_bytes=gib,
         bytes_per_block=gib,
         blocks_within=lambda num_bytes: num_bytes // gib,
@@ -254,6 +293,7 @@ def test_measured_sizing_warns_when_utilization_withholds_memory(
     gib = 1 << 30
     kv_cache = SimpleNamespace(
         reserved_headroom_bytes=0,
+        torch_reserve_growth_bytes=0,
         physical_bytes=gib,
         bytes_per_block=gib,
         blocks_within=lambda num_bytes: num_bytes // gib,
@@ -300,6 +340,7 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     gib = 1 << 30
     kv_cache = SimpleNamespace(
         reserved_headroom_bytes=7 * gib,
+        torch_reserve_growth_bytes=0,
         physical_bytes=gib,
         bytes_per_block=gib,
         blocks_within=lambda num_bytes: num_bytes // gib,
