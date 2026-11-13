@@ -132,6 +132,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        self.copy_stream = copy_stream
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -174,6 +175,11 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if self._has_fault_gpu is not None:
                 self._has_fault = self._has_fault_gpu.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
+
+    def wait_for_stream(self, main_stream: torch.cuda.Stream) -> None:
+        """Delay output readiness until work queued on main_stream completes."""
+        self.copy_stream.wait_stream(main_stream)
+        self.copy_event.record(self.copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
