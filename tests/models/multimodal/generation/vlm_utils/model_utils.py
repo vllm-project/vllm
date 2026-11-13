@@ -1039,6 +1039,7 @@ def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def paddleocr_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    # TODO: Remove this patch once CI uses Transformers 5.23, which defaults to False.
     # Match the original checkpoint's position embedding interpolation.
     embeddings = hf_model.model.model.visual.vision_model.embeddings
     embeddings.interpolation_align_corners = False
