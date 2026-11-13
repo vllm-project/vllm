@@ -2549,6 +2549,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.extensible_kv_cache = None
 
         gc.collect()
+        # cuBLAS workspaces created during capture would keep the graph pool alive.
+        if current_platform.is_cuda():
+            torch._C._cuda_clearCublasWorkspaces()
         torch.accelerator.empty_cache()
         logger.debug("Cleaned up model weights, KV caches, and workspace")
 
