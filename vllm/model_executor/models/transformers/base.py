@@ -882,7 +882,11 @@ class Base(
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
 
-        outputs = self.model(
+        # Composite models don't forward the decoder's recorded outputs
+        model = self.model
+        if self._output_aux_hidden_states_kwargs:
+            model = self.model.get_decoder()
+        outputs = model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             use_cache=False,
@@ -939,28 +943,30 @@ class Base(
             maybe_install_capturing_hooks,
         )
 
+        # Only the decoder records outputs in composite models
+        decoder = self.model.get_decoder()
         # The default value in PreTrainedModel is None
-        if self.model._can_record_outputs is None:
-            self.model._can_record_outputs = {}
+        if decoder._can_record_outputs is None:
+            decoder._can_record_outputs = {}
+        module_names = {m: n for n, m in decoder.named_modules()}
 
         self._set_aux_hidden_state_layers(layers)
         for layer in self.aux_hidden_state_layers:
             # The input to a layer is the output of the module before it
             if layer == 0:
-                embeddings = self.model.get_input_embeddings()
-                target_class = type(embeddings)
-                modules = self.model.named_modules()
-                layer_name = next(n for n, m in modules if m is embeddings)
+                module = self.model.get_input_embeddings()
+                target_class = type(module)
             else:
+                module = self.model.get_submodule(self._layer_names[layer - 1])
                 target_class = self._target_class
-                layer_name = self._layer_names[layer - 1]
+            layer_name = module_names[module]
             layer_key = f"aux_hidden_state_{layer}"
             aux_hidden_state_i = OutputRecorder(target_class, layer_name=layer_name)
-            self.model._can_record_outputs[layer_key] = aux_hidden_state_i
+            decoder._can_record_outputs[layer_key] = aux_hidden_state_i
             self._output_aux_hidden_states_kwargs[f"output_{layer_key}"] = True
 
         # Ensure that the capture hooks are installed before dynamo traces the model
-        maybe_install_capturing_hooks(self.model)
+        maybe_install_capturing_hooks(decoder)
 
     def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = self.text_config.num_hidden_layers

@@ -176,6 +176,31 @@ def test_compile_mm_encoder(
         pass
 
 
+def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
+    """Idefics3 only records outputs in its decoder, which its top-level model
+    calls without forwarding them, so EAGLE-3 must call the decoder directly."""
+    model = "HuggingFaceTB/SmolVLM-256M-Instruct"
+    draft_config = AutoConfig.from_pretrained(model).text_config
+    draft_config.architectures = ["LlamaForCausalLMEagle3"]
+    draft_config.num_hidden_layers = 1
+    draft_config.save_pretrained(tmp_path)
+
+    with vllm_runner(
+        model,
+        model_impl="transformers",
+        load_format="dummy",
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 1},
+        gpu_memory_utilization=0.5,
+        speculative_config={
+            "method": "eagle3",
+            "model": str(tmp_path),
+            "num_speculative_tokens": 2,
+        },
+    ) as llm:
+        llm.generate_greedy(["Hello"], max_tokens=8)
+
+
 def test_infer_dynamic_arg_dims():
     """Only unannotated and (legacy) tensor arguments are dynamic."""
 
