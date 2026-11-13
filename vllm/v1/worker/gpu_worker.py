@@ -551,11 +551,13 @@ class Worker(WorkerBase):
             torch.nn.functional.linear(x, x, x[0])
             del x
 
-            # Now take memory snapshot after NCCL is initialized
-            # NOTE: we freeze here to keep heap scans in kv cache setup / profiling
-            # fast. We unfreeze, collect, then refreeze to finalize the heap later in
-            # compile_or_warm_up_model.
+            # Collect garbage, then freeze the startup heap so that later gc.collect()
+            # calls (weight loading, memory profiling, KV cache sizing) skip it. It is
+            # unfrozen by the first CUDA graph capture, or at the latest by
+            # compile_or_warm_up_model, which then refreezes the final heap.
             freeze_gc_heap()
+
+            # Now take memory snapshot after NCCL is initialized
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
