@@ -18,6 +18,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_nul
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     MambaManager,
+    SlidingWindowManager,
     get_kv_cache_kind,
 )
 from vllm.v1.kv_cache_interface import (
@@ -823,8 +824,9 @@ class KVCacheManager:
     ) -> KVCacheBlocks:
         """Return a lookup-result view truncated at an aligned token endpoint.
 
-        An external hit can supply the final Mamba state even when the local
-        Mamba group ends before this endpoint. Other groups must cover it.
+        An external hit can supply the final Mamba state, or the window of a
+        sliding-window group, even when that local group ends before this
+        endpoint. Other groups must cover it.
         Pure slicing: refcounts are untouched and `blocks` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
@@ -844,7 +846,7 @@ class KVCacheManager:
                 continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            if issubclass(group.manager_cls, MambaManager):
+            if issubclass(group.manager_cls, (MambaManager, SlidingWindowManager)):
                 num_blocks = min(num_blocks, len(group_blocks))
             else:
                 assert num_blocks <= len(group_blocks)

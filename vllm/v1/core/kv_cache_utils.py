@@ -754,11 +754,13 @@ def partial_hash_hits_enabled(
     hash_block_size: int,
     dcp_world_size: int = 1,
     manager_classes: Sequence[type["SingleTypeKVCacheManager"]] | None = None,
+    allow_opt_in_lookups: bool = True,
 ) -> bool:
     """Whether aligned Mamba states support sub-block prefix-cache hits.
 
     If `manager_classes` (one per group) is given, also require every other
-    prefix-cacheable group to support fine-grained lookups.
+    prefix-cacheable group to support fine-grained lookups. Managers whose
+    support is opt-in count only if `allow_opt_in_lookups`.
     """
     if not any(
         is_mamba_align_group(group)
@@ -775,7 +777,10 @@ def partial_hash_hits_enabled(
         manager_cls.__name__
         for group, manager_cls in zip(kv_cache_groups, manager_classes)
         if group.prefix_cacheable
-        and not manager_cls.supports_fine_grained_hash_lookup
+        and not (
+            manager_cls.supports_fine_grained_hash_lookup
+            and (allow_opt_in_lookups or not manager_cls.fine_grained_lookup_is_opt_in)
+        )
         and resolve_dcp_kv_block_size(group, dcp_world_size) != hash_block_size
     }
     if unsupported_managers:
@@ -916,11 +921,23 @@ def resolve_cache_hit_alignment_tokens(
     if not vllm_config.cache_config.enable_prefix_caching or len(groups) <= 1:
         return scheduler_block_size
     manager_classes = [group.manager_cls for group in groups]
+    spec_config = vllm_config.speculative_config
+    # Sliding-window fine-grained hits need an explicit unit, and do not yet
+    # handle the EAGLE last-block drop.
+    eagle_block_drop = (
+        spec_config is not None
+        and spec_config.use_eagle_block_drop()
+        and not vllm_config.num_hash_lookahead_tokens
+    )
     if partial_hash_hits_enabled(
         groups,
         hash_block_size,
         vllm_config.parallel_config.decode_context_parallel_size,
         manager_classes,
+        allow_opt_in_lookups=(
+            vllm_config.cache_config.prefix_match_unit is not None
+            and not eagle_block_drop
+        ),
     ):
         return hash_block_size
     return scheduler_block_size

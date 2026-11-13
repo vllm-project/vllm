@@ -3,14 +3,18 @@
 
 import pytest
 
+from tests.models.utils import check_logprobs_close
 from tests.v1.core.utils import uniform_spec
 from vllm import SamplingParams
 from vllm.platforms import current_platform
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from ...utils import large_gpu_mark
 
 QWEN_MODEL = "Qwen/Qwen3.5-4B"
+# Short-conv (Mamba "align") + full-attention + sliding-window layers.
+LFM3_MODEL = "LiquidAI/LFM3-1.7B"
 QWEN_KV_CACHE_BYTES = 12 << 30
 HYBRID_MTP_MODELS = [
     pytest.param(
@@ -211,3 +215,61 @@ def test_qwen_mtp_mamba_prefix_cache_hit_is_bounded(vllm_runner, monkeypatch):
             if code not in output.outputs[0].text
         ]
         assert not missed, f"{arm} cache missed access codes for prompts {missed}"
+
+
+def _tokens_text_logprobs(output):
+    completion = output.outputs[0]
+    return list(completion.token_ids), completion.text, completion.logprobs
+
+
+def test_sliding_window_hybrid_prefix_cache_hit_is_fine_grained(
+    vllm_runner, monkeypatch
+):
+    """A sliding-window group must not round hybrid hits down to the block."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    prefix_match_unit = 16
+
+    with vllm_runner(
+        LFM3_MODEL,
+        max_model_len=4096,
+        block_size=None,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        prefix_match_unit=prefix_match_unit,
+    ) as runner:
+        llm = runner.get_llm()
+        scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+        assert any(
+            issubclass(group.manager_cls, SlidingWindowManager)
+            for group in scheduler.kv_cache_config.kv_cache_groups
+        )
+        block_size = _get_mamba_block_size(llm)
+        assert block_size > prefix_match_unit
+        tokenizer = llm.get_tokenizer()
+        manual, _ = _build_access_code_manual(tokenizer, 3 * block_size)
+        # End the prompt mid-block, so a block-aligned hit is shorter.
+        first = tokenizer.encode(manual)[: 2 * block_size + prefix_match_unit + 1]
+        question = tokenizer.encode(
+            "\nWhat is the access code for vault-01? Answer:", add_special_tokens=False
+        )
+        prompt = {"prompt_token_ids": first + question}
+        params = SamplingParams(temperature=0.0, max_tokens=16, logprobs=5)
+        llm.generate([{"prompt_token_ids": first}], params)
+        warm = llm.generate([prompt], params)[0]
+        params = SamplingParams(
+            temperature=0.0, max_tokens=16, logprobs=5, skip_reading_prefix_cache=True
+        )
+        cold = llm.generate([prompt], params)[0]
+
+    # The last prompt token is recomputed; the hit lands on the finer unit.
+    fine_hit = (len(first) - 1) // prefix_match_unit * prefix_match_unit
+    assert fine_hit % block_size != 0
+    assert warm.num_cached_tokens == fine_hit
+    assert cold.num_cached_tokens == 0
+    check_logprobs_close(
+        outputs_0_lst=[_tokens_text_logprobs(cold)],
+        outputs_1_lst=[_tokens_text_logprobs(warm)],
+        name_0="cold",
+        name_1="warm",
+    )

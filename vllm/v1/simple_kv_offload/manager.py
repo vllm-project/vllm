@@ -1338,7 +1338,7 @@ class SimpleCPUOffloadScheduler:
     ) -> int | None:
         """Locate the full-attention prompt-tail block for a fine-grained hit.
 
-        Mirrors `FullAttentionManager._cache_partial_tail_block`: only the
+        Mirrors `SingleTypeKVCacheManager._cache_partial_prompt_tail`: only the
         final prompt hash boundary is eligible, and boundaries that land on a
         physical block edge are already covered by the positional scan.
 
