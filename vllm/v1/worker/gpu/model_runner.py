@@ -51,6 +51,10 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     single_pp_stage,
 )
+from vllm.distributed.pp_transport.schema import (
+    PPTransportSchema,
+    PPTransportSchemaInterface,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -259,6 +263,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
+        self.pp_transport_schema: PPTransportSchemaInterface = PPTransportSchema()
 
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
@@ -443,6 +448,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         )
                     self.speculator.free_unused_weights(self.model)
         time_after_load = time.perf_counter()
+
+        self.pp_transport_schema = getattr(
+            self.model, "pp_transport_schema", PPTransportSchema()
+        )
+        if (
+            self.use_pp
+            and self.parallel_config.use_ubatching
+            and self.pp_transport_schema.has_sharded_tensors
+        ):
+            raise NotImplementedError("SP-sharded PP inputs do not support ubatching")
 
         self.model_memory_usage = m.consumed_memory
         logger.info(
@@ -943,7 +958,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors = None
         if not self.is_first_pp_rank:
             assert self.intermediate_tensors is not None
-            intermediate_tensors = self.intermediate_tensors[:num_tokens]
+            intermediate_tensors = self.pp_transport_schema.prepare_inputs(
+                self.intermediate_tensors, num_tokens
+            )
 
         if num_active_loras is None:
             num_active_loras = (
@@ -2096,14 +2113,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.pp_handler.check_received_tensors(
                     intermediate_tensors.tensors, self.intermediate_tensors.tensors
                 )
-                num_tokens = input_batch.num_tokens
-                received = intermediate_tensors.tensors
-                for k, v in self.intermediate_tensors.tensors.items():
-                    # Some PP transports receive into the persistent tensors.
-                    if received[k].data_ptr() != v.data_ptr():
-                        v[:num_tokens].copy_(received[k][:num_tokens])
             n = input_batch.num_tokens_after_padding
-            model_inputs["intermediate_tensors"] = self.intermediate_tensors[:n]
+            model_inputs["intermediate_tensors"] = (
+                self.pp_transport_schema.prepare_inputs(
+                    self.intermediate_tensors,
+                    n,
+                    None if dummy_run else intermediate_tensors,
+                    num_received_tokens=input_batch.num_tokens,
+                )
+            )
             del intermediate_tensors
 
         # Update the EPLB meta.

@@ -199,6 +199,170 @@ Some attention backends also materialize derived state, such as scheduler metada
 
 For draft models that advance positions, the fused path is enabled only when every draft attention group declares `supports_draft_decode_metadata_update`. Otherwise, MRV2 falls back to rebuilding attention metadata between draft steps. Draft models that keep positions fixed do not require this update. Before enabling a backend, developers must audit all derived metadata, including state inherited from parent builders or owned by auxiliary attention backends.
 
+## Per-field Pipeline Tensor Layouts
+
+Models can register per-field tensor layouts through
+`vllm.distributed.pp_transport.schema`. This schema uses the existing tensor-dict
+channel and is separate from the `PPTransport` communication-backend interface.
+
+```python
+from vllm.distributed import get_tp_group
+from vllm.distributed.pp_transport.schema import (
+    PPTransportDataType,
+    PPTransportSchema,
+    PPTransportTensor,
+)
+
+self.pp_transport_schema = PPTransportSchema(
+    {
+        PPTransportDataType.HIDDEN_STATES: PPTransportTensor(
+            (hidden_size,), sequence_parallel=True
+        ),
+        PPTransportDataType.RESIDUAL: PPTransportTensor((hidden_size,)),
+    },
+    tp_size=get_tp_group().world_size,
+)
+self.make_empty_intermediate_tensors = (
+    self.pp_transport_schema.make_empty_intermediate_tensors
+)
+```
+
+Expose `pp_transport_schema` on the top-level model. Non-last stages return
+`self.pp_transport_schema.make_intermediate_tensors(
+num_global_tokens, hidden_states=hidden_states, residual=residual)`.
+The token count includes the runner's padding. Shapes exclude the token
+dimension; an explicit `dtype` overrides the runner's requested dtype.
+
+Full tensors retain TP slice-send/all-gather. A field marked
+`sequence_parallel=True` has `ceil(num_global_tokens / tp_size)` local rows and
+travels directly to the matching TP lane. Adjacent stages must use the same
+per-field layouts, TP ordering and padded token count. The schema does not
+perform a model's SP collectives or enable SP+PP for an unsupported model.
+
+MRV2 shares per-field views across profiling, capture and execution. CUDA graph
+replay preserves each output field's captured shape and persistent addresses.
+SP-sharded bindings use NCCL when `VLLM_PP_TRANSPORT=auto`; forcing
+`copy_engine` is unsupported. SP bindings with ubatching/DBO are also unsupported.
+Models without a schema retain full-tensor behavior, including arbitrary legacy
+intermediate keys and dtype-converting receive copies.
+
+The NVIDIA DeepSeek V4 implementation declares its multi-stream hidden state
+with shape `(hc_mult, hidden_size)`. It retains its existing full-tensor PP
+boundary; this declaration does not enable a new SP mode for DeepSeek V4.
+
+### Extending the schema downstream
+
+The extension points are independent of the communication backend:
+
+- `PPTransportSchemaInterface` defines the runner-facing allocation, input-view,
+  output and TP-policy contract. Downstream runners can consume this protocol;
+  a downstream implementation can also subclass `PPTransportSchema`.
+- `PPTransportTensor` describes one field. Subclasses can add device-specific
+  parameters and override `num_rows(num_tokens, tp_size)`. Override `allocate`
+  to bind a model-owned persistent receive buffer. Allocation, input
+  preparation and output validation all use that method, so they agree on
+  padding and captured shapes.
+- `register_tensor(name, descriptor)` adds a field to one model's schema.
+  Names are open strings; `PPTransportDataType` only supplies built-in names.
+  Registration rejects duplicates and closes when buffers are allocated or
+  execution begins. No process-global registry or upstream enum edit is needed.
+
+For example, a downstream package such as vLLM Ascend can keep an additional
+integer tensor and its alignment parameter entirely in its own package:
+
+```python
+from dataclasses import dataclass
+
+import torch
+
+from vllm.distributed.pp_transport.schema import PPTransportSchema, PPTransportTensor
+
+
+@dataclass(frozen=True)
+class AlignedTensor(PPTransportTensor):
+    alignment: int = 16
+
+    def num_rows(self, num_tokens: int, tp_size: int) -> int:
+        rows = super().num_rows(num_tokens, tp_size)
+        return (rows + self.alignment - 1) // self.alignment * self.alignment
+
+
+schema = PPTransportSchema({"hidden_states": PPTransportTensor((hidden_size,))})
+schema.register_tensor(
+    "ascend.routing_state", AlignedTensor((2,), dtype=torch.int32)
+)
+```
+
+Expose this schema and its buffer factory on the model as above, and include
+the registered tensor in intermediate outputs. A downstream schema subclass
+can perform these registrations in its constructor. Different model instances
+can use different descriptors for the same name without affecting each other.
+
+Fields remain token-major tensors with a fixed per-token shape and optional
+dtype. The sender must populate any descriptor-specific padded rows. Downstream
+runners reuse `prepare_inputs` for profiling, capture and execution and pass
+`receive_all_gather_policy` / `send_all_gather_policy` to their tensor-dict
+channel. `all_gather_policy` is a compatibility accessor for fields whose SP
+policy is the same in both directions. Device collectives remain the
+responsibility of the downstream communicator; this interface does not install
+an NPU runner, HCCL backend or new serialization format. NPU execution requires
+validation in the downstream project.
+
+### Stage-specific dependencies and PP operators
+
+A middle stage can consume one cache source and produce a different source.
+Register each boundary's manifest separately; receive buffers are allocated
+only for incoming fields, and `make_intermediate_tensors` validates only outgoing
+fields. The default registration enables both directions for compatibility:
+
+```python
+for spec in incoming_specs:
+    schema.register_tensor(
+        spec.name, PPTransportTensor(spec.shape, dtype=spec.dtype), send=False
+    )
+for spec in outgoing_specs:
+    schema.register_tensor(
+        spec.name, PPTransportTensor(spec.shape, dtype=spec.dtype), receive=False
+    )
+```
+
+The same name can have different descriptors in the two directions. On each
+boundary, the sender's outgoing descriptor must match its receiver's incoming
+descriptor. A PCP cache payload can use `(pcp_size, head_size)` as its per-token
+shape, preserving the local leading token extent. The model's dependency planner
+still owns source lifetimes, passthrough fields and stage-local cache mirrors.
+
+`vllm.distributed.pp_transport.ops` contains the generic tensor-copy helper and
+opaque `export_pp_dependencies` / `import_pp_dependencies` operators. These take
+an ordering activation, cache-row buffers, source/destination state lists and
+a handler name. Register a handler implementing `PPDependencyHandler` in
+`compilation_config.static_forward_context[handler_name]`. Its
+`copy_cache_rows(context, rows, receive=...)` method owns native gather/scatter
+and may use the runtime metadata's global PCP write slots, cache planes and
+scale formats. The operators look up this handler in the actual forward context;
+fake/profile traces with no metadata do not gather or scatter cache rows.
+
+State export creates a snapshot in caller-owned wire buffers; import writes to
+the supplied persistent state buffers. State extents come from their own buffers,
+so a sharded ordering activation does not truncate a full-state payload. Cache
+and state field order must match the model's fixed boundary manifest.
+
+The operators declare mutation/order dependencies so compilation cannot discard
+the cache/state transfers after a metadata-free trace. Their composite dispatch
+uses device-native tensor operations and the downstream handler, without choosing
+CUDA or NPU at import time. For CUDA/ACL graph replay, only the device work issued
+during capture replays: metadata, slot and cache addresses must remain stable and
+be updated in place. Topology planning, source-write completion, bounded replay's
+token restoration, device collectives and native cache formats remain model or
+backend responsibilities.
+
+This contract covers the transport requirements identified in
+[vLLM Ascend #19284](https://github.com/vllm-project/vllm-ascend/pull/19284)
+at `a2ff79ec7`: separate incoming/outgoing manifests, bound state buffers,
+PCP-shaped payloads and runtime cache/state import/export. The PR uses a different
+pinned vLLM revision; adopting these interfaces requires downstream integration
+and NPU validation, rather than making it a drop-in patch.
+
 ## Development Philosophy
 
 MRV2 changes should meet a higher code quality bar. As feature gaps with V1 are filled, features should be reconsidered from first principles in the MRV2 design context instead of quickly porting V1 behavior.
