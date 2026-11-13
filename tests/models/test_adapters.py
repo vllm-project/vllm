@@ -87,7 +87,7 @@ class PackedWeightModel(torch.nn.Module):
 def _buffer_reusing_iterator(weight_dict):
     """Yield weights through a shared buffer overwritten each step.
 
-    Mimics ``runai_model_streamer`` with ``RUNAI_STREAMER_MEMORY_LIMIT=0``.
+    Mimics `runai_model_streamer` with `RUNAI_STREAMER_MEMORY_LIMIT=0`.
     """
     buf = None
     for name, tensor in weight_dict.items():
@@ -174,8 +174,8 @@ class _LanguageModelWrapper(torch.nn.Module):
 class ModelWithWeightsMapper(torch.nn.Module):
     """Stand-in for models whose keys only align after hf_to_vllm_mapper.
 
-    Checkpoint keys like ``model.language_model.*`` never match
-    ``""`` / ``model.`` + raw name against ``language_model.model.*`` params.
+    Checkpoint keys like `model.language_model.*` never match
+    `""` / `model.` + raw name against `language_model.model.*` params.
     The pooling prefix probe must consult the mapper so it can early-exit.
     """
 
@@ -206,7 +206,7 @@ class ModelWithWeightsMapper(torch.nn.Module):
 def test_pooling_prefix_probe_uses_hf_to_vllm_mapper(monkeypatch):
     """Mapper lets the prefix probe early-exit without cloning the full ckpt.
 
-    Checkpoint keys only align after ``hf_to_vllm_mapper``. The probe must use
+    Checkpoint keys only align after `hf_to_vllm_mapper`. The probe must use
     the mapped name for membership, keep forwarding original names to the
     parent loader, and stop after the first hit instead of cloning everything.
     """

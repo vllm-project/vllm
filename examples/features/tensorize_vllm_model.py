@@ -19,7 +19,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 logger = logging.getLogger()
 
 
-"""
+r"""
 tensorize_vllm_model.py is a script that can be used to serialize and 
 deserialize vLLM models. These models can be loaded using tensorizer 
 to the GPU extremely quickly over an HTTP/HTTPS endpoint, an S3 endpoint,

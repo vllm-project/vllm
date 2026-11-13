@@ -486,7 +486,13 @@ class LoRAModelManager:
         # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
         self.unsupported_lora_modules: set[str] = set()
 
-        for module_name, module in self.model.named_modules(remove_duplicate=False):
+        named_modules = list(self.model.named_modules(remove_duplicate=False))
+        runners = [f"{n}." for n, m in named_modules if isinstance(m, MoERunner)]
+        # MoERunner aliases block modules. Visit them last so that the block path,
+        # which is what adapters target, is the one tracked in `self.modules`.
+        named_modules.sort(key=lambda item: item[0].startswith(tuple(runners)))
+
+        for module_name, module in named_modules:
             if isinstance(module, PPMissingLayer):
                 continue
 
@@ -1192,17 +1198,17 @@ class LoRAModelManager:
     ) -> list[str]:
         """Narrow a flat expert-major sub-module list to this rank's experts.
 
-        ``new_module_names`` is produced by
-        ``fused_moe_make_expert_params_mapping`` and is ordered
-        ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
+        `new_module_names` is produced by
+        `fused_moe_make_expert_params_mapping` and is ordered
+        `[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]` (non-gated MoE has 2
         entries per expert instead of 3). When the module is a 2D
-        ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
+        `FusedMoEWithLoRA` with EP enabled, we slice the list to the
         contiguous block of experts owned by this rank so the downstream
-        ``pack_moe`` call only consumes local weights and produces a
-        tensor sized to ``local_num_experts`` directly.
+        `pack_moe` call only consumes local weights and produces a
+        tensor sized to `local_num_experts` directly.
 
         Returns the original list unchanged for non-MoE modules, the 3D
-        MoE path (handled separately by ``_stack_moe_lora_weights``),
+        MoE path (handled separately by `_stack_moe_lora_weights`),
         modules without EP, or layouts we cannot cleanly partition.
         """
         module = self.modules.get(module_name)

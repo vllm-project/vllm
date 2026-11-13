@@ -17,9 +17,11 @@ from torch.nn import functional as F
 
 import vllm.model_executor.layers.fused_moe  # noqa
 import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import (
     fused_moe,
     make_dummy_moe_config,
+    make_test_quant_config,
     modular_triton_fused_moe,
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
@@ -35,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEQuantConfig,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
@@ -42,7 +45,10 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.utils import (
+    masked_amax_scale,
+    moe_kernel_quantize_input,
     moe_use_td_hw_supported,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -59,14 +65,25 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize,
     marlin_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+    quantize_weights,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.triton_utils import tl
+from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+requires_deep_ep_v2 = pytest.mark.skipif(
+    not has_deep_ep_v2(), reason="Requires DeepEP v2 (ElasticBuffer)"
+)
 
 
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
@@ -107,6 +124,53 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert a_scale.ndim == 0
     assert captured_scale.shape == (1,)
     assert captured_scale.data_ptr() == a_scale.data_ptr()
+
+
+def test_triton_moe_launcher_defaults_weight_layout_to_activation_layout(
+    monkeypatch,
+) -> None:
+    """Callers that only set per_channel_quant keep their old weight layout.
+
+    Before the activation and weight scale layouts were split, per_channel_quant
+    selected per-channel weight scales too. Callers that do not pass
+    per_out_ch_quant must keep that behaviour instead of silently switching to
+    per-expert (per-tensor) weight scales.
+    """
+    captured: dict[str, bool] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs) -> None:
+                captured["per_channel_quant"] = kwargs["per_channel_quant"]
+                captured["per_out_ch_quant"] = kwargs["per_out_ch_quant"]
+
+            return launch
+
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel", FakeKernel())
+
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        A=torch.ones((1, 1)),
+        B=torch.ones((1, 1, 1)),
+        C=torch.empty((1, 1, 1)),
+        A_scale=torch.tensor([0.5]),
+        B_scale=torch.ones((1, 1, 1)),
+        topk_weights=torch.ones((1, 1)),
+        sorted_token_ids=None,
+        expert_ids=torch.zeros(1, dtype=torch.int32),
+        num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+        mul_routed_weight=True,
+        top_k=1,
+        config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+        compute_type=tl.float32,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=True,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=True,
+    )
+
+    assert captured["per_channel_quant"] is True
+    assert captured["per_out_ch_quant"] is True
 
 
 def test_triton_moe_launcher_rejects_noncontiguous_topk_weights() -> None:
@@ -1905,6 +1969,303 @@ def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
 
     opcheck(torch.ops._moe_C.moe_sum, (input, actual, topk_ids, expert_map))
+
+
+@pytest.mark.parametrize(
+    ("quant_dtype", "scale_max"),
+    [(torch.float8_e4m3fn, 448.0), (torch.int8, 127.0)],
+    ids=["fp8", "int8"],
+)
+@pytest.mark.parametrize("mode", ["mask", "bound", "expert_bound"])
+def test_masked_amax_scale_ignores_unrouted_rows(quant_dtype, scale_max, mode):
+    """Padding rows must never contribute to a per-tensor activation scale."""
+    num_rows, num_valid, k = 64, 48, 256
+    rows = torch.arange(num_rows, device="cuda")
+    if mode == "mask":
+        # Non-prefix valid rows: only a mask can express this.
+        included = rows % 2 == 1
+        kwargs = {"row_valid": included}
+    elif mode == "bound":
+        included = rows < num_valid
+        kwargs = {
+            "num_valid": torch.tensor([num_valid], device="cuda", dtype=torch.int32)
+        }
+    else:
+        # Batched dispatch layout: [expert, rows_per_expert, K] with worst-case
+        # per-expert capacity, so each expert has its own valid prefix.
+        rows_per_expert = 16
+        expert_num_tokens = torch.tensor(
+            [16, 9, 0, 16], device="cuda", dtype=torch.int32
+        )
+        expert = rows // rows_per_expert
+        included = (rows % rows_per_expert) < expert_num_tokens[expert]
+        kwargs = {
+            "expert_num_tokens": expert_num_tokens,
+            "rows_per_expert": rows_per_expert,
+        }
+
+    x = torch.randn((num_rows, k), device="cuda", dtype=torch.bfloat16)
+    x[~included] = float("nan")
+
+    scale = masked_amax_scale(x, quant_dtype, **kwargs)
+
+    expected = x[included].float().abs().amax() / scale_max
+    torch.testing.assert_close(scale, expected.reshape(1))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, True),
+        ({"a1_scale": torch.ones(1)}, False),
+        ({"per_act_token_quant": True}, False),
+        ({"block_shape": [128, 128]}, False),
+    ],
+    ids=["dynamic_per_tensor", "static", "per_token", "block"],
+)
+def test_act_scale_is_tensor_wide_fp8(kwargs, expected):
+    """Only a data-dependent per-tensor act scale can be poisoned by padding."""
+    quant_config = FusedMoEQuantConfig.make(current_platform.fp8_dtype(), **kwargs)
+    assert quant_config.act_scale_is_tensor_wide(kwargs.get("a1_scale")) is expected
+
+
+def test_act_scale_is_tensor_wide_other_schemes():
+    """int8 is tensor-wide, but MX string schemes and unquantized are not."""
+    assert FusedMoEQuantConfig.make(torch.int8).act_scale_is_tensor_wide(None)
+    # An MX scheme without block_shape still reports PER_TENSOR; it must not be
+    # mistaken for a native fp8/int8 tensor-wide scale.
+    assert not FusedMoEQuantConfig.make("mxfp8").act_scale_is_tensor_wide(None)
+    assert not FusedMoEQuantConfig.make(None).act_scale_is_tensor_wide(None)
+
+
+def test_triton_experts_declare_padded_standard():
+    """Triton experts must accept the DeepEP v2 padded layout."""
+    assert (
+        TritonExperts.activation_format() == mk.FusedMoEActivationFormat.PaddedStandard
+    )
+    # Every Triton scheme either uses a row-local scale or masks the per-tensor
+    # one, so all of them can consume a padded buffer.
+    moe_config = make_dummy_moe_config(
+        num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=512
+    )
+    schemes: list[tuple[Any, Any]] = [(None, None)]
+    if current_platform.supports_fp8():
+        schemes += [
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        ]
+
+    for weight_key, activation_key in schemes:
+        supported, reason = TritonExperts.is_supported_config(
+            TritonExperts,
+            moe_config,
+            weight_key,
+            activation_key,
+            mk.FusedMoEActivationFormat.PaddedStandard,
+        )
+        assert supported, reason
+
+
+def _run_triton_experts(
+    experts,
+    hidden_states,
+    a1q_scale,
+    w1,
+    w2,
+    topk_weights,
+    topk_ids,
+    out_dtype,
+):
+    """Drive `TritonExperts.apply` with caller-provided workspaces."""
+    moe_config = experts.moe_config
+    workspace13_shape, workspace2_shape, out_shape = experts.workspace_shapes(
+        M=hidden_states.size(0),
+        N=moe_config.intermediate_size,
+        K=moe_config.hidden_dim,
+        topk=topk_ids.size(1),
+        global_num_experts=moe_config.num_experts,
+        local_num_experts=moe_config.num_local_experts,
+        expert_tokens_meta=None,
+        activation=MoEActivation.SILU,
+    )
+    device = hidden_states.device
+    workspace_dtype = experts.workspace_dtype(out_dtype)
+    workspace13 = torch.empty(workspace13_shape, dtype=workspace_dtype, device=device)
+    workspace2 = torch.empty(workspace2_shape, dtype=workspace_dtype, device=device)
+    output = torch.empty(out_shape, dtype=out_dtype, device=device)
+    experts.apply(
+        output=output,
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=moe_config.num_experts,
+        expert_map=None,
+        a1q_scale=a1q_scale,
+        a2_scale=experts.a2_scale,
+        workspace13=workspace13,
+        workspace2=workspace2,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    return output
+
+
+@pytest.mark.parametrize(
+    ("block_shape", "per_act_token_quant"),
+    [(None, False), (None, True), ([128, 128], False)],
+    ids=["tensorwise", "tokenwise", "block"],
+)
+@torch.inference_mode()
+def test_triton_moe_padded_standard_ignores_padding(block_shape, per_act_token_quant):
+    """Inactive rows of a PaddedStandard buffer must not affect valid outputs."""
+    m, n, k, e, topk, pad = 32, 256, 512, 8, 2, 16
+    dtype, quant_dtype = torch.bfloat16, current_platform.fp8_dtype()
+
+    w1, w2, quant_config = make_test_quant_config(
+        e,
+        n,
+        k,
+        in_dtype=dtype,
+        quant_dtype=quant_dtype,
+        per_act_token_quant=per_act_token_quant,
+        block_shape=block_shape,
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=e,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size=n,
+        in_dtype=dtype,
+        max_num_tokens=next_power_of_2(m + pad),
+    )
+    experts = TritonExperts(moe_config, quant_config)
+
+    set_random_seed(7)
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    scores = torch.randn((m, e), device="cuda", dtype=torch.float32).softmax(dim=-1)
+    topk_weights, topk_ids = torch.topk(scores, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    # DeepEP v2 layout: valid rows are a prefix, the tail is inactive.
+    topk_ids_padded = torch.full((m + pad, topk), -1, dtype=torch.int32, device="cuda")
+    topk_ids_padded[:m] = topk_ids
+    topk_weights_padded = torch.zeros(
+        (m + pad, topk), device="cuda", dtype=topk_weights.dtype
+    )
+    topk_weights_padded[:m] = topk_weights
+
+    def quantize(x_padded):
+        if block_shape is None and not per_act_token_quant:
+            row_valid = torch.arange(x_padded.size(0), device="cuda") < m
+            scale = masked_amax_scale(
+                x_padded,
+                quant_dtype,
+                row_valid=row_valid,
+            )
+            return moe_kernel_quantize_input(x_padded, scale, quant_dtype, False, None)
+        return moe_kernel_quantize_input(
+            x_padded, None, quant_dtype, per_act_token_quant, block_shape
+        )
+
+    a_clean = torch.zeros((m + pad, k), device="cuda", dtype=dtype)
+    a_clean[:m] = a
+    a_poison = a_clean.clone()
+    a_poison[m:] = float("nan")
+
+    hs_clean, scale_clean = quantize(a_clean)
+    hs_poison, scale_poison = quantize(a_poison)
+    hs_unpadded, scale_unpadded = quantize(a)
+
+    out_clean = _run_triton_experts(
+        experts,
+        hs_clean,
+        scale_clean,
+        w1,
+        w2,
+        topk_weights_padded,
+        topk_ids_padded,
+        dtype,
+    )
+    out_poison = _run_triton_experts(
+        experts,
+        hs_poison,
+        scale_poison,
+        w1,
+        w2,
+        topk_weights_padded,
+        topk_ids_padded,
+        dtype,
+    )
+    out_unpadded = _run_triton_experts(
+        experts, hs_unpadded, scale_unpadded, w1, w2, topk_weights, topk_ids, dtype
+    )
+
+    assert torch.isfinite(out_poison[:m]).all(), (
+        "padding garbage leaked into valid outputs"
+    )
+    torch.testing.assert_close(out_poison[:m], out_clean[:m], rtol=0, atol=0)
+    torch.testing.assert_close(out_clean[:m], out_unpadded, atol=2e-2, rtol=2e-1)
+
+
+@requires_deep_ep_v2
+@torch.inference_mode()
+def test_deepep_v2_padded_scale_ignores_padding_tail():
+    """The prepare stage must keep decode padding out of a per-tensor scale."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+        DeepEPV2PrepareAndFinalize,
+    )
+
+    m_valid, pad, k = 16, 16, 256
+    expert_x = torch.randn((m_valid + pad, k), device="cuda", dtype=torch.bfloat16)
+    expert_x[m_valid:] = float("nan")
+
+    _, _, quant_config = make_test_quant_config(
+        8, k, k, in_dtype=torch.bfloat16, quant_dtype=current_platform.fp8_dtype()
+    )
+
+    prepare_finalize = object.__new__(DeepEPV2PrepareAndFinalize)
+    prepare_finalize.defer_globalize = False
+    prepare_finalize.use_cudagraph = True
+    prepare_finalize.rank_expert_offset = 0
+    prepare_finalize.num_experts = 8
+
+    topk = 1
+    recv_topk_idx = torch.zeros((m_valid + pad, topk), dtype=torch.int64, device="cuda")
+    recv_topk_idx[m_valid:] = -1
+    recv_topk_weights = torch.ones(
+        (m_valid + pad, topk), dtype=torch.float32, device="cuda"
+    )
+    # Per-rank prefix sums; the last entry is the received token count.
+    psum_recv_per_rank = torch.tensor([3, m_valid], dtype=torch.int32, device="cuda")
+
+    x_q, scale, meta, topk_ids, _ = prepare_finalize._receiver(
+        SimpleNamespace(event=None),
+        False,
+        expert_x,
+        recv_topk_idx,
+        8,
+        [],
+        recv_topk_weights,
+        psum_recv_per_rank,
+        None,
+        quant_config,
+        False,
+    )
+
+    assert x_q.dtype == torch.float8_e4m3fn
+    assert torch.isfinite(scale).all(), "padding poisoned the per-tensor scale"
+    expected = expert_x[:m_valid].float().abs().amax() / 448.0
+    torch.testing.assert_close(scale, expected.reshape(1))
+    assert topk_ids is not None
+    assert (topk_ids[m_valid:] == -1).all()
+    assert meta is not None
+    assert meta.psum_recv_per_rank is psum_recv_per_rank
 
 
 def _batched_fused_marlin_moe_cases() -> list[Any]:

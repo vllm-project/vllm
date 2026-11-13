@@ -5,7 +5,7 @@ import pytest
 from transformers import AutoModel
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
-from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.types import ScoreMultiModalParam
 from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,

@@ -53,11 +53,6 @@ dg_available = has_deep_gemm()
 device_capability = current_platform.get_device_capability()
 if device_capability is None or device_capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
-if current_platform.is_fp8_fnuz():
-    pytest.skip(
-        "Tests in this file require float8_e4m3fn and platform does not support",
-        allow_module_level=True,
-    )
 
 vllm_config = VllmConfig()
 
@@ -124,6 +119,7 @@ def torch_w8a8_block_fp8_moe(
     block_shape,
     silu_fp32=False,
     expert_map=None,
+    quant_fn=per_token_group_quant_fp8,
 ):
     """Fused MoE with block-wise fp8 quantization using native torch.
 
@@ -147,7 +143,7 @@ def torch_w8a8_block_fp8_moe(
     # Quantize with the production per-token-group fp8 kernel (same HIP/CUDA op the
     # kernels use) so the reference is bit-identical here; removes ~0.06-0.10% fp8
     # boundary-flip divergence that otherwise accumulates over K. Matmul stays fp32.
-    a_q, a_s = per_token_group_quant_fp8(a, block_k, dtype=current_platform.fp8_dtype())
+    a_q, a_s = quant_fn(a, block_k, dtype=current_platform.fp8_dtype())
     a_q = a_q.to(torch.float32)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
@@ -158,7 +154,7 @@ def torch_w8a8_block_fp8_moe(
             act_out = SiluAndMul().forward_native(
                 inter_out.float() if silu_fp32 else inter_out
             )
-            act_out_q, act_out_s = per_token_group_quant_fp8(
+            act_out_q, act_out_s = quant_fn(
                 act_out, block_k, dtype=current_platform.fp8_dtype()
             )
             out[mask] = native_w8a8_block_matmul(
@@ -250,7 +246,7 @@ def test_w8a8_block_fp8_fused_moe(
         N,
         K,
         dtype,
-        quant_dtype=torch.float8_e4m3fn,
+        quant_dtype=current_platform.fp8_dtype(),
         per_act_token_quant=False,
         block_shape=block_size,
     )
@@ -318,9 +314,15 @@ def test_w8a8_block_fp8_fused_moe(
 @pytest.mark.parametrize("M", [24, 1024])
 @pytest.mark.parametrize("modular", [False, True])
 @torch.inference_mode()
-def test_h200_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_init):
-    if "H200" not in torch.cuda.get_device_name():
-        pytest.skip("This block FP8 TMA test targets H200")
+def test_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_init):
+    if not (
+        current_platform.is_cuda()
+        and (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(100)
+        )
+    ):
+        pytest.skip("This block FP8 TMA test requires SM90 or SM100")
 
     E, N, K, topk = 256, 256, 128, 8
     torch.manual_seed(123)
@@ -361,7 +363,13 @@ def test_h200_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_in
     with set_current_vllm_config(vllm_config):
         with override_config({**config, "USE_TMA": False}):
             pointer_output = run()
-        tma_output = run()
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        with patch.object(
+            TensorDescriptor, "from_tensor", wraps=TensorDescriptor.from_tensor
+        ) as descriptors:
+            tma_output = run()
+        assert descriptors.call_count == 2
 
     torch.testing.assert_close(tma_output, pointer_output, atol=0, rtol=0)
 
@@ -379,7 +387,7 @@ def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
     a = torch.randn((M, K), dtype=torch.bfloat16) / 10
     score = torch.randn((M, E), dtype=torch.bfloat16)
     (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
+        E, N, K, torch.bfloat16, current_platform.fp8_dtype(), block_shape=block_size
     )
     quant_config = fp8_w8a8_moe_quant_config(
         w1_scale=w1_s,
@@ -432,7 +440,7 @@ def test_w8a8_block_fp8_fused_moe_expert_map(M, N, K, topk, ep_size, workspace_i
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
     w1, w2, quant_config = make_test_quant_config(
-        E, N, K, dtype, quant_dtype=torch.float8_e4m3fn, block_shape=block_size
+        E, N, K, dtype, quant_dtype=current_platform.fp8_dtype(), block_shape=block_size
     )
 
     local_e = E // ep_size
@@ -497,7 +505,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
         N,
         K,
         dtype,
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         block_shape=block_size,
     )
@@ -619,7 +627,7 @@ def test_w8a8_block_fp8_fused_moe_refined_block_scales(tp_rank, workspace_init):
         inter_full,
         hidden,
         dtype,
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         per_out_ch_quant=False,
         block_shape=ckpt_block,
     )

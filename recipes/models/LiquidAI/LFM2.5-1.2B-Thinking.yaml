@@ -170,7 +170,6 @@ guide: |
   ## Configuration Tips
   - Give reasoning room: leave `max_tokens` unset so the `<think>` block and answer aren't truncated.
   - Set `--max-model-len` to match your workload (up to 32K).
-  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache capacity.
   - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
 
   ## References

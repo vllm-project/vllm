@@ -12,7 +12,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_xpu_sparse_impl_implements_logical_topk_hook():
-    """``MLAAttention.forward`` calls ``impl.record_logical_topk_ready()``
+    """`MLAAttention.forward` calls `impl.record_logical_topk_ready()`
     unconditionally for sparse layers, so every sparse MLA impl must define it.
     Without it DeepSeek-V3.2 / GLM-5 crash on the first forward on XPU."""
     from vllm.v1.attention.backends.mla.xpu_mla_sparse import XPUMLASparseImpl

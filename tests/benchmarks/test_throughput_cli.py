@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ``vllm bench throughput`` CLI.
+"""Tests for `vllm bench throughput` CLI.
 
-Throughput reuses ``bench serve``'s ``datasets.get_samples`` dispatch; the
+Throughput reuses `bench serve`'s `datasets.get_samples` dispatch; the
 LoRA-assignment and MMVU cases below cover the pieces that are throughput-only
 (serve has no analogue), keeping the two benchmarks aligned without duplicating
 serve-side dataset coverage.
@@ -14,6 +14,7 @@ from argparse import Namespace
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import SampleRequest
@@ -286,11 +287,11 @@ def test_get_requests_allows_multimodal_on_plain_vllm_backend(
 def test_to_serve_args_supports_mm_processor_flags() -> None:
     """The adapter must serve callers without throughput's legacy flags.
 
-    ``bench mm-processor`` exposes neither --input-len/--output-len/--prefix-len
+    `bench mm-processor` exposes neither --input-len/--output-len/--prefix-len
     nor --backend, and leaves --random-prefix-len at its default of 0. The
     adapter must not read the legacy flags unconditionally, and must keep the
     explicit 0 instead of coercing it to None (which later crashed
-    RandomMultiModalDataset.get_prefix on ``None <= 0``).
+    RandomMultiModalDataset.get_prefix on `None <= 0`).
     """
     args = Namespace(
         random_input_len=32,
@@ -431,3 +432,53 @@ def test_get_requests_random_mm_with_mm_processor_args(
         assert isinstance(req.prompt, list)
         assert req.prompt[0]["role"] == "user"
         assert any(item.get("type") == "image_url" for item in req.prompt[0]["content"])
+
+
+@pytest.mark.benchmark
+def test_get_requests_hf_dataset_with_mm_processor_args(
+    monkeypatch: pytest.MonkeyPatch,
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    """Regression: bench mm-processor's HF sampling must not crash.
+
+    bench mm-processor has no --hf-name, and get_samples reads args.hf_name when
+    it builds any HF dataset. Only the HF download is stubbed.
+    """
+    import vllm.benchmarks.datasets.datasets as dsmod
+    from vllm.benchmarks.mm_processor import add_cli_args as add_mm_cli_args
+
+    class _DownloadedDataset(list):
+        def shuffle(self, seed: int) -> "_DownloadedDataset":  # noqa: ARG002
+            return self
+
+    item = {
+        "conversation": [[{"content": "What is this?"}]],
+        "images": [Image.new("RGB", (8, 8))],
+    }
+    monkeypatch.setattr(
+        dsmod, "load_dataset", lambda *_, **__: _DownloadedDataset([item] * 3)
+    )
+
+    parser = FlexibleArgumentParser()
+    add_mm_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "lmarena-ai/VisionArena-Chat",
+            "--hf-split",
+            "train",
+            "--num-prompts",
+            "3",
+        ]
+    )
+
+    requests = get_requests(args, hf_tokenizer)
+
+    assert len(requests) == 3
+    for req in requests:
+        assert isinstance(req.prompt, list)
+        assert req.prompt[0]["role"] == "user"
+        content_types = {part["type"] for part in req.prompt[0]["content"]}
+        assert content_types == {"text", "image_url"}

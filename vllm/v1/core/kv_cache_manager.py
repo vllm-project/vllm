@@ -15,15 +15,14 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    MambaManager,
+    get_kv_cache_kind,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CrossAttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
-    MambaSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -210,8 +209,8 @@ class KVCacheManager:
         self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
         self.kv_cache_event_metadata = tuple(
             (
-                get_kv_cache_spec_kind(group.kv_cache_spec).value,
-                get_kv_cache_spec_sliding_window(group.kv_cache_spec),
+                get_kv_cache_kind(group.manager_config, group.distinct_specs).value,
+                getattr(group.manager_config.params, "sliding_window", None),
             )
             for group in kv_cache_config.kv_cache_groups
         )
@@ -294,14 +293,14 @@ class KVCacheManager:
         Args:
             request: The request to get the computed blocks.
             max_cache_hit_length: Upper bound on the hit length. Defaults to
-                ``request.get_max_cache_hit_length()``; explicit bounds can only
+                `request.get_max_cache_hit_length()`; explicit bounds can only
                 reduce the request's cache hit limit.
 
         Returns:
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
-                - ``shared_prefix_boundary``: the block-aligned token position of
+                - `shared_prefix_boundary`: the block-aligned token position of
                   a shared prefix that a sparse-retention group (Mamba / sliding
                   window) has not cached yet (Marconi-style APC), or 0 if none.
                   Pinned so sparse prefix-cache retention does not drop
@@ -359,16 +358,16 @@ class KVCacheManager:
         while a deeper Mamba state survives, or vice versa. Report the
         full-attention hit as the local prefix - the connector transfers the
         remaining suffix and the Mamba state is transferred unconditionally by
-        nixl's ``_apply_prefix_caching`` - and flag when that hit ran deeper
+        nixl's `_apply_prefix_caching` - and flag when that hit ran deeper
         than a lagging group. Such a hit only has a valid Mamba state at its
         boundary if the connector supplies it, so the caller must fall back to
-        ``get_computed_blocks`` to reconcile when no external tokens are found.
+        `get_computed_blocks` to reconcile when no external tokens are found.
 
-        Non-hybrid models and already-convergent hits use ``get_computed_blocks``.
+        Non-hybrid models and already-convergent hits use `get_computed_blocks`.
 
         Returns:
-            The ``get_computed_blocks`` triple (blocks, number of local computed
-            tokens, shared-prefix boundary) plus ``hit_diverged``.
+            The `get_computed_blocks` triple (blocks, number of local computed
+            tokens, shared-prefix boundary) plus `hit_diverged`.
 
         """
         coordinator = self.coordinator
@@ -762,14 +761,14 @@ class KVCacheManager:
         block_ids = self.get_block_ids(request_id)
         clipped_block_ids: list[list[int]] = []
         for group, ids in zip(self.kv_cache_config.kv_cache_groups, block_ids):
-            spec = group.kv_cache_spec
-            if not isinstance(spec, AttentionSpec) or isinstance(
-                spec, (CrossAttentionSpec, EncoderOnlyAttentionSpec)
-            ):
+            is_attention = all(
+                isinstance(spec, AttentionSpec) for spec in group.distinct_specs
+            )
+            if not is_attention or issubclass(group.manager_cls, CrossAttentionManager):
                 clipped_block_ids.append(ids)
                 continue
 
-            num_valid_blocks = cdiv(num_computed_tokens, spec.block_size)
+            num_valid_blocks = cdiv(num_computed_tokens, group.block_size)
             clipped_block_ids.append(ids[:num_valid_blocks])
         return tuple(clipped_block_ids)
 
@@ -780,21 +779,18 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             self.get_blocks(request.request_id).blocks,
         ):
-            if not group.kv_cache_spec.prefix_cacheable:
+            if not group.prefix_cacheable:
                 continue
-            if isinstance(
-                group.kv_cache_spec,
-                (CrossAttentionSpec, EncoderOnlyAttentionSpec),
-            ):
-                # Cross-attention and encoder-only groups are not prefix cached.
+            if issubclass(group.manager_cls, CrossAttentionManager):
+                # Cross-attention groups are not prefix cached.
                 continue
 
+            # Coverage grows along the block table: the last hashed block has the most.
             group_cached_tokens = 0
-            for block in blocks:
-                group_cached_tokens = max(
-                    group_cached_tokens,
-                    block.block_hash_num_tokens or 0,
-                )
+            for block in reversed(blocks):
+                if block.block_hash_num_tokens:
+                    group_cached_tokens = block.block_hash_num_tokens
+                    break
 
             cached_tokens = (
                 group_cached_tokens
@@ -829,7 +825,7 @@ class KVCacheManager:
 
         An external hit can supply the final Mamba state even when the local
         Mamba group ends before this endpoint. Other groups must cover it.
-        Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
+        Pure slicing: refcounts are untouched and `blocks` is not mutated.
         """
         truncated: list[list[KVCacheBlock]] = []
         for group_blocks, manager, group in zip(
@@ -838,7 +834,7 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
-            if not group.kv_cache_spec.prefix_cacheable:
+            if not group.prefix_cacheable:
                 # Scratch groups (e.g. the CSA compressor ring) hold a fixed
                 # block covering no token range, so a lookup result never
                 # carries computed blocks for them and their block size does
@@ -848,7 +844,7 @@ class KVCacheManager:
                 continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            if isinstance(group.kv_cache_spec, MambaSpec):
+            if issubclass(group.manager_cls, MambaManager):
                 num_blocks = min(num_blocks, len(group_blocks))
             else:
                 assert num_blocks <= len(group_blocks)
@@ -898,7 +894,7 @@ class KVCacheManager:
     ) -> dict[str, list[tuple[int, int, int]]]:
         """Drain this step's boundary-state hand-offs for a KV connector.
 
-        Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
+        Returns `{request_id: [(group_id, block_id, boundary_tokens), ...]}`
         for mamba "align" boundary states: the
         request's committed boundary-state snapshots and, on a sub-block partial
         hit, the CoW copy of its last-prompt-boundary state. Only mamba "align"

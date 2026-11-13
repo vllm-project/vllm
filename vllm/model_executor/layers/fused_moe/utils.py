@@ -73,7 +73,7 @@ def resolve_layer_fused_shared_expert(
     Args:
         quant_config: Model quantization configuration.
         prefix: MoE module prefix.
-        shared_expert_name: Shared-expert module name under ``prefix``.
+        shared_expert_name: Shared-expert module name under `prefix`.
         moe_backend: MoE backend that runs the fused shared expert.
         disable_under_ep: Whether this model family does not support FSE under
             expert parallelism. Kept as an explicit call-site policy instead of
@@ -267,18 +267,18 @@ def remap_topk_to_local(
 ) -> torch.Tensor:
     """Map global expert ids to local ids; non-local or invalid routes become -1.
 
-    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
+    Replaces `torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)`
     with one kernel. Returns a NEW tensor -- the caller keeps the original
-    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
+    `topk_ids` as `global_topk_ids`, so this must not write in place.
 
     Args:
         topk_ids: Global expert ids; -1 marks invalid slots. Must be contiguous;
-            the Triton kernel indexes by flat ``numel()`` offsets.
+            the Triton kernel indexes by flat `numel()` offsets.
         expert_map: Global-to-local mapping; -1 marks non-local experts.
-        out_dtype: Output dtype, ``torch.int32`` or ``torch.int64``.
+        out_dtype: Output dtype, `torch.int32` or `torch.int64`.
 
     Returns:
-        Remapped local expert ids with the same shape as ``topk_ids``.
+        Remapped local expert ids with the same shape as `topk_ids`.
 
     """
     if out_dtype not in (torch.int32, torch.int64):
@@ -453,6 +453,144 @@ def _mxfp6_e2m3_quantize(
     A = quant_dequant_mxfp6(A, quant_dtype="fp6_e2m3")
 
     return A, None
+
+
+@triton.jit
+def _masked_amax_scale_kernel(
+    x_ptr,
+    valid_ptr,
+    bound_ptr,
+    out_ptr,
+    num_rows,
+    num_cols,
+    stride_row,
+    stride_col,
+    rows_per_expert,
+    scale_max,
+    eps,
+    HAS_MASK: tl.constexpr,
+    HAS_EXPERT_BOUND: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows_valid = rows < num_rows
+    if HAS_MASK:
+        rows_valid = rows_valid & tl.load(
+            valid_ptr + rows, mask=rows_valid, other=0
+        ).to(tl.int1)
+    elif HAS_EXPERT_BOUND:
+        # Batched dispatch buffers are [expert, max_tokens, K]; only the
+        # leading `expert_num_tokens[e]` rows of each expert hold tokens.
+        expert = rows // rows_per_expert
+        bound = tl.load(bound_ptr + expert, mask=rows_valid, other=0)
+        rows_valid = rows_valid & ((rows % rows_per_expert) < bound)
+    else:
+        # Padding always trails the valid rows, so a device-side row count is
+        # enough and saves materializing a mask.
+        rows_valid = rows_valid & (rows < tl.load(bound_ptr))
+    amax = 0.0
+    for col_start in range(0, num_cols, BLOCK_K):
+        cols = col_start + tl.arange(0, BLOCK_K)
+        mask = rows_valid[:, None] & (cols[None, :] < num_cols)
+        vals = tl.load(
+            x_ptr + rows[:, None] * stride_row + cols[None, :] * stride_col,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        amax = tl.maximum(amax, tl.max(tl.max(tl.abs(vals), axis=1), axis=0))
+    tl.atomic_max(out_ptr, tl.maximum(amax / scale_max, eps))
+
+
+def masked_amax_scale(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    *,
+    row_valid: torch.Tensor | None = None,
+    num_valid: torch.Tensor | None = None,
+    expert_num_tokens: torch.Tensor | None = None,
+    rows_per_expert: int | None = None,
+    eps: float = 1e-10,
+) -> torch.Tensor:
+    """Per-tensor activation quant scale that skips rows without a route.
+
+    `PaddedStandard` buffers carry rows that hold no route (`topk_ids == -1`)
+    and whose contents are uninitialized, so a tensor-wide absmax would be
+    poisoned by them. Batched dispatch buffers have the same problem per
+    expert: rows past `expert_num_tokens[e]` hold stale tokens. Those rows
+    are dropped from the reduction instead; their quantized values are never
+    consumed by an expert GEMM.
+
+    Exactly one of `row_valid`, `num_valid` and `expert_num_tokens`
+    selects the valid rows.
+
+    Args:
+        x: 2D activations to reduce.
+        quant_dtype: Target quantization dtype (`torch.int8` or a float8).
+        row_valid: Boolean flags, one per row of `x`. Use when the valid rows
+            are not a prefix.
+        num_valid: 1-element device tensor holding the number of leading valid
+            rows. Cheaper than `row_valid` when padding trails the rows.
+        expert_num_tokens: Device tensor of received token counts, one per
+            expert, for a buffer laid out as `[expert, rows_per_expert, K]`.
+        rows_per_expert: Row stride between experts, i.e. the worst-case
+            per-expert capacity of the buffer.
+        eps: Lower bound on the returned scale, matching the dynamic kernels.
+
+    """
+    assert x.dim() == 2, f"expected 2D activations, got {x.shape}"
+    assert sum(m is not None for m in (row_valid, num_valid, expert_num_tokens)) == 1, (
+        "pass exactly one of row_valid / num_valid / expert_num_tokens"
+    )
+    assert (expert_num_tokens is None) == (rows_per_expert is None), (
+        "rows_per_expert is only valid together with expert_num_tokens"
+    )
+    out = torch.zeros((1,), dtype=torch.float32, device=x.device)
+    if row_valid is not None:
+        assert row_valid.shape == (x.size(0),), (
+            f"expected {x.size(0)} row flags, got {tuple(row_valid.shape)}"
+        )
+        row_valid = row_valid.contiguous()
+        bound = out
+    elif num_valid is not None:
+        assert num_valid.numel() == 1, f"expected 1 row count, got {num_valid}"
+        bound = num_valid
+    else:
+        assert expert_num_tokens is not None and rows_per_expert is not None
+        assert rows_per_expert > 0, "expected a positive rows_per_expert"
+        assert x.size(0) % rows_per_expert == 0, (
+            f"{x.size(0)} rows is not a multiple of {rows_per_expert}"
+        )
+        assert expert_num_tokens.numel() == x.size(0) // rows_per_expert, (
+            f"expected {x.size(0) // rows_per_expert} expert counts, "
+            f"got {expert_num_tokens.numel()}"
+        )
+        bound = expert_num_tokens
+    scale_max = (
+        127.0 if quant_dtype == torch.int8 else float(torch.finfo(quant_dtype).max)
+    )
+    block_m, block_k = 32, 128
+    _masked_amax_scale_kernel[(triton.cdiv(x.size(0), block_m),)](
+        x,
+        # The pointers of the inactive constexpr branches are never
+        # dereferenced, so `out` doubles as a dummy.
+        out if row_valid is None else row_valid,
+        bound,
+        out,
+        x.size(0),
+        x.size(1),
+        x.stride(0),
+        x.stride(1),
+        rows_per_expert or 0,
+        scale_max,
+        eps,
+        HAS_MASK=row_valid is not None,
+        HAS_EXPERT_BOUND=expert_num_tokens is not None,
+        BLOCK_M=block_m,
+        BLOCK_K=block_k,
+    )
+    return out
 
 
 def moe_kernel_quantize_input(
@@ -707,17 +845,17 @@ def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
 
 def moe_use_td_hw_supported() -> bool:
     """Whether the current device can run the TD (gather) path of
-    ``fused_moe_kernel`` (ignores the ``VLLM_TRITON_USE_TD`` override).
+    `fused_moe_kernel` (ignores the `VLLM_TRITON_USE_TD` override).
 
-    The A-load uses ``tensor_descriptor.gather``, which lowers to the PTX
-    ``tile::gather4`` instruction. That instruction is part of the
-    ``tcgen05``/Tensor Memory (TMEM) family introduced with Blackwell and has
+    The A-load uses `tensor_descriptor.gather`, which lowers to the PTX
+    `tile::gather4` instruction. That instruction is part of the
+    `tcgen05`/Tensor Memory (TMEM) family introduced with Blackwell and has
     no Hopper (sm90) equivalent -- ptxas rejects it there ("Feature
     '.tile::gather4 ...' requires .target sm_100 or higher"). Unlike
-    ``scatter4``, ``gather4`` is supported across the whole sm100+ range
+    `scatter4`, `gather4` is supported across the whole sm100+ range
     including consumer Blackwell (sm120/sm121): see triton-lang/triton#8498,
-    which enables ``gather4`` on sm120/sm121 while leaving ``scatter4``
-    unsupported there. So this gates on a blanket ``has_device_capability(100)``
+    which enables `gather4` on sm120/sm121 while leaving `scatter4`
+    unsupported there. So this gates on a blanket `has_device_capability(100)`
     rather than the sm100 *family* check used for the scatter store path.
     """
     if current_platform.is_xpu():
@@ -728,12 +866,12 @@ def moe_use_td_hw_supported() -> bool:
 
 
 def resolve_moe_use_td() -> bool:
-    """Tri-state resolver for ``VLLM_TRITON_USE_TD``.
+    """Tri-state resolver for `VLLM_TRITON_USE_TD`.
 
     Unset auto-selects the TD path on XPU only, mirroring the attention
-    dispatcher in ``triton_attn.py``. ``1``/``0`` force it on/off regardless
-    of hardware; forcing ``1`` where it cannot compile (see
-    ``moe_use_td_hw_supported``) fails at ptxas. Blackwell CUDA (sm100+) can
+    dispatcher in `triton_attn.py`. `1`/`0` force it on/off regardless
+    of hardware; forcing `1` where it cannot compile (see
+    `moe_use_td_hw_supported`) fails at ptxas. Blackwell CUDA (sm100+) can
     compile it but is opt-in only, pending validation.
     """
     override = envs.VLLM_TRITON_USE_TD
@@ -748,7 +886,7 @@ _warned_moe_use_td_ineffective = False
 def warn_if_moe_use_td_ineffective(
     active_backend: str, is_quantized: bool = False
 ) -> None:
-    """One-shot warning when ``VLLM_TRITON_USE_TD`` is set but ignored.
+    """One-shot warning when `VLLM_TRITON_USE_TD` is set but ignored.
 
     Fires when the user set the env explicitly and either (a) the active
     MoE backend is not the fused Triton kernel, or (b) the model is

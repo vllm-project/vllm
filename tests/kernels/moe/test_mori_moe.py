@@ -70,7 +70,7 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
         AiterFp8ChannelExperts,
         AiterMxfp4Experts,
         AiterUnquantizedExperts,
-        derive_aiter_quant_method,
+        derive_aiter_quant_type,
         mxfp4_w4a16_extra_kwargs,
         rocm_aiter_fused_experts,
     )
@@ -160,7 +160,7 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
                 ids,
                 config,
                 quant_config=ref_quant,
-                quant_method=derive_aiter_quant_method(ref_quant),
+                quant_type=derive_aiter_quant_type(ref_quant),
                 **mxfp4_w4a16_extra_kwargs(ref_quant, config),
             )
         return torch_experts(

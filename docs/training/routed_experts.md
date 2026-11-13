@@ -13,7 +13,6 @@ The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-
 
 Startup fails with a `ValueError` unless:
 
-- **Model Runner V2** is used (`VLLM_USE_V2_MODEL_RUNNER=1` if vLLM falls back to V1);
 - the runner is `generate` and the model is **MoE**;
 - **prefix caching is enabled** (the default). `--no-enable-prefix-caching` fails; the old v0.21 advice to disable it is wrong.
 
@@ -62,9 +61,5 @@ experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
 ## `routed_experts_prompt_start`
 
 Per-request, default `0`: drops the first N prompt-token rows (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it top-level on `/v1/*completions`, inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(routed_experts_prompt_start=...)`.
-
-## Limitations
-
-- The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
