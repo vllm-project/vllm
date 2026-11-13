@@ -7133,15 +7133,15 @@ def test_session_seeded_lookup_matches_disabled(config_name):
             make_request(f"{turn}", token_ids, hash_block_size, sha256, session_id="s")
             for _ in range(2)
         ]
-        prefix = seeded.sessions.get_prefix("s")
-        if prefix is not None and any(prefix.num_lookup_blocks.values()):
+        if seeded.sessions.get_blocks("s", requests[0].block_hashes) is not None:
             num_seeded_turns += 1
         assert _hit_hashes(seeded, _run_turn(seeded, requests[0])) == _hit_hashes(
             reference, _run_turn(reference, requests[1])
         )
         seeded.free(requests[0])
         reference.free(requests[1])
-    assert num_seeded_turns >= 4
+    # Turns that diverge from the session fall back to the normal lookup.
+    assert num_seeded_turns >= 3
 
 
 @pytest.mark.parametrize(
@@ -7324,7 +7324,7 @@ def test_session_ttl_expiry_demotes_blocks(monkeypatch):
     manager.new_step_starts()
     assert _retained_list(manager) == []
     assert set(_session_refs(manager)) == {0}
-    assert manager.sessions.get_prefix("s") is None
+    assert manager.sessions.get_blocks("s", []) is None
 
 
 def test_max_sessions_drops_oldest_session():
@@ -7498,9 +7498,9 @@ def test_session_retention_random_ops_keep_invariants(
                 f"r{step}", token_ids, 16, sha256, session_id=session_id
             )
             if session_id is not None and manager.sessions is not None:
-                prefix = manager.sessions.get_prefix(session_id)
-                num_seeded += prefix is not None and any(
-                    prefix.num_lookup_blocks.values()
+                num_seeded += (
+                    manager.sessions.get_blocks(session_id, request.block_hashes)
+                    is not None
                 )
             seeded = _lookup(manager, request)
             assert _hit_hashes(manager, seeded) == _hit_hashes(

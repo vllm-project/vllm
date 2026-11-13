@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_sessions import KVCacheSessions, SessionPrefix
+from vllm.v1.core.kv_cache_sessions import KVCacheSessions
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -219,7 +219,7 @@ class KVCacheManager:
                         self.coordinator.single_type_managers,
                         kv_cache_config.kv_cache_groups,
                     )
-                    if manager.supports_session_prefix and group.prefix_cacheable
+                    if manager.supports_session_blocks and group.prefix_cacheable
                 },
             )
             for manager in self.coordinator.single_type_managers:
@@ -273,10 +273,12 @@ class KVCacheManager:
         """Whether a local prefix cache lookup may be run for this request."""
         return self.enable_caching and request.prefix_cache_hit_limit != 0
 
-    def _session_prefix(self, request: Request) -> SessionPrefix | None:
+    def _session_blocks(
+        self, request: Request
+    ) -> Sequence[Sequence[KVCacheBlock]] | None:
         if self.sessions is None or request.session_id is None:
             return None
-        return self.sessions.get_prefix(request.session_id)
+        return self.sessions.get_blocks(request.session_id, request.block_hashes)
 
     def _register_session(self, request: Request) -> None:
         if self.sessions is None or request.session_id is None:
@@ -312,7 +314,7 @@ class KVCacheManager:
         _, num_computed_tokens, _ = self.coordinator.find_longest_cache_hit(
             request.block_hashes,
             request.num_tokens - 1,
-            self._session_prefix(request),
+            self._session_blocks(request),
         )
         return num_computed_tokens
 
@@ -368,7 +370,7 @@ class KVCacheManager:
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes,
                 max_cache_hit_length,
-                self._session_prefix(request),
+                self._session_blocks(request),
             )
         )
 
@@ -431,7 +433,7 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes,
             max_cache_hit_length,
-            self._session_prefix(request),
+            self._session_blocks(request),
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its

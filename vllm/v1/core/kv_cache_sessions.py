@@ -24,9 +24,8 @@ from vllm.v1.core.kv_cache_utils import (
 
 
 @dataclass(slots=True)
-class SessionPrefix:
-    """The cached blocks of a session's latest request. Read-only outside
-    `KVCacheSessions`."""
+class _Session:
+    """The cached blocks of a session's latest request."""
 
     # Per KV cache group, the blocks holding one `session_ref` for this
     # session and the hash each had when the reference was taken.
@@ -40,32 +39,6 @@ class SessionPrefix:
     epoch: int
     lookup_epoch: int
     expires_at: float
-
-    def lookup(
-        self,
-        computed_blocks: Sequence[list[KVCacheBlock]],
-        block_hashes: Sequence[BlockHash],
-        kv_cache_group_ids: Sequence[int],
-        max_num_blocks: int,
-    ) -> int:
-        """If `block_hashes` continues the session, extend each group's
-        `computed_blocks` with the session's blocks and return how many."""
-        num_blocks = min(
-            max_num_blocks,
-            len(block_hashes),
-            *(self.num_lookup_blocks.get(g, 0) for g in kv_cache_group_ids),
-        )
-        if num_blocks == 0:
-            return 0
-        group_id = kv_cache_group_ids[0]
-        last_key = make_block_hash_with_group_id(block_hashes[num_blocks - 1], group_id)
-        # Hashes are chained: a match at the last block implies a match at
-        # every block before it.
-        if self.keys[group_id][num_blocks - 1] != last_key:
-            return 0
-        for computed, group_id in zip(computed_blocks, kv_cache_group_ids):
-            computed.extend(self.blocks[group_id][:num_blocks])
-        return num_blocks
 
 
 class KVCacheSessions:
@@ -92,7 +65,7 @@ class KVCacheSessions:
         self.hash_block_size = hash_block_size
         self.lookup_block_sizes = lookup_block_sizes
         # Ordered by expiry.
-        self._sessions: OrderedDict[str, SessionPrefix] = OrderedDict()
+        self._sessions: OrderedDict[str, _Session] = OrderedDict()
         # Bumped by BlockPool whenever a session-referenced block loses its
         # hash; a session registered at the current epoch is intact.
         self.epoch = 0
@@ -107,7 +80,7 @@ class KVCacheSessions:
         called before the blocks are freed."""
         old = self._sessions.pop(session_id, None)
         intact = old is not None and old.epoch == self.epoch
-        session = SessionPrefix(
+        session = _Session(
             blocks=[],
             keys=[],
             num_lookup_blocks={},
@@ -159,11 +132,16 @@ class KVCacheSessions:
         if len(self._sessions) > self.max_sessions:
             self._release(self._sessions.popitem(last=False)[1])
 
-    def get_prefix(self, session_id: str) -> SessionPrefix | None:
-        """Return the session's latest request's blocks, with `num_lookup_blocks`
-        covering only blocks that are still cached."""
+    def get_blocks(
+        self, session_id: str, block_hashes: Sequence[BlockHash]
+    ) -> list[Sequence[KVCacheBlock]] | None:
+        """Return, per KV cache group, the session's cached blocks that hold
+        the start of a request with `block_hashes`, or None if it does not
+        continue the session."""
         session = self._sessions.get(session_id)
-        if session is not None and session.lookup_epoch != self.epoch:
+        if session is None:
+            return None
+        if session.lookup_epoch != self.epoch:
             for group_id, num_lookup_blocks in session.num_lookup_blocks.items():
                 blocks, keys = session.blocks[group_id], session.keys[group_id]
                 for i in range(num_lookup_blocks):
@@ -171,7 +149,25 @@ class KVCacheSessions:
                         session.num_lookup_blocks[group_id] = i
                         break
             session.lookup_epoch = self.epoch
-        return session
+
+        found = None
+        for group_id, num_lookup_blocks in session.num_lookup_blocks.items():
+            hashes = resolve_block_hashes(
+                block_hashes, self.hash_block_size, self.lookup_block_sizes[group_id]
+            )
+            num_blocks = min(num_lookup_blocks, len(hashes))
+            # Hashes are chained: a match at the last block implies a match
+            # at every block before it.
+            if num_blocks and session.keys[group_id][
+                num_blocks - 1
+            ] == make_block_hash_with_group_id(hashes[num_blocks - 1], group_id):
+                blocks = session.blocks[group_id]
+                if found is None:
+                    found = [()] * len(session.blocks)
+                found[group_id] = (
+                    blocks if num_blocks == len(blocks) else blocks[:num_blocks]
+                )
+        return found
 
     def close(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
@@ -191,7 +187,7 @@ class KVCacheSessions:
         self._sessions.clear()
 
     @staticmethod
-    def _release(session: SessionPrefix) -> None:
+    def _release(session: _Session) -> None:
         for blocks, keys in zip(session.blocks, session.keys):
             # Tail first, so demoted blocks keep the tail-first eviction order.
             for block, key in zip(reversed(blocks), reversed(keys)):
