@@ -5,6 +5,7 @@
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 import torch
 
@@ -13,6 +14,8 @@ from vllm.utils.math_utils import cdiv
 
 
 class PPTransportDataType(StrEnum):
+    """Built-in field names; downstream fields can use any nonempty string."""
+
     HIDDEN_STATES = "hidden_states"
     RESIDUAL = "residual"
 
@@ -28,43 +31,85 @@ class PPTransportTensor:
     dtype: torch.dtype | None = None
     sequence_parallel: bool = False
 
+    def num_rows(self, num_tokens: int, tp_size: int) -> int:
+        """Override for device-specific token padding, shared by all buffer views."""
+        return cdiv(num_tokens, tp_size) if self.sequence_parallel else num_tokens
+
+
+class PPTransportSchemaInterface(Protocol):
+    """Runner-facing contract, also implementable outside vLLM."""
+
+    @property
+    def has_sharded_tensors(self) -> bool: ...
+
+    @property
+    def all_gather_policy(self) -> dict[str, bool]: ...
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors: ...
+
+    def prepare_inputs(
+        self,
+        buffers: IntermediateTensors,
+        num_tokens: int,
+        received: IntermediateTensors | None = None,
+        *,
+        num_received_tokens: int | None = None,
+    ) -> IntermediateTensors: ...
+
+    def make_intermediate_tensors(
+        self, num_tokens: int, **tensors: torch.Tensor
+    ) -> IntermediateTensors: ...
+
 
 class PPTransportSchema:
     """Per-model tensor layouts, independent of the communication backend."""
 
     def __init__(
         self,
-        tensors: Mapping[PPTransportDataType, PPTransportTensor] | None = None,
+        tensors: Mapping[str, PPTransportTensor] | None = None,
         *,
         tp_size: int = 1,
     ):
         if tp_size < 1:
             raise ValueError("PP transport requires a positive TP size")
         self.tp_size = tp_size
-        self._tensors = tuple(
-            (PPTransportDataType(data_type).value, tensor)
-            for data_type, tensor in (tensors or {}).items()
+        self._tensors: dict[str, PPTransportTensor] = {}
+        self._sealed = False
+        for name, tensor in (tensors or {}).items():
+            self.register_tensor(name, tensor)
+
+    def register_tensor(self, name: str, tensor: PPTransportTensor) -> None:
+        """Register a model-local field before allocating or using its buffers."""
+        if self._sealed:
+            raise RuntimeError("PP fields cannot change after buffer initialization")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("PP field names must be nonempty strings")
+        if name in self._tensors:
+            raise ValueError(f"PP field already registered: {name}")
+        self._tensors[name] = tensor
+
+    @property
+    def has_sharded_tensors(self) -> bool:
+        return self.tp_size > 1 and any(
+            tensor.sequence_parallel for tensor in self._tensors.values()
         )
-        self._input_partitions = {
-            key: tp_size for key, tensor in self._tensors if tensor.sequence_parallel
-        }
-        self._input_dtypes = {
-            key: tensor.dtype
-            for key, tensor in self._tensors
-            if tensor.dtype is not None
-        }
-        self.has_sharded_tensors = tp_size > 1 and any(
-            tensor.sequence_parallel for _, tensor in self._tensors
-        )
-        self.all_gather_policy = {
-            key: False for key, tensor in self._tensors if tensor.sequence_parallel
+
+    @property
+    def all_gather_policy(self) -> dict[str, bool]:
+        return {
+            key: False
+            for key, tensor in self._tensors.items()
+            if tensor.sequence_parallel
         }
 
     def make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors:
+        self._sealed = True
         return _allocate_intermediate_tensors(
-            self._tensors, batch_size, dtype, device, self.tp_size
+            self._tensors.items(), batch_size, dtype, device, self.tp_size
         )
 
     def prepare_inputs(
@@ -76,10 +121,16 @@ class PPTransportSchema:
         num_received_tokens: int | None = None,
     ) -> IntermediateTensors:
         """Use the same per-field views during profiling, capture and execution."""
+        self._sealed = True
         views = {}
         for key, buffer in buffers.items():
-            partition = self._input_partitions.get(key, 1)
-            num_rows = cdiv(num_tokens, partition)
+            binding = self._tensors.get(key)
+            sharded = binding is not None and binding.sequence_parallel
+            num_rows = (
+                binding.num_rows(num_tokens, self.tp_size)
+                if binding is not None
+                else num_tokens
+            )
             if num_rows > buffer.shape[0]:
                 raise ValueError(f"PP input exceeds buffer capacity: {key}")
             view = buffer[:num_rows]
@@ -87,10 +138,10 @@ class PPTransportSchema:
                 source = received[key]
                 copy_rows = (
                     num_rows
-                    if partition > 1 or num_received_tokens is None
+                    if sharded or num_received_tokens is None
                     else num_received_tokens
                 )
-                if partition > 1 and source.shape[0] != num_rows:
+                if sharded and source.shape[0] != num_rows:
                     raise ValueError(
                         f"SP PP stages must use matching padding for {key}"
                     )
@@ -100,8 +151,9 @@ class PPTransportSchema:
                         f"Invalid PP input shape for {key}: {source.shape}"
                     )
                 if (
-                    key in self._input_dtypes
-                    and source.dtype != self._input_dtypes[key]
+                    binding is not None
+                    and binding.dtype is not None
+                    and source.dtype != binding.dtype
                 ):
                     raise ValueError(
                         f"Invalid PP input dtype for {key}: {source.dtype}"
@@ -118,10 +170,10 @@ class PPTransportSchema:
     def make_intermediate_tensors(
         self, num_tokens: int, **tensors: torch.Tensor
     ) -> IntermediateTensors:
+        self._sealed = True
         output = {}
-        for key, binding in self._tensors:
-            partition = self.tp_size if binding.sequence_parallel else 1
-            num_rows = cdiv(num_tokens, partition)
+        for key, binding in self._tensors.items():
+            num_rows = binding.num_rows(num_tokens, self.tp_size)
             tensor = tensors[key]
             if tensor.shape != (num_rows, *binding.shape):
                 raise ValueError(f"Invalid PP output shape for {key}: {tensor.shape}")
@@ -140,9 +192,7 @@ def _allocate_intermediate_tensors(
         {
             key: torch.zeros(
                 (
-                    cdiv(num_tokens, tp_size)
-                    if binding.sequence_parallel
-                    else num_tokens,
+                    binding.num_rows(num_tokens, tp_size),
                     *binding.shape,
                 ),
                 dtype=binding.dtype or dtype,

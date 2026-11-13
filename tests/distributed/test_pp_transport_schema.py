@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -49,17 +51,22 @@ def _run_pp2_tp2_transport(rank: int, init_method: str):
                 },
                 tp_size=2,
             )
+            transport.register_tensor(
+                "downstream.route_state",
+                PPTransportTensor((4,), sequence_parallel=True),
+            )
             buffers = transport.make_empty_intermediate_tensors(
                 8, torch.float32, torch.device("cpu")
             )
             addresses = {key: tensor.data_ptr() for key, tensor in buffers.items()}
             for step, num_tokens in enumerate((5, 2)):
                 expected = {}
-                for index, key in enumerate(("hidden_states", "residual")):
-                    rows = (
-                        (num_tokens + 1) // 2 if key in sharded_fields else num_tokens
-                    )
-                    lane_offset = lane * 100 if key in sharded_fields else 0
+                for index, key in enumerate(
+                    ("hidden_states", "residual", "downstream.route_state")
+                ):
+                    sharded = key in sharded_fields or key == "downstream.route_state"
+                    rows = (num_tokens + 1) // 2 if sharded else num_tokens
+                    lane_offset = lane * 100 if sharded else 0
                     expected[key] = (
                         torch.arange(rows * 4, dtype=torch.float32).reshape(rows, 4)
                         + step * 1000
@@ -229,3 +236,70 @@ def test_legacy_factory_preserves_arbitrary_keys_and_buffer_overrides():
         rtol=0,
         atol=0,
     )
+
+
+@dataclass(frozen=True)
+class AlignedTensor(PPTransportTensor):
+    """Example downstream descriptor; no accelerator package is needed."""
+
+    alignment: int = 4
+
+    def num_rows(self, num_tokens: int, tp_size: int) -> int:
+        rows = super().num_rows(num_tokens, tp_size)
+        return (rows + self.alignment - 1) // self.alignment * self.alignment
+
+
+class DownstreamSchema(PPTransportSchema):
+    def __init__(self):
+        super().__init__({"hidden_states": PPTransportTensor((4,))}, tp_size=2)
+        self.register_tensor(
+            "downstream.route_state",
+            AlignedTensor((2,), dtype=torch.int32, sequence_parallel=True),
+        )
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_downstream_descriptor_drives_all_buffer_views(compiled):
+    transport = DownstreamSchema()
+    buffers = transport.make_empty_intermediate_tensors(
+        20, torch.float32, torch.device("cpu")
+    )
+    addresses = {key: value.data_ptr() for key, value in buffers.items()}
+    assert buffers["downstream.route_state"].shape == (12, 2)
+    assert transport.all_gather_policy == {"downstream.route_state": False}
+
+    def forward(hidden, route, num_tokens):
+        inputs = transport.prepare_inputs(
+            buffers,
+            num_tokens,
+            IntermediateTensors(
+                {"hidden_states": hidden, "downstream.route_state": route}
+            ),
+        )
+        return transport.make_intermediate_tensors(num_tokens, **inputs.tensors)
+
+    if compiled:
+        forward = torch.compile(forward, backend="eager", fullgraph=True)
+    for num_tokens, local_rows in ((9, 8), (2, 4)):
+        expected = {
+            "hidden_states": torch.full((num_tokens, 4), 3.0),
+            "downstream.route_state": torch.full((local_rows, 2), 7, dtype=torch.int32),
+        }
+        output = forward(*expected.values(), num_tokens)
+        captured = copy_intermediate_tensors(buffers, output)
+        torch.testing.assert_close(captured.tensors, expected, rtol=0, atol=0)
+        assert {key: value.data_ptr() for key, value in captured.items()} == addresses
+
+
+def test_registration_is_model_local_and_sealed_before_execution():
+    transport = DownstreamSchema()
+    other = PPTransportSchema()
+    assert not other.has_sharded_tensors
+    assert other.all_gather_policy == {}
+    with pytest.raises(ValueError, match="already registered"):
+        transport.register_tensor("downstream.route_state", PPTransportTensor((3,)))
+    with pytest.raises(ValueError, match="nonempty strings"):
+        transport.register_tensor("", PPTransportTensor((3,)))
+    transport.make_empty_intermediate_tensors(8, torch.float32, torch.device("cpu"))
+    with pytest.raises(RuntimeError, match="after buffer initialization"):
+        transport.register_tensor("late_field", PPTransportTensor((3,)))

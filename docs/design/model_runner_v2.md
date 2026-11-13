@@ -201,7 +201,7 @@ For draft models that advance positions, the fused path is enabled only when eve
 
 ## Per-field Pipeline Tensor Layouts
 
-Models can declare hidden-state and residual layouts through
+Models can register per-field tensor layouts through
 `vllm.distributed.pp_transport.schema`. This schema uses the existing tensor-dict
 channel and is separate from the `PPTransport` communication-backend interface.
 
@@ -249,6 +249,59 @@ intermediate keys and dtype-converting receive copies.
 The NVIDIA DeepSeek V4 implementation declares its multi-stream hidden state
 with shape `(hc_mult, hidden_size)`. It retains its existing full-tensor PP
 boundary; this declaration does not enable a new SP mode for DeepSeek V4.
+
+### Extending the schema downstream
+
+The extension points are independent of the communication backend:
+
+- `PPTransportSchemaInterface` defines the runner-facing allocation, input-view,
+  output and TP-policy contract. Downstream runners can consume this protocol;
+  a downstream implementation can also subclass `PPTransportSchema`.
+- `PPTransportTensor` describes one field. Subclasses can add device-specific
+  parameters and override `num_rows(num_tokens, tp_size)`. Allocation, input
+  preparation and output validation all use that method, so they agree on
+  padding and captured shapes.
+- `register_tensor(name, descriptor)` adds a field to one model's schema.
+  Names are open strings; `PPTransportDataType` only supplies built-in names.
+  Registration rejects duplicates and closes when buffers are allocated or
+  execution begins. No process-global registry or upstream enum edit is needed.
+
+For example, a downstream package such as vLLM Ascend can keep an additional
+integer tensor and its alignment parameter entirely in its own package:
+
+```python
+from dataclasses import dataclass
+
+from vllm.distributed.pp_transport.schema import PPTransportSchema, PPTransportTensor
+
+
+@dataclass(frozen=True)
+class AlignedTensor(PPTransportTensor):
+    alignment: int = 16
+
+    def num_rows(self, num_tokens: int, tp_size: int) -> int:
+        rows = super().num_rows(num_tokens, tp_size)
+        return (rows + self.alignment - 1) // self.alignment * self.alignment
+
+
+schema = PPTransportSchema({"hidden_states": PPTransportTensor((hidden_size,))})
+schema.register_tensor(
+    "ascend.routing_state", AlignedTensor((2,), dtype=torch.int32)
+)
+```
+
+Expose this schema and its buffer factory on the model as above, and include
+the registered tensor in intermediate outputs. A downstream schema subclass
+can perform these registrations in its constructor. Different model instances
+can use different descriptors for the same name without affecting each other.
+
+Fields remain token-major tensors with a fixed per-token shape and optional
+dtype. The sender must populate any descriptor-specific padded rows. Downstream
+runners reuse `prepare_inputs` for profiling, capture and execution and pass
+`all_gather_policy` to their tensor-dict channel. Device collectives remain the
+responsibility of the downstream communicator; this interface does not install
+an NPU runner, HCCL backend or new serialization format. NPU execution requires
+validation in the downstream project.
 
 ## Development Philosophy
 

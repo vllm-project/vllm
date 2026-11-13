@@ -51,7 +51,10 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     single_pp_stage,
 )
-from vllm.distributed.pp_transport.schema import PPTransportSchema
+from vllm.distributed.pp_transport.schema import (
+    PPTransportSchema,
+    PPTransportSchemaInterface,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -260,7 +263,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
-        self.pp_transport_schema = PPTransportSchema()
+        self.pp_transport_schema: PPTransportSchemaInterface = PPTransportSchema()
 
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
