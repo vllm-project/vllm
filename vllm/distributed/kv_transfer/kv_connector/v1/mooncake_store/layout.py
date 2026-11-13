@@ -9,7 +9,7 @@ import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
-from typing import NamedTuple, cast
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -505,11 +505,15 @@ class TPShardedStoreLayout(StoreLayout):
             )
             for shard_id in self.store_shard_ids
         }
-        # Indexed [chunk][slot]: a stacked array when every slot has the same
-        # number of segments, else nested lists of per-slot arrays.
-        self._chunk_addr_bases: np.ndarray | list[list[np.ndarray]] = []
-        self._chunk_block_strides: np.ndarray | list[list[np.ndarray]] = []
-        self._chunk_sizes: np.ndarray | list[list[np.ndarray]] = []
+        self._shard_slots = {
+            shard_id: slot for slot, shard_id in enumerate(self.store_shard_ids)
+        }
+        # Segments indexed `[chunk][slot][segment]`, zero-padded to the longest
+        # slot when slots differ in segment count (`_segment_counts` is set).
+        self._chunk_addr_bases = np.empty((0, 0, 0), dtype=np.uint64)
+        self._chunk_block_strides = self._chunk_addr_bases
+        self._chunk_sizes = self._chunk_addr_bases
+        self._segment_counts: np.ndarray | None = None
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
@@ -539,6 +543,7 @@ class TPShardedStoreLayout(StoreLayout):
         if np.any(
             (local_shards < 0)
             | (local_shards >= self.shards_per_rank)
+            | (range_indices < 0)
             | (range_indices >= len(self._range_metadata))
         ):
             raise ValueError("Store shard is not owned by this TP rank")
@@ -548,34 +553,16 @@ class TPShardedStoreLayout(StoreLayout):
         self,
         templates: Sequence[Sequence[tuple[list[int], list[int], list[int]]]],
     ) -> None:
-        if len({len(bases) for chunk in templates for bases, _, _ in chunk}) == 1:
-            self._chunk_addr_bases = np.asarray(
-                [[bases for bases, _, _ in chunk] for chunk in templates],
-                dtype=np.uint64,
-            )
-            self._chunk_block_strides = np.asarray(
-                [[strides for _, strides, _ in chunk] for chunk in templates],
-                dtype=np.uint64,
-            )
-            self._chunk_sizes = np.asarray(
-                [[sizes for _, _, sizes in chunk] for chunk in templates],
-                dtype=np.uint64,
-            )
-            return
-        # Layer ranges with different layer counts give slots of different
-        # segment counts.
-        self._chunk_addr_bases = [
-            [np.asarray(bases, dtype=np.uint64) for bases, _, _ in chunk]
-            for chunk in templates
-        ]
-        self._chunk_block_strides = [
-            [np.asarray(strides, dtype=np.uint64) for _, strides, _ in chunk]
-            for chunk in templates
-        ]
-        self._chunk_sizes = [
-            [np.asarray(sizes, dtype=np.uint64) for _, _, sizes in chunk]
-            for chunk in templates
-        ]
+        counts = np.asarray(
+            [[len(bases) for bases, _, _ in chunk] for chunk in templates],
+            dtype=np.int64,
+        )
+        width = int(counts.max())
+        segments = np.zeros((3, *counts.shape, width), dtype=np.uint64)
+        for (chunk, slot), count in np.ndenumerate(counts):
+            segments[:, chunk, slot, :count] = templates[chunk][slot]
+        self._chunk_addr_bases, self._chunk_block_strides, self._chunk_sizes = segments
+        self._segment_counts = None if np.all(counts == width) else counts
 
     def prepare_values(
         self,
@@ -589,7 +576,7 @@ class TPShardedStoreLayout(StoreLayout):
             raise ValueError("Each Store chunk must have one shard ID")
 
         # Small batches avoid NumPy indexing setup.
-        if len(chunks) > 16 and isinstance(self._chunk_addr_bases, np.ndarray):
+        if len(chunks) > 16:
             starts, ends = np.asarray(chunks, dtype=np.int64).T
             spans = ends - starts
             if np.any(starts % self.store_chunk_size) or np.any(
@@ -598,7 +585,7 @@ class TPShardedStoreLayout(StoreLayout):
                 raise ValueError("Invalid Store chunk boundary")
             block_indices, offsets = np.divmod(starts, self.block_size)
             chunk_indices = offsets // self.store_chunk_size
-            local_shards = self._slots(np.asarray(shard_ids, dtype=np.int64))
+            slots = self._slots(np.asarray(shard_ids, dtype=np.int64))
             if np.any(block_indices >= len(block_ids)):
                 raise ValueError("Store chunk has no local cache block")
             selected_blocks = np.fromiter(
@@ -606,15 +593,15 @@ class TPShardedStoreLayout(StoreLayout):
                 dtype=np.uint64,
                 count=len(chunks),
             )
-            bases = self._chunk_addr_bases[chunk_indices, local_shards]
-            strides = cast(np.ndarray, self._chunk_block_strides)[
-                chunk_indices, local_shards
-            ]
-            batch_sizes = cast(np.ndarray, self._chunk_sizes)[
-                chunk_indices, local_shards
-            ]
-            batch_addrs = bases + selected_blocks[:, None] * strides
-            return batch_addrs.tolist(), batch_sizes.tolist(), selected_blocks.tolist()
+            bases = self._chunk_addr_bases[chunk_indices, slots]
+            strides = self._chunk_block_strides[chunk_indices, slots]
+            batch_addrs = (bases + selected_blocks[:, None] * strides).tolist()
+            batch_sizes = self._chunk_sizes[chunk_indices, slots].tolist()
+            if self._segment_counts is not None:
+                counts = self._segment_counts[chunk_indices, slots].tolist()
+                batch_addrs = [a[:n] for a, n in zip(batch_addrs, counts, strict=True)]
+                batch_sizes = [s[:n] for s, n in zip(batch_sizes, counts, strict=True)]
+            return batch_addrs, batch_sizes, selected_blocks.tolist()
 
         addrs: list[list[int]] = []
         sizes: list[list[int]] = []
@@ -627,14 +614,21 @@ class TPShardedStoreLayout(StoreLayout):
                 raise ValueError("Invalid Store chunk boundary")
             block_index, block_offset = divmod(start, self.block_size)
             chunk_index = block_offset // self.store_chunk_size
-            local_shard = int(self._slots(np.asarray([shard_id]))[0])
+            slot = self._shard_slots.get(shard_id)
+            if slot is None:
+                raise ValueError("Store shard is not owned by this TP rank")
             if block_index >= len(block_ids):
                 raise ValueError("Store chunk has no local cache block")
             block_id = block_ids[block_index]
-            bases = self._chunk_addr_bases[chunk_index][local_shard]
-            strides = self._chunk_block_strides[chunk_index][local_shard]
+            count = (
+                None
+                if self._segment_counts is None
+                else self._segment_counts[chunk_index, slot]
+            )
+            bases = self._chunk_addr_bases[chunk_index, slot, :count]
+            strides = self._chunk_block_strides[chunk_index, slot, :count]
             addrs.append((bases + block_id * strides).tolist())
-            sizes.append(self._chunk_sizes[chunk_index][local_shard].tolist())
+            sizes.append(self._chunk_sizes[chunk_index, slot, :count].tolist())
             selected_block_ids.append(block_id)
         return addrs, sizes, selected_block_ids
 

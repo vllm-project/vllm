@@ -686,6 +686,10 @@ def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes():
         addrs, sizes, _ = layout.prepare_values(
             [(0, block_size)] * len(shard_ids), [0], shard_ids
         )
+        # Batches above 16 chunks take the vectorized path.
+        assert layout.prepare_values(
+            [(0, block_size)] * len(shard_ids) * 9, [0], shard_ids * 9
+        ) == (addrs * 9, sizes * 9, [0] * len(shard_ids) * 9)
         for shard_id, shard_addrs, shard_sizes in zip(
             shard_ids, addrs, sizes, strict=True
         ):
