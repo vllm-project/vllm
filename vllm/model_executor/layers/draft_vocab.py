@@ -398,6 +398,40 @@ def gather_rows_gemv(
     return out
 
 
+# Writes the listed and the picked logits into the `-inf` target-vocabulary
+# logits in one launch; columns `[0, num_listed)` of the grid are listed rows,
+# the next `num_picked` are picked rows.
+@triton.jit
+def _scatter_draft_logits_kernel(
+    out_ptr,
+    listed_ptr,
+    token_ids_ptr,
+    picked_ptr,
+    picks_ptr,
+    candidate_ids_ptr,
+    vocab_size,
+    num_listed,
+    num_picked,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    is_listed = cols < num_listed
+    is_picked = (cols >= num_listed) & (cols < num_listed + num_picked)
+    pcols = tl.where(is_picked, cols - num_listed, 0)
+    listed_id = tl.load(token_ids_ptr + cols, mask=is_listed, other=0)
+    listed = tl.load(listed_ptr + token * num_listed + cols, mask=is_listed, other=0.0)
+    pick = tl.load(picks_ptr + token * num_picked + pcols, mask=is_picked, other=0)
+    picked_id = tl.load(candidate_ids_ptr + pick, mask=is_picked, other=0)
+    picked = tl.load(picked_ptr + token * num_picked + pcols, mask=is_picked, other=0.0)
+    ids = tl.where(is_listed, listed_id, picked_id).to(tl.int64)
+    tl.store(
+        out_ptr + token * vocab_size + ids,
+        tl.where(is_listed, listed, picked),
+        mask=is_listed | is_picked,
+    )
+
+
 def scatter_draft_logits(
     vocab_size: int,
     listed: torch.Tensor,
@@ -409,11 +443,28 @@ def scatter_draft_logits(
     """Target-vocabulary logits, `-inf` outside the listed and picked rows.
 
     `out[n, token_ids] = listed[n]` and `out[n, candidate_ids[picks[n]]] =
-    picked[n]`.
+    picked[n]`, in one kernel on CUDA.
     """
     out = listed.new_full((listed.shape[0], vocab_size), float("-inf"))
-    out[:, token_ids] = listed
-    out.scatter_(1, candidate_ids[picks], picked)
+    if not listed.is_cuda:
+        out[:, token_ids] = listed
+        out.scatter_(1, candidate_ids[picks], picked)
+        return out
+    num_listed, num_picked = listed.shape[1], picked.shape[1]
+    block = 1024
+    grid = (listed.shape[0], triton.cdiv(num_listed + num_picked, block))
+    _scatter_draft_logits_kernel[grid](
+        out,
+        listed.contiguous(),
+        token_ids,
+        picked.contiguous(),
+        picks.contiguous(),
+        candidate_ids,
+        vocab_size,
+        num_listed,
+        num_picked,
+        BLOCK=block,
+    )
     return out
 
 
