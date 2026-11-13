@@ -14,6 +14,7 @@ proposal and a verification plan.
 | [provenance.json](provenance.json) | code versions measured, SHA256 of the original files, changes from the historical runner |
 | [results/20261112.json](results/20261112.json) | November measurements, output hashes, memory observations and excluded runs |
 | [results/20261112-latest.json](results/20261112-latest.json) | updated main comparison, rows/concurrency sweep and actual long-input validation |
+| [results/20261113-fi074.json](results/20261113-fi074.json) | refreshed main, matching native wheel and FlashInfer 0.7.4 validation |
 | [results/20261112-input-manifest.json](results/20261112-input-manifest.json) | frozen long-input source/tokenizer hashes, seeds and token positions |
 | [LICENSE.prompts](LICENSE.prompts) | MIT license of the prompt source |
 
@@ -28,7 +29,154 @@ two of its existing sanity tasks. This measures fix-proposal text
 generation only; the code-editing and official-grading quality checks are a
 separate procedure.
 
-## Latest main integration and long-input validation
+## Main refresh with FlashInfer 0.7.4
+
+The final serving runtime is `87535c55bf698b71f9b6d4e6b38b024e958da4e5`,
+incorporating main `c07d58dc82d75f7d1a947b3264b460384ec3e18d` (latest
+snapshot checked at 2026-11-13 01:56 UTC). Its separate GPU suite and
+fresh main/PR comparison are recorded below.
+
+The broader row/concurrency, MTP and long-input campaign runs on
+`40f9048f45cf1d39a66a4d067a5dd45e97a97c21`, incorporating main
+`3bc1d31306e9a10fce59846f888fe106f274bc8c`. That snapshot adds
+30 upstream commits after the earlier final snapshot below, including the
+FlashInfer 0.7.4 requirement, NVFP4 activation-fusion contracts and MTP
+changes. This campaign uses the public nightly wheel from
+`b70414673330f969f07bd6d0f214fd536e6a7dd1`; its C++/CUDA build inputs
+and dependency declarations match the tested main. Both PR and actual
+main use that same wheel and FlashInfer **0.7.4** in a separate uv
+environment. The other 406 installed dependency versions are unchanged.
+Torch remains 2.14.0+cu132, Triton 3.8.0, Transformers 5.22.0, xgrammar
+0.2.9 and NVIDIA Cutlass DSL 4.8.0.
+
+The broader campaign's pytest results are **208 passed, 12 skipped,
+1 failed**; the two benchmark-client tests also pass. The 12 skips are
+the existing SM10x-only CuTeDSL/Torch NVFP4 cases on SM120. The failed
+configuration test tries to
+construct four-GPU parallelism before its intended assertion on this
+one-GPU machine. The same unmodified test fails at the same constructor
+on actual upstream main. No test, tolerance, GPU count or skip marker is
+changed. The result artifact retains the failure and main control.
+Coverage includes the original 164 pool/configuration/loader/worker/
+tokenizer cases, activation contracts, Qwen MTP configuration/remapping,
+and real NVFP4 tensor-versus-prequantized-input kernel checks.
+
+Whole-repository manual pre-commit, including mypy and CI test-tethering,
+passes on Linux. Selective pip-compile has no changed PR inputs (six hooks
+skip). Strict MkDocs passes in **196.52 seconds**, using the RTD Ubuntu
+22.04 / Python 3.12 setup, hash-locked docs requirements, no Torch, and a
+clean Git-tracked checkout. The existing decord wheel's platform metadata
+warning occurs in both runtime environments; its runtime import succeeds,
+and its metadata is preserved.
+
+This campaign repeats the frozen request pair, four API checks, row and
+concurrency measurements, MTP checks and official-YaRN long retrieval.
+The source/tokenizer hashes and seeds remain those in the existing input
+manifest. The earlier campaigns below keep their original revisions and
+dependencies; their results are historical rather than reattributed to
+this runtime. Rust frontend, ROCm, SM90-specific execution, TP=2 and GLM
+serving are not covered by this single-GPU Python-server campaign.
+
+### Final main snapshot check
+
+Main advanced by three more commits during the campaign: a cuBLAS
+workspace cleanup at MRV2 shutdown, a ROCm AITER revert and an MRV2
+structured-output draft handoff improvement. They are
+included in final PR runtime `87535c55bf698b71f9b6d4e6b38b024e958da4e5`,
+whose main parent is `c07d58dc82d75f7d1a947b3264b460384ec3e18d`.
+The expanded GPU suite was rerun on this runtime with
+209 passes, 12 architecture skips and one four-GPU configuration
+failure; both benchmark-client tests pass. The extra passing CUDA test
+exercises the upstream draft-handoff change. The source and build-input
+checks are recorded separately from the original campaign.
+
+Fresh servers then repeat the same 48 GiB pair and four API checks:
+
+| Source/configuration | Decode tok/s | TTFT | Output tokens |
+| --- | ---: | ---: | ---: |
+| Main c07d58dc82, B12X A16 / UVA34 | 13.1477 | 9.282 s | 1838 |
+| PR 87535c55bf, Marlin pool N=258 / staging OFF | 64.3164 | 7.113 s | 1519 |
+
+This final snapshot gives **4.89x** the main decode throughput at the constrained budget.
+All four API checks pass in each arm. The long, row-sweep, MTP and
+full-card results below retain their actual 40f9048f45 / 3bc1d31306
+runtime versions; they are not relabeled as final-head measurements.
+
+Each final arm additionally runs the existing fixed-output protocol:
+one 128-token warmup, then three 256-token c1 samples, ignoring EOS
+for timing. Prompt order is identical; continuations can still differ.
+Main median [range]: **13.15 [13.15–13.17] tok/s**;
+pool: **71.83 [70.53–76.05] tok/s**.
+These timing-only requests are separate from the normal-stop pair
+and four API correctness checks.
+
+### Refreshed serving measurements
+
+The short comparison uses a 48 GiB available-memory budget, 768 MiB KV,
+4096 context, one slot, 512-token chunks, MTP off and FULL_DECODE_ONLY
+graphs in every arm. Each row is one fresh server and the original
+1070-token warmup / 753-token measured request, capped at 2048 output
+tokens with normal stopping. All four API checks pass in every arm.
+These compare serving configurations, including their backend/offload
+choices, with differing generated continuations; they do not isolate a
+single implementation toggle or establish variation across restarts.
+
+| Source/configuration | Decode tok/s | TTFT | Output tokens |
+| --- | ---: | ---: | ---: |
+| Main, Marlin / UVA32 | 9.2721 | 10.560 s | 1589 |
+| Main, B12X A16 / UVA34 | 13.1490 | 9.349 s | 1349 |
+| PR, Marlin pool N=258 / staging OFF | 65.2440 | 7.065 s | 1141 |
+
+The pool is **4.96x** the fastest main configuration tested at this budget.
+
+A separate full-card main run uses B12X A16 with all expert weights on
+the GPU, no expert CPU offload, 8 GiB KV, maximum context 128,512, two
+slots and 4608-token chunks. Engram disk offloading stays enabled.
+The original measured request gives **107.85 tok/s** (TTFT 0.141 s).
+Three fixed-output samples give c1 **107.59 [106.44–108.03]**
+and aggregate c2 **187.59 [186.59–188.34]** tok/s.
+All nine retrieval requests at 12.5K / 81.6K / 128K pass (45/45
+bindings), as do all four API checks. This is a different GPU-memory,
+KV and batching condition from the 48 GiB comparison.
+
+The row sweep uses a 64 GiB budget, automatic KV sizing, maximum
+context 128,512, two slots, 4608-token chunks, no prefix caching,
+staging off and MTP off. Each concurrency has three 256-output-token
+samples after a 128-token warmup. c2 is aggregate decode-window
+throughput; end-to-end throughput is recorded separately.
+
+| Initial rows/layer | Planner KV tokens | KV GiB | c1 median [range] tok/s | c2 aggregate median [range] tok/s | Retrieval bindings |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 64 | 1,676,633 | 43.62 | 23.53 [22.84–26.87] | 25.11 [24.12–25.89] | 15/15 |
+| 128 | 1,362,824 | 35.71 | 41.23 [40.27–44.81] | 44.56 [43.00–46.63] | 15/15 |
+| 192 | 1,050,510 | 27.80 | 62.32 [57.85–66.18] | 73.76 [72.07–73.82] | 15/15 |
+
+Planner capacity is not a test at that input length. The separate
+refreshed long run uses N=192, staging on, 64 GiB, fixed 24 GiB KV,
+two slots, batch 4608, no prefix caching and the official YaRN4 settings
+shown below. YaRN applies at every tested length in this run.
+
+| Actual input tokens | Requests | Correct bindings | TTFT median [range] |
+| --- | ---: | ---: | ---: |
+| 12,500 | 3 | 15/15 | 17.06 [17.00–17.26] s |
+| 81,600 | 3 | 15/15 | 101.86 [101.58–102.39] s |
+| 128,000 | 3 | 15/15 | 158.18 [157.87–158.71] s |
+| 1,000,000 | 1 | 5/5 | 1232.90 [1232.90–1232.90] s |
+
+Two concurrent 12,500-token requests also pass (10/10 bindings). The
+million-token result is one frozen-input retrieval sample, with actual
+server usage, all five exact bindings, normal stop and complete stream
+required. It is not a general accuracy or 1M decode-speed benchmark.
+The earlier controlled staging ON/OFF comparison retains its original
+source revisions and dependencies below.
+
+The MTP functional run uses N=192, staging off, three Triton draft
+tokens, 1.5 GiB KV and INFO logging. All four API checks pass;
+counters record 448 drafts, 1344 draft tokens and
+1105 accepted tokens. These establish active speculation on the smoke set,
+rather than a representative acceptance-rate or speed result.
+
+## Earlier main integration and long-input validation
 
 The final integration merges main
 `3f1ebac297fb8791a8fa8ee55e635e7fa93ddaec` in runtime commit
