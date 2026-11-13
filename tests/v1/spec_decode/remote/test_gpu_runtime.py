@@ -478,6 +478,50 @@ def test_standalone_capacity_reaches_flex_attention_metadata_builder(num_blocks)
     )
 
 
+@pytest.mark.parametrize("non_causal", [False, True])
+def test_standalone_mla_checks_live_causality_before_assigning_capacity(non_causal):
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
+    from vllm.v1.attention.backends.mla.prefill.cpu_sdpa import (
+        CPUSDPAMLAPrefillBackend,
+    )
+    from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_layer_configs
+
+    config = make_config()
+    with set_current_vllm_config(config):
+        attention = MLAAttention(
+            num_heads=2,
+            scale=192**-0.5,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            kv_b_proj=ColumnParallelLinear(512, 512, bias=False),
+            cache_config=config.cache_config,
+            prefix="draft.layers.0.self_attn",
+            attn_backend=CPUMLABackend,
+            prefill_backend_cls=CPUSDPAMLAPrefillBackend,
+            non_causal_multi_token_decode=non_causal,
+        )
+        layer_config = get_kv_cache_layer_configs(config)[attention.layer_name]
+        assert layer_config.manager_cls is FullAttentionManager
+        budget = 3 * layer_config.spec.page_size_bytes
+        if non_causal:
+            with pytest.raises(ValueError, match="causal token-addressed KV"):
+                initialize_standalone_kv_cache_config(config, budget)
+            assert config.cache_config.num_gpu_blocks is None
+        else:
+            cache = initialize_standalone_kv_cache_config(config, budget)
+            assert cache.num_blocks == config.cache_config.num_gpu_blocks == 3
+            assert cache.kv_cache_groups[0].kv_cache_specs == {
+                attention.layer_name: layer_config.spec
+            }
+
+
 def test_standalone_sliding_window_tables_retain_full_context_capacity(monkeypatch):
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
     from vllm.v1.kv_cache_interface import AttentionSpec

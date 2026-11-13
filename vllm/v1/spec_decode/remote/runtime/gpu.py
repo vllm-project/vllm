@@ -64,6 +64,11 @@ def initialize_standalone_kv_cache_config(
         vllm_config,
         AttentionLayerBase,  # type: ignore[type-abstract]
     )
+    if any(
+        getattr(layer, "non_causal_multi_token_decode", False)
+        for layer in layers.values()
+    ):
+        raise ValueError("standalone runtime requires causal token-addressed KV")
     layouts = get_supported_kv_cache_layouts(
         layer.get_attn_backend() for layer in layers.values()
     )
