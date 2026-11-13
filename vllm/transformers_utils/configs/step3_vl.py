@@ -130,7 +130,7 @@ class Step3TextConfig(PreTrainedConfig):
         self.moe_intermediate_size = moe_intermediate_size
         self.moe_num_experts = moe_num_experts
         self.moe_top_k = moe_top_k
-        self.rope_parameters = rope_parameters
+        self.rope_parameters = rope_parameters or {}
         self.max_position_embedding = max_position_embedding
         self.share_expert_dim = share_expert_dim
         self.share_q_dim = share_q_dim
