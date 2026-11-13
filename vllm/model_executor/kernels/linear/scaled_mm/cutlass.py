@@ -46,6 +46,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
         config = self.config
+        weight_group_shape = config.weight_quant_key.scale.group_shape
         # WEIGHT
         # Cutlass kernels need transposed weight.
         weight = getattr(layer, w_q_name)
@@ -61,7 +62,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, w_s_name)
-        if is_fused_module and not config.is_channelwise:
+        if is_fused_module and not weight_group_shape.is_per_channel():
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
@@ -70,10 +71,10 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         )
 
         # INPUT SCALE
-        if config.is_static_input_scheme:
+        if config.activation_quant_key.scale.static:
             input_scale = getattr(layer, i_s_name)
 
-            if config.input_symmetric:
+            if config.activation_quant_key.symmetric:
                 replace_parameter(
                     layer,
                     i_s_name,
@@ -105,10 +106,10 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # For more details, see
         # csrc/quantization/w8a8/cutlass/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
-        if not config.input_symmetric:
+        if not config.activation_quant_key.symmetric:
             weight = getattr(layer, w_q_name)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
-            if config.is_static_input_scheme:
+            if config.activation_quant_key.scale.static:
                 # cutlass_w8a8 requires azp to be folded into azp_adj
                 # in the per-tensor case
                 azp_adj = getattr(layer, i_zp_name) * azp_adj

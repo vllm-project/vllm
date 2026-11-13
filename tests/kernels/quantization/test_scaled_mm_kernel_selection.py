@@ -36,6 +36,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kInt8DynamicTokenAsym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorAsym,
+    kInt8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
 
@@ -170,13 +175,41 @@ def test_aiter_int8_kernel_can_implement_scale_layouts(
     is_static_input_scheme, is_channelwise, is_fused_module, expected
 ):
     config = Int8ScaledMMLinearLayerConfig(
-        is_static_input_scheme=is_static_input_scheme,
-        is_channelwise=is_channelwise,
-        input_symmetric=True,
+        weight_quant_key=(
+            kInt8StaticChannelSym if is_channelwise else kInt8StaticTensorSym
+        ),
+        activation_quant_key=(
+            kInt8StaticTensorSym if is_static_input_scheme else kInt8DynamicTokenSym
+        ),
         is_fused_module=is_fused_module,
     )
     can_impl, _ = AiterInt8ScaledMMLinearKernel.can_implement(config)
     assert can_impl is expected
+
+
+@pytest.mark.parametrize("is_fused_module", [True, False])
+@pytest.mark.parametrize("is_channelwise", [True, False])
+@pytest.mark.parametrize("is_static_input_scheme", [True, False])
+def test_aiter_int8_kernel_rejects_asymmetric_activations(
+    is_static_input_scheme, is_channelwise, is_fused_module
+):
+    """AITER supports symmetric activation quantization only.
+
+    Guards the input_symmetric -> activation_quant_key.symmetric mapping: an
+    asymmetric activation key must be rejected whatever the weight layout is.
+    """
+    config = Int8ScaledMMLinearLayerConfig(
+        weight_quant_key=(
+            kInt8StaticChannelSym if is_channelwise else kInt8StaticTensorSym
+        ),
+        activation_quant_key=(
+            kInt8StaticTensorAsym if is_static_input_scheme else kInt8DynamicTokenAsym
+        ),
+        is_fused_module=is_fused_module,
+    )
+    can_impl, reason = AiterInt8ScaledMMLinearKernel.can_implement(config)
+    assert can_impl is False
+    assert reason is not None
 
 
 def _make_compressed_tensors_per_tensor_int8_scheme():
@@ -273,14 +306,12 @@ def test_cpu_kernel_accepts_all_configs():
     """Test that CPUInt8ScaledMMLinearKernel accepts all config combinations."""
     configs = [
         Int8ScaledMMLinearLayerConfig(
-            is_channelwise=False,
-            is_static_input_scheme=True,
-            input_symmetric=True,
+            weight_quant_key=kInt8StaticTensorSym,
+            activation_quant_key=kInt8StaticTensorSym,
         ),
         Int8ScaledMMLinearLayerConfig(
-            is_channelwise=True,
-            is_static_input_scheme=False,
-            input_symmetric=False,
+            weight_quant_key=kInt8StaticChannelSym,
+            activation_quant_key=kInt8DynamicTokenAsym,
         ),
     ]
 
@@ -309,9 +340,8 @@ def test_cpu_sgl_int8_linear_accepts_3d_input():
         torch.randn(N, dtype=torch.bfloat16), requires_grad=False
     )
     config = Int8ScaledMMLinearLayerConfig(
-        is_channelwise=True,
-        is_static_input_scheme=False,
-        input_symmetric=True,
+        weight_quant_key=kInt8StaticChannelSym,
+        activation_quant_key=kInt8DynamicTokenSym,
     )
     kernel = CPUInt8ScaledMMLinearKernel(
         config,
