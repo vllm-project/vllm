@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash specialized decode: a decode executor over the stock backbone for
-GB300 TP4, enabled by `additional_config={"decode_backend": "latency_specialized"}`.
+GB300 TP4, enabled by default; `decode_backend=stock` disables it.
 """
 
 from dataclasses import dataclass
@@ -19,15 +19,20 @@ class DecodeConfig:
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     """The deployment's specialized decode settings, None for the stock decode.
-    Raises when the specialized decode is requested for an unsupported deployment."""
+    Auto falls back for unsupported deployments; latency_specialized raises."""
     extra = vllm_config.additional_config
-    backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
-    if backend == "auto":
+    extra = extra if isinstance(extra, dict) else {}
+    backend = extra.get("decode_backend", "auto")
+    if backend == "stock":
         return None
-    if backend != "latency_specialized":
-        raise ValueError("Supported decode_backend values are auto/latency_specialized")
+    if backend not in ("auto", "latency_specialized"):
+        raise ValueError(
+            "Supported decode_backend values are auto/stock/latency_specialized"
+        )
     reasons = unsupported(vllm_config)
     if reasons:
+        if backend == "auto":
+            return None
         raise ValueError(
             "GLM-5.3-Flash specialized decode does not support " + "; ".join(reasons)
         )
@@ -85,8 +90,14 @@ def unsupported(vllm_config) -> list[str]:
 
     from vllm.config import CompilationMode, CUDAGraphMode
     from vllm.platforms import current_platform
+    from vllm.utils.import_utils import has_cutedsl
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     parallel, spec = vllm_config.parallel_config, vllm_config.speculative_config
+    model, cache = vllm_config.model_config, vllm_config.cache_config
+    quant = vllm_config.quant_config
+    attention = vllm_config.attention_config
+    backend = attention.backend_per_kind.get("mla_attention", attention.backend)
     text = vllm_config.model_config.hf_text_config
     geometry = [
         f"{name}={getattr(text, name, None)} (expects {value})"
@@ -97,6 +108,15 @@ def unsupported(vllm_config) -> list[str]:
     graphs = compilation.cudagraph_mode
     checks = (
         (not current_platform.is_device_capability_family(100), "this GPU (SM100/103)"),
+        (not has_cutedsl(), "missing CuTe DSL"),
+        (model.dtype != torch.bfloat16, "activation dtypes other than BF16"),
+        (
+            model.quantization != "fp8"
+            or quant is None
+            or not quant.is_checkpoint_fp8_serialized
+            or quant.weight_block_size != [128, 128],
+            "checkpoints other than native block-FP8 (128x128)",
+        ),
         (bool(geometry), "this model geometry: " + ", ".join(geometry)),
         (not getattr(text, "mhc", False), "checkpoints without mHC"),
         (parallel.tensor_parallel_size != 4, "TP other than 4"),
@@ -117,9 +137,15 @@ def unsupported(vllm_config) -> list[str]:
             "deployments without FULL decode CUDA graphs (e.g. enforce-eager)",
         ),
         (
-            not str(vllm_config.cache_config.cache_dtype).startswith("fp8"),
-            "KV cache dtypes other than FP8",
+            cache.cache_dtype not in ("fp8", "fp8_e4m3"),
+            "KV cache dtypes other than FP8 E4M3",
         ),
+        (bool(cache.kv_cache_dtype_skip_layers), "mixed KV cache dtypes"),
+        (
+            backend not in (None, AttentionBackendEnum.FLASHINFER_MLA_SPARSE),
+            "attention backends other than FLASHINFER_MLA_SPARSE",
+        ),
+        (attention.hisparse_config is not None, "HiSparse"),
         (spec is not None and spec.method != "mtp", "speculative methods but MTP"),
         (
             spec is not None and spec.num_speculative_tokens > 7,

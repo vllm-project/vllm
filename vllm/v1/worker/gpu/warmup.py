@@ -157,17 +157,21 @@ def run_mixed_prefill_decode_warmup(
     requesting prompt_logprobs on the prefill requests.
 
     Prefill tokens beyond what one request can hold (max_model_len - 1) are
-    split across further prefill requests, up to max_num_reqs. A runner
-    limited to one request runs the prefill alone if prefill_only_fallback.
+    split across further prefill requests, up to max_num_reqs. If
+    prefill_only_fallback, the prefills run alone when request slots rather
+    than tokens limit them, including on a runner limited to one request.
     """
     with_decode = model_runner.max_num_reqs >= 2
     if model_runner.is_pooling_model or not (with_decode or prefill_only_fallback):
         return False
 
+    max_prefill_len = model_runner.max_model_len - 1
+    if with_decode and prefill_only_fallback:
+        # The decode request takes a slot a further prefill could fill.
+        with_decode = cdiv(num_tokens - 1, max_prefill_len) < model_runner.max_num_reqs
     num_decode_reqs = int(with_decode)
     # A decode request schedules one token.
     decode_scheduled_tokens = num_decode_reqs
-    max_prefill_len = model_runner.max_model_len - 1
     num_prefill_reqs = min(
         cdiv(num_tokens - decode_scheduled_tokens, max_prefill_len),
         model_runner.max_num_reqs - num_decode_reqs,
@@ -434,7 +438,7 @@ def run_kv_cache_sizing_warmup(
     if (
         prompt_logprobs is not None
         and max_prompt_len < max_num_tokens
-        and model_runner.max_num_reqs > 2
+        and model_runner.max_num_reqs > 1
     ):
         run_mixed_prefill_decode_warmup(
             model_runner,
