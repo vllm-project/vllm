@@ -723,6 +723,8 @@ class CompilationConfig:
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
     This is the most performant mode for most models and is the default.
+    A model with persistent state defaults to NONE instead: the runner's
+    cudagraphs are not yet validated with it.
 
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the

@@ -9020,3 +9020,809 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+# Persistent state: StateScheduler over a state-only layout planned by the real
+# planner, with max_num_seqs slots plus the null page. See
+# docs/design/persistent_state.md for the design.
+
+
+def _state_scheduler(*, max_num_seqs=2, log_stats=False):
+    from tests.v1.core.utils import (
+        create_state_spec,
+        get_kv_cache_configs,
+        state_layer,
+    )
+    from vllm.v1.core.sched.state_scheduler import StateScheduler
+
+    base = create_scheduler(max_num_seqs=max_num_seqs, max_model_len=32)
+    base.vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    spec = create_state_spec()
+    config = get_kv_cache_configs(
+        base.vllm_config,
+        [{"state": state_layer(spec)}],
+        [(max_num_seqs + 1) * spec.page_size_bytes],
+    )[0]
+    return StateScheduler(
+        vllm_config=base.vllm_config,
+        kv_cache_config=config,
+        block_size=1,
+        log_stats=log_stats,
+        structured_output_manager=base.structured_output_manager,
+    )
+
+
+def _state_manager(scheduler):
+    return scheduler.kv_cache_manager.coordinator.state_managers["state"]
+
+
+def _state_output(step, *, sampled=42, acknowledge=True):
+    """The worker's output for `step`: one sampled token per scheduled request
+    and, unless `acknowledge` is False, the completion covering every handle and
+    cleanup the step carried."""
+    from copy import deepcopy
+
+    from vllm.v1.kv_cache_interface import StateCompletion
+
+    ids = list(step.num_scheduled_tokens)
+    return ModelRunnerOutput(
+        req_ids=ids,
+        sampled_token_ids=[[sampled] for _ in ids],
+        state_completion=(
+            StateCompletion(
+                step.state_step_seq,
+                deepcopy(step.state_slot_handles),
+                deepcopy(step.state_cleanup_handles),
+            )
+            if acknowledge
+            else None
+        ),
+    )
+
+
+def _stream_input(
+    request_id="stream", tokens=(1, 2, 3), mm_features=None, client_index=0, **params
+):
+    """One input of an ordinary (never admitted) resumable request."""
+    sampling_params = SamplingParams(max_tokens=params.pop("max_tokens", 4), **params)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=list(tokens),
+        sampling_params=sampling_params,
+        pooling_params=None,
+        mm_features=mm_features,
+        client_index=client_index,
+        resumable=True,
+    )
+
+
+def _finished_outputs(outputs, request_id):
+    return [
+        output
+        for batch in outputs.values()
+        for output in batch.outputs
+        if output.request_id == request_id and output.finish_reason is not None
+    ]
+
+
+def _scheduler_classes():
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+    from vllm.v1.core.sched.state_scheduler import StateScheduler
+
+    class CustomStateScheduler(StateScheduler):
+        pass
+
+    class AsyncStateScheduler(StateScheduler, AsyncScheduler):
+        pass
+
+    return {
+        "default": (None, StateScheduler),
+        "custom": (CustomStateScheduler, CustomStateScheduler),
+        "plain": (Scheduler, None),
+        "diffusion": (DiffusionScheduler, None),
+        "async": (AsyncStateScheduler, None),
+    }
+
+
+@pytest.mark.parametrize("kind", ["default", "custom", "plain", "diffusion", "async"])
+def test_state_layout_selects_state_scheduler(kind):
+    """A persistent-state layout selects StateScheduler, or a configured
+    subclass of it that is not an async scheduler; any other configured class
+    is refused."""
+    from vllm.v1.core.sched.state_scheduler import get_scheduler_cls
+
+    scheduler_cls, expected = _scheduler_classes()[kind]
+    scheduler = _state_scheduler()
+    scheduler_config = scheduler.vllm_config.scheduler_config
+    scheduler_config.scheduler_cls = scheduler_cls
+    if expected is None:
+        with pytest.raises(ValueError, match="StateScheduler subclass"):
+            get_scheduler_cls(scheduler_config, scheduler.kv_cache_config)
+    else:
+        assert get_scheduler_cls(scheduler_config, scheduler.kv_cache_config) is (
+            expected
+        )
+
+
+def test_attention_layout_keeps_configured_scheduler_not_state_scheduler():
+    from vllm.v1.core.sched.state_scheduler import StateScheduler, get_scheduler_cls
+
+    scheduler = create_scheduler()
+    assert (
+        get_scheduler_cls(
+            scheduler.vllm_config.scheduler_config, scheduler.kv_cache_config
+        )
+        is Scheduler
+    )
+    with pytest.raises(ValueError, match="persistent-state KV cache"):
+        StateScheduler(
+            vllm_config=scheduler.vllm_config,
+            kv_cache_config=scheduler.kv_cache_config,
+            block_size=16,
+            structured_output_manager=scheduler.structured_output_manager,
+        )
+
+
+def test_state_abort_while_scheduled_holds_slot_until_fence():
+    """An aborted request's slot stays occupied until a completion covers its
+    last scheduled step and a later cleanup; a waiting request gets the slot
+    only then, under a newer generation, and the peer's handle never changes."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    a, b, c = create_requests(num_requests=3, num_tokens=4)
+    for request in (a, b):
+        scheduler.add_request(request)
+    step = scheduler.schedule()
+    old = manager.get(a.request_id)
+    scheduler.finish_requests(a.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.add_request(c)
+    assert manager.num_free_slots == 0
+    scheduler.update_from_output(step, _state_output(step))
+    cleanup = scheduler.schedule()
+    assert c.request_id not in cleanup.num_scheduled_tokens
+    assert cleanup.state_cleanup_handles == {a.request_id: {"state": old}}
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    replacement = scheduler.schedule()
+    assert c.request_id in replacement.num_scheduled_tokens
+    new = manager.get(c.request_id)
+    assert new.slot == old.slot and new.generation > old.generation
+    assert manager.get(b.request_id) == step.state_slot_handles[b.request_id]["state"]
+
+
+def test_state_stop_retires_slot_until_cleanup_is_acknowledged():
+    """A request that finishes on a stop token releases its slot only after
+    the cleanup step's completion."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    (request,) = create_requests(num_requests=1, num_tokens=4, stop_token_ids=[42])
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert manager.get(request.request_id) is None
+    assert manager.num_free_slots == 1
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+
+
+def test_state_slot_never_scheduled_releases_at_once():
+    """Slot-manager unit test: a slot whose request was never scheduled
+    returns to the pool at once, with no cleanup step. Every slot is
+    allocated by a schedule, so the slot is allocated through the manager
+    here."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    (request,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(request)
+    manager.allocate_new_blocks(request.request_id, 0, 0)
+    assert manager.get(request.request_id) is not None
+    assert manager.num_free_slots == 1
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert manager.num_free_slots == 2
+    assert not scheduler.state_retirements
+
+
+def test_state_step_without_its_completion_fails_only_that_request():
+    """A completion that omits one scheduled handle finishes that request with
+    an error and leaves its slot quarantined; the acknowledged peer runs on."""
+    from vllm.v1.kv_cache_interface import StateCompletion
+
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    a, b = create_requests(num_requests=2, num_tokens=4)
+    scheduler.add_request(a)
+    scheduler.add_request(b)
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.state_completion = StateCompletion(
+        step.state_step_seq, {b.request_id: step.state_slot_handles[b.request_id]}
+    )
+    outputs = scheduler.update_from_output(step, output)
+    assert a.status == RequestStatus.FINISHED_ERROR
+    assert a.num_output_tokens == 0
+    assert b.status == RequestStatus.RUNNING
+    assert b.num_output_tokens == 1
+    assert [o.finish_reason for o in _finished_outputs(outputs, a.request_id)] == [
+        FinishReason.ERROR
+    ]
+    scheduler.finish_requests(b.request_id, RequestStatus.FINISHED_ABORTED)
+    assert manager.num_free_slots == 0
+    assert len(scheduler.state_retirements) == 2
+
+
+def test_state_model_failure_ends_only_the_matching_live_handle():
+    """A failure the worker reports ends that request with an error; a late
+    replay of the same completion cannot touch the slot's next generation."""
+    from dataclasses import replace
+
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    failed, survivor = create_requests(num_requests=2, num_tokens=1)
+    for request in (failed, survivor):
+        scheduler.add_request(request)
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.state_completion = replace(
+        output.state_completion,
+        failed_req_ids=frozenset({failed.request_id, "unknown"}),
+    )
+    outputs = scheduler.update_from_output(step, output)
+    assert failed.request_id not in scheduler.requests
+    assert survivor.output_token_ids
+    assert [o.finish_reason for o in _finished_outputs(outputs, failed.request_id)] == [
+        FinishReason.ERROR
+    ]
+    old = step.state_slot_handles[failed.request_id]["state"]
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    (again,) = create_requests(num_requests=1, num_tokens=1, req_ids=["again"])
+    scheduler.add_request(again)
+    scheduler.schedule()
+    replacement = manager.get("again")
+    assert replacement.slot == old.slot and replacement.generation > old.generation
+    scheduler.update_from_output(step, output)
+    assert manager.get("again") == replacement
+    assert again.status == RequestStatus.RUNNING
+
+
+def test_state_completion_of_an_older_generation_is_ignored():
+    """Late progress from a retired generation cannot change the request that
+    now holds the slot."""
+    scheduler = _state_scheduler()
+    (request,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    (replacement,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(replacement)
+    cleanup = scheduler.schedule()
+    assert replacement.request_id not in cleanup.num_scheduled_tokens
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    assert replacement.status == RequestStatus.RUNNING
+    assert replacement.num_output_tokens == 0
+
+
+@pytest.mark.parametrize("wrong_ack", ["missing", "generation", "session", "step"])
+def test_state_cleanup_miss_is_retried_once_without_a_new_request(wrong_ack):
+    """A cleanup the worker does not acknowledge, or acknowledges for another
+    generation, request or step, quarantines the slot; the next step resends
+    the same cleanup and its acknowledgment releases the slot."""
+    from dataclasses import replace
+
+    from vllm.v1.kv_cache_interface import StateCompletion
+
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    (request,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    cleanup = scheduler.schedule()
+    handle = cleanup.state_cleanup_handles[request.request_id]["state"]
+    output = _state_output(cleanup, acknowledge=False)
+    handles = {request.request_id: {"state": handle}}
+    seq = cleanup.state_step_seq
+    if wrong_ack == "generation":
+        handles[request.request_id]["state"] = replace(handle, generation=99)
+    elif wrong_ack == "session":
+        handles = {"other": {"state": handle}}
+    elif wrong_ack == "step":
+        seq -= 1
+    if wrong_ack != "missing":
+        output.state_completion = StateCompletion(seq, {}, handles)
+    scheduler.update_from_output(cleanup, output)
+    assert manager.num_free_slots == 1
+    assert scheduler.has_requests()
+    retry = scheduler.schedule()
+    assert not retry.num_scheduled_tokens
+    assert retry.state_cleanup_handles == cleanup.state_cleanup_handles
+    scheduler.update_from_output(retry, _state_output(retry))
+    assert manager.num_free_slots == 2
+    assert not scheduler.has_requests()
+
+
+def test_state_cleanup_second_miss_raises():
+    """When the retried cleanup is not acknowledged either, the scheduler
+    raises RuntimeError and the slot is never reused."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    (request,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup, acknowledge=False))
+    retry = scheduler.schedule()
+    with pytest.raises(RuntimeError, match="not acknowledged after cleanup"):
+        scheduler.update_from_output(retry, _state_output(retry, acknowledge=False))
+    assert manager.num_free_slots == 1
+    assert len(scheduler.state_retirements) == 1
+
+
+def test_state_cleanup_late_acknowledgment_releases_without_token_replay():
+    """A late completion of the missed cleanup step releases the slot and
+    replays no token."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    (request,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup, acknowledge=False))
+    assert manager.num_free_slots == 1
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+    assert request.num_output_tokens == 1
+
+
+def test_state_missing_acknowledgments_quarantine_only_their_slots():
+    """An unrelated later completion cannot release a slot whose write or
+    cleanup fence is missing."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    a, b = create_requests(num_requests=2, num_tokens=4)
+    scheduler.add_request(a)
+    step = scheduler.schedule()
+    scheduler.finish_requests(a.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.update_from_output(step, _state_output(step, acknowledge=False))
+    scheduler.add_request(b)
+    next_step = scheduler.schedule()
+    output = _state_output(next_step)
+    # Acknowledging only B does not acknowledge A's cleanup.
+    output.state_completion.cleanup_handles.clear()
+    scheduler.update_from_output(next_step, output)
+    scheduler.finish_requests(b.request_id, RequestStatus.FINISHED_ABORTED)
+    assert manager.num_free_slots == 0
+    cleanup = scheduler.schedule()
+    output = _state_output(cleanup)
+    # Acknowledging only A does not acknowledge B's cleanup.
+    del output.state_completion.cleanup_handles[b.request_id]
+    scheduler.update_from_output(cleanup, output)
+    assert manager.num_free_slots == 1
+    assert len(scheduler.state_retirements) == 1
+    retry = scheduler.schedule()
+    scheduler.update_from_output(retry, _state_output(retry))
+    assert manager.num_free_slots == 2
+
+
+# Resumable requests that were never admitted: they park only at EOS, and each
+# input replaces the prompt.
+
+
+def test_state_stream_parks_at_eos_and_keeps_its_slot():
+    """A resumable request whose turn stops on EOS parks under the same handle;
+    only its end retires the slot."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    request = _stream_input()
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    handle = manager.get(request.request_id)
+    scheduler.update_from_output(step, _state_output(step, sampled=EOS_TOKEN_ID))
+    assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert manager.get(request.request_id) == handle
+    assert manager.num_free_slots == 1
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert manager.num_free_slots == 1
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_state_stream_continuation_replaces_the_prompt(queued):
+    """The next input of a parked stream, sent before or after the park,
+    replaces its prompt and history under the same handle."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    request = _stream_input(tokens=[3])
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    handle = step.state_slot_handles["stream"]["state"]
+    scheduler.update_from_output(step, _state_output(step, sampled=6))
+    step = scheduler.schedule()
+    if queued:
+        scheduler.add_request(_stream_input())
+    scheduler.update_from_output(step, _state_output(step, sampled=EOS_TOKEN_ID))
+    if not queued:
+        scheduler.add_request(_stream_input())
+    assert request.prompt_token_ids == [1, 2, 3]
+    assert list(request.all_token_ids) == [1, 2, 3]
+    assert request.num_computed_tokens == 0
+    assert not request.output_token_ids
+    assert manager.get("stream") == handle
+    assert scheduler.num_waiting_for_streaming_input == 0
+    assert scheduler.schedule().num_scheduled_tokens == {"stream": 3}
+
+
+@pytest.mark.parametrize("stop", ["stop_token", "length", "repetition"])
+@pytest.mark.parametrize("queued", [False, True])
+def test_state_stream_other_stops_end_the_stream(stop, queued):
+    """A stop token, the length limit or detected repetition ends a resumable
+    state request instead of parking it, even with a continuation queued; its
+    slot retires behind the fence and is then reusable. (Stop strings are
+    refused for streaming input, so they never end a turn.)"""
+    from vllm.sampling_params import RepetitionDetectionParams
+
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    if stop == "stop_token":
+        request = _stream_input(tokens=[3], stop_token_ids=[6])
+        expected = (RequestStatus.FINISHED_STOPPED, FinishReason.STOP)
+    elif stop == "length":
+        request = _stream_input(tokens=[3], max_tokens=1)
+        expected = (RequestStatus.FINISHED_LENGTH_CAPPED, FinishReason.LENGTH)
+    else:
+        request = _stream_input(
+            tokens=[3],
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=1, min_count=2
+            ),
+        )
+        expected = (RequestStatus.FINISHED_REPETITION, FinishReason.REPETITION)
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    old = step.state_slot_handles["stream"]["state"]
+    if queued:
+        scheduler.add_request(_stream_input())
+    outputs = scheduler.update_from_output(step, _state_output(step, sampled=6))
+    if stop == "repetition":
+        # The second identical token is the repetition.
+        assert request.status == RequestStatus.RUNNING
+        step = scheduler.schedule()
+        assert step.state_slot_handles["stream"]["state"] == old
+        outputs = scheduler.update_from_output(step, _state_output(step, sampled=6))
+    assert request.status == expected[0]
+    assert not request.resumable
+    assert "stream" not in scheduler.requests
+    assert [o.finish_reason for o in _finished_outputs(outputs, "stream")] == [
+        expected[1]
+    ]
+    assert manager.num_free_slots == 1
+    cleanup = scheduler.schedule()
+    assert cleanup.state_cleanup_handles["stream"]["state"] == old
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert manager.num_free_slots == 2
+
+
+@pytest.mark.parametrize("stop", ["eos", "stop_token", "length"])
+def test_state_stream_output_ends_the_clients_stream_unless_it_parks(stop):
+    """The output of a turn that ends a resumable request also ends the
+    client's stream; the output of a turn that parks at EOS does not."""
+    scheduler = _state_scheduler()
+    params = {"stop_token": {"stop_token_ids": [6]}, "length": {"max_tokens": 1}}
+    scheduler.add_request(_stream_input(tokens=[3], **params.get(stop, {})))
+    step = scheduler.schedule()
+    sampled = EOS_TOKEN_ID if stop == "eos" else 6
+    outputs = scheduler.update_from_output(step, _state_output(step, sampled=sampled))
+    (output,) = _finished_outputs(outputs, "stream")
+    assert output.ends_stream is (stop != "eos")
+
+
+def test_state_same_request_id_waits_for_its_retiring_slot():
+    """A new request with the id of an ended request whose slot is still
+    retiring is not scheduled, although another slot is free, until that slot
+    has been released."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    (ended,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(ended)
+    step = scheduler.schedule()
+    old = manager.get(ended.request_id)
+    scheduler.update_from_output(step, _state_output(step))
+    scheduler.finish_requests(ended.request_id, RequestStatus.FINISHED_ABORTED)
+    (again,) = create_requests(num_requests=1, num_tokens=4)
+    assert again.request_id == ended.request_id
+    scheduler.add_request(again)
+    cleanup = scheduler.schedule()
+    assert manager.num_free_slots == 1
+    assert not cleanup.num_scheduled_tokens
+    assert cleanup.state_cleanup_handles == {ended.request_id: {"state": old}}
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert scheduler.schedule().num_scheduled_tokens == {again.request_id: 4}
+    assert manager.get(again.request_id) not in (None, old)
+
+
+# A misplaced multimodal item in a continuation of a stream that was never
+# admitted ends the request at once.
+
+
+def _misplaced_input(offset, length):
+    return _stream_input(
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy(),
+                mm_position=PlaceholderRange(offset=offset, length=length),
+                identifier="image",
+                modality="image",
+            )
+        ]
+    )
+
+
+# Placements a three-token replacement prompt cannot hold: one starts past its
+# end, the other starts inside it but runs past the end.
+_MISPLACED_MM = pytest.mark.parametrize(
+    ("offset", "length"), [(5, 1), (0, 4)], ids=["starts_outside", "overruns_end"]
+)
+
+
+@_MISPLACED_MM
+@pytest.mark.parametrize("when", ["parked", "running"])
+def test_state_stream_misplaced_multimodal_continuation_ends_the_request(
+    when, offset, length
+):
+    """Parked or mid-turn, the request finishes with an error at once; nothing
+    from the input is applied or queued, its slot retires behind the fence,
+    and the error reaches the client in the next output."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    request = _stream_input(client_index=3)
+    scheduler.add_request(request)
+    step = scheduler.schedule()
+    handle = manager.get("stream")
+    if when == "parked":
+        scheduler.update_from_output(step, _state_output(step, sampled=EOS_TOKEN_ID))
+        assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    scheduler.add_request(_misplaced_input(offset, length))
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert "stream" not in scheduler.requests
+    assert request.prompt_token_ids == [1, 2, 3]
+    assert not request.streaming_queue
+    assert manager.get("stream") is None
+    assert [r.handle for r in scheduler.state_retirements] == [handle]
+    assert manager.num_free_slots == 1
+    outputs = {}
+    if when == "running":
+        # The turn's in-flight output is dropped; the request has ended.
+        outputs = scheduler.update_from_output(step, _state_output(step))
+    cleanup = scheduler.schedule()
+    assert cleanup.state_cleanup_handles == {"stream": {"state": handle}}
+    cleanup_outputs = scheduler.update_from_output(cleanup, _state_output(cleanup))
+    (error,) = _finished_outputs(outputs or cleanup_outputs, "stream")
+    assert error.finish_reason == FinishReason.ERROR
+    assert error in (outputs or cleanup_outputs)[3].outputs
+    assert manager.num_free_slots == 2
+
+
+@_MISPLACED_MM
+def test_state_stream_misplaced_continuation_before_first_schedule(offset, length):
+    """A continuation queued before the request was ever scheduled ends it with
+    an error at once; it never held a slot, so nothing retires."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    request = _stream_input()
+    scheduler.add_request(request)
+    scheduler.add_request(_misplaced_input(offset, length))
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert "stream" not in scheduler.requests
+    assert not request.streaming_queue
+    assert manager.num_free_slots == 2
+    assert not scheduler.state_retirements
+    step = scheduler.schedule()
+    assert not step.num_scheduled_tokens
+    outputs = scheduler.update_from_output(step, _state_output(step))
+    (error,) = _finished_outputs(outputs, "stream")
+    assert error.finish_reason == FinishReason.ERROR
+
+
+@_MISPLACED_MM
+def test_state_stream_misplaced_first_input_is_refused(offset, length):
+    """A new resumable request whose first input has a misplaced item is
+    refused: nothing is applied or queued, it never holds a slot, and the
+    client gets exactly one error output for it."""
+    scheduler = _state_scheduler()
+    manager = _state_manager(scheduler)
+    request = _misplaced_input(offset, length)
+    scheduler.add_request(request)
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert "stream" not in scheduler.requests
+    assert sum(scheduler.get_request_counts()) == 0
+    assert manager.num_free_slots == 2
+    assert not scheduler.state_retirements
+    step = scheduler.schedule()
+    assert not step.num_scheduled_tokens
+    outputs = scheduler.update_from_output(step, _state_output(step))
+    (error,) = _finished_outputs(outputs, "stream")
+    assert error.finish_reason == FinishReason.ERROR
+    assert not scheduler.has_requests()
+
+
+# Cache clearing never ends a live stream.
+
+_RESET_HELD = (
+    "persistent state: {n} state slot(s) are held, and resetting running "
+    "requests would end their streams. Abort the streams and wait until they "
+    "have retired, then reset again."
+)
+_RESET_RETIRING = (
+    "persistent state: {n} state slot(s) are still retiring; retry the reset "
+    "once they have retired."
+)
+
+
+def _hold_slot(scheduler, kind: str, request_id: str = "stream") -> None:
+    """Leave one ordinary resumable request's slot `bound` (scheduled this
+    step), `parked` (sampled EOS) or `retiring` (aborted after a scheduled
+    step, its fence not yet acknowledged)."""
+    scheduler.add_request(_stream_input(request_id))
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {request_id: 3}
+    if kind == "bound":
+        return
+    scheduler.update_from_output(step, _state_output(step, sampled=EOS_TOKEN_ID))
+    if kind == "retiring":
+        scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+        assert scheduler.state_retirements
+
+
+def _slot_state(scheduler):
+    """Everything a refused reset must leave as it is: the handles, the free
+    slots, every request's status, the running order, the retirements, the
+    queued outputs and the pause state."""
+    manager = _state_manager(scheduler)
+    retiring = [r.request_id for r in scheduler.state_retirements]
+    return (
+        {rid: manager.get(rid) for rid in [*scheduler.requests, *retiring]},
+        manager.num_free_slots,
+        {rid: req.status for rid, req in scheduler.requests.items()},
+        [req.request_id for req in scheduler.running],
+        retiring,
+        len(scheduler.state_error_outputs),
+        scheduler.pause_state,
+    )
+
+
+@pytest.mark.parametrize("kind", ["bound", "parked"])
+def test_state_reset_running_requests_refused_while_a_slot_is_held(kind):
+    """A reset that would preempt running requests is refused while a slot is
+    bound or parked, with the exact message, before anything changes."""
+    scheduler = _state_scheduler()
+    _hold_slot(scheduler, kind)
+    before = _slot_state(scheduler)
+    with pytest.raises(RuntimeError) as refused:
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert str(refused.value) == _RESET_HELD.format(n=1)
+    assert _slot_state(scheduler) == before
+
+
+def test_state_reset_running_requests_counts_bound_and_parked_slots():
+    """The refusal counts every bound and parked slot, not retiring ones."""
+    scheduler = _state_scheduler(max_num_seqs=3)
+    _hold_slot(scheduler, "parked", "parked")
+    _hold_slot(scheduler, "retiring", "retiring")
+    _hold_slot(scheduler, "bound", "bound")
+    assert [r.request_id for r in scheduler.state_retirements] == ["retiring"]
+    before = _slot_state(scheduler)
+    with pytest.raises(RuntimeError) as refused:
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert str(refused.value) == _RESET_HELD.format(n=2)
+    assert _slot_state(scheduler) == before
+
+
+@pytest.mark.parametrize("kind", ["bound", "parked", "retiring"])
+def test_state_reset_without_running_requests_changes_nothing_while_held(kind):
+    """Without resetting running requests, a reset while any slot is held
+    returns False and changes nothing, as it does while blocks are in use."""
+    scheduler = _state_scheduler()
+    _hold_slot(scheduler, kind)
+    before = _slot_state(scheduler)
+    assert scheduler.reset_prefix_cache(reset_running_requests=False) is False
+    assert _slot_state(scheduler) == before
+
+
+def test_state_reset_running_requests_with_only_retiring_slots_asks_for_a_retry():
+    """With only retiring slots, the scheduler's reset refuses with the retry
+    message and preempts nothing; once the slots have retired, it succeeds.
+
+    Recorded coverage exception: the multiprocess engine's retiring-only reset
+    retry is covered here, at scheduler level, only. Its busy loop retires the
+    slots by itself within a step or two, so an engine-level reset cannot be
+    ordered before the retirement deterministically."""
+    scheduler = _state_scheduler()
+    _hold_slot(scheduler, "retiring")
+    before = _slot_state(scheduler)
+    with pytest.raises(RuntimeError) as refused:
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert str(refused.value) == _RESET_RETIRING.format(n=1)
+    assert _slot_state(scheduler) == before
+    cleanup = scheduler.schedule()
+    scheduler.update_from_output(cleanup, _state_output(cleanup))
+    assert not scheduler.state_retirements
+    assert scheduler.reset_prefix_cache(reset_running_requests=True) is True
+
+
+def test_state_held_outputs_keep_errors_queued_while_held():
+    """Errors queued before and while queued outputs are held reach the client
+    in the first step after the hold, and none in the held steps, whose
+    outputs the caller drops."""
+    scheduler = _state_scheduler()
+    for request_id in ("a", "b"):
+        _hold_slot(scheduler, "parked", request_id)
+
+    def end_with_an_error(request_id):
+        misplaced = _misplaced_input(5, 1)
+        scheduler.add_request(
+            _stream_input(request_id, mm_features=misplaced.mm_features)
+        )
+        assert request_id not in scheduler.requests
+
+    def step():
+        scheduler_output = scheduler.schedule()
+        return scheduler.update_from_output(
+            scheduler_output, _state_output(scheduler_output)
+        )
+
+    end_with_an_error("a")
+    with scheduler.holding_queued_outputs():
+        held = [step()]
+        end_with_an_error("b")
+        held.append(step())
+    assert [o for outputs in held for o in _finished_outputs(outputs, "a")] == []
+    assert [o for outputs in held for o in _finished_outputs(outputs, "b")] == []
+    after = step()
+    for request_id in ("a", "b"):
+        (error,) = _finished_outputs(after, request_id)
+        assert error.finish_reason == FinishReason.ERROR
+
+
+def test_state_held_error_does_not_keep_a_drain_loop_alive():
+    """A loop that steps while the scheduler has requests, as a clearing pause
+    does while queued outputs are held, ends although an error stays queued;
+    the first step after the hold delivers the error, exactly once."""
+    scheduler = _state_scheduler()
+    _hold_slot(scheduler, "parked")
+    scheduler.add_request(_misplaced_input(5, 1))
+    assert "stream" not in scheduler.requests
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+
+    def step():
+        scheduler_output = scheduler.schedule()
+        return scheduler.update_from_output(
+            scheduler_output, _state_output(scheduler_output)
+        )
+
+    held = []
+    with scheduler.holding_queued_outputs():
+        for _ in range(3):
+            if not scheduler.has_requests():
+                break
+            held.append(step())
+        else:
+            pytest.fail("held steps never end while an error is queued")
+        assert not scheduler.state_retirements
+    assert [o for outputs in held for o in _finished_outputs(outputs, "stream")] == []
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert scheduler.has_requests()
+    after = [step() for _ in range(3)]
+    errors = [o for outputs in after for o in _finished_outputs(outputs, "stream")]
+    assert [error.finish_reason for error in errors] == [FinishReason.ERROR]

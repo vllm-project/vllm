@@ -312,6 +312,11 @@ class EngineCoreOutput(
     # for array_like compatibility.
     watermarking: bool | None = None
 
+    # Set with a finish reason when the engine ended a resumable request's
+    # stream, which then takes no further input. Appended last for array_like
+    # compatibility.
+    ends_stream: bool = False
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    PersistentStateSpec,
     compute_layout_strides,
 )
 
@@ -1141,8 +1142,11 @@ def get_kv_cache_groups_from_builder(
     Core checks every grouping, whether it comes from the default grouping, a
     model's `SupportsKVCacheGrouping` or a platform builder.
     """
+    state_spec = _check_persistent_state_layout(vllm_config, layer_configs)
     groups = builder.get_kv_cache_groups(vllm_config, layer_configs)
     _check_exact_partition(groups, layer_configs)
+    if state_spec is not None and [g.distinct_specs for g in groups] != [(state_spec,)]:
+        raise ValueError("Persistent state requires one state cache group")
     return groups
 
 
@@ -1470,6 +1474,10 @@ def get_kv_cache_configs(
         The generated KVCacheConfigs for each worker.
 
     """
+    has_state = any(_persistent_state_specs(configs) for configs in layer_configs)
+    if has_state and (len(layer_configs), len(available_memory)) != (1, 1):
+        raise ValueError("Persistent state requires one engine worker")
+
     builder = get_kv_cache_config_builder(vllm_config)
 
     # If original_max_model_len was -1, automatically
@@ -1480,13 +1488,21 @@ def get_kv_cache_configs(
         for worker_spec in layer_configs
     ]
 
+    if has_state:
+        # The state pool's size is configured, not measured: plan exactly it.
+        state_groups = projected_groups_per_worker[0]
+        pool_bytes = _plan_persistent_state_pool(
+            builder, vllm_config, state_groups, available_memory[0]
+        )
+        available_memory = [pool_bytes]
+
     # If `num_gpu_blocks_override` is set, the cache size that will actually
     # be allocated is decoupled from the profiled `available_memory`. Reflect
     # that in `available_memory` here so auto-fit, the admission check, and
     # the per-worker config builder all plan against the same effective
-    # capacity.
+    # capacity. A persistent-state pool already has the override's pages.
     override = vllm_config.cache_config.num_gpu_blocks_override
-    if override is not None:
+    if override is not None and not has_state:
         adjusted_memory: list[int] = []
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
             if not groups:
@@ -1581,6 +1597,74 @@ def get_kv_cache_configs(
         cfg.needs_kv_cache_zeroing = needs_kv_cache_zeroing
 
     return kv_cache_configs
+
+
+def _plan_persistent_state_pool(
+    builder: KVCacheConfigBuilder,
+    vllm_config: VllmConfig,
+    groups: list[KVCacheGroup],
+    available_memory: int,
+) -> int:
+    """The bytes of the persistent-state pool: `num_gpu_blocks_override` pages
+    when set, else `max_num_seqs` slots plus the null page. Fails when fewer
+    pages fit the budget; the pool is never shrunk to fit."""
+    page = _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
+    override = vllm_config.cache_config.num_gpu_blocks_override
+    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+    planned = max_num_seqs + 1 if override is None else override
+    fit = available_memory // page
+    if fit >= planned:
+        return planned * page
+    source, advice = "num_gpu_blocks_override", "lower num_gpu_blocks_override"
+    if override is None:
+        source = f"max_num_seqs={max_num_seqs} slots and the null page"
+        advice = (
+            f"the largest max_num_seqs that fits is {fit - 1}; lower it"
+            if fit >= 2
+            else "no slot fits, since one page is the null page"
+        )
+    raise ValueError(
+        f"Persistent state needs {planned} pages of {page} bytes ({source}), but "
+        f"the KV cache budget holds {fit} pages: {advice}, or give the KV cache "
+        "more memory (gpu_memory_utilization or kv_cache_memory_bytes)."
+    )
+
+
+def _persistent_state_specs(
+    layer_configs: dict[str, KVCacheLayerConfig],
+) -> list[PersistentStateSpec]:
+    return [
+        layer_config.spec
+        for layer_config in layer_configs.values()
+        if isinstance(layer_config.spec, PersistentStateSpec)
+    ]
+
+
+def _check_persistent_state_layout(
+    vllm_config: VllmConfig, layer_configs: dict[str, KVCacheLayerConfig]
+) -> KVCacheSpec | None:
+    """Refuse unsupported persistent-state layouts and configurations.
+
+    Returns the state spec, or None when the model has no persistent state.
+    """
+    states = _persistent_state_specs(layer_configs)
+    if not states:
+        return None
+    from vllm.v1.core.state_slot_manager import validate_state_config
+
+    validate_state_config(vllm_config)
+    override = vllm_config.cache_config.num_gpu_blocks_override
+    if override is not None and override < 2:
+        # Checked before memory profiling; one page is the null page.
+        raise ValueError(
+            f"num_gpu_blocks_override={override} leaves the persistent-state "
+            "pool no slot: it needs at least 2 pages, one being the null page."
+        )
+    if len(states) != len(layer_configs):
+        raise ValueError("Persistent state requires a state-only cache layout")
+    if len(states) != 1:
+        raise ValueError("Persistent state requires one aggregate state spec")
+    return states[0]
 
 
 def get_global_kv_cache_groups(
