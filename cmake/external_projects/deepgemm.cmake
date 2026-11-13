@@ -28,7 +28,8 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/simon-veitner-redhat/DeepGEMM.git")
-  # TEMP: SM90 FP8 block Mega MoE commit on the fork, on dev 196f338.
+  # TEMP: SM90 FP8 block Mega MoE plus its fence/assert hardening on the fork,
+  # on dev 196f338.
   # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
@@ -42,7 +43,7 @@ else()
   # FP8 x FP4 Mega MoE kernel (vllm-project/DeepGEMM#44) and the MegaMoE
   # combine-readiness fix under CUDA graph replay (vllm-project/DeepGEMM#59).
   # Targets the PyTorch 2.11 stable ABI (requires PyTorch 2.14+ headers at build time) and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "b582b9919c7d289c7514cb5fde27a90b8908a3aa")
+  set(_DEEPGEMM_UPSTREAM_TAG "b3669fe03daab8ae1a0efc89878b955ee647b991")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
