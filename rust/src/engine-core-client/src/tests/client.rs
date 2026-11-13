@@ -574,6 +574,14 @@ fn is_engine_core_dead(error: &Error) -> bool {
     }
 }
 
+fn is_engine_disconnected(error: &Error) -> bool {
+    match error {
+        Error::EngineDisconnected { .. } => true,
+        Error::Shared(error) => is_engine_disconnected(error),
+        _ => false,
+    }
+}
+
 fn is_decode_error(error: &Error) -> bool {
     match error {
         Error::Decode { .. } | Error::ExtValueDecode { .. } => true,
@@ -2317,6 +2325,81 @@ async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+/// A killed engine sends no `ENGINE_CORE_DEAD` sentinel: its input connection
+/// closing fails the in-flight requests and marks the client unhealthy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_disconnect_fails_in_flight_requests_and_marks_client_unhealthy() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (request_received_tx, request_received_rx) = oneshot::channel();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-killed".to_vec(),
+        move |dealer, _push| {
+            Box::pin(async move {
+                recv_engine_message(dealer).await;
+                let _ = request_received_tx.send(());
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let mut stream = client
+        .call(sample_request_with_id("req-in-flight"))
+        .await
+        .unwrap()
+        .into_outputs();
+    timeout(Duration::from_secs(2), request_received_rx)
+        .await
+        .expect("wait for the engine to receive the request")
+        .unwrap();
+
+    // Drop the engine's sockets without a sentinel, as a killed process does.
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+
+    let error = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("in-flight request must fail promptly")
+        .expect("stream must yield the failure")
+        .expect_err("request must fail");
+    assert!(
+        is_engine_disconnected(&error),
+        "unexpected error: {error:?}"
+    );
+    assert!(!client.is_healthy());
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(Error::EngineDisconnected { .. })
+    ));
+
+    let error = client
+        .call(sample_request_with_id("req-after-disconnect"))
+        .await
+        .err()
+        .expect("later requests must be rejected");
+    assert!(
+        is_engine_disconnected(&error),
+        "unexpected error: {error:?}"
+    );
+
     client.shutdown().await.unwrap();
 }
 
