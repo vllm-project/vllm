@@ -102,7 +102,7 @@ def _fi_source_identity(module: Any) -> tuple[str, ...]:
 class FlashInferDCPWorkspace:
     """Own collective workspaces per observed stream and DBO slot.
 
-    Each stream must execute an eager combine (or ``prepare``) on every rank
+    Each stream must execute an eager combine (or `prepare`) on every rank
     before capture. Workspaces and stream references stay alive for graph replay.
     """
 
@@ -272,7 +272,7 @@ class FlashInferDCPWorkspace:
 
         Eager decode is host-bound, so a call whose stream, DBO slot and input
         layouts match an earlier validated call skips the checks and
-        ``prepare``. Only pointer alignment can differ and is checked per call.
+        `prepare`. Only pointer alignment can differ and is checked per call.
         """
         key = (
             torch._C._cuda_getCurrentRawStream(self.device.index),

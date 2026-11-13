@@ -184,16 +184,20 @@ class TestDCPCommBackendConfig:
         "hf_config,error",
         [
             (
-                '{"model_type":"llama","architectures":["LlamaForCausalLM"],'
-                '"num_attention_heads":16,"max_position_embeddings":128}',
+                (
+                    '{"model_type":"llama","architectures":["LlamaForCausalLM"],'
+                    '"num_attention_heads":16,"max_position_embeddings":128}'
+                ),
                 "greater than the model's total number of KV heads",
             ),
             (
-                '{"model_type":"kimi_k3",'
-                '"architectures":["KimiK3ForConditionalGeneration"],'
-                '"text_config":{"num_attention_heads":16,"kv_lora_rank":64,'
-                '"qk_rope_head_dim":32,"qk_nope_head_dim":128,"v_head_dim":128,'
-                '"max_position_embeddings":128}}',
+                (
+                    '{"model_type":"kimi_k3",'
+                    '"architectures":["KimiK3ForConditionalGeneration"],'
+                    '"text_config":{"num_attention_heads":16,"kv_lora_rank":64,'
+                    '"qk_rope_head_dim":32,"qk_nope_head_dim":128,"v_head_dim":128,'
+                    '"max_position_embeddings":128}}'
+                ),
                 "model-owned symmetric-memory",
             ),
         ],

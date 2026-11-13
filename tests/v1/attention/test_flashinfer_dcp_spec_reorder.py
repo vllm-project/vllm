@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer GQA builder: reorder threshold under DCP with spec decode."""
 
+from typing import cast
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -98,6 +100,7 @@ def test_flashinfer_gqa_dcp_spec_decode_clamps_reorder_threshold(
     with set_current_vllm_config(vllm_config):
         group.create_metadata_builders(vllm_config, torch.device("cpu"))
     builder = group.get_metadata_builder()
+    assert isinstance(builder, FlashInferMetadataBuilder)
 
     assert builder.use_dcp
     if comm_backend == "fi_a2a_fused":
@@ -155,9 +158,12 @@ def test_flashinfer_fused_dcp_builders_refresh_isolated_masks(
     group = AttentionGroup(FlashInferBackend, ["layer.0"], kv_cache_spec, 0)
     with set_current_vllm_config(vllm_config):
         group.create_metadata_builders(vllm_config, device, num_metadata_builders=2)
-        assert all(builder.use_dcp for builder in group.metadata_builders)
+        builders = group.metadata_builders
+        assert all(isinstance(b, FlashInferMetadataBuilder) for b in builders)
+        fi_builders = cast(list[FlashInferMetadataBuilder], builders)
+        assert all(builder.use_dcp for builder in fi_builders)
         masks = []
-        for builder in group.metadata_builders:
+        for builder in fi_builders:
             mask = builder.dcp_valid_token_mask.buffer
             assert mask is not None and mask.shape == (128,)
             mask.fill_(True)
