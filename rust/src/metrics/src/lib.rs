@@ -16,12 +16,14 @@ use crate::buckets::BucketConfig;
 mod api_server;
 mod buckets;
 mod histogram;
+mod renderer;
 mod request;
 mod scheduler;
 
 pub use api_server::*;
 pub use buckets::{BucketFamily, CustomHistogramBuckets, FamilyHistogram};
 pub use histogram::Histogram;
+pub use renderer::*;
 pub use request::*;
 pub use scheduler::*;
 
@@ -46,6 +48,7 @@ pub struct Metrics {
     pub scheduler: SchedulerMetrics,
     pub request: RequestMetrics,
     pub api_server: ApiServerMetrics,
+    pub renderer: RendererMetrics,
 }
 
 impl Metrics {
@@ -56,6 +59,7 @@ impl Metrics {
         let scheduler = SchedulerMetrics::register(&mut registry, &buckets);
         let request = RequestMetrics::register(&mut registry, &buckets);
         let api_server = ApiServerMetrics::register(&mut registry);
+        let renderer = RendererMetrics::register(&mut registry);
 
         Self {
             registry,
@@ -63,6 +67,7 @@ impl Metrics {
             scheduler,
             request,
             api_server,
+            renderer,
         }
     }
 

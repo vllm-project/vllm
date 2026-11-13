@@ -96,7 +96,7 @@ def compute_tp_mapping(
     DCP support is scoped to MLA only, with a side is either fully replicated or fully
     sharded. DCP-branch reuses the same rank set used at handshake selection.
 
-    ``head_sharded_kv_heads`` maps head-sharded KV with that many total KV heads
+    `head_sharded_kv_heads` maps head-sharded KV with that many total KV heads
     instead of the topology's, e.g. a GQA draft under an MLA target.
     """
     tp_rank = transfer_topology.tp_rank

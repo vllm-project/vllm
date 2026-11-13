@@ -70,7 +70,7 @@ class LLBf16SplitK:
     :note: Constraints:
         - K must preserve 16-byte row alignment for contiguous bf16 inputs.
 
-    :compile-key: ``(split_k, num_stages)`` selects the cluster split
+    :compile-key: `(split_k, num_stages)` selects the cluster split
         count and cp.async pipeline depth specialization.
     """
 
@@ -192,21 +192,21 @@ class LLBf16SplitK:
         scale: float = 1.0,
     ):
         """Execute the split-K GEMM operation in steps:
-        - Build swizzled staged SMEM layouts for A ``[16, tile_k, stages]``
-          and B ``[tile_n, tile_k, stages]``.
+        - Build swizzled staged SMEM layouts for A `[16, tile_k, stages]`
+          and B `[tile_n, tile_k, stages]`.
         - Build 128-bit cp.async GMEM-to-SMEM tiled copies for DMA warps.
         - Build an m16n8k16 BF16 MMA tiled across the CTA N tile.
-        - Launch grid ``ceil(M/16) x ceil(N/tile_n) x split_k`` with one
+        - Launch grid `ceil(M/16) x ceil(N/tile_n) x split_k` with one
           cluster along split-K, so each cluster rank owns K tiles
-          ``rank, rank + split_k, ...``.
+          `rank, rank + split_k, ...`.
         - Reduce MMA-warp partials within the CTA, exchange split-K partials
           through DSMEM, then reduce cluster partials and store C.
 
-        :param mA: Input tensor A with shape ``[M, K]``.
+        :param mA: Input tensor A with shape `[M, K]`.
         :type mA: cute.Tensor
-        :param mB: Input tensor B with shape ``[N, K]``.
+        :param mB: Input tensor B with shape `[N, K]`.
         :type mB: cute.Tensor
-        :param mC: Output tensor C with shape ``[M, N]``.
+        :param mC: Output tensor C with shape `[M, N]`.
         :type mC: cute.Tensor
         :param stream: CUDA stream for asynchronous execution.
         :type stream: CUstream

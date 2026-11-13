@@ -3,6 +3,8 @@
 import numpy as np
 import torch
 
+from vllm.utils.torch_utils import token_ids_to_tensor
+
 
 class CPURequestState:
     def __init__(
@@ -97,8 +99,8 @@ class CPURequestState:
         )
         self.prefill_len_np[req_idx] = prefill_len
         self.total_len[req_idx] = prefill_len
-        self.all_token_ids[req_idx, :prefill_len] = torch.tensor(
-            all_token_ids, dtype=torch.int32, device=self.device
+        self.all_token_ids[req_idx, :prefill_len] = token_ids_to_tensor(
+            all_token_ids, dtype=torch.int32
         )
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens

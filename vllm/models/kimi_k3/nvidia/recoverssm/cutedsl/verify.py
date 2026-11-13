@@ -3,8 +3,8 @@
 """KDA RecoverSSM verify on the fifth-generation tensor cores: one CTA (4 warps) per
 (head, request).
 
-With per-channel log decays ``L_t = g_1 + ... + g_t`` and normalized ``k_t``, ``q_t``
-(``q_t`` carries the 1/sqrt(K) scale), the verify window satisfies
+With per-channel log decays `L_t = g_1 + ... + g_t` and normalized `k_t`, `q_t`
+(`q_t` carries the 1/sqrt(K) scale), the verify window satisfies
 
     u_t = beta_t * (v_t - S_0 p_t - sum_{i<t} c_it u_i),   p_t = e^{L_t} k_t
     o_t = S_0 r_t + sum_{i<=t} d_it u_i,                    r_t = e^{L_t} q_t
@@ -19,7 +19,7 @@ CTAs are persistent and walk the (head, request) items. Per item:
    this item's solve and the next item's probes (the first item's is issued before
    the PDL wait: the state is written by the previous step's commit).
 2. Thread c owns channel c: the optional short convolution of q, k, v (the stock
-   ``causal_conv1d_update`` speculative step), then p_t, r_t (BF16 high and low
+   `causal_conv1d_update` speculative step), then p_t, r_t (BF16 high and low
    halves, the B operands) and w_t; two threads per (probe, i) pair reduce the
    coupling scalars.
 3. One thread issues the M128 x N16 x K16 BF16 MMAs (high and low halves accumulate
@@ -27,7 +27,7 @@ CTAs are persistent and walk the (head, request) items. Per item:
 4. Thread r reads state row r's 16 projections from tensor memory, solves the
    row's triangular system and stores its outputs and corrections (coalesced).
 
-Outputs and records (``u_t``, key and raw gate) match ``kda_recoverssm_verify``.
+Outputs and records (`u_t`, key and raw gate) match `kda_recoverssm_verify`.
 """
 
 import cutlass
@@ -98,7 +98,7 @@ def tc_fence_after():
 
 @asm()
 def proxy_fence():
-    """Generic-proxy shared memory writes (``st.shared``, ``cp.async``) visible to
+    """Generic-proxy shared memory writes (`st.shared`, `cp.async`) visible to
     the tensor cores' async proxy."""
     return "fence.proxy.async.shared::cta;", "~{memory}", ()
 
@@ -134,7 +134,7 @@ def umma_commit(barrier):
 
 @asm((Float32,) * PROBES)
 def tmem_load_row(address):
-    """Lane i of warp w: TMEM lane 32 w + i, columns [0, 16) of ``address``."""
+    """Lane i of warp w: TMEM lane 32 w + i, columns [0, 16) of `address`."""
     regs = ",".join(f"${i}" for i in range(PROBES))
     code = f"tcgen05.ld.sync.aligned.32x32b.x16.b32 {{{regs}}}, [${PROBES}]; "
     code += "tcgen05.wait::ld.sync.aligned;"
@@ -161,11 +161,11 @@ class KdaTcVerify:
     state [slots, H, V, K], corr [rows, H, Q, V], kg [rows, H, Q, 2K] (request b's
     records in row b), out [T, HV],
     query_start [B + 1], request slots [B], (conv state [slots, Q + 2, 3HK] token
-    major, or [slots, 3HK, Q + 2] with ``conv_dim_first``, conv weight [3HK, 4]
-    (BF16, or FP32 with ``conv_weight_f32``: the stock conv1d parameter),
-    accepted tokens [B] when ``conv``; qkv is then the raw projection), a zeroed
+    major, or [slots, 3HK, Q + 2] with `conv_dim_first`, conv weight [3HK, 4]
+    (BF16, or FP32 with `conv_weight_f32`: the stock conv1d parameter),
+    accepted tokens [B] when `conv`; qkv is then the raw projection), a zeroed
     int32 work counter [1] (left zeroed),
-    lower_bound, null slot, stream. ``ctas``: the persistent grid bound (CTAs
+    lower_bound, null slot, stream. `ctas`: the persistent grid bound (CTAs
     resident per SM x SMs)."""
 
     def __init__(
@@ -210,7 +210,7 @@ class KdaTcVerify:
 
     @cute.jit
     def load_state(self, tma_atom, tma_tensor, a_tile, barrier, slot, head, lane):
-        """Warp-wide: TMA state (slot, head) into ``a_tile`` on ``barrier``."""
+        """Warp-wide: TMA state (slot, head) into `a_tile` on `barrier`."""
         H: cutlass.Constexpr = self.heads
         if lane == 0:
             cute.arch.mbarrier_arrive_and_expect_tx(barrier, K * K * 2)

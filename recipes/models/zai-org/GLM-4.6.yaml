@@ -161,7 +161,6 @@ guide: |
 
   - `--max-model-len=65536` works well for most scenarios; max is 128K.
   - `--max-num-batched-tokens=32768` is a good default for prompt-heavy workloads.
-  - `--gpu-memory-utilization=0.95` maximizes KV cache headroom.
 
   ## Client Usage
 

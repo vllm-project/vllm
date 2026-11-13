@@ -281,7 +281,7 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
     }
   } else if constexpr (std::is_same_v<InputT, __nv_bfloat16> &&
                        kNumExperts == 256 && kHiddenDim == 8192) {
-    // MuseSpark1x: the 8MB weight makes this shape FFMA-bound past M~10, so
+    // Muse Spark: the 8MB weight makes this shape FFMA-bound past M~10, so
     // the wider block wins at every M and token groups clear the M >= 28
     // accumulator cliff. Thresholds are from a B300 sweep. BS=192/384 are not
     // instantiable: VPT=8 requires kBlockSize to divide kHiddenDim / 8 = 1024.

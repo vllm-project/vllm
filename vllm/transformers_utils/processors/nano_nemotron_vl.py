@@ -70,9 +70,9 @@ def _bicubic_resize_and_normalize(
 
     Input must be a raw 4-D **NHWC** tensor.
 
-    *size*: target ``(H, W)``; skips interpolation when ``None``.
+    *size*: target `(H, W)`; skips interpolation when `None`.
     *norm_mean* / *norm_std*: when both provided, apply normalization.
-    When *do_cpu_normalize* is false, return the resized ``uint8`` tensor
+    When *do_cpu_normalize* is false, return the resized `uint8` tensor
     unchanged so rescaling and normalization can run on the model device.
     """
     tensor = tensor.permute(0, 3, 1, 2)
@@ -972,7 +972,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         T = self.video_temporal_patch_size
 
-        for pixel_values, video_metadata, frames_indices, frame_duration_ms in zip(
+        for pixel_values, _, frames_indices, frame_duration_ms in zip(
             pixel_values_lst_video,
             video_metadata_lst,
             frames_indices_lst,

@@ -3,7 +3,7 @@
 """ROCm Kimi-K3 specialization of GDN attention metadata.
 
 The request classification and cudagraph staging intentionally mirror
-``GDNAttentionMetadataBuilder``. Only the FLA chunk metadata is built
+`GDNAttentionMetadataBuilder`. Only the FLA chunk metadata is built
 differently on device rather than on the host.
 """
 
