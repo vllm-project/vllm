@@ -145,6 +145,7 @@ variants:
       mi325x:
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
   mxfp4:
     model_id: "amd/Qwen3.8-Flash-Next-Quark-MXFP4"
     precision: mxfp4
