@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config
+from tests.v1.kv_connector.unit.utils import create_vllm_config, make_kv_cache_group
 from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -43,11 +43,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.read_leases import (
     ReadLeases,
 )
 from vllm.utils.network_utils import get_open_port, make_zmq_path
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 
 BASE_WORKER = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
 LAYER = "model.layers.0.self_attn"
@@ -160,9 +156,9 @@ def make_kv_cache_config(
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 [LAYER],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=num_kv_heads,
                     head_size=HEAD_SIZE,
@@ -873,7 +869,7 @@ async def test_failed_peer_waits_for_the_other_peer_read(monkeypatch, bootstrap_
         decoder_kv = make_kv_tensor(32, decoder_block_bytes)
         decoder.register_kv_caches({LAYER: decoder_kv})
         producer_kv = make_kv_tensor(8, producer_block_bytes)
-        for rank, producer in enumerate(producers):
+        for producer in producers:
             producer.register_kv_caches({LAYER: producer_kv})
         # The first peer refuses the handshake; the second is still computing
         # the request it was asked for.

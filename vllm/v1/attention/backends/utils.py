@@ -25,6 +25,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
@@ -143,25 +144,25 @@ def fill_mm_prefix_query_ranges(
 ) -> int:
     """Map each scheduled query token to the mm_prefix range containing it.
 
-    Writes into ``out``, a caller-owned ``(max_num_batched_tokens, 2)`` int32
+    Writes into `out`, a caller-owned `(max_num_batched_tokens, 2)` int32
     staging buffer, and returns the number of rows written (0 if no range
-    covers any scheduled query token, in which case ``out`` is untouched and
-    the caller should skip the mask_mod entirely). Row ``i`` holds the absolute
-    ``[start, end]`` bounds of the bidirectional range that query token ``i``
-    belongs to, or ``(-1, -1)`` when it is outside every range.
+    covers any scheduled query token, in which case `out` is untouched and
+    the caller should skip the mask_mod entirely). Row `i` holds the absolute
+    `[start, end]` bounds of the bidirectional range that query token `i`
+    belongs to, or `(-1, -1)` when it is outside every range.
 
     mm_prefix ranges never overlap, so "query and key share a range" is
     equivalent to "the key lies inside the query's own range". The kernel
     therefore needs no key-side lookup, and this metadata is sized by scheduled
     query tokens rather than by context length -- bounded by
-    ``max_num_batched_tokens`` instead of ``num_seqs * max_seq_len``.
+    `max_num_batched_tokens` instead of `num_seqs * max_seq_len`.
 
     Ranges are absolute prompt positions and may extend past the tokens
     scheduled so far under chunked prefill; the portion outside the current
-    chunk is simply not recorded. Degenerate ranges (``start >= end``) are
-    skipped to match the Triton path's ``start < end`` validity check.
+    chunk is simply not recorded. Degenerate ranges (`start >= end`) are
+    skipped to match the Triton path's `start < end` validity check.
 
-    ``seq_lens_cpu`` only needs to be exact for prefill rows, since mm_prefix
+    `seq_lens_cpu` only needs to be exact for prefill rows, since mm_prefix
     ranges cover prompt tokens: an over-estimate on a decode row shifts that
     row's query position further past every range, which still matches nothing.
     """
@@ -255,7 +256,7 @@ def get_supported_kv_cache_layouts(
     """Layouts every one of the worker's backends supports, most preferred first.
 
     Every backend declares the layouts its kernels support, most preferred first
-    (``supported_kv_cache_layouts``), or None when any layout works; workers where
+    (`supported_kv_cache_layouts`), or None when any layout works; workers where
     nothing declares follow the default preference. Identical declarations keep
     their order; otherwise the layout the most backends put first wins, ties
     keeping the enum order. An empty intersection is a hard error.
@@ -274,7 +275,7 @@ def _merge_supported_layouts(
     supported_layouts_lists: Sequence[Sequence[KVCacheLayout]],
 ) -> list[KVCacheLayout]:
     """Layouts in every supported set, merged as in
-    ``get_supported_kv_cache_layouts``."""
+    `get_supported_kv_cache_layouts`."""
     first = supported_layouts_lists[0]
     if all(layouts == first for layouts in supported_layouts_lists[1:]):
         return list(first)
@@ -311,23 +312,23 @@ def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
 def resolve_kv_cache_layout(
     vllm_config: VllmConfig,
     supported_layouts: list[list[str]],
-    kv_cache_specs: Iterable[KVCacheSpec] | None = None,
+    layer_configs: Iterable[KVCacheLayerConfig] | None = None,
 ) -> KVCacheLayout:
     """Resolve one KV cache layout for the whole model.
 
     Runs once in the engine core. Every worker reports the layouts its backends
-    support, most preferred first (``get_supported_kv_cache_layouts``). Pipeline
+    support, most preferred first (`get_supported_kv_cache_layouts`). Pipeline
     stages hold different layers, so their lists may differ; the candidates are
     the layouts every worker supports, and the layout the most workers put first
     wins. Workers whose backends declare nothing do not vote. Specs mixing HNC
     shapes narrow the candidates to block-compact layouts. An explicit
-    ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
-    with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
+    `VLLM_KV_CACHE_LAYOUT` must be one of the candidates or resolution fails,
+    with the legacy `NHD`/`HND` names as aliases for `LBNHC`/`LBHNC`; the
     connector's preference is used when compatible and dropped with a warning
-    otherwise. A layout already present on ``cache_config`` wins outright, and
-    the result is recorded there (see ``CacheConfig.kv_cache_layout``); it
-    reaches workers through the ``set_kv_cache_layout`` RPC and
-    ``KVCacheConfig.kv_cache_layout``.
+    otherwise. A layout already present on `cache_config` wins outright, and
+    the result is recorded there (see `CacheConfig.kv_cache_layout`); it
+    reaches workers through the `set_kv_cache_layout` RPC and
+    `KVCacheConfig.kv_cache_layout`.
     """
     cache_config = vllm_config.cache_config
     if cache_config.kv_cache_layout is not None:
@@ -351,9 +352,8 @@ def resolve_kv_cache_layout(
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
     # Specs without per-layer views lay out their own raw backing tensor.
-    kv_cache_specs = tuple(
-        spec for spec in kv_cache_specs or () if spec.has_layer_views
-    )
+    layer_configs = tuple(lc for lc in layer_configs or () if lc.spec.has_layer_views)
+    kv_cache_specs = [lc.spec for lc in layer_configs]
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
         for spec in kv_cache_specs
@@ -369,14 +369,23 @@ def resolve_kv_cache_layout(
     # Self-addressed per-request rings (e.g. the kpool tail) are replicated
     # state like Mamba and don't need a separate draft group.
     dcp_sharding = {
-        spec.dcp_sharded
-        for spec in kv_cache_specs
-        if isinstance(spec, AttentionSpec) and spec.uses_slot_mapping
+        lc.spec.dcp_sharded
+        for lc in layer_configs
+        if isinstance(lc.spec, AttentionSpec)
+        and lc.manager_cls.uses_slot_mapping
+        and lc.spec.uses_slot_mapping
     }
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
-    if len(dcp_sharding) > 1 and len(page_sizes) > 1:
+    is_hybrid = any(isinstance(spec, MambaSpec) for spec in kv_cache_specs)
+    if len(dcp_sharding) > 1 and len(page_sizes) > 1 and not is_hybrid:
         # Sharded target and replicated draft caches need independent groups.
         # Block-outer layouts can pack those groups without equalizing pages.
+        # Targets with linear-attention layers (MambaSpec: Mamba, KDA, GDN) are
+        # not narrowed to block-outer layouts: they keep a layer-compact layout,
+        # and page unification pads the draft's smaller pages up to the target's.
+        # Their state pages force large blocks (1536 tokens for Kimi-K3 at TP8)
+        # that packed attention caches cannot split into kernel blocks, and NIXL
+        # cannot transfer packed rows that hold the state.
         candidates = [layout for layout in candidates if layout.is_block_outermost]
         if not candidates:
             raise ValueError(
@@ -509,13 +518,13 @@ def get_kv_cache_dtype_from_layers(
 def get_num_attention_heads_from_layers(
     vllm_config: VllmConfig, layer_names: list[str]
 ) -> int | None:
-    """Per-TP-rank ``num_heads`` shared by the named Attention layers.
+    """Per-TP-rank `num_heads` shared by the named Attention layers.
 
     Use in metadata builders whose plan-time allocations depend on the
-    head count: the model-wide ``get_num_attention_heads()`` is wrong
+    head count: the model-wide `get_num_attention_heads()` is wrong
     for models with non-uniform per-layer head counts. All layers in
-    one attention group must agree on ``num_heads``; this is asserted.
-    Returns ``None`` when no matching Attention layer is found.
+    one attention group must agree on `num_heads`; this is asserted.
+    Returns `None` when no matching Attention layer is found.
     """
     attn_layers = get_layers_from_vllm_config(
         vllm_config,
@@ -1022,13 +1031,13 @@ def split_prefill_chunks(
 
 
 def set_triton_ptr_range(region: torch.Tensor, *views: torch.Tensor) -> None:
-    """Bound the bytes Triton kernels may access through ``views``.
+    """Bound the bytes Triton kernels may access through `views`.
 
     Triton's AMD backend uses 32-bit buffer addressing only for pointer
-    arguments within 2 GiB. It checks ``ptr_range()`` first and otherwise the
+    arguments within 2 GiB. It checks `ptr_range()` first and otherwise the
     size of the whole storage, so views into one large allocation (such as a
     layer of the KV cache) lose it. Each view gets the distance from its
-    ``data_ptr()`` to the end of ``region``; kernels must not access past it.
+    `data_ptr()` to the end of `region`; kernels must not access past it.
     """
     if region.numel() == 0:
         return
@@ -1216,6 +1225,20 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
+@triton.jit
+def dcp_local_to_global_index(local, dcp_rank, dcp_size, cp_kv_cache_interleave_size):
+    """Global position of a KV slot held locally by `dcp_rank`.
+
+    Describes the same interleaving as `get_dcp_local_seq_lens` and must
+    stay consistent with it.
+    """
+    return (
+        local // cp_kv_cache_interleave_size * (dcp_size * cp_kv_cache_interleave_size)
+        + dcp_rank * cp_kv_cache_interleave_size
+        + local % cp_kv_cache_interleave_size
+    )
+
+
 @triton.jit(
     do_not_specialize_on_alignment=["out_ptr", "block_table_ptr", "seq_lens_ptr"]
 )
@@ -1230,37 +1253,37 @@ def _mamba_align_block_table_kernel(
     n_out,
     BLOCK: tl.constexpr,
 ):
-    """Gather the last ``n_out`` block-table entries of each request.
+    """Gather the last `n_out` block-table entries of each request.
 
     One program per request. This replaces a five-statement PyTorch expression
-    that expanded to seven kernels over a ``(num_reqs,)`` tensor -- one element
+    that expanded to seven kernels over a `(num_reqs,)` tensor -- one element
     in a single-request decode -- so almost all of its cost was launch
     overhead rather than work.
 
     Both block-table strides are passed explicitly. The expression this replaces
-    was ``torch.gather(block_table, 1, ...)``, which honours any layout, and
-    this is a shared utility -- ``gdn_attn``, ``mamba_attn``, ``short_conv_attn``
-    and ``linear_attn`` all call it -- so assuming a column stride of 1 would
+    was `torch.gather(block_table, 1, ...)`, which honours any layout, and
+    this is a shared utility -- `gdn_attn`, `mamba_attn`, `short_conv_attn`
+    and `linear_attn` all call it -- so assuming a column stride of 1 would
     silently read the wrong slots for a caller holding a non-contiguous view.
-    ``kimi_k3/nvidia/kda_metadata.py`` passes both strides for the same reason.
+    `kimi_k3/nvidia/kda_metadata.py` passes both strides for the same reason.
 
     Two annotations above are load-bearing and easy to drop by accident:
 
-    ``block_table_stride_0: tl.int64``
-        Without it ``req_idx * block_table_stride_0`` is computed in i32 --
-        ``program_id`` is i32 and Triton specializes a stride below 2^31 to
+    `block_table_stride_0: tl.int64`
+        Without it `req_idx * block_table_stride_0` is computed in i32 --
+        `program_id` is i32 and Triton specializes a stride below 2^31 to
         i32 -- so the product wraps once a row offset reaches 2^31 elements
         (a 4096 x 625000 table faults from row 3436 on MI355X).
-        ``torch.gather``, which this replaces, indexes in 64-bit and has no
+        `torch.gather`, which this replaces, indexes in 64-bit and has no
         such limit, so narrowing it would be a regression.
-        ``mamba_utils.py:43`` annotates its row stride the same way.
+        `mamba_utils.py:43` annotates its row stride the same way.
 
-    ``do_not_specialize_on_alignment`` on the three pointers
+    `do_not_specialize_on_alignment` on the three pointers
         Triton puts pointer alignment in the specialization key. A view of
-        ``seq_lens`` or ``block_table_tensor`` starting at a request index that
+        `seq_lens` or `block_table_tensor` starting at a request index that
         is not a multiple of 4 is differently aligned, so a fresh variant
         JIT-compiles mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
-        ``jit_monitor_mode=error``. The torch expression this replaced never
+        `jit_monitor_mode=error`. The torch expression this replaced never
         compiled anything, so that recompile would be a regression introduced
         by this change.
     """
@@ -1283,11 +1306,26 @@ def _mamba_align_block_table_kernel(
     tl.store(out_ptr + req_idx * n_out + offs, vals, mask=mask)
 
 
+def get_attn_type_from_layers(vllm_config: VllmConfig, layer_names: list[str]) -> str:
+    """The `AttentionType` shared by the given attention layers."""
+    from vllm.model_executor.layers.attention import Attention
+
+    attn_types = {
+        layer.attn_type
+        for layer in get_layers_from_vllm_config(
+            vllm_config, Attention, layer_names
+        ).values()
+    }
+    assert len(attn_types) == 1, f"Mixed attention types in a group: {attn_types}"
+    return attn_types.pop()
+
+
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     kv_cache_spec: KVCacheSpec,
     mamba_cache_mode: str,
+    num_speculative_blocks: int,
 ) -> torch.Tensor:
     """Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
@@ -1309,7 +1347,7 @@ def mamba_get_block_table_tensor(
         # one-request decode. One Triton kernel does the same work in one
         # launch. Zero-length requests in a CUDA graph still clamp to row 0.
         num_reqs = block_table.shape[0]
-        n_out = 1 + kv_cache_spec.num_speculative_blocks
+        n_out = 1 + num_speculative_blocks
         # The expression this replaced took its row count from `seq_lens` (a
         # `torch.gather` whose index tensor is built from it), so a mismatch
         # raised and a cross-device pair raised. Taking `num_reqs` from

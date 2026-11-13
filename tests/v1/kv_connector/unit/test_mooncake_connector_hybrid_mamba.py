@@ -9,7 +9,6 @@ validated by this test module.
 
 import asyncio
 from collections import OrderedDict
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +17,8 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.core.utils import uniform_spec
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from vllm import SamplingParams
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
@@ -40,10 +41,10 @@ from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     MambaSpec,
 )
@@ -71,7 +72,6 @@ def make_hybrid_gdn_kv_cache_config(
         shapes=((6, 3), (1, 2, 2)),
         dtypes=(torch.float16, torch.float16),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode=mamba_cache_mode,
     )
     assert gdn_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
     return KVCacheConfig(
@@ -79,18 +79,19 @@ def make_hybrid_gdn_kv_cache_config(
         hash_block_size=block_size,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["model.layers.0.self_attn"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["model.layers.1.linear_attn"],
                 gdn_spec,
+                manager_config=MambaManager.config(mamba_cache_mode=mamba_cache_mode),
             ),
         ],
     )
@@ -256,7 +257,7 @@ def test_lookahead_hashes_follow_truncated_prefill(
     kv_config = make_hybrid_gdn_kv_cache_config(block_size)
     kv_config.hash_block_size = hash_block_size
     group = kv_config.kv_cache_groups[1]
-    group.kv_cache_spec = replace(group.kv_cache_spec, mamba_cache_mode="align")
+    group.manager_config = group.manager_config.replace_params(mamba_cache_mode="align")
     scheduler = scheduler_cls(config, "test-engine", kv_config)
     init_none_hash(sha256)
     hasher = get_request_block_hasher(hash_block_size, sha256, num_lookahead)
@@ -320,8 +321,8 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         worker = connector.connector_worker
 
         num_blocks = kv_cache_config.num_blocks
-        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
+        gdn_spec = uniform_spec(kv_cache_config.kv_cache_groups[1])
         fa_raw = torch.empty(num_blocks * fa_spec.page_size_bytes, dtype=torch.int8)
         gdn_block_stride = gdn_spec.page_size_bytes + 64
         gdn_raw = torch.empty(num_blocks, gdn_block_stride, dtype=torch.int8)
@@ -378,7 +379,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
         factor = 4
         worker._physical_blocks_per_logical_kv_block = factor
 
-        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
         physical_page_bytes = fa_spec.page_size_bytes // factor
         fa_cache = torch.empty(
             kv_cache_config.num_blocks * factor,
@@ -418,9 +419,9 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
     worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
     worker.kv_cache_config = kv_cache_config
     worker._layer_specs = {
-        layer_name: group.kv_cache_spec
+        layer_name: spec
         for group in kv_cache_config.kv_cache_groups
-        for layer_name in group.layer_names
+        for layer_name, spec in group.kv_cache_specs.items()
     }
     worker._layer_group_indices = {
         layer_name: group_index
@@ -430,7 +431,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
 
     ratio = 4
     worker._physical_blocks_per_logical_kv_block = ratio
-    fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
     physical_page_bytes = fa_spec.page_size_bytes // ratio
     fa_cache = torch.empty(
         kv_cache_config.num_blocks * ratio,
@@ -575,7 +576,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         )
         worker = connector.connector_worker
 
-        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
         fa_cache_width = (
             fa_spec.page_size_bytes
             // torch.tensor([], dtype=torch.float16).element_size()

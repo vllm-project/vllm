@@ -24,6 +24,7 @@ from huggingface_hub.utils import httpx
 
 from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
@@ -52,6 +53,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_registry import (  # noqa: E501
+    clear_shared_transfer_engine,
+    register_shared_transfer_engine,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -67,15 +72,17 @@ from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -101,7 +108,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroup
     from vllm.v1.request import Request
 
 ReqId = str  # Internal scheduler request ID
@@ -644,7 +651,7 @@ class BlockTransferRequest:
 
 def _kernel_block_ids(
     block_ids: list[list[int]],
-    group_specs: Sequence["KVCacheGroupSpec"],
+    group_specs: Sequence["KVCacheGroup"],
     blocks_per_logical: int,
 ) -> list[list[int]]:
     """Expand logical block ids to the kernel blocks that serve them.
@@ -661,7 +668,7 @@ def _kernel_block_ids(
             (np.array(group)[:, None] * blocks_per_logical + block_arange)
             .reshape(-1)
             .tolist()
-            if not isinstance(group_specs[index].kv_cache_spec, MambaSpec)
+            if not issubclass(group_specs[index].manager_cls, MambaManager)
             else group
         )
         for index, group in enumerate(block_ids)
@@ -669,13 +676,13 @@ def _kernel_block_ids(
 
 
 def _drop_mamba_placeholders(
-    block_ids: list[list[int]], group_specs: Sequence["KVCacheGroupSpec"]
+    block_ids: list[list[int]], group_specs: Sequence["KVCacheGroup"]
 ) -> list[list[int]]:
     """Drop null blocks, which are prefix-cache placeholders without state."""
     return [
         (
             [block_id for block_id in group if block_id != NULL_BLOCK_ID]
-            if isinstance(group_specs[index].kv_cache_spec, MambaSpec)
+            if issubclass(group_specs[index].manager_cls, MambaManager)
             else group
         )
         for index, group in enumerate(block_ids)
@@ -687,7 +694,7 @@ def plan_block_descriptors(
     *,
     src_regions: Sequence[TransferRegion],
     dst_regions: Sequence[TransferRegion],
-    group_specs: Sequence["KVCacheGroupSpec"],
+    group_specs: Sequence["KVCacheGroup"],
     blocks_per_logical: int,
     plan: Callable[[TransferRegion, TransferRegion], tuple[bool, int, int, int]],
 ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
@@ -717,7 +724,7 @@ def plan_block_descriptors(
     err_msg: str | None = None
 
     for request in requests:
-        if not any(request.src_block_ids) or not any(request.dst_block_ids):
+        if not any(request.dst_block_ids):
             # No blocks to copy: the transfer only releases the source's blocks.
             continue
 
@@ -1021,10 +1028,9 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
 
     @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> bool:
-        return True
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Registers the device KV cache with an RDMA engine.
+        return KVCacheAccess.REGISTERS
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -1048,7 +1054,7 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self._pulls_mamba_state = (
             vllm_config.kv_transfer_config.kv_role == "kv_consumer"
             and any(
-                isinstance(group.kv_cache_spec, MambaSpec)
+                issubclass(group.manager_cls, MambaManager)
                 for group in kv_cache_config.transfer_groups
             )
         )
@@ -1286,7 +1292,7 @@ class MooncakeConnectorScheduler:
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not issubclass(g.manager_cls, FullAttentionManager)
                 for g in kv_cache_config.transfer_groups
             )
         )
@@ -1294,8 +1300,7 @@ class MooncakeConnectorScheduler:
         # path is currently tested with GDN; Mamba2 is not validated yet.
         self._has_mamba = kv_cache_config.has_mamba_layers
         self._bounded_replay = any(
-            g.kv_cache_spec.prefix_replay_tokens > 0
-            for g in kv_cache_config.kv_cache_groups
+            g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
 
         # Requests that need to start recv/send.
@@ -1316,8 +1321,8 @@ class MooncakeConnectorScheduler:
 
         # Compute sliding window block counts per KV cache group.
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            (p.sliding_window, g.block_size)
+            if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
@@ -1360,7 +1365,7 @@ class MooncakeConnectorScheduler:
         h(N-1) instead of h(N). The decoder recomputes the last token to
         derive h(N) correctly.
 
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         params = request.kv_transfer_params
         if (
@@ -1684,6 +1689,12 @@ class MooncakeConnectorWorker:
             self.hostname,
             self.rpc_port,
         )
+        register_shared_transfer_engine(
+            engine=self.engine,
+            hostname=self.hostname,
+            rpc_port=self.rpc_port,
+            protocol=str(protocol),
+        )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
@@ -1801,14 +1812,11 @@ class MooncakeConnectorWorker:
         )
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
-        self._layer_specs: dict[str, KVCacheSpec] = {}
-        for group in kv_cache_config.transfer_groups:
-            group_spec = group.kv_cache_spec
-            specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
-            for layer_name in group.layer_names:
-                self._layer_specs[layer_name] = specs_by_layer.get(
-                    layer_name, group_spec
-                )
+        self._layer_specs: dict[str, KVCacheSpec] = {
+            name: spec
+            for group in kv_cache_config.transfer_groups
+            for name, spec in group.kv_cache_specs.items()
+        }
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
@@ -1857,6 +1865,8 @@ class MooncakeConnectorWorker:
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
+        if hasattr(self, "engine"):
+            clear_shared_transfer_engine(self.engine)
         self.async_zmq_ctx.term()
         if not self.is_kv_consumer:
             self._sender_executor.shutdown(wait=False)
@@ -2420,9 +2430,7 @@ class MooncakeConnectorWorker:
                 kv_data_ptrs.append(storage_addr)
                 kv_data_lens.append(storage.nbytes())
 
-            is_mla_region = isinstance(
-                layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-            )
+            is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
             tensor_blocks = cache.shape[0] if cache.ndim > 1 else num_blocks
             if cache.ndim == 1:
                 # A flat buffer is block-major only when it is an integral run
@@ -2459,7 +2467,11 @@ class MooncakeConnectorWorker:
             # hetero PP can align by name (#56033). A non-contiguous row cannot
             # name a sub-span, so it is one region anchored at the allocation.
             use_packed_row = (
-                not isinstance(layer_spec, (MambaSpec, CircularBufferSpec))
+                not isinstance(layer_spec, MambaSpec)
+                and not issubclass(
+                    self.kv_cache_config.transfer_groups[group_index].manager_cls,
+                    CircularBufferManager,
+                )
                 and storage_is_block_major
                 and block_stride > 0
                 and (is_mla_region or not hnc_contiguous)
@@ -3162,8 +3174,8 @@ class MooncakeConnectorWorker:
     ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
         """Align and coalesce once per peer layout.
 
-        ``send_kv_to_decode`` runs on every scheduler batch. The registered
-        layout does not change until the next ``register_kv_caches``.
+        `send_kv_to_decode` runs on every scheduler batch. The registered
+        layout does not change until the next `register_kv_caches`.
         """
         cache_key = (
             meta.remote_hostname,

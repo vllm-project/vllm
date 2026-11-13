@@ -18,11 +18,11 @@ class ECTransferConfig:
     ec_connector: str | None = None
     """The EC connector for vLLM to transmit EC caches between vLLM instances.
 
-    Built-in options include ``ECExampleConnector`` (shared filesystem via
-    safetensors) and ``ECMooncakeConnector`` (Mooncake TransferEngine RDMA;
-    requires ``mooncake-transfer-engine`` and matching producer/consumer
-    ``ec_connector_extra_config``; see ``mooncake_ec_connector`` module docstring).
-    Set ``cross_encoder_cache`` in Mooncake extra config to reuse shared
+    Built-in options include `ECExampleConnector` (shared filesystem via
+    safetensors) and `ECMooncakeConnector` (Mooncake TransferEngine RDMA;
+    requires `mooncake-transfer-engine` and matching producer/consumer
+    `ec_connector_extra_config`; see `mooncake_ec_connector` module docstring).
+    Set `cross_encoder_cache` in Mooncake extra config to reuse shared
     Encoder outputs from Store before encoding, retaining P2P delivery.
     """
 
@@ -100,7 +100,7 @@ class ECTransferConfig:
     def is_encode_only(self) -> bool:
         """Whether this instance encodes but does not run the language model.
 
-        It allocates no KV cache either -- `GPUModelRunner.get_kv_cache_spec`
+        It allocates no KV cache either -- `GPUModelRunner.get_kv_cache_layer_configs`
         returns {} for it -- so it is the one role that can spend accelerator
         time and memory on frontend work.
         """
