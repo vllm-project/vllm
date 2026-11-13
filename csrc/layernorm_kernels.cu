@@ -243,6 +243,9 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
   int hidden_size = input.size(-1);
 
   int num_tokens = input.numel() / hidden_size;
+  if (num_tokens == 0) {
+    return;
+  }
   int num_dims = input.dim();
   int64_t input_stride_d2 = input.stride(-2);
   int64_t input_stride_d3 = (num_dims >= 3) ? input.stride(-3) : 0;
@@ -325,6 +328,9 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
   int64_t input_stride = input.stride(-2);
   int64_t residual_stride = residual.stride(-2);
   int num_tokens = input.numel() / hidden_size;
+  if (num_tokens == 0) {
+    return;
+  }
 
   dim3 grid(num_tokens);
   /* This kernel is memory-latency bound in many scenarios.
