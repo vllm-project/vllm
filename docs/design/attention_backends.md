@@ -151,6 +151,15 @@ Priority is **1 = highest** (tried first).
 >
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 
+For BF16 sparse MQA calls, `FLASHMLA_SPARSE` uses native 8- and 16-query-head
+ETAP kernels on H20 (78 SMs) and H100 SXM 80GB (132 SMs), including single-query
+batches. At 32 heads, native kernels require more than twice the device's SM
+count in queries. On other SM90 devices, 8- and 16-head native kernels require
+more queries than the SM count. Other head counts round up to multiples of 64.
+Native and padded kernels can differ in BF16 rounding and greedy output. FP8
+checkpoints served with BF16 KV caches use this rule; FP8 KV-cache sparse decode
+keeps its existing dispatch.
+
 ## Legend
 
 | Column | Description |
