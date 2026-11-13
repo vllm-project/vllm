@@ -181,6 +181,31 @@ def test_measure_kv_cache_bytes():
     assert measure_kv_cache_bytes(requested_memory=2 * gib, **common) == 0
 
 
+@pytest.mark.parametrize(
+    ("free_gib", "device_wide_gib"),
+    [
+        pytest.param(4, 1, id="other-process-allocated"),
+        pytest.param(8, 5, id="other-process-released"),
+    ],
+)
+def test_measure_kv_cache_bytes_uses_this_process_memory(free_gib, device_wide_gib):
+    """Another process allocating or releasing 2 GiB on the device between
+    startup and the measurement moves free memory, but not this engine's
+    budget: it grew by 3 GiB of non-KV memory plus 1 GiB of committed KV
+    cache either way."""
+    gib = 1 << 30
+    common = dict(
+        init_free_memory=10 * gib,
+        free_memory=free_gib * gib,
+        committed_bytes=1 * gib,
+        requested_memory=6 * gib,
+        margin_floor_bytes=0,
+        margin_fraction=0.0,
+    )
+    assert measure_kv_cache_bytes(**common) == device_wide_gib * gib
+    assert measure_kv_cache_bytes(process_memory_increase=4 * gib, **common) == 3 * gib
+
+
 def test_measured_sizing_caps_torch_memory(monkeypatch):
     """Torch's caching allocator may grow into what stays free once the cache
     is extended, less multimodal IPC memory and the non-torch reserve,
