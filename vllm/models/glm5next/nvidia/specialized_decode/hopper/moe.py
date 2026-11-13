@@ -26,6 +26,10 @@ of the shared expert (on the last layer's real inputs one such column lands
 Every layer on a device shares one workspace: calls are ordered on the
 forward stream, and the experts kernel resets its counters when it ends, so
 CUDA graph replays need no reset.
+
+The TMA descriptors are built once from the weights' addresses (packed UE8M0
+scales are converted to FP32 then), so weights replaced by new tensors after
+the layer is built are not seen.
 """
 
 from typing import NamedTuple
