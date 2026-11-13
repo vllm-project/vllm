@@ -3,19 +3,19 @@
 """KnowLine question types and prompt rendering for the decisions APIs.
 
 KnowLine-35B-A3B is a Qwen3.5-MoE checkpoint post-trained to answer decisions
-as the first token after a literal ``Answer:``. This module writes the
+as the first token after a literal `Answer:`. This module writes the
 checkpoint's trained format, so picks and probabilities match its reference
 server: the state as chat turns, then one user turn carrying the instruction
-plus the question with its letter-labeled options (``A.``, ``B.``, ...), the
-assistant opener with thinking off, and ``Answer:``.
+plus the question with its letter-labeled options (`A.`, `B.`, ...), the
+assistant opener with thinking off, and `Answer:`.
 
-The label set runs ``A`` to ``Z`` and then ``AA`` on, one token each right
-after ``Answer:``; the strategy discovers it on the model's tokenizer at
+The label set runs `A` to `Z` and then `AA` on, one token each right
+after `Answer:`; the strategy discovers it on the model's tokenizer at
 startup. A Gen1.5 checkpoint reads the state and the question a second time
 when the single-pass request fits the strategy's token bound.
 
 Answers keep the checkpoint's trained shapes: a noul's answer is the
-probability of true alone, and a choice's or score's ``confidence`` is a
+probability of true alone, and a choice's or score's `confidence` is a
 certainty proxy, one minus the normalized entropy of the labels.
 """
 
@@ -238,7 +238,7 @@ def knowline_question_types(
     labels: Sequence[str],
 ) -> dict[str, QuestionType]:
     """The three question types, labeled with the strategy's discovered
-    ``labels``."""
+    `labels`."""
     types: dict[str, QuestionType] = {}
     for qtype in (KnowLineChoice(), KnowLineNoul(), KnowLineScore()):
         qtype.label_set = tuple(labels)
@@ -338,8 +338,9 @@ def _scaffold(
         except Exception:  # roles the template rejects: one user message
             msgs = [{"role": "user", "content": render_value(state)}]
             text = tokenizer.apply_chat_template(_conv(msgs, m1, m2), **template_kwargs)
-    # tokenize=False asks for the rendered text; a request's
-    # chat_template_kwargs can still make the template return token ids.
+    # tokenize=False asks for the rendered text; the fixed kwargs mean a
+    # request cannot flip it, but a server-side template that returns
+    # token ids anyway must fail here, not as a TypeError at the split.
     if not isinstance(text, str):
         raise StructuredDecisionError("the chat template must render text")
     if text.count(m1) != 1 or (m2 is not None and text.count(m2) != 1):
@@ -360,12 +361,12 @@ def render_prompts(
     twice_max_tokens: int,
     max_model_len: int | None = None,
 ) -> dict[str, tuple[str, list[int], int]]:
-    """Each question's prompt, ending in ``Answer:``: -> {qid: (prompt, prompt
+    """Each question's prompt, ending in `Answer:`: -> {qid: (prompt, prompt
     token ids, n options)}. The label tokens sit right after the prompt's ids.
 
     A Gen1.5 request reads the state and the question twice, when the
-    single-pass request fits ``twice_max_tokens`` tokens. A state that alone
-    leaves no room in ``max_model_len`` is rejected before the questions are
+    single-pass request fits `twice_max_tokens` tokens. A state that alone
+    leaves no room in `max_model_len` is rejected before the questions are
     encoded.
     """
     prefix, _, ending = _scaffold(tokenizer, state, False, template_kwargs)
@@ -417,7 +418,7 @@ def probe_prompt(tokenizer: TokenizerLike, template_kwargs: Mapping[str, Any]) -
 def find_labels(
     tokenizer: TokenizerLike, context: str, n: int = MAX_LABELS
 ) -> tuple[list[str], list[int]]:
-    """Labels A..Z, AA.. that are one token right after ``context`` (a real
+    """Labels A..Z, AA.. that are one token right after `context` (a real
     prompt ending): -> (labels, token ids)."""
     base = tokenizer.encode(context, add_special_tokens=False)
     labels, ids = [], []

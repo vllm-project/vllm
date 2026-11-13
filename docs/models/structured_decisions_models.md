@@ -424,12 +424,15 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   `B.`, ...), the assistant opener with thinking off, and `Answer:`. A JSON
   state is flattened to indented text, not JSON. A chat template that
   rejects the conversation folds the ask into the last user turn, or
-  renders the whole chat as one user message.
+  renders the whole chat as one user message. A question's `instructions`
+  carry the reference's ask when absent or null; an explicit empty value
+  (`""`, `[]` or `{}`) renders as empty, as the reference server does.
 - Labels run `A` to `Z`, then two-letter labels from `AA`, skipping any
   that is not one token right after `Answer:`. A choice can have up to 255
   options and a score up to 255 levels. With the checkpoint's tokenizer,
   26 two-letter labels are skipped and the 255th label is `JU`. A
-  tokenizer with fewer than 255 such labels disables serving.
+  tokenizer with fewer than 255 such labels disables the decisions
+  endpoints.
 - This is a hybrid model (GDN linear attention). With prefix caching, vLLM
   prefills any prompt over one 1088-token mamba block as a single chunk,
   and that chunk must replay a piecewise CUDA graph: the default capture
@@ -440,8 +443,8 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   budget.
 - The read asks for the labels' logprobs over the whole vocabulary, so
   `diagnostics.label_mass` is the labels' share and `argmax_is_label`
-  reports the model's actual first token. One request asks for up to 256
-  labels, so every question, up to 255 options, is one read.
+  reports the model's actual first token. One read can ask for up to 256
+  labels, so a question of up to 255 options is one read.
 - A request reads the state and the question a second time when the
   single-pass request fits the marker's `twice_max_tokens` bound, 3000 by
   default, as in the reference server. The bound is on the read-once
@@ -454,8 +457,8 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   says of reading twice that "Nothing was trained". Answers and
   probabilities then differ from the reference server's. A marker that is
   not a dict, a bound that is negative, boolean or not an integer, or the
-  marker on an architecture other than Qwen3.5 disables the decisions
-  endpoints, with the reason logged. `--hf-overrides` replaces
+  marker on an architecture other than the Qwen3.5 conditional-generation
+  classes disables the decisions endpoints, with the reason logged. `--hf-overrides` replaces
   the whole `knowline_config` field; it does not merge with one the
   checkpoint already ships.
 - Answers keep the trained shapes: a `noul` answers the probability of true
@@ -465,11 +468,13 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
 - The model reads text: `images`, `audio` and `videos` return 400. Top-level
   `instructions` return 400, since the prompt is fixed. Other
   `chat_template_kwargs` reach the template, with thinking off.
-- The OpenAI-style `/v1/decisions` serves the model too, with its stock
-  question rendering: the input is flattened to text, a `predicate` reads
-  as a choice between `false` and `true`, a `score` as a choice over its
+- The OpenAI-style `/v1/decisions` serves the model too, with the stock
+  question types: the input is flattened to text, a `predicate` reads as
+  a choice between `false` and `true`, a `score` as a choice over its
   level labels, a question takes at most 26 options, and `confidence` is
-  the stock one (the top probability times the label mass). These are not
-  the question shapes the checkpoint was trained on, though its answers
-  stay close to `/v1/systemone`'s on the same questions. Prefer
-  `/v1/systemone` for the trained answer shapes.
+  the stock one (the top probability times the label mass). The trained
+  prompt renders them, but their options carry no descriptions, so their
+  option lines render empty. These are not the question shapes the
+  checkpoint was trained on; predicates and scores answer close to
+  `/v1/systemone`'s on the same questions. Prefer `/v1/systemone` for the
+  trained answer shapes.
