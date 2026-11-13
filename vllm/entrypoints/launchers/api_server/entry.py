@@ -118,6 +118,8 @@ async def build_and_serve(
     sock: socket.socket,
     args: Namespace,
     peer_loads: tuple[MutableSequence[int], int] | None = None,
+    *,
+    exit_on_repeated_cleanup_signal: bool = True,
     **uvicorn_kwargs,
 ) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
@@ -143,6 +145,7 @@ async def build_and_serve(
         sock=sock,
         enable_ssl_refresh=args.enable_ssl_refresh,
         peer_loads=peer_loads,
+        exit_on_repeated_cleanup_signal=exit_on_repeated_cleanup_signal,
         host=args.host,
         port=args.port,
         log_level=args.uvicorn_log_level,
@@ -161,7 +164,9 @@ async def build_and_serve(
     )
 
 
-async def run_server(args, **uvicorn_kwargs) -> None:
+async def run_server(
+    args, *, exit_on_repeated_cleanup_signal: bool = True, **uvicorn_kwargs
+) -> None:
     """Run a single-worker API server."""
     decorate_logs("APIServer", skip_if_decorated=True)
 
@@ -173,11 +178,23 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     signal.signal(signal.SIGTERM, _interrupt_init)
 
     listen_address, sock = setup_server(args, reuse_port=False)
-    await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+    await run_server_worker(
+        listen_address,
+        sock,
+        args,
+        exit_on_repeated_cleanup_signal=exit_on_repeated_cleanup_signal,
+        **uvicorn_kwargs,
+    )
 
 
 async def run_server_worker(
-    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+    listen_address,
+    sock,
+    args,
+    client_config=None,
+    *,
+    exit_on_repeated_cleanup_signal: bool = True,
+    **uvicorn_kwargs,
 ) -> None:
     """Run a single API server worker."""
     init_parser_plugin(args)
@@ -192,7 +209,13 @@ async def run_server_worker(
         client_config=client_config,
     ) as engine_client:
         shutdown_task = await build_and_serve(
-            engine_client, listen_address, sock, args, peer_loads, **uvicorn_kwargs
+            engine_client,
+            listen_address,
+            sock,
+            args,
+            peer_loads,
+            exit_on_repeated_cleanup_signal=exit_on_repeated_cleanup_signal,
+            **uvicorn_kwargs,
         )
     # NB: Await server shutdown only after the backend context is exited
     try:

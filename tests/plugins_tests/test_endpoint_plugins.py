@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
 from starlette.datastructures import State
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
@@ -40,6 +40,7 @@ from vllm.entrypoints.launchers.launcher import (
     serve_http,
     terminate_if_errored,
 )
+from vllm.logger import configure_logging_from_args
 from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,
@@ -510,7 +511,34 @@ def test_sync_lifecycle_hook_is_rejected_at_load(
         "vllm.plugins.load_plugins_by_group",
         _fake_loader({_SyncHook.name: _SyncHook}),
     )
-    with pytest.raises(TypeError, match=rf"{_SyncHook.name}.*{hook}.*async"):
+    with pytest.raises(
+        TypeError,
+        match=rf"{_SyncHook.name} attribute {hook} is a reserved lifecycle hook "
+        "name: rename it or make it `async def`",
+    ):
+        load_endpoint_plugins(())
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "five"])
+def test_invalid_stop_timeout_is_rejected_at_load(
+    monkeypatch: pytest.MonkeyPatch, timeout: str
+):
+    """A stop deadline that is not a positive integer fails before any plugin
+    factory runs, and only for a server with an allowlisted endpoint plugin."""
+    monkeypatch.setenv("VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS", timeout)
+    monkeypatch.delenv("VLLM_PLUGINS", raising=False)
+    assert load_endpoint_plugins(()) == []
+
+    monkeypatch.setenv("VLLM_PLUGINS", "raising_endpoint_plugin")
+    monkeypatch.setattr(
+        "vllm.plugins.load_plugins_by_group",
+        _fake_loader({"raising_endpoint_plugin": _RaisingEndpointPlugin}),
+    )
+    with pytest.raises(
+        ValueError,
+        match="VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS must be a positive "
+        f"integer, got '{timeout}'",
+    ):
         load_endpoint_plugins(())
 
 
@@ -600,6 +628,101 @@ async def test_failed_start_rolls_back_in_reverse_once(
     ]
 
 
+class _HangingStopPlugin(DummyAdminEndpointPlugin):
+    """`stop` never returns on its own. With `release` it also ignores
+    cancellation until the test sets it."""
+
+    def __init__(self, events: list[str], release: asyncio.Event | None = None):
+        super().__init__(events)
+        self.name = "hanging"
+        self.stopping = asyncio.Event()
+        self.release = release
+
+    async def stop(self, state: State) -> None:
+        await super().stop(state)
+        self.stopping.set()
+        if self.release is None:
+            await asyncio.Event().wait()
+            return
+        while not self.release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.release.wait()
+
+
+@pytest.mark.asyncio
+async def test_hung_stop_is_bounded_during_startup_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The stop deadline also covers rollback: a failed `start` still surfaces
+    its own error after a preceding plugin's `stop` hangs."""
+    monkeypatch.setenv("VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS", "1")
+    events: list[str] = []
+
+    class _Failing(DummyAdminEndpointPlugin):
+        name = "failing"
+
+        async def start(self, state: State) -> None:
+            await super().start(state)
+            raise RuntimeError("bind failed")
+
+    plugins = [_dummy("first", events), _HangingStopPlugin(events), _Failing(events)]
+    app = await _build_plugin_app(monkeypatch, plugins, None, _NativeServing(events))
+
+    with pytest.raises(RuntimeError, match="bind failed"):
+        async with asyncio.timeout(_TIMEOUT_S), app.router.lifespan_context(app):
+            pytest.fail("startup must not complete")
+
+    assert events == [
+        "start:first",
+        "start:hanging",
+        "start:failing",
+        "stop:hanging",
+        "stop:first",
+        "native_shutdown",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_cancellation_during_stop_is_bounded_and_reraised(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cancelling the lifespan task while a `stop` runs cancels that hook. When
+    the hook ignores it, the wait still ends at the deadline, earlier plugins
+    and native cleanup run, and the cancellation is re-raised."""
+    monkeypatch.setenv("VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS", "1")
+    events: list[str] = []
+    release = asyncio.Event()
+    hanging = _HangingStopPlugin(events, release)
+    plugins = [_dummy("first", events), hanging]
+    app = await _build_plugin_app(monkeypatch, plugins, None, _NativeServing(events))
+
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            events.append("serving")
+
+    task = asyncio.create_task(run_lifespan())
+    try:
+        async with asyncio.timeout(_TIMEOUT_S):
+            await hanging.stopping.wait()
+        task.cancel()
+        # Awaiting `task` here would wait for the hook if the deadline failed.
+        done, _ = await asyncio.wait({task}, timeout=_TIMEOUT_S)
+        assert done, "lifespan cleanup waited for the hung stop"
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert events == [
+        "start:first",
+        "start:hanging",
+        "serving",
+        "stop:hanging",
+        "stop:first",
+        "native_shutdown",
+    ]
+
+
 class _PrintedEvents(list):
     """Events a child process reports as they happen, so the parent sees
     them even when the child is terminated by a signal."""
@@ -609,13 +732,29 @@ class _PrintedEvents(list):
         print(f"EVENT={event}", flush=True)
 
 
-async def _serve_in_child(case: str) -> None:
+_STOP_CASES = ("held_stop", "hung_stop", "stop_ignores_cancel")
+
+
+async def _serve_in_child(
+    case: str,
+    trigger: str = "SIGTERM",
+    signals: tuple[str, ...] = (),
+    **serve_kwargs: Any,
+) -> None:
     """Run real `serve_http` under uvloop and shut it down as `case` says.
 
-    Plugin "B" blocks in `start` until cancelled. In the `_AFTER_START` cases it
-    starts, and one of its later hooks misbehaves instead: `stop` (or `drain`,
-    which ignores its deadline cancellation) never returns.
+    Plugin "B" blocks in `start` until cancelled, or raises from it in
+    `start_raises`. In the `_AFTER_START` cases it starts, and one of its later
+    hooks misbehaves instead: `stop` (or `drain`, which ignores its deadline
+    cancellation) never returns. In `_TRIGGERED` cases `trigger` requests
+    shutdown once the server is serving and a hook is held: `held_stop` sends
+    itself `signals` from `stop`, returning once each is handled, and
+    `held_drain` does so from a `drain` that has passed its deadline and never
+    returns; `hung_stop` waits until cancelled; `stop_ignores_cancel` never
+    returns and repeats SIGTERM once everything else has been cleaned up.
     """
+    # As the launchers do, so that the parent can read this process's warnings.
+    configure_logging_from_args(_build_args())
     events = _PrintedEvents()
     loop = asyncio.get_running_loop()
 
@@ -641,8 +780,28 @@ async def _serve_in_child(case: str) -> None:
     engine = _Engine(events, shutdown_timeout=1 if case in _ONE_SECOND else 30)
     blocked = asyncio.Event()
 
+    async def ignore_cancellation_until(done) -> None:
+        while not done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(0.01)
+
+    async def send_handled_signals() -> None:
+        # A signal has been handled once the SIGUSR1 sent after it has.
+        handled = asyncio.Event()
+        loop.add_signal_handler(signal.SIGUSR1, handled.set)
+        for name in signals:
+            os.kill(os.getpid(), signal.Signals[name])
+            os.kill(os.getpid(), signal.SIGUSR1)
+            await handled.wait()
+            handled.clear()
+
     class _Blocking(DummyAdminEndpointPlugin):
         name = "B"
+
+        def attach_router(self, app: FastAPI) -> None:
+            @app.post("/plugins/B/request_shutdown")
+            async def request_shutdown(raw_request: Request):
+                raw_request.app.state.request_shutdown()
 
         async def start(self, state: State) -> None:
             await super().start(state)
@@ -650,6 +809,8 @@ async def _serve_in_child(case: str) -> None:
             if case in _AFTER_START:
                 return
             blocked.set()
+            if case == "start_raises":
+                raise RuntimeError("bind failed")
             if case == "request_shutdown":
                 state.request_shutdown()
             try:
@@ -663,6 +824,14 @@ async def _serve_in_child(case: str) -> None:
             await asyncio.Event().wait()
 
         async def drain(self, state: State, timeout: float) -> None:
+            if case == "held_drain":
+                deadline = time.monotonic() + timeout
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.Event().wait()
+                while (remaining := deadline - time.monotonic()) > 0:
+                    await asyncio.sleep(remaining)
+                await send_handled_signals()
+                await asyncio.Event().wait()
             if case != "drain_cancelled_stop_hangs":
                 return await super().drain(state, timeout)
             # Watchdog exit cancels the drain, which settles cooperatively.
@@ -678,17 +847,20 @@ async def _serve_in_child(case: str) -> None:
                     await asyncio.sleep(remaining)
                 os.kill(os.getpid(), signal.SIGTERM)
                 await asyncio.Event().wait()
-            if case == "stop_ignores_signal":
-                os.kill(os.getpid(), signal.SIGINT)
-                await asyncio.Event().wait()
             if case == "stop_hangs_after_watchdog":
                 # The first request finds no shutdown sequence to act on it:
-                # `stop_endpoint_plugins` cancelled that task. A signal after
-                # the request must still exit.
+                # `stop_endpoint_plugins` cancelled that task. A repeated
+                # signal after the request must still exit.
                 state.request_shutdown()
                 events.append("shutdown_requested:B")
-                os.kill(os.getpid(), signal.SIGTERM)
+            if case == "hung_stop":
                 await asyncio.Event().wait()
+            if case == "stop_ignores_cancel":
+                await ignore_cancellation_until(lambda: _EXITED[0] in events)
+                os.kill(os.getpid(), signal.SIGTERM)
+                await ignore_cancellation_until(lambda: False)
+            if case != "held_drain":
+                await send_handled_signals()
 
     # The real launcher's engine context outlives `serve_http`, including when
     # Uvicorn raises SystemExit on startup failure.
@@ -710,7 +882,14 @@ async def _serve_in_child(case: str) -> None:
         sock = create_server_socket(("127.0.0.1", 0), reuse_port=False)
         port = sock.getsockname()[1]
         server_task = asyncio.create_task(
-            serve_http(app, sock, host="127.0.0.1", port=port, log_level="warning")
+            serve_http(
+                app,
+                sock,
+                host="127.0.0.1",
+                port=port,
+                log_level="warning",
+                **serve_kwargs,
+            )
         )
 
         async with asyncio.timeout(_TIMEOUT_S):
@@ -722,7 +901,13 @@ async def _serve_in_child(case: str) -> None:
         if case in ("watchdog", "stop_hangs_after_watchdog"):
             engine.errored, engine.is_running = True, False
             terminate_if_errored(state.server, engine)
-        elif case != "request_shutdown":
+        elif case in _TRIGGERED and trigger == "request_shutdown":
+            async with httpx.AsyncClient() as client:
+                url = f"http://127.0.0.1:{port}/plugins/B/request_shutdown"
+                assert (await client.post(url)).status_code == 200
+        elif case in _TRIGGERED:
+            os.kill(os.getpid(), signal.Signals[trigger])
+        elif case not in ("request_shutdown", "start_raises"):
             os.kill(os.getpid(), signal.SIGTERM)
 
         async with asyncio.timeout(_TIMEOUT_S):
@@ -736,79 +921,138 @@ async def _serve_in_child(case: str) -> None:
 
 
 _HANGING_DRAIN = ("abandon_during_engine_shutdown", "abandoned_engine_shutdown_hangs")
-_ONE_SECOND = (*_HANGING_DRAIN, "drain_cancelled_stop_hangs")
-_AFTER_START = (
-    *_ONE_SECOND,
-    "stop_ignores_signal",
-    "stop_hangs_after_watchdog",
+_ONE_SECOND = (*_HANGING_DRAIN, "drain_cancelled_stop_hangs", "held_drain")
+_TRIGGERED = (*_STOP_CASES, "held_drain")
+_AFTER_START = (*_ONE_SECOND, *_STOP_CASES, "stop_hangs_after_watchdog")
+_ABANDONED_HANGS = (
+    "start:C",
+    "drain_hangs",
+    "drain_cancel_ignored",
+    "engine_shutdown",
+    "signal_during_engine_shutdown",
 )
 _ROLLED_BACK = ["partial_cleanup:B", "stop:A", "native_shutdown"]
 _EXITED = ["engine_context_exit"]
+_STOPPING = ["start:C", "engine_shutdown", "stop:C", "stop:B"]
+_STOPPED = [*_STOPPING, "stop:A", "native_shutdown", *_EXITED]
+_SIGTERM_EXIT = 128 + signal.SIGTERM
+_SIGINT_EXIT = 128 + signal.SIGINT
+_EXPIRING_STOP_CASES = ("hung_stop", "stop_ignores_cancel")
+
+
+def _held(trigger: str, *signals: str, **serve_kwargs: Any) -> dict:
+    return {"trigger": trigger, "signals": signals, **serve_kwargs}
 
 
 @pytest.mark.parametrize(
-    "case, returncodes, expected",
+    "case, kwargs, returncode, expected",
     [
-        ("sigterm", (0, 3), ["engine_shutdown", *_ROLLED_BACK, *_EXITED]),
-        ("request_shutdown", (0, 3), ["engine_shutdown", *_ROLLED_BACK, *_EXITED]),
-        ("watchdog", (0, 3), [*_ROLLED_BACK, *_EXITED]),
+        ("sigterm", {}, 3, ["engine_shutdown", *_ROLLED_BACK, *_EXITED]),
+        ("request_shutdown", {}, 3, ["engine_shutdown", *_ROLLED_BACK, *_EXITED]),
+        ("watchdog", {}, 3, [*_ROLLED_BACK, *_EXITED]),
+        ("start_raises", {}, 3, ["stop:A", "native_shutdown", *_EXITED]),
         (
             "start_ignores_cancel",
-            (128 + signal.SIGTERM,),
+            {},
+            _SIGTERM_EXIT,
             ["engine_shutdown", "cancel_ignored:B"],
         ),
+        ("held_stop", _held("SIGTERM", "SIGTERM"), _SIGTERM_EXIT, _STOPPING),
+        ("held_stop", _held("SIGINT", "SIGINT"), _SIGINT_EXIT, _STOPPING),
+        ("held_stop", _held("SIGINT", "SIGTERM"), 0, _STOPPED),
+        ("held_stop", _held("request_shutdown", "SIGTERM"), 0, _STOPPED),
         (
-            "stop_ignores_signal",
-            (128 + signal.SIGINT,),
-            ["start:C", "engine_shutdown", "stop:C", "stop:B"],
+            "held_stop",
+            _held("request_shutdown", "SIGTERM", "SIGTERM"),
+            _SIGTERM_EXIT,
+            _STOPPING,
         ),
         (
+            "held_stop",
+            _held(
+                "SIGTERM", "SIGTERM", "SIGTERM", exit_on_repeated_cleanup_signal=False
+            ),
+            0,
+            _STOPPED,
+        ),
+        ("hung_stop", {}, 0, _STOPPED),
+        ("stop_ignores_cancel", {}, _SIGTERM_EXIT, _STOPPED),
+        (
             "abandon_during_engine_shutdown",
-            (128 + signal.SIGTERM,),
+            {},
+            _SIGTERM_EXIT,
             ["start:C", "drain_hangs", "drain_cancel_ignored", "engine_shutdown"],
         ),
         (
             "abandoned_engine_shutdown_hangs",
-            (128 + signal.SIGTERM,),
-            [
-                "start:C",
-                "drain_hangs",
-                "drain_cancel_ignored",
-                "engine_shutdown",
-                "signal_during_engine_shutdown",
-            ],
+            {},
+            _SIGTERM_EXIT,
+            [*_ABANDONED_HANGS],
+        ),
+        (
+            "abandoned_engine_shutdown_hangs",
+            {"exit_on_repeated_cleanup_signal": False},
+            _SIGTERM_EXIT,
+            [*_ABANDONED_HANGS],
+        ),
+        # Past the drain deadline SIGTERM after SIGINT is not a repeat; the
+        # second SIGINT is, and its number is the exit status.
+        (
+            "held_drain",
+            _held("SIGINT", "SIGTERM", "SIGINT"),
+            _SIGINT_EXIT,
+            ["start:C", "engine_shutdown"],
+        ),
+        (
+            "held_drain",
+            _held("SIGTERM", "SIGTERM", exit_on_repeated_cleanup_signal=False),
+            _SIGTERM_EXIT,
+            ["start:C", "engine_shutdown"],
         ),
         (
             "drain_cancelled_stop_hangs",
-            (128 + signal.SIGTERM,),
+            {},
+            _SIGTERM_EXIT,
             ["start:C", "stop:C", "stop:B"],
         ),
         (
             "stop_hangs_after_watchdog",
-            (128 + signal.SIGTERM,),
+            {"signals": ("SIGTERM", "SIGTERM")},
+            _SIGTERM_EXIT,
             ["start:C", "stop:C", "stop:B", "shutdown_requested:B"],
         ),
     ],
 )
 def test_shutdown_during_plugin_lifecycle(
-    case: str, returncodes: tuple[int, ...], expected: list[str]
+    case: str, kwargs: dict, returncode: int, expected: list[str]
 ):
     """Shutdown during a blocked `start` cancels it and rolls back the
-    started plugins before the listener closes. When a hook ignores
-    cancellation or never returns, a repeated SIGTERM or SIGINT exits the
-    process instead of hanging: after engine shutdown, or once the shutdown
-    task has been cancelled. After the drain deadline, it abandons the drain
-    and exits once the engine has shut down, or at the next signal."""
+    started plugins before the listener closes, and a failed startup exits
+    with status 3. When a hook ignores cancellation or never returns, a
+    repeated SIGTERM or SIGINT exits the process instead of hanging: after
+    engine shutdown, or once the shutdown task has been cancelled. After the
+    drain deadline, it abandons the drain and exits once the engine has shut
+    down, or at the next repeated signal. Only a signal number the process has
+    already received counts as repeated. A server that a parent supervises
+    exits on one only after abandoning a drain. A `stop` that outlives its
+    deadline is cancelled and does not hold up the rest."""
     code = (
         "import runpy, uvloop; "
         f"scope = runpy.run_path({__file__!r}); "
-        f"uvloop.run(scope['_serve_in_child']({case!r}))"
+        f"uvloop.run(scope['_serve_in_child']({case!r}, **{kwargs!r}))"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
         timeout=6 * _TIMEOUT_S,
+        env={
+            **os.environ,
+            # Only a `stop` meant to outlive its deadline gets a short one.
+            "VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS": (
+                "1" if case in _EXPIRING_STOP_CASES else str(6 * _TIMEOUT_S)
+            ),
+        },
     )
     events = [
         line.removeprefix("EVENT=")
@@ -816,9 +1060,10 @@ def test_shutdown_during_plugin_lifecycle(
         if line.startswith("EVENT=")
     ]
     output = result.stdout + result.stderr
-    # Uvicorn versions either return or raise SystemExit(3) on startup failure.
-    assert result.returncode in returncodes, output
+    assert result.returncode == returncode, output
     assert events == ["start:A", "start:B", *expected], output
+    abandoned = "Endpoint plugin B did not stop within 1 seconds" in output
+    assert abandoned == (case in _EXPIRING_STOP_CASES), output
     if case == "abandon_during_engine_shutdown":
         assert "RuntimeError: engine shutdown failed" in output, output
 
@@ -1275,7 +1520,11 @@ def test_repeated_sigterm_exits_render_server_with_hung_plugin_stop():
     with RemoteLaunchRenderServer(
         "vllm-project/tiny-random-LlamaForCausalLM",
         ["--shutdown-timeout", "10"],
-        env_dict={"VLLM_PLUGINS": "dummy_admin_endpoint_plugin"},
+        env_dict={
+            "VLLM_PLUGINS": "dummy_admin_endpoint_plugin",
+            # Keep the hung `stop` inside its deadline until the second signal.
+            "VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS": "60",
+        },
     ) as server:
         response = httpx.post(server.url_for("plugins/dummy/hang_stop"))
         assert response.status_code == 200

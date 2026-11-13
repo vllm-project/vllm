@@ -206,11 +206,17 @@ async def serve_http(
     sock: socket.socket | None,
     enable_ssl_refresh: bool = False,
     peer_loads: tuple[MutableSequence[int], int] | None = None,
+    *,
+    exit_on_repeated_cleanup_signal: bool = True,
     **uvicorn_kwargs: Any,
 ):
     """Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
     options.  Supports http header limits via h11_max_incomplete_event_size and
     h11_max_header_count.
+
+    `exit_on_repeated_cleanup_signal` is False for a server whose parent
+    process signals it and bounds its shutdown, so that a signal delivered
+    twice does not skip HTTP and plugin cleanup.
     """
     logger.info("Available routes are:")
     # post endpoints
@@ -279,6 +285,7 @@ async def serve_http(
     drain_task: asyncio.Task[None] | None = None
     drain_deadline = 0.0
     drain_abandoned: asyncio.Future[int] = loop.create_future()
+    received_signals: set[int] = set()
 
     def abandon_drain(signum: int) -> None:
         try:
@@ -290,8 +297,11 @@ async def serve_http(
             os._exit(128 + signum)
 
     def handle_signal(signum: int) -> None:
+        repeated = signum in received_signals
+        received_signals.add(signum)
         if (
-            drain_task is not None
+            repeated
+            and drain_task is not None
             and not drain_task.done()
             and time.monotonic() >= drain_deadline
             and not drain_abandoned.done()
@@ -308,7 +318,10 @@ async def serve_http(
             or drain_abandoned.done()
             or (shutdown_task is not None and shutdown_task.done())
         )
-        if not shutdown_event.is_set() or not cleanup_only:
+        # A supervised server's parent bounds its HTTP and plugin cleanup, but
+        # not an abandoned drain's engine shutdown.
+        may_exit = exit_on_repeated_cleanup_signal or drain_abandoned.done()
+        if not (repeated and cleanup_only and may_exit):
             request_shutdown()
             return
         # Only HTTP and plugin cleanup, or engine shutdown after an abandoned
@@ -415,6 +428,9 @@ async def serve_http(
         app.state.shutdown_task = shutdown_task
 
         await server_task
+        if not server.started:
+            # Uvicorn < 0.50 returns from a failed startup; later versions exit.
+            raise SystemExit(3)
         return dummy_shutdown()
     except asyncio.CancelledError:
         port = uvicorn_kwargs["port"]
