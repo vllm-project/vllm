@@ -165,7 +165,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             n = cdiv(n, self.sp_size)
         else:
             n = tokens.shape[0]
-        num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+        num_max_tokens_per_rank = min(
+            1 << max(n - 1, 0).bit_length(), self.buffer.num_max_tokens_per_rank
+        )
 
         (
             recv_x,
