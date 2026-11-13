@@ -37,8 +37,8 @@ def is_requantization_source() -> bool:
 class OnlineRequantizationMixin:
     """Shared lifecycle for converting serialized weights before quantization."""
 
-    # Only the MXFP4 and FP8 per-channel (PTPC) online linear methods honor an
-    # activation override for now.
+    # Only the MXFP4, FP8 per-channel (PTPC) linear and MXFP8 MoE online methods
+    # honor an activation override for now.
     accepts_activation_override: bool = False
 
     @classmethod

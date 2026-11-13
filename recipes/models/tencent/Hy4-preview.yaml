@@ -4,7 +4,7 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent Hunyuan Hy4-preview — scaled-up MoE language model (770B total / 49B active) with a 10B MTP layer for speculative decoding, 1M context, and hy_v4 tool/reasoning parsers"
   date_added: 2026-08-28
-  date_updated: 2026-09-28
+  date_updated: 2026-11-13
   tasks:
     - text
   performance_headline: "Hunyuan Hy4-preview MoE — 770B/49B on 16xB200, 8xB300, 8xMI355X with MTP"
@@ -99,9 +99,8 @@ hardware_overrides:
 strategy_overrides:
   single_node_tp:
     hardware_overrides:
-      # gfx942 stores the MXFP8 checkpoint as BF16. The shared AMD window
-      # (262144, 8192 batched tokens) stays the MI355X path.
-      # These flags replace that window on MI325X only.
+      # The shared AMD window (262144, 8192 batched tokens) stays the MI355X
+      # path. These flags replace that window on MI325X only.
       mi325x:
         extra_args:
           - "--trust-remote-code"
@@ -206,11 +205,15 @@ guide: |
 
   ### Serving on 8×AMD MI325X (gfx942)
 
-  Select the FP8 variant. Since gfx942 dequantizes MXFP8 weights to BF16,
-  the context window is not the same as on the MI355X. The verified serve
-  is context 139264, FP8 KV, and the AITER MoE, MHA, RMSNorm, and linear toggles.
-  At GPU memory utilization 0.96 the KV cache holds 530,912 tokens,
-  about 3.81× one 139,264-token request.
+  Select the FP8 variant. vLLM keeps the MXFP8 experts in MXFP8 and runs them
+  with the AITER Triton MXFP8 MoE backend, which it selects automatically on
+  gfx942 (`--moe-backend aiter_triton_mxfp8_mxfp8` pins it; the startup log
+  shows `Using AITER_TRITON_MXFP8_MXFP8 Mxfp8 MoE backend`). Compared with
+  converting the experts to BF16 at load, it measured 109 instead of 196 GiB
+  of weights per GPU, 13-23% more output throughput at 8K-128K input, and
+  unchanged GSM8K (96.8%) in a TP8 serve at a 262,144-token window.
+  The verified serve is context 139264, FP8 KV, and the AITER MoE, MHA,
+  RMSNorm, and linear toggles.
   
   ```bash
   export VLLM_ROCM_USE_AITER=1
