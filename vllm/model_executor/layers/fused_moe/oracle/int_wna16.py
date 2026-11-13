@@ -1503,12 +1503,12 @@ def convert_to_wna16_moe_kernel_format(
                 input_schema=HummingInputSchema(),
             )
         elif isinstance(quant_config, WNA16WeightFormat):
-            from vllm.utils.humming import HummingInputSchema
-
+            # With no input schema, Humming takes it from
+            # VLLM_HUMMING_INPUT_QUANT_CONFIG; the format has no input scheme.
             convert_to_humming_moe_kernel_format(
                 layer,
+                quant_config={},
                 weight_schema=_WNA16FormatHummingWeightSchema(quant_config),
-                input_schema=HummingInputSchema(),
             )
         else:
             convert_to_humming_moe_kernel_format(
