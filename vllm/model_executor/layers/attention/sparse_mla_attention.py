@@ -870,7 +870,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         hot_cache = index_group.physical_kv_cache(layer_index).view(
             kv_c_and_k_pe_cache.dtype
         )
-        assert hot_cache.is_contiguous(), "HiSparse hot buffer must be contiguous"
         if (
             num_decode_tokens >= num_tokens
             or index_group.cache(layer_index).all_context_pages_resident
