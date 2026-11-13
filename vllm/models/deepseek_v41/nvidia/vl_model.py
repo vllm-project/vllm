@@ -136,6 +136,7 @@ class DeepseekV41ForCausalLM(
     """
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     packed_modules_mapping = {
         "gate_up_proj": ["w1", "w3"],
@@ -182,6 +183,8 @@ class DeepseekV41ForCausalLM(
             )
             self.vision.to(dtype=model_config.dtype)
             self.aligner.to(dtype=model_config.dtype)
+            if self.multimodal_config.mm_device_do_normalize:
+                self.vision.enable_mm_device_normalize()
 
         with self._mark_language_model(vllm_config):
             self.language_model = DeepseekV41LLMForCausalLM(
@@ -222,7 +225,7 @@ class DeepseekV41ForCausalLM(
         self,
         image_input: DeepseekV4VLImagePixelInputs,
     ) -> tuple[torch.Tensor, ...]:
-        patches = image_input.patches.to(self.aligner.w1.weight.dtype)
+        patches = image_input.patches
         vit_grid = image_input.vit_grid.tolist()
 
         image_embeds_list: list[torch.Tensor]
