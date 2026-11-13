@@ -526,7 +526,8 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
     processed_layers: list[torch.nn.Module] = []
     fake_experts = SimpleNamespace(
-        process_weights_after_loading=processed_layers.append
+        process_weights_after_loading=processed_layers.append,
+        keep_constants=lambda layer: None,
     )
     kernel = SimpleNamespace(fused_experts=fake_experts)
     monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda _: object())

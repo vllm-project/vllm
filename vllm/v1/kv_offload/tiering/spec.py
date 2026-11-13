@@ -67,7 +67,10 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
@@ -414,6 +417,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                    num_segments=REGION_SEGMENTS,
+                    populate=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
@@ -484,6 +489,19 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 self.num_chunks,
                 len(secondary_tiers),
             )
+            if secondary_tiers and not (
+                self.config.replicated_layout
+                or (
+                    self.config.canonical_layout
+                    and self.config.parallel.is_parallelism_agnostic
+                )
+            ):
+                logger.warning(
+                    "Secondary-tier KV is only valid for engines with the same "
+                    "parallel configuration; sharing it across TP sizes needs "
+                    "canonical_layout=true in kv_connector_extra_config, "
+                    "parallelism-agnostic KV cache layers, and no PP, DCP or PCP."
+                )
 
         return self._manager
 
@@ -540,13 +558,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        rank = 0 if self.replicated_layout else self.config.parallel.rank
+        if self.secondary_tier_configs and self.config.parallel.world_size > 1:
+            _reject_workers_across_nodes()
+        world_size = self.config.parallel.world_size
+        worker_index = self.config.parallel.rank
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_chunks=self.num_chunks,
-            rank=rank,
+            rank=0 if self.replicated_layout else worker_index,
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
+            num_segments=REGION_SEGMENTS,
+            # Every worker maps the same bytes in the replicated layout, so
+            # each pre-faults only its share.
+            populate_shard=(
+                (worker_index, world_size) if self.replicated_layout else None
+            ),
         )
         try:
             if self.config.canonical_layout:
@@ -598,4 +625,32 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         logger.info(
             "Canonical KV layout enabled (all_layers_portable=%s)",
             self.all_layers_portable,
+        )
+
+
+def _reject_workers_across_nodes() -> None:
+    """Reject secondary tiers on an engine whose workers span nodes.
+
+    Secondary tiers run in the engine core and read only its node's CPU
+    region, which lacks the slots of workers on other nodes (#54415). An
+    engine's workers form a grid of TP, PP and PCP groups, so they share one
+    node if every such group does. Collective over each group.
+    """
+    from vllm.distributed.parallel_state import (
+        get_pcp_group,
+        get_pp_group,
+        get_tp_group,
+        in_the_same_node_as,
+    )
+
+    # Every rank must join every collective before any of them raises.
+    spans = [
+        group.world_size > 1
+        and not all(in_the_same_node_as(group.cpu_group, source_rank=0))
+        for group in (get_tp_group(), get_pp_group(), get_pcp_group())
+    ]
+    if any(spans):
+        raise NotImplementedError(
+            "TieringOffloadingSpec secondary tiers are not supported on "
+            "engines whose workers span several nodes."
         )

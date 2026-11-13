@@ -177,9 +177,6 @@ class TokenizeChatRequest(OpenAIBaseModel):
             },
             exclude_none=True,
         )
-        # /tokenize accepts an empty tools list, which the chat route rejects.
-        if data.get("tools") == []:
-            del data["tools"]
         return ChatCompletionRequest.model_validate(data)
 
 

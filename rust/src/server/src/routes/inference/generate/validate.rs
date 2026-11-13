@@ -3,44 +3,26 @@
 
 use super::types::{GenerateOutputMode, GenerateRequest};
 use crate::error::{ApiError, bail_invalid_request};
+use crate::model_names::ServedModelNames;
 
 /// Enforce the minimal compatibility contract for the Rust token generate
 /// route.
 pub(crate) fn validate_request_compat(
     request: &GenerateRequest,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<(), ApiError> {
-    if let Some(model) = request.model.as_ref()
-        && !served_model_names.iter().any(|n| n == model)
-    {
-        return Err(ApiError::model_not_found(model.clone()));
-    }
+    served_model_names.check(request.model.as_deref())?;
 
     if request.sampling_params.n.unwrap_or(1) != 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
-    // TODO: support `output_mode: "text"`.
-    if request.output_mode == Some(GenerateOutputMode::Text) {
+    if request.output_mode == Some(GenerateOutputMode::Text)
+        && request.sampling_params.detokenize == Some(false)
+    {
         bail_invalid_request!(
             param = "output_mode",
-            "Only output_mode=\"tokens\" is supported."
-        );
-    }
-
-    // TODO: support stop strings, which need incremental detokenization.
-    if request
-        .sampling_params
-        .stop
-        .as_ref()
-        .is_some_and(|stop| !stop.as_slice().is_empty())
-    {
-        bail_invalid_request!(param = "stop", "stop is not supported.");
-    }
-    if request.sampling_params.include_stop_str_in_output == Some(true) {
-        bail_invalid_request!(
-            param = "include_stop_str_in_output",
-            "include_stop_str_in_output is not supported."
+            "output_mode='text' requires sampling_params.detokenize to be true"
         );
     }
 
@@ -96,6 +78,7 @@ mod tests {
     use serde_json::json;
 
     use super::validate_request_compat;
+    use crate::model_names::ServedModelNames;
     use crate::routes::inference::generate::types::GenerateRequest;
 
     fn base_request() -> GenerateRequest {
@@ -107,8 +90,8 @@ mod tests {
         .expect("parse request")
     }
 
-    fn served(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn served(names: &[&str]) -> ServedModelNames {
+        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect())
     }
 
     #[test]
@@ -147,48 +130,26 @@ mod tests {
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
+    /// Like Python, the `text` level needs the output to be detokenized.
     #[test]
-    fn validate_request_compat_rejects_text_output_mode() {
-        for (output_mode, accepted) in [
-            (json!(null), true),
-            (json!("tokens"), true),
-            (json!("text"), false),
+    fn validate_request_compat_rejects_text_output_mode_without_detokenize() {
+        for (output_mode, detokenize, accepted) in [
+            (json!(null), json!(false), true),
+            (json!("tokens"), json!(false), true),
+            (json!("text"), json!(null), true),
+            (json!("text"), json!(true), true),
+            (json!("text"), json!(false), false),
         ] {
             let request: GenerateRequest = serde_json::from_value(json!({
                 "token_ids": [11, 22],
-                "sampling_params": {},
+                "sampling_params": {"detokenize": detokenize},
                 "output_mode": output_mode,
             }))
             .expect("parse request");
             assert_eq!(
                 validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
                 accepted,
-                "{output_mode}"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_stop_strings() {
-        for (sampling_params, accepted) in [
-            (
-                json!({"stop": null, "include_stop_str_in_output": false}),
-                true,
-            ),
-            (json!({"stop": []}), true),
-            (json!({"stop": "\n"}), false),
-            (json!({"stop": ["\n"]}), false),
-            (json!({"include_stop_str_in_output": true}), false),
-        ] {
-            let request: GenerateRequest = serde_json::from_value(json!({
-                "token_ids": [11, 22],
-                "sampling_params": sampling_params,
-            }))
-            .expect("parse request");
-            assert_eq!(
-                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
-                accepted,
-                "{sampling_params}"
+                "{output_mode} {detokenize}"
             );
         }
     }

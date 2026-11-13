@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.backpressure import (
@@ -275,9 +276,11 @@ class TestBackpressure:
 
     def _store_blocks(self, keys, ctx=_CTX):
         self._start_request(ctx)
-        result = self.manager.prepare_store(keys, ctx)
+        result = self.manager.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
         assert result is not None
-        self.manager.complete_store(keys, ctx, success=True)
+        self.manager.complete_store(
+            keys, ctx, trigger=StoreTrigger.ON_COMPUTE, success=True
+        )
 
     def _simulate_on_schedule_end(self):
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
@@ -285,10 +288,10 @@ class TestBackpressure:
 
     def _backdate_held_jobs(self, age_s: float):
         """Set submit_time on all in-flight store jobs so they appear
-        to have taken ``age_s`` seconds when completed."""
+        to have taken `age_s` seconds when completed."""
         self.manager._processed_jobs_this_step = False
         now = time.monotonic()
-        for job_id, meta in self.manager._jobs.items():
+        for meta in self.manager._jobs.values():
             tj = meta.transfer_job
             if not tj.is_promotion and tj.submit_time > 0:
                 tj.submit_time = now - age_s
@@ -321,8 +324,8 @@ class TestBackpressure:
         reduced = stats.reduce()
         stores_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
         blocks_key = TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED
-        assert reduced["{}:('1:delayed',)".format(stores_key)] == 6
-        assert reduced["{}:('1:delayed',)".format(blocks_key)] == 12
+        assert reduced[f"{stores_key}:('1:delayed',)"] == 6
+        assert reduced[f"{blocks_key}:('1:delayed',)"] == 12
 
         self._backdate_held_jobs(0.001)
         self.tier.release_jobs()
@@ -443,8 +446,8 @@ class TestBackpressure:
         keys2 = to_keys(range(10, 12))
         # Force-submit since pressure is on (cascade would skip).
         for k in keys2:
-            self.primary.prepare_store([k], _CTX)
-            self.primary.complete_store([k], _CTX)
+            self.primary.prepare_store([k], _CTX, trigger=StoreTrigger.ON_COMPUTE)
+            self.primary.complete_store([k], _CTX, trigger=StoreTrigger.ON_COMPUTE)
         job_meta = self.manager.create_store_job(keys2, _CTX)
         job_meta.submit_time = time.monotonic() - mid_latency_s(len(keys2))
         self.tier.submit_store(job_meta)
@@ -556,7 +559,9 @@ class TestBackpressure:
         # prepare_store with existing + new blocks.
         new = to_keys(range(10, 12))
         all_keys = existing + new
-        result = self.manager.prepare_store(all_keys, ctx)
+        result = self.manager.prepare_store(
+            all_keys, ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert result is not None
 
         # Existing blocks would normally cascade to request-level tier,

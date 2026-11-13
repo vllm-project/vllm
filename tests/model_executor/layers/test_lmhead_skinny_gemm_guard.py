@@ -93,55 +93,25 @@ def _set_cap(max_bytes):
     _skinny_gemm_max_weight_bytes.cache_clear()
 
 
-# Event names that are not compute-kernel records: transfers, runtime API
-# wrappers, framework overhead. Every fn profiled here is a GEMM, so a
-# capture holding only these (in the observed failure: nothing at all)
-# recorded no kernels.
-_NOT_KERNEL = ("Memcpy", "Memset", "cuda", "hip", "aten::", "at::", "ProfilerStep")
+def _skinny_dispatch(monkeypatch, x, w):
+    """Whether rocm_unquantized_gemm_impl took the wvSplitK path, and its output.
 
-
-def _launched_kernels(fn, iters=3, attempts=3):
-    """Kernel names recorded for fn(), retrying failed captures.
-
-    Mid-suite, the ROCm activity tracer can drop every kernel record of a
-    capture while the neighboring captures in the same test stay healthy
-    (seen once in the full model_executor suite, next to a "ROCTracer
-    produced duplicate flow start" warning). A GEMM always launches
-    device kernels, so a capture without any kernel record is a failed
-    capture -- retry it rather than read it as dispatch evidence.
+    Spied at the op boundary rather than read from torch.profiler, which
+    records nothing while another ROCProfiler SDK tool (e.g. the CI kernel
+    recorder) is registered in the process.
     """
-    from torch.profiler import ProfilerActivity, profile
+    calls = 0
+    wvsplitk = ops.wvSplitK
 
-    fn()
-    torch.accelerator.synchronize()
-    kernels = []
-    for _ in range(attempts):
-        with profile(activities=[ProfilerActivity.CUDA]) as prof:
-            for _ in range(iters):
-                fn()
-            torch.accelerator.synchronize()
-        kernels = [e.key for e in prof.key_averages()]
-        if any(not k.startswith(_NOT_KERNEL) for k in kernels):
-            break
-    return kernels
+    def spy(*args):
+        nonlocal calls
+        calls += 1
+        return wvsplitk(*args)
 
-
-def _has_wvsplitk_hf(names):
-    """Any wvSplitK_hf skinny-kernel variant ran.
-
-    The csrc dispatch (WVSPLITK_CFG in csrc/rocm/skinny_gemms.cu) picks
-    between the wvSplitK_hf_sml_, wvSplitK_hf_ and wvSplitK_hf_big_
-    variants by LDS fit (Kbp*N vs the part's shared-memory size) and
-    M-tile divisibility, so the same shape lands on different variants
-    on different parts (MI300/gfx942 runs wvSplitK_hf_ for (2048, 7168)
-    at n=5 where MI355X/gfx950 runs wvSplitK_hf_sml_). The guard's
-    contract is about the skinny path as a whole, so match the family.
-    """
-    return any("wvSplitK_hf" in k for k in names)
-
-
-def _has_cijk(names):
-    return any("Cijk" in k for k in names)
+    with monkeypatch.context() as m:
+        m.setattr(ops, "wvSplitK", spy)
+        out = rocm_unquantized_gemm_impl(x, w, None)
+    return calls == 1, out
 
 
 def test_guard_decision():
@@ -250,22 +220,16 @@ def test_census_warning_fires_once_per_site(caplog):
 
 
 @pytest.mark.parametrize("cap_gib,expect_skinny", [(None, False), (1, True)])
-def test_n5_big_weight_dispatch(cap_gib, expect_skinny):
+def test_n5_big_weight_dispatch(monkeypatch, cap_gib, expect_skinny):
     """The draft-lm_head shape (n=5, >256 MiB): under the default cap the
-    guard redirects to the generic hipBLASLt GEMM (the same kernel class
-    its n=6 verify twin dispatches to); a raised cap keeps the stock
-    wvSplitK path."""
+    guard redirects to the generic GEMM (the same path its n=6 verify twin
+    dispatches to); a raised cap keeps the stock wvSplitK path."""
     _set_cap(cap_gib * 1024 * 1024 * 1024 if cap_gib else None)
     w = _weight(BIG_SHAPE)
     x = _x(5, BIG_SHAPE[1])
     ref = torch.nn.functional.linear(x, w)
-    kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
-    assert _has_wvsplitk_hf(kernels) == expect_skinny, f"kernels={kernels}"
-    if not expect_skinny:
-        assert _has_cijk(kernels), (
-            f"fall-through did not reach the hipBLASLt GEMM; kernels={kernels}"
-        )
-    out = rocm_unquantized_gemm_impl(x, w, None)
+    skinny, out = _skinny_dispatch(monkeypatch, x, w)
+    assert skinny == expect_skinny
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-1)
 
 
@@ -276,7 +240,7 @@ def test_n5_big_weight_dispatch(cap_gib, expect_skinny):
         (SMALL_SHAPE, 5, True),  # small weight: bytes-gated only
     ],
 )
-def test_guard_no_op_where_it_must_be(shape, n, expect_skinny):
+def test_guard_no_op_where_it_must_be(monkeypatch, shape, n, expect_skinny):
     """The guard must not touch dispatch outside its window, under the
     default cap AND a raised one: n=6 (above the skinny branch) and small
     weights (below the byte cap)."""
@@ -286,21 +250,17 @@ def test_guard_no_op_where_it_must_be(shape, n, expect_skinny):
     for cap_gib in (None, 1):
         _set_cap(cap_gib * 1024 * 1024 * 1024 if cap_gib else None)
         _skinny_guard_warned.clear()
-        kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
-        assert _has_wvsplitk_hf(kernels) == expect_skinny, (
-            f"cap={cap_gib} GiB: skinny dispatch changed for "
-            f"shape={shape} n={n}; kernels={kernels}"
+        skinny, out = _skinny_dispatch(monkeypatch, x, w)
+        assert skinny == expect_skinny, (
+            f"cap={cap_gib} GiB: skinny dispatch changed for shape={shape} n={n}"
         )
-    out = rocm_unquantized_gemm_impl(x, w, None)
-    torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-1)
+        torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-1)
 
 
-def test_n1_big_weight_dispatch_unchanged():
-    """n=1 must keep the stock wvSplitK_hf skinny kernel under the
-    guard (default ON) -- the carve-out keeps n=1 bit-identical to stock."""
+def test_n1_big_weight_dispatch_unchanged(monkeypatch):
+    """n=1 must keep the stock wvSplitK skinny kernel under the guard
+    (default ON) -- the carve-out keeps n=1 bit-identical to stock."""
     w = _weight(BIG_SHAPE)
     x = _x(1, BIG_SHAPE[1])
-    kernels = _launched_kernels(lambda: rocm_unquantized_gemm_impl(x, w, None))
-    assert _has_wvsplitk_hf(kernels), (
-        f"n=1 was redirected by the guard; the carve-out is missing; kernels={kernels}"
-    )
+    skinny, _ = _skinny_dispatch(monkeypatch, x, w)
+    assert skinny, "n=1 was redirected by the guard; the carve-out is missing"

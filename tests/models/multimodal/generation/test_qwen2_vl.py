@@ -10,6 +10,7 @@ from PIL import Image
 
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import rescale_video_size, sample_frames_from_video
+from vllm.platforms import current_platform
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -126,6 +127,7 @@ def batch_make_image_embeddings(
     image_processor = processor.image_processor
 
     mm_config = llm.get_llm().model_config.multimodal_config
+    assert mm_config is not None
     mm_kwargs = mm_config.merge_mm_processor_kwargs({})
     preprocess_result = image_processor.preprocess(
         images=images, return_tensors="pt", **mm_kwargs
@@ -211,6 +213,7 @@ def batch_make_video_embeddings(
     video_processor = processor.video_processor
 
     mm_config = llm.get_llm().model_config.multimodal_config
+    assert mm_config is not None
     mm_kwargs = mm_config.merge_mm_processor_kwargs({})
     preprocess_result = video_processor.preprocess(
         videos=videos, return_tensors="pt", **mm_kwargs
@@ -264,6 +267,12 @@ def batch_make_video_embeddings(
     return result
 
 
+def _encoder_graph_hits(worker) -> int:
+    manager = worker.model_runner.model_state.encoder_runner.cudagraph_manager
+    assert manager is not None and manager.is_captured()
+    return manager.get_cumulative_stats()["graph_hits"]
+
+
 def run_embedding_input_test(
     vllm_runner: type[VllmRunner],
     inputs: list[tuple[list[str], PromptImageInput, PromptVideoInput]],
@@ -275,9 +284,13 @@ def run_embedding_input_test(
     mm_limit: int,
     tensor_parallel_size: int,
     distributed_executor_backend: str | None = None,
+    encoder_cudagraph: bool = False,
 ):
     """Inference result should be the same between
     original image/video input and image/video embeddings input.
+
+    With `encoder_cudagraph`, the original input replays the encoder CUDA graph
+    and the embeddings input does not.
     """
     from transformers import AutoProcessor
 
@@ -295,7 +308,17 @@ def run_embedding_input_test(
         distributed_executor_backend=distributed_executor_backend,
         default_torch_num_threads=1,
         enable_mm_embeds=True,
+        compilation_config={"cudagraph_mm_encoder": True}
+        if encoder_cudagraph
+        else None,
     ) as vllm_model:
+
+        def graph_hits() -> int:
+            return sum(vllm_model.collective_rpc(_encoder_graph_hits))
+
+        if encoder_cudagraph:
+            hits_at_start = graph_hits()
+
         outputs_per_case_for_original_input = [
             vllm_model.generate_greedy_logprobs(
                 prompts,
@@ -306,6 +329,10 @@ def run_embedding_input_test(
             )
             for prompts, images, videos in inputs
         ]
+
+        if encoder_cudagraph:
+            hits_after_original_input = graph_hits()
+            assert hits_after_original_input > hits_at_start
 
         outputs_per_case_for_embeddings_input = [
             vllm_model.generate_greedy_logprobs(
@@ -321,6 +348,9 @@ def run_embedding_input_test(
             )
             for prompts, images, videos in inputs
         ]
+
+        if encoder_cudagraph:
+            assert graph_hits() == hits_after_original_input
 
     for outputs_for_original_input, outputs_for_embeddings_input in zip(
         outputs_per_case_for_original_input, outputs_per_case_for_embeddings_input
@@ -448,4 +478,37 @@ def test_qwen2_vl_video_embeddings_input(
         num_logprobs=num_logprobs,
         mm_limit=1,
         tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
+@pytest.mark.parametrize("model", models)
+def test_qwen2_vl_embeddings_input_with_encoder_cudagraph(
+    vllm_runner,
+    image_assets,
+    video_assets,
+    model,
+) -> None:
+    """Embeddings inputs skip the encoder CUDA graph."""
+    image = image_assets[0].pil_image
+    video = sample_frames_from_video(video_assets[0].np_ndarrays, 4)
+
+    inputs_per_case: list[tuple[list[str], PromptImageInput, PromptVideoInput]] = [
+        ([IMAGE_PROMPTS[0]], [rescale_image_size(image, 0.5)], []),
+        ([VIDEO_PROMPTS[0]], [], [rescale_video_size(video, 0.5)]),
+    ]
+
+    run_embedding_input_test(
+        vllm_runner,
+        inputs_per_case,
+        model,
+        dtype=target_dtype,
+        max_tokens=128,
+        num_logprobs=10,
+        mm_limit=1,
+        tensor_parallel_size=1,
+        encoder_cudagraph=True,
     )

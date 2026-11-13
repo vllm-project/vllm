@@ -225,6 +225,80 @@ def test_sparse_flashmla_prefill_smoke(h_q: int):
     assert actual[0].shape == (s_q, h_q, d_v)
 
 
+@pytest.mark.parametrize(
+    ("layout_name", "num_layers", "num_blocks"),
+    [
+        # Unpadded, layer 1 would start 104 KiB below a granule boundary.
+        ("LBNHC", 2, 27),
+        # Block 0 alone would leave the last layer's view 104 KiB or 96 KiB.
+        ("BLNHC", 28, 8),
+        ("BLNHC", 85, 8),
+    ],
+)
+def test_sparse_flashmla_prefill_on_the_kv_cache_at_allocation(
+    layout_name: str, num_layers: int, num_blocks: int
+):
+    """On SM100, a TMA gather with an out-of-bounds index reads up to 128 KiB past
+    the start of the KV view. Autotuning runs this before warmup commits more than
+    the extensible cache's first blocks, which an illegal access would crash."""
+    import vllm.v1.attention.ops.flashmla as fm
+    from tests.v1.core.utils import new_kv_cache_group
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.utils.extensible_tensor import granule_size
+    from vllm.utils.vmm_driver import vmm_unavailable_reason
+    from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+    from vllm.v1.worker.extensible_kv_cache import (
+        ExtensibleKVCache,
+        pad_kv_cache_segments,
+    )
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    ok, reason = fm.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+    if (reason := vmm_unavailable_reason()) is not None:
+        pytest.skip(f"VMM unavailable: {reason}")
+
+    device = torch.device("cuda")
+    block_size, d_qk, h_q, s_q, topk = 64, 576, 64, 128, 2048
+    layout = KVCacheLayout[layout_name]
+    spec = MLAAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=d_qk, dtype=torch.bfloat16
+    )
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    layers = [f"layer.{i}" for i in range(num_layers)]
+    config = get_kv_cache_config_from_groups(
+        vllm_config,
+        [new_kv_cache_group(layers, spec)],
+        available_memory=num_layers * spec.page_size_bytes * num_blocks,
+    )
+    assert config.num_blocks == num_blocks
+    config = pad_kv_cache_segments(
+        config, layout, granule_size(torch.accelerator.current_device_index())
+    )
+    kv_cache = ExtensibleKVCache(config, device, layout)
+    try:
+        views = allocate_kv_cache(config, device, layout, allocate=kv_cache.allocate)
+        q = torch.randn((s_q, h_q, d_qk), dtype=torch.bfloat16, device=device)
+        # The farthest reach: one valid slot in an int4 group of invalid ones, on
+        # the last row of a 64-row page.
+        indices = torch.full((s_q, 1, topk), -1, dtype=torch.int32, device=device)
+        indices[..., 0] = block_size - 1
+        topk_length = torch.ones(s_q, dtype=torch.int32, device=device)
+        for layer in layers:
+            rows, _ = flat_kv_row_view(views[layer].squeeze(1), block_size)
+            fm.flash_mla_sparse_fwd(
+                q, rows.unsqueeze(1), indices, d_qk**-0.5, topk_length=topk_length
+            )
+        torch.accelerator.synchronize()
+    finally:
+        kv_cache.free()
+
+
 def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 

@@ -3,12 +3,15 @@
 """CPU byte-copy runtime for UMBP connector contract tests."""
 
 import ctypes
+import multiprocessing as mp
 import threading
-from collections.abc import Sequence
+import traceback
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVLayoutDescriptor,
@@ -24,10 +27,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
     UMBPRuntimeFactory,
 )
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
 )
@@ -225,6 +228,45 @@ class MemoryRuntime(IUMBPRuntime):
         del namespace
         return _MemoryWorkerHandle(self._store, topology, layout)
 
+    def evict_all(self) -> None:
+        self._store.clear()
+
+
+def mori_has_umbp() -> bool:
+    try:
+        from mori.cpp import UMBPClient  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _report(errors, target: Callable, *args) -> None:
+    try:
+        target(*args)
+    except BaseException:
+        errors.put(traceback.format_exc())
+        raise
+    errors.put(None)
+
+
+def run_in_new_process(target: Callable, *args, timeout: float = 120) -> None:
+    """Run target in a fresh interpreter that must finish and exit cleanly."""
+    context = mp.get_context("spawn")
+    errors = context.Queue()
+    process = context.Process(target=_report, args=(errors, target, *args))
+    process.start()
+    try:
+        error = errors.get(timeout=timeout)
+        assert error is None, error
+        process.join(30)
+        assert process.exitcode == 0, "process did not exit after its work"
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(10)
+        errors.close()
+        errors.join_thread()
+
 
 def install_memory_runtime(monkeypatch):
     """Share one isolated store across the connectors created by a test."""
@@ -247,7 +289,7 @@ def handshake(scheduler_connector, worker_connector) -> None:
 
 
 def _kv_cache_config() -> KVCacheConfig:
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
     )
     return KVCacheConfig(
@@ -260,26 +302,24 @@ def _kv_cache_config() -> KVCacheConfig:
                 block_stride=1024,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer1", "layer2"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer1", "layer2"], spec)],
     )
 
 
 def _hybrid_kv_cache_config() -> KVCacheConfig:
-    full = FullAttentionSpec(
+    full = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
     )
-    mamba = MambaSpec(
-        block_size=16,
-        shapes=((4,),),
-        dtypes=(torch.float32,),
+    mamba = MambaManager.layer_config(
+        MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,)),
         mamba_cache_mode="align",
     )
     return KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["attention"], full),
-            KVCacheGroupSpec(["mamba"], mamba),
+            new_kv_cache_group(["attention"], full),
+            new_kv_cache_group(["mamba"], mamba),
         ],
     )
 
@@ -296,6 +336,8 @@ def _vllm_config(
     parallel.update(parallel_overrides)
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
+            kv_connector="UMBPStoreConnector",
+            kv_connector_module_path=None,
             kv_connector_extra_config=extra,
         ),
         cache_config=SimpleNamespace(
@@ -313,6 +355,7 @@ def _vllm_config(
         kv_events_config=None,
         max_in_flight_tokens=64,
         num_prefill_lookahead_tokens=0,
+        num_hash_lookahead_tokens=0,
         parallel_config=SimpleNamespace(**parallel),
     )
 
