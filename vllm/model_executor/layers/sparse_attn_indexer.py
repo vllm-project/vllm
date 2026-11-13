@@ -81,6 +81,55 @@ logger = init_logger(__name__)
 MXFP4_BLOCK_SIZE = 32
 
 
+def _top_k_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    top_k: int,
+) -> None:
+    if envs.VLLM_BATCH_INVARIANT:
+        if (
+            current_platform.is_device_capability_family(100)
+            and is_deep_select_supported(logits[:num_rows], top_k)
+        ):
+            deep_select_topk(
+                logits[:num_rows],
+                top_k,
+                end=row_ends[:num_rows],
+                output_idx=indices[:num_rows],
+            )
+        else:
+            from flashinfer.topk import TopKTieBreak, top_k_ragged_transform
+
+            starts = row_starts[:num_rows]
+            selected = top_k_ragged_transform(
+                logits[:num_rows],
+                torch.zeros_like(starts),
+                row_ends[:num_rows] - starts,
+                top_k,
+                deterministic=True,
+                tie_break=TopKTieBreak.LARGE,
+                dsa_graph_safe=True,
+                row_starts=starts,
+            )
+            indices[:num_rows].copy_(selected)
+        return
+    ops.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        stride0,
+        stride1,
+        top_k,
+    )
+
+
 def _assert_cutedsl_dcp_merge_supported(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -584,11 +633,16 @@ def sparse_attn_indexer(
 
     # DeepSelect ranks BF16 decode logits directly; other top-k backends and
     # the DCP merge read an FP32 copy.
-    fp32_decode_logits = topk_backend != "deep_select" or dcp_world_size != 1
+    fp32_decode_logits = (
+        envs.VLLM_BATCH_INVARIANT
+        or topk_backend != "deep_select"
+        or dcp_world_size != 1
+    )
 
     decode_budget = envs.VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB * 1024 * 1024
     chunk_decode = (
         decode_budget > 0
+        and not envs.VLLM_BATCH_INVARIANT
         and current_platform.is_device_capability_family(100)
         and not use_pcp
         and dcp_world_size == 1
@@ -921,6 +975,7 @@ def sparse_attn_indexer(
                         # fp32 copy; fp32 logits keep the per-row top-k.
                         use_deep_select = (
                             topk_backend == "deep_select"
+                            and not envs.VLLM_BATCH_INVARIANT
                             and logits.dtype == torch.bfloat16
                             and dcp_world_size == 1
                             and is_deep_select_supported(logits, topk_tokens)
@@ -950,7 +1005,20 @@ def sparse_attn_indexer(
                                 chunk_candidates,
                                 candidate_block_size,
                             )
-                    if use_deep_select:
+                    if envs.VLLM_BATCH_INVARIANT:
+                        _top_k_per_row_prefill(
+                            logits,
+                            torch.zeros_like(row_ends)
+                            if row_starts is None
+                            else row_starts,
+                            row_ends,
+                            topk_indices[rows],
+                            num_rows,
+                            logits.stride(0),
+                            logits.stride(1),
+                            topk_tokens,
+                        )
+                    elif use_deep_select:
                         deep_select_topk(
                             logits,
                             topk_tokens,
@@ -1125,9 +1193,13 @@ def sparse_attn_indexer(
             )
             # Keeping bf16 halves top-k/candidate reads. SM100 decode is varlen:
             # one context length per row.
-            if dcp_world_size != 1 or not get_indexer_topk(
-                topk_backend
-            ).takes_bf16_logits(logits, topk_tokens, logits.shape[0]):
+            if (
+                envs.VLLM_BATCH_INVARIANT
+                or dcp_world_size != 1
+                or not get_indexer_topk(topk_backend).takes_bf16_logits(
+                    logits, topk_tokens, logits.shape[0]
+                )
+            ):
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
@@ -1165,16 +1237,35 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
+        if envs.VLLM_BATCH_INVARIANT:
+            assert next_n == 1, (
+                "Batch-invariant sparse top-k decode requires one token per request."
+            )
+            row_ends = seq_lens.reshape(-1)[:num_rows].contiguous()
+            assert row_ends.numel() == num_rows, (
+                "Batch-invariant sparse top-k requires one sequence length per row."
+            )
+            _top_k_per_row_prefill(
+                logits,
+                torch.zeros_like(row_ends),
+                row_ends,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+        else:
+            # The backend comes from the layer (config is only readable at model
+            # construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
+                logits,
+                seq_lens,
+                next_n,
+                topk_indices,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
 
         if decode_metadata.global_seq_lens is not None:
             _merge_dcp_topk_global(
@@ -1313,6 +1404,11 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
+        if envs.VLLM_BATCH_INVARIANT and (self.dcp_world_size > 1 or self.use_pcp):
+            raise NotImplementedError(
+                "Batch-invariant sparse top-k does not support DCP/PCP: "
+                "the local selector and distributed merge use different tie-breaks."
+            )
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
