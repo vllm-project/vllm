@@ -190,7 +190,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
       "                      Tensor block_scale_a, Tensor block_scale_b,"
-      "                      Tensor alpha) -> ()");
+      "                      Tensor alpha, Tensor? bias=None) -> ()");
 
   // cutlass nvfp4 block scaled group GEMM
   ops.def(
@@ -609,6 +609,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "beam_allreduce(Tensor input, Tensor! output, int buffer_ptrs, "
       "Tensor! flags, int multicast_ptr, int world, int rank) -> ()");
+#endif
+
+#ifdef VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX
+  // SM100 only; impl registration is in csrc/qwen4_exp/hc_up_gate_mix.cu.
+  ops.def(
+      "qwen4_exp_hc_up_gate_mix(Tensor! out, Tensor lowrank, Tensor xn, "
+      "Tensor w_up) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

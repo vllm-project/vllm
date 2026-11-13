@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from dataclasses import replace
 from itertools import groupby
 from typing import TYPE_CHECKING
@@ -21,6 +22,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.v1.token_buffer import rfind_token_sequences
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -187,21 +189,19 @@ class Plamo3Parser(ParserEngine):
             for literal in self.parser_engine_config.terminal_literals
         }
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         # Detect PLaMo reasoning boundaries that span multiple token IDs.
         if not self.thinking_enabled:
             return True
 
-        start_ids = self._reasoning_start_token_id_sequence
-        end_ids = self._reasoning_end_token_id_sequence
-        for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i : i + len(end_ids)] == end_ids:
-                return True
-            if input_ids[i : i + len(start_ids)] == start_ids:
-                return False
-            if input_ids[i] == self.vocab.get(EOT):
-                return False
-        return False
+        # The newest end, start or end-of-turn marker decides.
+        sequences = (
+            self._reasoning_end_token_id_sequence,
+            self._reasoning_start_token_id_sequence,
+            (self.vocab.get(EOT),),
+        )
+        _, k = rfind_token_sequences(input_ids, sequences)
+        return k == 0
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Extract content after PLaMo's multi-token reasoning end marker.

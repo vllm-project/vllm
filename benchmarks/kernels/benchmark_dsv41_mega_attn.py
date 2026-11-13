@@ -18,7 +18,7 @@ to each; the mega and swap-AB arms' Q side is only a zero-pad (nothing at all
 when the shard is already at the kernel head count) because their kernels do
 the Q RoPE, the inverse RoPE and the FP8 cast.
 
-``--local-heads`` is the variable that decides the outcome: the mega kernel
+`--local-heads` is the variable that decides the outcome: the mega kernel
 absorbs work proportional to the live head count while paying for the padded
 one, so it wins at 64 live heads and is a wash at 16 (TP4 on a 64-head model).
 The swap-AB kernel pays for the live heads only but runs one thread-block
@@ -98,7 +98,7 @@ def fill_cache(view, bytes_per_token, cos_sin, device):
 
 
 def time_graph(fn, iters=100, warmup=5):
-    """Capture ``fn`` in a CUDA graph and time its replay."""
+    """Capture `fn` in a CUDA graph and time its replay."""
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """OpenVLA configuration support.
 
-OpenVLA checkpoints use a custom ``model_type`` and nest the language model
-configuration under ``text_config``. This shim lets vLLM load the checkpoint
+OpenVLA checkpoints use a custom `model_type` and nest the language model
+configuration under `text_config`. This shim lets vLLM load the checkpoint
 configuration without executing Hugging Face remote code.
 """
 

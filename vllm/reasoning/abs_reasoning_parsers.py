@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.mcp.tool_server import ToolServer
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.parser.engine.parser_engine import ReasoningEnd
     from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -57,6 +58,28 @@ class ReasoningParser:
         """
         return None
 
+    @property
+    def reasoning_end_token_ids(self) -> frozenset[int]:
+        """Every token id that alone ends reasoning.
+
+        Empty if reasoning can also end in a way that is not a single token.
+        """
+        return frozenset()
+
+    @property
+    def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
+        """Reasoning-end tokens that are also content, e.g. a tool-call start."""
+        return frozenset()
+
+    def find_reasoning_end(self, token_ids: Sequence[int]) -> "ReasoningEnd | None":
+        """Find the first reasoning end in `token_ids`.
+
+        Returns its offset and whether its token is content, or
+        `ReasoningEnd(len(token_ids), False)` if there is none. Returns `None`
+        if the parser cannot locate reasoning ends by token id.
+        """
+        return None
+
     def has_engine_confirmed_reasoning_end(self) -> bool:
         """Whether the engine has confirmed the reasoning end transition.
 
@@ -64,7 +87,7 @@ class ReasoningParser:
         detokenizer holds back text.  This method returns the engine's
         *processed* state, not a raw token-ID check.
 
-        Only called for parsers with ``engine_based_streaming = True``.
+        Only called for parsers with `engine_based_streaming = True`.
         """
         return False
 
@@ -75,14 +98,10 @@ class ReasoningParser:
         It is used in structured engines like `xgrammar` to check if the
         reasoning content ends in the model output.
 
-        Parameters
-        ----------
-        input_ids: list[int]
-            The input_ids of the model output.
+        Args:
+            input_ids: The input_ids of the model output.
 
-        Returns
-        -------
-        bool
+        Returns:
             True if the reasoning content ends in the input_ids.
 
         """
@@ -98,16 +117,12 @@ class ReasoningParser:
         `input_ids` the entire model output and `delta_ids` are the last few
         computed tokens of the model output (like during a decode step).
 
-        Parameters
-        ----------
-        input_ids: list[int]
-            The entire model output.
-        delta_ids: list[int]
-            The last few computed tokens of the model output at the current decode step.
+        Args:
+            input_ids: The entire model output.
+            delta_ids: The last few computed tokens of the model output at the
+                current decode step.
 
-        Returns
-        -------
-        bool
+        Returns:
             True if the reasoning content ends in the `delta_ids` on a
             decode step.
 
@@ -118,14 +133,10 @@ class ReasoningParser:
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """Extract content token ids from the input_ids.
 
-        Parameters
-        ----------
-        input_ids: list[int]
-            The input_ids of the model output.
+        Args:
+            input_ids: The input_ids of the model output.
 
-        Returns
-        -------
-        list[int]
+        Returns:
             The extracted content from the input_ids.
 
         """
@@ -134,9 +145,9 @@ class ReasoningParser:
         """Count the number of reasoning tokens in a sequence.
 
         Text-based reasoning models typically wrap their chain-of-thought
-        between special start/end tokens (e.g., ``<think> ... </think>``).
+        between special start/end tokens (e.g., `<think> ... </think>`).
         Implementations that support reasoning token counting should override
-        this method. The default implementation returns ``0`` so existing
+        this method. The default implementation returns `0` so existing
         parsers remain unchanged unless they explicitly opt in.
 
         Args:

@@ -45,6 +45,7 @@ from vllm.multimodal.video_decoders.pynvvideocodec import (
     PyNvVideoCodecVideoBackendMixin,
     _get_decoder_caps,
     _pynv_decoder_pool,
+    _sample_nearest_keyframes,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
@@ -208,9 +209,15 @@ def test_decode_video_imports_only_selected_backend(
                 "hw_decoders": 3,
                 "max_width": 3840,
                 "max_height": 2160,
+                "keyframe_sampling": "nearest",
             },
             {"min_frames": 4},
-            {"hw_decoders": 3, "max_width": 3840, "max_height": 2160},
+            {
+                "hw_decoders": 3,
+                "max_width": 3840,
+                "max_height": 2160,
+                "keyframe_sampling": "nearest",
+            },
         ),
     ],
 )
@@ -238,6 +245,33 @@ def test_video_backend_rejects_options_for_another_decoder():
         ValueError, match="device is not supported by the 'opencv' backend"
     ):
         resolve_video_backend_kwargs("opencv", {"device": "cuda"})
+
+    with pytest.raises(ValueError, match="keyframe_sampling is not supported"):
+        resolve_video_backend_kwargs("opencv", {"keyframe_sampling": "nearest"})
+
+
+@pytest.mark.parametrize(
+    ("targets", "keyframes", "expected"),
+    [
+        ([9, 11, 12], (0, 10, 20, 30), [0, 10, 20]),
+        ([5], (0, 10), [0]),
+        ([0, 13, 26], (35, 0, 10, 10, 50), [0, 10, 35]),
+        ([0, 10, 20, 30], (0, 10), [0, 10, 20, 30]),
+        ([0, 10, 20, 30], (0, 10, 20, 40), [0, 10, 20, 30]),
+    ],
+    ids=["joint", "tie-earlier", "dedup-and-range", "too-few", "out-of-range"],
+)
+def test_pynvvideocodec_sample_nearest_keyframes(targets, keyframes, expected):
+    assert _sample_nearest_keyframes(targets, keyframes, 40) == expected
+
+
+def test_pynvvideocodec_rejects_invalid_keyframe_sampling():
+    with pytest.raises(ValueError, match="keyframe_sampling must be"):
+        VideoBackend.load_bytes(
+            b"fake video",
+            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+            keyframe_sampling="other",
+        )
 
 
 @pytest.mark.parametrize(
@@ -625,7 +659,7 @@ def test_pynvvideocodec_native_metadata_error_is_not_chained(
     class FakeNvc:
         PyNvVCExceptionUnsupported = FakeUnsupported
 
-    def raise_unsupported(cls, file_path, nvc, max_width, max_height):
+    def raise_unsupported(cls, file_path, nvc, max_width, max_height, **kwargs):
         raise FakeUnsupported("metadata failed")
 
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", FakeNvc)
@@ -1277,6 +1311,30 @@ def test_pynvvideocodec_decodes_frames_in_bounded_batches(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    ("keyframe_sampling", "expected"),
+    [(None, [0, 13, 26, 39]), ("nearest", [0, 10, 20, 30])],
+)
+def test_pynvvideocodec_keyframe_sampling_decodes_keyframes(
+    keyframe_sampling: str | None, expected: list[int]
+):
+    video = create_long_gop_video(num_frames=40, gop_size=10)
+
+    with _fresh_decoder_pool():
+        loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
+        frames, metadata = loader.load_bytes(
+            video,
+            num_frames=4,
+            hw_decoders=1,
+            keyframe_sampling=keyframe_sampling,
+        )
+
+    assert metadata["frames_indices"] == expected
+    mean_green = frames[..., 1].reshape(4, -1).mean(axis=1)
+    np.testing.assert_allclose(mean_green, expected, atol=5)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_pynvvideocodec_chunked_decode_preserves_frame_order():
     video = create_long_gop_video(num_frames=65, width=64, height=64)
 
@@ -1409,9 +1467,9 @@ def test_video_processor_from_model_repo(
     """Test that a model repo resolves to the correct video loader backend.
 
     The test downloads the preprocessor config from HuggingFace Hub,
-    extracts the ``video_processor_type`` field, and verifies it maps
+    extracts the `video_processor_type` field, and verifies it maps
     to the expected backend and loader class.  When a corresponding HF
-    ``VideoProcessor.sample_frames`` implementation exists, the test
+    `VideoProcessor.sample_frames` implementation exists, the test
     also verifies that the vLLM backend produces identical frame indices.
     """
     video_processor = get_video_processor_cls_name_from_config(model_repo)
@@ -1507,7 +1565,7 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
 def test_video_backend_handles_edit_list_trimmed_video(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
+    """An mp4 edit list (e.g. from a lossless `ffmpeg -ss ... -c copy` cut)
     hides the decode lead-in: the header still counts every physical sample
     while sequential decode only yields the visible frames. Sampling over the
     header count used to collapse such videos to the few indices below the
@@ -1545,7 +1603,7 @@ def test_opencv_demux_counts_frames_when_video_header_lacks_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Streamed WebM and raw H.264 carry no frame count/duration in their
-    headers, so OpenCV reports a bogus negative ``CAP_PROP_FRAME_COUNT``.
+    headers, so OpenCV reports a bogus negative `CAP_PROP_FRAME_COUNT`.
     The loader must count the frames via a demux-only pass, without
     decoding.
     """
@@ -1896,7 +1954,7 @@ def test_torchcodec_backend_returns_target_frames_not_keyframes():
     GOP keyframe they seek back to.
 
     A long GOP (single keyframe at frame 0) with a per-frame green-channel
-    marker. With ``seek_mode="exact"`` torchcodec resolves each index to the
+    marker. With `seek_mode="exact"` torchcodec resolves each index to the
     exact frame, so the returned markers must be distinct, ordered, and match
     the requested indices.
     """

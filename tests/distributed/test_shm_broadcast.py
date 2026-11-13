@@ -50,7 +50,7 @@ def distributed_run(fn, world_size, timeout=60, mp_context=None):
         fn: Function to run in each process
         world_size: Number of processes to spawn
         timeout: Maximum time in seconds to wait for processes (default: 60)
-        mp_context: Optional multiprocess context (e.g. ``mp.get_context("spawn")``)
+        mp_context: Optional multiprocess context (e.g. `mp.get_context("spawn")`)
             for workers that must not inherit the parent's thread/CUDA state.
 
     """
@@ -757,15 +757,50 @@ def test_readable_reports_pending_message_without_consuming():
         reader.shutdown()
 
 
-def test_readable_sleeps_on_remote_socket():
+def test_spin_until_readable_returns_on_each_condition():
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024 * 1024,
+        max_chunks=2,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        far_future = time.monotonic() + 60
+
+        # None of these would return before the deadline if the condition failed.
+        reader.spin_until_readable(["input"], far_future)
+        reader.spin_until_readable([], time.monotonic())
+        assert not reader.readable()
+
+        threading.Timer(0.05, writer.enqueue, args=("message",)).start()
+        reader.spin_until_readable([], far_future)
+        assert reader.readable()
+        # Doesn't consume the message.
+        assert reader.dequeue(timeout=5) == "message"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_spin_until_readable_sleeps_on_remote_socket():
+    reader = mock.Mock(_is_local_reader=False, _is_remote_reader=True)
+    MessageQueue.spin_until_readable(reader, [], time.monotonic() + 60)
+    reader.remote_socket.poll.assert_called_once_with(
+        timeout=shm_broadcast.REMOTE_POLL_WAIT_MS
+    )
+    reader.buffer.get_metadata.assert_not_called()
+
+
+def test_readable_does_not_wait_on_remote_socket():
     reader = mock.Mock(
         shutting_down=False, _is_local_reader=False, _is_remote_reader=True
     )
     reader.remote_socket.poll.return_value = 0
     assert MessageQueue.readable(reader) is False
-    reader.remote_socket.poll.assert_called_once_with(
-        timeout=shm_broadcast.REMOTE_READABLE_WAIT_MS
-    )
+    reader.remote_socket.poll.assert_called_once_with(timeout=0)
 
 
 def test_reader_in_reference_cycle_is_collected_without_blocking():
