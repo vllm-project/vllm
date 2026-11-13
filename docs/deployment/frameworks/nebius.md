@@ -33,7 +33,7 @@ nebius ai endpoint create \
     --name "$ENDPOINT_NAME" \
     --image "$VLLM_IMAGE" \
     --container-command vllm \
-    --args "serve $MODEL_ID --revision $MODEL_REVISION --tokenizer-revision $MODEL_REVISION --host 0.0.0.0 --port 8000 --tensor-parallel-size 1 --max-model-len 4096 --gpu-memory-utilization 0.8" \
+    --args "serve $MODEL_ID --revision $MODEL_REVISION --tokenizer-revision $MODEL_REVISION --host 0.0.0.0 --port 8000 --tensor-parallel-size 1 --max-model-len 4096" \
     --platform gpu-l40s-a \
     --preset 1gpu-8vcpu-32gb \
     --container-port 8000/http \

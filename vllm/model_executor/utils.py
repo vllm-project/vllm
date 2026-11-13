@@ -3,12 +3,15 @@
 """Utils for model executor."""
 
 import copy
+import functools
+import mmap
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, overload
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 _weights_pre_processed: ContextVar[bool] = ContextVar(
@@ -19,7 +22,7 @@ _weights_pre_processed: ContextVar[bool] = ContextVar(
 @contextmanager
 def weights_already_processed():
     """Mark that weights are already in post-processed (runtime) format, so
-    ``process_weights_after_loading`` skips tensor transforms (used by the
+    `process_weights_after_loading` skips tensor transforms (used by the
     weight cache IPC loader).
     """
     token = _weights_pre_processed.set(True)
@@ -68,6 +71,97 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+@functools.cache
+def _is_integrated_gpu(device: torch.device) -> bool:
+    return device.type == "cuda" and current_platform.is_integrated_gpu(device.index)
+
+
+def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+    """`dst.copy_(src)` for weight loaders.
+
+    Model-specific weight loaders should call this instead of `.copy_()` when
+    copying a checkpoint tensor to the device. Off integrated GPUs it is a
+    plain `copy_`.
+
+    On integrated GPUs, a host-to-device copy straight from a safetensors mmap
+    takes its page faults inside the driver copy, which is several times slower
+    than faulting them on the CPU, so touch one byte per page of `src` first.
+    PyTorch already stages non-contiguous and dtype-converting copies through
+    a CPU temporary. Sources with at most one element are skipped: they count
+    as contiguous with any stride, which `view(torch.uint8)` rejects.
+    """
+    if (
+        src.device.type == "cpu"
+        and src.dtype == dst.dtype
+        and src.numel() > 1
+        and src.is_contiguous()
+        and _is_integrated_gpu(dst.device)
+    ):
+        flat = src.reshape(-1).view(torch.uint8)
+        flat[:: mmap.PAGESIZE].sum()
+        flat[-1:].sum()
+    return dst.copy_(src)
+
+
+def _extent(t: torch.Tensor) -> int:
+    """Number of elements spanned by `t` in its storage."""
+    if t.numel() == 0:
+        return 0
+    return 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
+
+
+def storage_view(
+    storage: torch.UntypedStorage,
+    offset: int,
+    shape: tuple[int, ...],
+    stride: tuple[int, ...],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """A `dtype` tensor on `storage` at element `offset`. `set_` does
+    not bounds-check: callers check that the view fits."""
+    view = torch.empty(0, dtype=dtype, device=storage.device)
+    return view.set_(storage, offset, shape, stride)
+
+
+def _in_own_storage(
+    old: torch.Tensor, new: torch.Tensor, whole_storage: bool = False
+) -> torch.Tensor:
+    """`new` copied into the bytes `old` spans if it fits, so the loaded
+    storage is kept (with its `data_ptr`); else `new` itself. An equal-size
+    result fits too: a repack to the same byte count (e.g. FP8 → Marlin int32)
+    then keeps the address captured CUDA graphs read.
+
+    With `whole_storage` (direct reload), `new` may use the rest of
+    `old`'s storage, so a weight that post-load processing grew keeps its
+    address on a reload too, as do a padded view with gaps (ROCm FP8 padding)
+    and an emptied weight (the checkpoint bytes stay for the next reload)."""
+    storage = old.untyped_storage()
+    offset, size = old.storage_offset() * old.element_size(), new.element_size()
+    span = _extent(new)
+    if whole_storage:
+        fits = (
+            span >= new.numel()  # not overlapping
+            and offset + span * size <= storage.nbytes()
+        )
+    else:
+        fits = (
+            new.numel() > 0
+            and span == new.numel()  # neither overlapping nor with gaps
+            # its gaps may hold another tensor's data
+            and _extent(old) == old.numel()
+            and new.numel() * size <= old.numel() * old.element_size()
+        )
+    if (
+        not fits
+        or old.device != new.device
+        or new.untyped_storage().data_ptr() == storage.data_ptr()
+        or offset % size
+    ):
+        return new
+    view = storage_view(storage, offset // size, new.shape, new.stride(), new.dtype)
+    return view.copy_(new)
+
+
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
@@ -77,15 +171,20 @@ def replace_parameter(
     weight. Called within implementations of the `process_weights_after_loading` method.
 
     The existing parameter object is kept (and so its class and loader attributes
-    for weight reloading): ``new_tensor`` is copied into it when shape, stride,
-    dtype and device match, which preserves ``data_ptr`` for captured CUDA graphs;
-    otherwise the parameter's ``.data`` is rebound to ``new_tensor``. A new
-    parameter is registered only if none exists under ``param_name``, or if the
+    for weight reloading): `new_tensor` is copied into it when shape, stride,
+    dtype and device match, which preserves `data_ptr` for captured CUDA graphs;
+    otherwise a smaller `new_tensor` is copied into the parameter's own storage
+    (so the loaded storage never shrinks), else `.data` is rebound to it. A new
+    parameter is registered only if none exists under `param_name`, or if the
     existing one is an online requantization source (released after conversion).
 
-    Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
-    ``is_shuffled``) are carried over to the parameter, except ``weight_loader``,
+    Custom attributes set on `new_tensor` (e.g. kernel dispatch flags such as
+    `is_shuffled`) are carried over to the parameter, except `weight_loader`,
     which is always taken from the existing parameter.
+
+    Under direct reload, a `new_tensor` larger than the parameter at cold start
+    may be written into the parameter's existing storage on a reload, so do not
+    read a local alias of the old data (`w = layer.weight.data`) after this call.
 
     This function should not be called on weights which are tied/shared
 
@@ -113,6 +212,9 @@ def replace_parameter(
     # a loader riding along under that name has to be dropped as well.
     new_tensor_attrs.pop("weight_loader", None)
     new_tensor_attrs.pop("_weight_loader", None)
+    # A checkpoint record belongs to the parameter it was recorded on (direct
+    # reload); one on new_tensor (another checkpoint parameter) must not overwrite it.
+    new_tensor_attrs.pop("_ckpt", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
@@ -131,8 +233,16 @@ def replace_parameter(
             and old_param.device == new_tensor.device
         ):
             old_param.data.copy_(new_tensor)
+        elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
+            old_param.data = new_tensor  # online quantization frees the source
         else:
-            old_param.data = new_tensor
+            from vllm.model_executor.model_loader.reload.direct import (
+                direct_reload_enabled,
+            )
+
+            old_param.data = _in_own_storage(
+                old_param, new_tensor, whole_storage=direct_reload_enabled()
+            )
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
         return
@@ -147,6 +257,100 @@ def replace_parameter(
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
 
     setattr(layer, param_name, new_param)
+
+
+@overload
+def refill_derived(obj: object, name: str, new: None) -> None: ...
+
+
+@overload
+def refill_derived(obj: object, name: str, new: torch.Tensor) -> torch.Tensor: ...
+
+
+def refill_derived(
+    obj: object, name: str, new: torch.Tensor | None
+) -> torch.Tensor | None:
+    """Set `obj.name` (a plain attribute, never a parameter or buffer) to a
+    tensor derived from the weights. A held tensor of the same shape, dtype and
+    device is refilled in place, so captured CUDA graphs keep its address; it
+    must own its storage. Returns the tensor now held under `name`."""
+    old = getattr(obj, name, None)
+    if (
+        isinstance(old, torch.Tensor)
+        and new is not None
+        and (old.shape, old.dtype, old.device) == (new.shape, new.dtype, new.device)
+    ):
+        return old.copy_(new)
+    setattr(obj, name, new)
+    return new
+
+
+def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None:
+    """Register the `src_name` parameter object under `dst_name` as well.
+
+    Both names then refer to one object and so to one storage: the loader writes
+    through the checkpoint name, kernels read the runtime name, and a later
+    `replace_parameter` on either name updates both. `dst_name` becomes the
+    name `kernel_parameters` reports for the object."""
+    param = getattr(layer, src_name)
+    existing = layer._parameters.get(dst_name)
+    if existing is not None and existing is not param:
+        raise ValueError(f"{dst_name!r} is already registered as another parameter")
+    layer.register_parameter(dst_name, param)
+    param.runtime_name = dst_name
+
+
+def retire_parameter(layer: torch.nn.Module, name: str) -> None:
+    """Mark a loaded parameter that no kernel reads after post-processing.
+
+    It stays registered with its loaded data (so it can be loaded again);
+    `kernel_parameters` and `get_live_param` skip it."""
+    getattr(layer, name).retired = True
+
+
+def set_kernel_parameter(
+    layer: torch.nn.Module, name: str, tensor: torch.Tensor
+) -> None:
+    """`replace_parameter`, for a tensor kernels read under `name`: the parameter
+    is live even if it was retired before, and `name` becomes its runtime name
+    if it is registered under several names (see `move_parameter`)."""
+    replace_parameter(layer, name, tensor)
+    param = getattr(layer, name)
+    param.__dict__.pop("retired", None)
+    if hasattr(param, "runtime_name"):
+        param.runtime_name = name
+
+
+def _is_live(param: torch.Tensor | None) -> bool:
+    return (
+        param is not None and not getattr(param, "retired", False) and param.numel() > 0
+    )
+
+
+def get_live_param(layer: torch.nn.Module, name: str) -> torch.Tensor | None:
+    """`getattr(layer, name, None)`, treating retired or empty params as absent."""
+    tensor = getattr(layer, name, None)
+    if isinstance(tensor, torch.nn.Parameter) and not _is_live(tensor):
+        return None
+    return tensor
+
+
+def kernel_parameters(layer: torch.nn.Module) -> dict[str, torch.nn.Parameter]:
+    """The layer's own parameters as kernels see them: live parameters only, each
+    object once, under its runtime name (see `move_parameter`)."""
+    names: dict[int, str] = {}
+    params: dict[str, torch.nn.Parameter] = {}
+    for name, param in layer._parameters.items():
+        if not _is_live(param):
+            continue
+        first = names.setdefault(id(param), name)
+        if first == name:
+            params[name] = param
+        elif getattr(param, "runtime_name", None) == name:
+            del params[first]
+            params[name] = param
+            names[id(param)] = name
+    return params
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:

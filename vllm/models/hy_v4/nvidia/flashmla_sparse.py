@@ -3,24 +3,24 @@
 """Sink-capable FlashMLA sparse backend for HY V4 (NVIDIA).
 
 HY V4 adds a per-head learnable attention sink on top of sparse MLA. The
-vendored FlashMLA kernels already accept an ``attn_sink`` argument, but vLLM's
-shared ``FLASHMLA_SPARSE`` backend neither advertises sink support nor forwards
+vendored FlashMLA kernels already accept an `attn_sink` argument, but vLLM's
+shared `FLASHMLA_SPARSE` backend neither advertises sink support nor forwards
 the tensor, so the bias would be silently dropped.
 
 This module supplies the missing wiring inside the model package, mirroring how
-`vllm.models.deepseek_v4.nvidia.flashinfer_sparse` hands ``sinks`` to the
+`vllm.models.deepseek_v4.nvidia.flashinfer_sparse` hands `sinks` to the
 FlashInfer sparse MLA kernels: subclass the platform backend, declare
 `supports_sink`, and thread the sink into every kernel call.
 
-The subclass intentionally keeps the inherited ``get_name()``
-(``"FLASHMLA_SPARSE"``). Several shared code paths key off that exact string —
+The subclass intentionally keeps the inherited `get_name()`
+(`"FLASHMLA_SPARSE"`). Several shared code paths key off that exact string —
 `_canonicalize_sparse_mla_kv_cache_dtype` promotes a quantized KV cache to
-``fp8_ds_mla`` for it, and `FlashMLASparseImpl` asserts that layout — so a new
-name would silently change KV cache behaviour. Only``supports_sink`` and the
+`fp8_ds_mla` for it, and `FlashMLASparseImpl` asserts that layout — so a new
+name would silently change KV cache behaviour. Only`supports_sink` and the
 two kernel wrappers differ from the parent.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -45,11 +45,15 @@ logger = init_logger(__name__)
 class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
     """FlashMLA sparse impl that applies HY V4's per-head learnable sink.
 
-    The sink enters as the ``sinks`` impl kwarg of
+    The sink enters as the `sinks` impl kwarg of
     `vllm.model_executor.layers.attention.MLAAttention` and is consumed by the
     FlashMLA kernels, which fold it into the softmax denominator:
-    ``out *= exp(lse) / (exp(lse) + exp(sink))``.
+    `out *= exp(lse) / (exp(lse) + exp(sink))`.
     """
+
+    # The sinks are sharded by head with TP, and ShardQ runs every head on
+    # each rank.
+    supports_shardq: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -99,7 +103,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
 
         Raises:
             ValueError: If the dtype is not float32 or the shape is not
-                ``(num_heads,)``.
+                `(num_heads,)`.
 
         """
         if sinks is None:
@@ -125,12 +129,12 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
 
         Args:
             q: Query tensor, before any head padding.
-            head_dim: Axis of ``q`` holding the query heads.
+            head_dim: Axis of `q` holding the query heads.
             kernel_heads: Head count the kernel is invoked with, which may
                 exceed the query head count because of padding.
 
         Returns:
-            The sink tensor padded to ``kernel_heads`` with ``-inf`` (a no-op
+            The sink tensor padded to `kernel_heads` with `-inf` (a no-op
             sink) for the padded lanes, or None when the layer has no sink.
 
         Raises:
@@ -181,7 +185,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
-        padded_num_heads = self.fp8_decode_padded_heads
+        padded_num_heads = self._compute_fp8_decode_padded_heads(actual_num_heads)
         attn_sink = self._sinks_for_query(q, head_dim=2, kernel_heads=padded_num_heads)
 
         # Pad query if needed (kernel only supports h_q = 64 or 128)
@@ -280,7 +284,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
 
 
 class HYV4FlashMLASparseBackend(FlashMLASparseBackend):
-    """``FLASHMLA_SPARSE`` with attention-sink support for HY V4.
+    """`FLASHMLA_SPARSE` with attention-sink support for HY V4.
 
     Keeps the parent's name, metadata and builder; only the impl class and the
     sink capability differ. See the module docstring for why the name is reused.

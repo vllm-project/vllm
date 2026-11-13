@@ -388,6 +388,42 @@ class TestKvCacheScaleMapper:
             == "model.layers.0.self_attn.attn.k_scale"
         )
 
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            # llm-compressor stores the scales on the HF attention module,
+            # which GPT-J names `attn`; vLLM's Attention layer is `attn.attn`.
+            ("transformer.h.0.attn.k_scale", "transformer.h.0.attn.attn.k_scale"),
+            ("transformer.h.0.attn.v_scale", "transformer.h.0.attn.attn.v_scale"),
+            ("transformer.h.0.attn.q_scale", "transformer.h.0.attn.attn.q_scale"),
+            (
+                "transformer.h.0.attn.k_zero_point",
+                "transformer.h.0.attn.attn.k_zero_point",
+            ),
+            # deprecated fused kv_scale
+            ("transformer.h.0.attn.kv_scale", "transformer.h.0.attn.attn.k_scale"),
+            # already in vLLM form -> unchanged
+            (
+                "transformer.h.0.attn.attn.k_scale",
+                "transformer.h.0.attn.attn.k_scale",
+            ),
+            # projections are still stacked into qkv_proj
+            (
+                "transformer.h.0.attn.k_proj.weight",
+                "transformer.h.0.attn.qkv_proj.weight",
+            ),
+        ],
+    )
+    def test_gptj_attention_named_attn(self, name, expected):
+        """GPT-J's attention module is itself named `attn`, so the default
+        rule, which skips names already ending in `.attn.k_scale`, must not
+        leave its checkpoint scales pointing at the outer module."""
+        from vllm.model_executor.models.gpt_j import GPTJForCausalLM
+
+        # AutoWeightsLoader does `mapper |= cache_scale_mapper`
+        combined = GPTJForCausalLM.hf_to_vllm_mapper | self._mapper()
+        assert combined._map_name(name) == expected
+
 
 @pytest.mark.parametrize("fails", [False, True])
 def test_drop_checkpoint_cache_releases_local_weight_files(

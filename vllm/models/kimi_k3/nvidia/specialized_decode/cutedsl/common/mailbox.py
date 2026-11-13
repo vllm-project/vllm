@@ -18,7 +18,7 @@ def rearm(pointer):
 
 @cute.jit
 def fetch(values, i: cutlass.Constexpr[int], pointer):
-    """Load fragment ``i`` into ``values[i]``; returns its dirty flag at bit ``i``."""
+    """Load fragment `i` into `values[i]`; returns its dirty flag at bit `i`."""
     got = load_words(pointer, count=4, volatile=True)
     for k in cutlass.range_constexpr(4):
         values[i, k] = got[k]
@@ -27,7 +27,7 @@ def fetch(values, i: cutlass.Constexpr[int], pointer):
 
 @cute.jit
 def poll(base, stride, count: cutlass.Constexpr[int]):
-    """Lamport-poll ``count`` 16-byte fragments at base + i*stride (elements); all
+    """Lamport-poll `count` 16-byte fragments at base + i*stride (elements); all
     loads issue before any check and only dirty fragments re-poll."""
     values = cute.make_rmem_tensor((count, 4), Uint32)
     pending = Uint32(0)

@@ -124,7 +124,10 @@ PY
     fi
     echo "INFO: will use metadata.json from ${meta_json_url}"
 
-    for i in {1..5}; do
+    # A nightly build tests the commit that just landed on main, whose release
+    # pipeline publishes the wheel about 40 minutes after the merge.
+    max_attempts=12
+    for ((i = 1; i <= max_attempts; i++)); do
         echo "Checking metadata.json URL (attempt $i)..."
         if curl --fail "$meta_json_url" > metadata.json; then
             echo "INFO: metadata.json URL is valid."
@@ -150,8 +153,8 @@ PY
             fi
         fi
         # failure handling & retry logic
-        if [ "$i" -eq 5 ]; then
-            echo "ERROR: metadata is still not available after 5 attempts."
+        if [ "$i" -eq "$max_attempts" ]; then
+            echo "ERROR: metadata is still not available after $max_attempts attempts."
             echo "ERROR: Please check whether the precompiled wheel for commit $merge_base_commit is available."
             echo " NOTE: If $merge_base_commit is a new commit on main, maybe try again after its release pipeline finishes."
             echo " NOTE: If it fails, please report in #sig-ci channel."
@@ -198,9 +201,13 @@ elif [[ -n "${PYTHON_ONLY_COMPILE_PYTHON:-}" ]]; then
     cuda_variant="$(python3 -c 'import torch; print("cu" + torch.version.cuda.replace(".", ""))')"
     uv venv --python "${PYTHON_ONLY_COMPILE_PYTHON}" /tmp/python-only-venv
     source /tmp/python-only-venv/bin/activate
+    # --torch-backend lists non-torch packages (e.g. outlines-core) at older versions,
+    # so add the index for the image's CUDA build instead and let uv take the best
+    # version across indexes.
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 \
         VLLM_PRECOMPILED_WHEEL_VARIANT="${cuda_variant}" \
-        uv pip install -e . --torch-backend="${cuda_variant}"
+        uv pip install -e . --index-strategy unsafe-best-match \
+        --extra-index-url "https://download.pytorch.org/whl/${cuda_variant}"
 else
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
 fi
@@ -219,7 +226,7 @@ actual = f"{sys.version_info.major}.{sys.version_info.minor}"
 assert actual == expected, f"expected Python {expected}, got {actual}"
 
 llm = LLM(
-    "hmellor/tiny-random-LlamaForCausalLM",
+    "vllm-project/tiny-random-LlamaForCausalLM",
     max_model_len=256,
     gpu_memory_utilization=0.3,
 )

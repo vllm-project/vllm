@@ -147,6 +147,7 @@ message IsPausedResponse { bool paused = 1; }
 message SleepRequest {
   optional uint32 level = 1;
   PauseMode mode = 2;
+  optional bool reset_connector = 3;
 }
 message SleepResponse {}
 

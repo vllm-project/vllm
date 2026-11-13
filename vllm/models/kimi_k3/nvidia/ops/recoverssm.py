@@ -587,7 +587,7 @@ class KDARecoverSSMRecords:
     """One KDA layer's RecoverSSM verify records.
 
     Per request of a speculative step (its row in the step's speculative batch),
-    head and verified token: the FP32 correction ``u_t`` [V] and the activation
+    head and verified token: the FP32 correction `u_t` [V] and the activation
     dtype key and raw gate [2K]. A verify writes them and the commit after sampling
     reads them; they are not part of a request's state and so are not stored in
     the KV cache."""
@@ -629,7 +629,7 @@ def kda_recoverssm_verify(
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Verify a KDA speculative window without modifying its checkpoint. Request
-    ``b`` writes its verify records to row ``b`` of ``records``."""
+    `b` writes its verify records to row `b` of `records`."""
     if q.ndim != 4 or q.shape[0] != 1:
         raise ValueError("KDA RecoverSSM q must have shape [1, tokens, heads, dim]")
     _, total_tokens, num_heads, key_dim = q.shape
