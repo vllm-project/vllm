@@ -39,6 +39,7 @@ from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
 )
 from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
     Qwen3OmniMoeProcessor,
+    Qwen3OmniMoeProcessorKwargs,
 )
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar
@@ -105,6 +106,7 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniThinkerDummyInputsBuilder,
     Qwen2_5OmniThinkerMultiModalDataParser,
     Qwen2_5OmniThinkerMultiModalProcessor,
+    Qwen2_5OmniThinkerProcessingInfo,
     _get_feature_tensor,
     check_interleaved_audio_video,
     merge_interleaved_embeddings,
@@ -362,7 +364,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
-        self.max_source_positions = config.max_source_positions
+        # Transformers-format Qwen3-ASR checkpoints do not set this
+        self.max_source_positions = getattr(config, "max_source_positions", 1500)
         self.n_window = config.n_window
         self.n_window_infer = config.n_window_infer
         self.conv_chunksize = config.conv_chunksize
@@ -1159,16 +1162,9 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
-class Qwen3OmniMoeThinkerMultiModalDataParser(Qwen2_5OmniThinkerMultiModalDataParser):
-    # Keep the existing raw-media fallback for vision inputs.
-    embedding_fields = {
-        "audio": Qwen2_5OmniThinkerMultiModalDataParser.embedding_fields["audio"],
-    }
+class Qwen3OmniMoeThinkerProcessingInfo(Qwen2_5OmniThinkerProcessingInfo):
+    processor_kwargs_cls = Qwen3OmniMoeProcessorKwargs
 
-
-class Qwen3OmniMoeThinkerProcessingInfo(
-    Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo
-):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3OmniMoeConfig).thinker_config
 
@@ -1192,7 +1188,7 @@ class Qwen3OmniMoeThinkerProcessingInfo(
         return feature_extractor
 
     def get_data_parser(self):
-        return Qwen3OmniMoeThinkerMultiModalDataParser(
+        return Qwen2_5OmniThinkerMultiModalDataParser(
             spatial_merge_size=self.get_hf_config().vision_config.spatial_merge_size,
             target_sr=self.get_feature_extractor().sampling_rate,
             target_channels=self.get_target_channels(),
@@ -1240,6 +1236,7 @@ class Qwen3OmniMoeThinkerProcessingInfo(
 Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder[
     Qwen3OmniMoeThinkerProcessingInfo
 ]
+
 
 _I = TypeVar("_I", bound=BaseProcessingInfo, default=Qwen3OmniMoeThinkerProcessingInfo)
 

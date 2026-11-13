@@ -10,18 +10,18 @@ approximate hardware math, bf16 / fp8 packing, buffer resources, the
 execution-model constants and the kernel symbol naming.
 
 Ported from the FlyDSL GLM-5 layer kernel (ROCm/FlyDSL branch
-``glm5-mla-moe-layer-monokernel`` @ 1e28fd8a,
-``kernels/mla_moe_layer/shared_reuse_moe_kernel.py``). Only published flydsl APIs
-and aiter's vendored ``buffer_ops`` / ``dpp_utils`` are used.
+`glm5-mla-moe-layer-monokernel` @ 1e28fd8a,
+`kernels/mla_moe_layer/shared_reuse_moe_kernel.py`). Only published flydsl APIs
+and aiter's vendored `buffer_ops` / `dpp_utils` are used.
 
-Every function but ``kernel_symbol`` is traced inside a ``@flyc.kernel`` body.
+Every function but `kernel_symbol` is traced inside a `@flyc.kernel` body.
 
 Raw boundaries kept, for want of an equivalent on the pinned FlyDSL:
-``buffer_ops`` loads / stores (the kernels take raw Int64 addresses, no tensors
-for ``make_buffer_tensor``); raw MFMA intrinsics (hand-laid operands: permlane
-transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (``expect``,
-``s_memrealtime``, the approximate rsq / rcp / exp2) and the struct unpacking of
-``permlane*_swap``.
+`buffer_ops` loads / stores (the kernels take raw Int64 addresses, no tensors
+for `make_buffer_tensor`); raw MFMA intrinsics (hand-laid operands: permlane
+transposes, fp8 packing, MXFP4 scales); the LLVM intrinsics here (`expect`,
+`s_memrealtime`, the approximate rsq / rcp / exp2) and the struct unpacking of
+`permlane*_swap`.
 
 Also the TP group seen from inside a kernel (every rank's peer buffer, an
 all-reduce's rank-ordered sum) and a timeline build's phase stamps."""
@@ -35,6 +35,8 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
+from vllm.models.deepseek_v41.amd.mono.common.gfx942 import mfma_bf16_k32
 from vllm.models.deepseek_v41.amd.mono.common.plan import THREADS, WAVES
 
 # ---------------------------------------------------------------- primitives
@@ -71,7 +73,7 @@ def permlane_swap(off, x, y):
 
 
 def lane_gather(v, src_lane):
-    """Lane ``src_lane``'s value of v, a source lane a lane (ds_bpermute)."""
+    """Lane `src_lane`'s value of v, a source lane a lane (ds_bpermute)."""
     return fx.Int32(
         rocdl.ds_bpermute(T.i32, fx.Int32(src_lane) * 4, fx.Int32(v).ir_value())
     )
@@ -83,10 +85,10 @@ def memrealtime():
 
 
 def fresh(v):
-    """``v`` (a per-lane Int32) through an opaque move, here: the lane math built
+    """`v` (a per-lane Int32) through an opaque move, here: the lane math built
     on it is computed at its use, where LLVM would otherwise hoist it out of a task
     loop or CSE it across stages into registers held for the whole kernel (spills,
-    and a kernel with scratch is refused: ``runtime.widths``)."""
+    and a kernel with scratch is refused: `runtime.widths`)."""
     return fx.Int32(
         llvm.inline_asm(
             T.i32,
@@ -122,15 +124,15 @@ def hw_exp2(x):
 
 
 def div_rn(x, d, r):
-    """``x / d`` rounded to nearest, bit-identical to the IEEE division, given
-    ``r = 1.0 / d`` from one true division per divisor (Markstein: a quotient
+    """`x / d` rounded to nearest, bit-identical to the IEEE division, given
+    `r = 1.0 / d` from one true division per divisor (Markstein: a quotient
     within 1 ulp plus its exact fma residual times RN(1/d) rounds correctly)."""
     q = x * r
     return fx.Float32(fmath.fma(fx.Float32(fmath.fma(-q, d, x)), r, q))
 
 
 def xshfl(v, off):
-    """Value of lane ``lane ^ off``: offsets 32 / 16 via v_permlane*_swap, in-row
+    """Value of lane `lane ^ off`: offsets 32 / 16 via v_permlane*_swap, in-row
     offsets via DPP (VALU latency, not LDS). Powers of two only: any other
     offset would take the lane ^ 1 path."""
     assert off in (1, 2, 4, 8, 16, 32), off
@@ -152,8 +154,11 @@ def xshfl(v, off):
 
 
 def xred(v, off, op):
-    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap."""
-    if off < 16:
+    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap.
+    gfx942 has no permlane swap: it reads lane ^ off with a shuffle instead.
+    The lanes then see op(a, b) or op(b, a), which is the same value for the
+    commutative ops used here (add, max)."""
+    if off < 16 or GFX942:
         return op(v, xshfl(v, off))
     is_f = isinstance(v, fx.Float32)
     x = v.bitcast(fx.Int32) if is_f else fx.Int32(v)
@@ -178,7 +183,7 @@ def butterfly(v, offsets, op=_add):
 
 
 def traced(fn):
-    """Apply flydsl's AST rewriting to a helper, so its ``while`` / ``if`` over
+    """Apply flydsl's AST rewriting to a helper, so its `while` / `if` over
     traced values lower to scf ops. Kernels rewrite only their own body."""
     return ASTRewriter.transform(fn)
 
@@ -189,8 +194,8 @@ LOAD_BATCH = 4  # rounds of a strided loop whose loads go out together
 @traced
 def batched_rounds(tid, n, load, use, batch=LOAD_BATCH):
     """A CTA's strided loop over elements v = tid + THREADS i < n (n a Python
-    int): ``load(v)`` of ``batch`` rounds issued before any ``use(v, loaded)``.
-    A round whose ``use`` stores to global memory keeps the next round's loads
+    int): `load(v)` of `batch` rounds issued before any `use(v, loaded)`.
+    A round whose `use` stores to global memory keeps the next round's loads
     behind it (they may alias), so the rounds' loads would go out in series. A
     round past n loads element n - 1 (in range) and uses nothing."""
     rounds = -(-n // THREADS)
@@ -204,12 +209,14 @@ def batched_rounds(tid, n, load, use, batch=LOAD_BATCH):
 
 
 def mfma_bf16(a, b, c):
+    if GFX942:
+        return mfma_bf16_k32(a, b, c)
     return fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
 
 
 def row_sum(red, r, t, waves=None):
-    """Row r, token t of the waves' 16x16 MFMA accumulators (wave w's at ``red``
-    + (w * 64 + lane) * 4), summed in wave order from 0 (``waves``: which, in
+    """Row r, token t of the waves' 16x16 MFMA accumulators (wave w's at `red`
+    + (w * 64 + lane) * 4), summed in wave order from 0 (`waves`: which, in
     order; all of them by default)."""
     tot = fx.Float32(0.0)
     for w in waves if waves is not None else range(WAVES):
@@ -218,7 +225,7 @@ def row_sum(red, r, t, waves=None):
 
 
 def ballot(pred):
-    """The wave's lanes where ``pred`` holds, a bit a lane."""
+    """The wave's lanes where `pred` holds, a bit a lane."""
     return fx.Int64(rocdl.ballot(T.i64, as_ir_value(pred)))
 
 
@@ -227,13 +234,13 @@ def popcount(x):
 
 
 def lanes_below(bal, lane):
-    """How many of the lanes in ballot ``bal`` are below ``lane``."""
+    """How many of the lanes in ballot `bal` are below `lane`."""
     return popcount(bal & ((fx.Int64(1) << fx.Int64(lane)) - 1))
 
 
 def load_ptr64(table, i):
-    """Entry ``i`` of an i64 table in memory, wave-uniform (each half through
-    ``uniform``): a peer's buffer base, a kernel argument block's pointer."""
+    """Entry `i` of an i64 table in memory, wave-uniform (each half through
+    `uniform`): a peer's buffer base, a kernel argument block's pointer."""
     pw = fx.Vector(bo.buffer_load(rsrc(table), i * 2, vec_width=2, dtype=T.i32))
     return (fx.Int64(uniform(pw[1])) << 32) | fx.Int64(fx.Uint32(uniform(pw[0])))
 
@@ -274,14 +281,14 @@ def fp8_pack4(a, b, c, d):
 
 # ---------------------------------------------------------------- TP ranks
 def peer_bases(peers, tp):
-    """Every rank's peer buffer base from the ``peers`` table (an i64 a rank),
+    """Every rank's peer buffer base from the `peers` table (an i64 a rank),
     loaded once: a put's address must not wait on a load of its own."""
     return [load_ptr64(peers, p) for p in range(tp)]
 
 
 def sum_partials(poll, own, pair_of, tp):
-    """The ``tp`` ranks' bf16 pair partials at ``pair_of(src)`` of the mailbox
-    region ``own``, summed in fp32 in rank order 0 .. tp - 1: one poll batch ->
+    """The `tp` ranks' bf16 pair partials at `pair_of(src)` of the mailbox
+    region `own`, summed in fp32 in rank order 0 .. tp - 1: one poll batch ->
     (lo sum, hi sum). Every rank sums in the same order, so they agree."""
     ws = poll([(own, pair_of(src), 1) for src in range(tp)])
     acc0, acc1 = bf2_f32(ws[0][0])

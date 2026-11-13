@@ -714,9 +714,6 @@ class Zamba2Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        is_lora_enabled = bool(lora_config)
-        assert not is_lora_enabled
 
         self.config = config
 
@@ -821,7 +818,7 @@ class Zamba2Model(nn.Module):
 
         # Process through layers
         original_hidden_states = torch.clone(hidden_states)
-        for layer_idx, layer in enumerate(self.layers):
+        for layer in self.layers:
             layer_outputs = layer(
                 hidden_states,
                 original_hidden_states=original_hidden_states,

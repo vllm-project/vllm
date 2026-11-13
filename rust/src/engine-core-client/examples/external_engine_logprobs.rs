@@ -73,7 +73,7 @@ fn build_request(
 ) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id,
-        prompt_token_ids: Some(prompt_token_ids),
+        prompt_token_ids: Some(prompt_token_ids.into()),
         sampling_params: Some(EngineCoreSamplingParams {
             max_tokens,
             logprobs: Some(logprobs),
@@ -111,7 +111,9 @@ async fn main() -> Result<()> {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address.clone(),
             advertised_host: args.host.clone(),
+            engine_start_index: 0,
             engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
             ready_timeout,
             local_input_address: None,
             local_output_address: None,

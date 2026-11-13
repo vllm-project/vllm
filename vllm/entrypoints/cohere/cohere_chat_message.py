@@ -3,22 +3,22 @@
 """vLLM chat-protocol extensions for grounded (citation-carrying) models.
 
 This module keeps the OpenAI chat completion protocol classes
-(:class:`ChatMessage` / :class:`DeltaMessage`) free of Cohere-specific fields.
+(`ChatMessage` / `DeltaMessage`) free of Cohere-specific fields.
 It provides two things:
 
-* :class:`Citation` / :class:`CitationSource`: the vLLM-internal citation
+* `Citation` / `CitationSource`: the vLLM-internal citation
   representation produced by the Cohere parser
-  (:mod:`vllm.parser.cohere_command`) and consumed by
-  :mod:`vllm.entrypoints.cohere.serving`. This is *not* the on-wire Cohere
+  (`vllm.parser.cohere_command`) and consumed by
+  `vllm.entrypoints.cohere.serving`. This is *not* the on-wire Cohere
   SDK shape -- that conversion happens in the serving layer.
-* :class:`CohereChatMessage` / :class:`CohereDeltaMessage`: :class:`ChatMessage`
-  / :class:`DeltaMessage` subclasses that add a ``citations`` field. They
+* `CohereChatMessage` / `CohereDeltaMessage`: `ChatMessage`
+  / `DeltaMessage` subclasses that add a `citations` field. They
   are only instantiated by the citation-aware serving handler
-  (:class:`vllm.entrypoints.cohere.serving.CohereServingChatV2`) and by the
+  (`vllm.entrypoints.cohere.serving.CohereServingChatV2`) and by the
   Cohere reasoning parser's streaming path. Non-Cohere code paths continue
-  to construct plain :class:`ChatMessage` / :class:`DeltaMessage`.
+  to construct plain `ChatMessage` / `DeltaMessage`.
 
-The module intentionally does *not* import the ``cohere`` Python SDK so the
+The module intentionally does *not* import the `cohere` Python SDK so the
 reasoning parser (which is Cohere-model-specific but ships without the SDK
 dependency) can import from here freely.
 """
@@ -35,23 +35,23 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 
 
 class CitationSource(OpenAIBaseModel):
-    """Source attribution for a :class:`Citation`.
+    """Source attribution for a `Citation`.
 
-    Mirrors the shape used by Cohere's Chat v2 API. ``type`` is the source
-    discriminator (``document`` or ``tool``); ``id`` is the citing
-    document/tool-output identifier; ``document`` and ``tool_output`` carry
+    Mirrors the shape used by Cohere's Chat v2 API. `type` is the source
+    discriminator (`document` or `tool`); `id` is the citing
+    document/tool-output identifier; `document` and `tool_output` carry
     the original payload that produced the citation.
 
     Sources are fully resolved by the parser at emit time
-    (see :func:`_melody_sources_to_vllm` in
-    :mod:`vllm.parser.cohere_command`) using the
-    ``POSITION_TO_SOURCE_KEY`` map forwarded through
-    ``chat_template_kwargs`` by
-    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2._apply_cohere_template_kwargs`.
+    (see `_melody_sources_to_vllm` in
+    `vllm.parser.cohere_command`) using the
+    `POSITION_TO_SOURCE_KEY` map forwarded through
+    `chat_template_kwargs` by
+    `vllm.entrypoints.cohere.serving.CohereServingChatV2._apply_cohere_template_kwargs`.
     That means every instance that reaches the serving / wire layer
-    already has ``type`` / ``id`` populated; the serving layer only has
-    to coerce to :class:`cohere.types.Citation` and rewrite
-    ``THINKING_CONTENT`` -> ``PLAN`` for non-reasoning models.
+    already has `type` / `id` populated; the serving layer only has
+    to coerce to `cohere.types.Citation` and rewrite
+    `THINKING_CONTENT` -> `PLAN` for non-reasoning models.
     """
 
     type: Literal["document", "tool"] | None = None
@@ -65,8 +65,8 @@ class Citation(OpenAIBaseModel):
 
     vLLM-internal representation used by the Cohere reasoning parser and
     the Cohere v2 serving layer. This is not the on-wire Cohere SDK shape:
-    conversion to the SDK's ``cohere.types.Citation`` happens in
-    :mod:`vllm.entrypoints.cohere.serving`.
+    conversion to the SDK's `cohere.types.Citation` happens in
+    `vllm.entrypoints.cohere.serving`.
     """
 
     start: int | None = None
@@ -82,23 +82,23 @@ class Citation(OpenAIBaseModel):
     has multiple content blocks)."""
     type: Literal["TEXT_CONTENT", "THINKING_CONTENT", "PLAN"] | None = None
     """Which kind of content block this citation grounds: the user-visible
-    text (``TEXT_CONTENT``), a thinking block (``THINKING_CONTENT``), or a
-    tool-plan block (``PLAN``). ``None`` means unspecified."""
+    text (`TEXT_CONTENT`), a thinking block (`THINKING_CONTENT`), or a
+    tool-plan block (`PLAN`). `None` means unspecified."""
 
 
 class CohereChatMessage(ChatMessage):
-    """:class:`ChatMessage` extension carrying grounding citations.
+    """`ChatMessage` extension carrying grounding citations.
 
-    Only instantiated by :class:`CohereServingChatV2` (and any other
-    :class:`OpenAIServingChat` subclass that opts in by overriding
-    ``_create_chat_message``). Regular OpenAI-compatible handlers keep
-    emitting plain :class:`ChatMessage` so their response schema is
+    Only instantiated by `CohereServingChatV2` (and any other
+    `OpenAIServingChat` subclass that opts in by overriding
+    `_create_chat_message`). Regular OpenAI-compatible handlers keep
+    emitting plain `ChatMessage` so their response schema is
     unchanged.
 
-    The response envelope declares ``message: SerializeAsAny[ChatMessage]``,
+    The response envelope declares `message: SerializeAsAny[ChatMessage]`,
     so pydantic serializes this subclass with its own schema (including
-    ``citations``) when it flows through
-    :class:`ChatCompletionResponseChoice`.
+    `citations`) when it flows through
+    `ChatCompletionResponseChoice`.
     """
 
     citations: list[Citation] | None = None
@@ -119,17 +119,17 @@ class CohereChatMessage(ChatMessage):
 
 
 class CohereDeltaMessage(DeltaMessage):
-    """:class:`DeltaMessage` extension carrying grounding citations for streaming.
+    """`DeltaMessage` extension carrying grounding citations for streaming.
 
-    Emitted by :class:`vllm.parser.cohere_command.CohereCommandParser`
+    Emitted by `vllm.parser.cohere_command.CohereCommandParser`
     on delta events whose payload includes citations. Non-Cohere parsers
-    return plain :class:`DeltaMessage`, so their streamed shape is
+    return plain `DeltaMessage`, so their streamed shape is
     unchanged.
 
     The response envelope declares
-    ``delta: SerializeAsAny[DeltaMessage]``, so pydantic serializes this
+    `delta: SerializeAsAny[DeltaMessage]`, so pydantic serializes this
     subclass with its own schema when it flows through
-    :class:`ChatCompletionResponseStreamChoice`.
+    `ChatCompletionResponseStreamChoice`.
     """
 
     citations: list[Citation] | None = None

@@ -106,6 +106,7 @@ plugins:
         examples/features/pause_resume.md: examples/rl/pause_resume.md
         serving/online_serving/decisions.md: models/structured_decisions_models.md
         serving/online_serving/structured_decisions.md: models/structured_decisions_models.md
+        training/routed_experts_replay.md: training/routed_experts.md
 
 markdown_extensions:
   - attr_list
@@ -146,7 +147,6 @@ extra_css:
   - mkdocs/stylesheets/extra.css
 
 extra_javascript:
-  - mkdocs/javascript/run_llm_widget.js
   - mkdocs/javascript/mathjax.js
   - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
   - mkdocs/javascript/edit_and_feedback.js

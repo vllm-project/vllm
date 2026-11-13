@@ -49,6 +49,18 @@ QWEN3_8_DFLASH2_NVFP4 = DFlashCorrectnessConfig(
     chat_template_kwargs={"enable_thinking": False},
 )
 
+QWEN3_5_4B_DFLASH2 = DFlashCorrectnessConfig(
+    model="Qwen/Qwen3.5-4B",
+    draft_model="vllm-project/Qwen3.5-4B-DFlash2",
+    expected_accuracy=0.8,
+    expected_acceptance_len=4.55 * 0.9,
+    num_speculative_tokens=15,
+    max_num_seqs=32,
+    use_chat_completions=True,
+    language_model_only=True,
+    chat_template_kwargs={"enable_thinking": False},
+)
+
 LAGUNA_DFLASH_NVFP4 = DFlashCorrectnessConfig(
     model="poolside/Laguna-XS-2.1-NVFP4",
     draft_model="poolside/Laguna-XS-2.1-DFlash-NVFP4",
@@ -64,14 +76,8 @@ LAGUNA_DFLASH_NVFP4 = DFlashCorrectnessConfig(
 )
 
 
-@pytest.mark.parametrize("use_mrv2", [False, True])
-def test_dflash_reference_acceptance_lengths(
-    monkeypatch: pytest.MonkeyPatch,
-    use_mrv2: bool,
-    vllm_runner,
-):
+def test_dflash_reference_acceptance_lengths(vllm_runner):
     run_acceptance_length_eval(
-        monkeypatch,
         vllm_runner,
         spec_config={
             "model": QWEN3_DFLASH.model,
@@ -84,7 +90,6 @@ def test_dflash_reference_acceptance_lengths(
             },
             "max_model_len": 32768,
             "max_num_seqs": 128,
-            "gpu_memory_utilization": 0.85,
             "enforce_eager": False,
             "disable_log_stats": False,
         },
@@ -95,44 +100,25 @@ def test_dflash_reference_acceptance_lengths(
             "gsm8k": 6.54 * 0.975,
         },
         chat_template_kwargs={"enable_thinking": False},
-        use_mrv2=use_mrv2,
     )
 
 
 @single_gpu_only
 @pytest.mark.parametrize(
-    ("config", "use_mrv2"),
+    "config",
     [
-        pytest.param(
-            QWEN3_DFLASH,
-            False,
-            id="qwen3-mrv1",
-        ),
-        pytest.param(
-            QWEN3_DFLASH,
-            True,
-            id="qwen3-mrv2",
-        ),
-        pytest.param(
-            LAGUNA_DFLASH_NVFP4,
-            True,
-            id="laguna-nvfp4-mrv2",
-        ),
-        pytest.param(
-            QWEN3_8_DFLASH2_NVFP4,
-            True,
-            id="qwen3.8-dflash2-nvfp4-mrv2",
-        ),
+        pytest.param(QWEN3_DFLASH, id="qwen3"),
+        pytest.param(LAGUNA_DFLASH_NVFP4, id="laguna-nvfp4"),
+        pytest.param(QWEN3_8_DFLASH2_NVFP4, id="qwen3.8-dflash2-nvfp4"),
+        pytest.param(QWEN3_5_4B_DFLASH2, id="qwen3.5-4b-dflash2"),
     ],
 )
 def test_dflash_correctness(
     monkeypatch: pytest.MonkeyPatch,
     config: DFlashCorrectnessConfig,
-    use_mrv2: bool,
     vllm_runner,
 ):
     """Guard GSM8K accuracy and batched acceptance length for DFlash models."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
     if config.disable_flashinfer_sampler:
         monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
@@ -148,7 +134,6 @@ def test_dflash_correctness(
         },
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
-        gpu_memory_utilization=0.85,
         enforce_eager=config.enforce_eager,
         disable_log_stats=False,
         enable_chunked_prefill=None,
@@ -164,9 +149,7 @@ def test_dflash_correctness(
         )
         accuracy = results["accuracy"]
         acceptance_len = compute_acceptance_len(spec_llm.get_metrics())
-        context = (
-            f"DFlash target={config.model}, draft={config.draft_model}, MRV2={use_mrv2}"
-        )
+        context = f"DFlash target={config.model}, draft={config.draft_model}"
         print(
             f"{context}: GSM8K accuracy={accuracy:.3f}, "
             f"acceptance_len={acceptance_len:.2f}"

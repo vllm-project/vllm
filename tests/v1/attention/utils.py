@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for attention-related v1 tests."""
 
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -18,8 +22,9 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import ModelDType
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.attention.backend import (
-    AttentionImpl,
+    AttentionImplBase,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -28,10 +33,12 @@ from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    MambaAttentionBackendEnum,
+)
 from vllm.v1.kv_cache_interface import (
-    EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
@@ -127,7 +134,7 @@ def create_common_attn_metadata(
 
 def try_get_attention_backend(
     backend: AttentionBackendEnum,
-) -> tuple[type[AttentionMetadataBuilder], type[AttentionImpl]]:
+) -> tuple[type[AttentionMetadataBuilder], type[AttentionImplBase]]:
     """Try to get the attention backend class, skipping test if not found."""
     try:
         backend_class = backend.get_class()
@@ -151,32 +158,71 @@ def try_backend_includes_kv_cache_update(
 
 def create_standard_kv_cache_spec(
     vllm_config: VllmConfig,
-    attn_type: AttentionType = AttentionType.DECODER,
-) -> FullAttentionSpec | EncoderOnlyAttentionSpec:
-    """Create an AttentionSpec from VllmConfig.
-
-    Returns an EncoderOnlyAttentionSpec for encoder-only attention (no KV
-    cache), and a FullAttentionSpec otherwise.
-    """
-    if attn_type == AttentionType.ENCODER_ONLY:
-        return EncoderOnlyAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=vllm_config.model_config.get_num_kv_heads(
-                vllm_config.parallel_config
-            ),
-            head_size=vllm_config.model_config.get_head_size(),
-            dtype=vllm_config.model_config.dtype,
-        )
-    return FullAttentionSpec(
+) -> AttentionSpec:
+    """Create an AttentionSpec from VllmConfig."""
+    return AttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config
         ),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        sliding_window=vllm_config.model_config.get_sliding_window(),
         kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
     )
+
+
+@contextmanager
+def registered_attention_layers(
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    attn_type: str = AttentionType.DECODER,
+    sliding_window: int | None = None,
+) -> Iterator[None]:
+    """Register stand-in `Attention` layers for builders that read the
+    attention type or window from their group's layers."""
+    from vllm.model_executor.layers.attention import Attention
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for name in layer_names:
+        layer = Attention.__new__(Attention)
+        torch.nn.Module.__init__(layer)
+        layer.attn_type = attn_type
+        layer.impl = SimpleNamespace(sliding_window=sliding_window)
+        forward_context[name] = layer
+    try:
+        yield
+    finally:
+        for name in layer_names:
+            forward_context.pop(name, None)
+
+
+class CheckpointingMambaLayer(MambaBase):
+    """Stand-in Mamba layer whose KV cache reserves prefill checkpoints at
+    a fixed alignment."""
+
+    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
+
+    def __init__(self, checkpoint_alignment: int | None):
+        self.checkpoint_alignment = checkpoint_alignment
+
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return self.checkpoint_alignment
+
+    def get_state_shape(self):
+        return ()
+
+    def get_state_dtype(self):
+        return ()
+
+
+def register_mamba_layers(
+    vllm_config: VllmConfig, layer_names: list[str], checkpoint_alignment: int | None
+) -> None:
+    """Register stand-in Mamba layers for builders that read their prefill
+    checkpoint alignment from their group's layers."""
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for name in layer_names:
+        forward_context[name] = CheckpointingMambaLayer(checkpoint_alignment)
 
 
 def create_vllm_config(
@@ -189,7 +235,6 @@ def create_vllm_config(
     max_num_seqs: int = 256,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
-    add_mock_model_methods: bool = True,
     hf_config_override: dict | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
@@ -230,36 +275,28 @@ def create_vllm_config(
     load_config = LoadConfig()
     compilation_config = CompilationConfig()
 
-    if add_mock_model_methods:
-        # Add mock methods to satisfy backends that need them
-        # This is a workaround because tests don't build full, real models,
-        # but some backends expect to query the model for layer-specific
-        # parameters
-        import types
-
-        model_config.get_num_layers = types.MethodType(lambda self: 1, model_config)
-        model_config.get_sliding_window_for_layer = types.MethodType(
-            lambda self, i: None, model_config
-        )
-        model_config.get_logits_soft_cap_for_layer = types.MethodType(
-            lambda self, i: 0.0, model_config
-        )
-        model_config.get_sm_scale_for_layer = types.MethodType(
-            lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
-        )
-
     if hf_config_override:
         model_config.hf_config.update(hf_config_override)
 
-    return VllmConfig(
-        model_config=model_config,
-        cache_config=cache_config,
-        parallel_config=parallel_config,
-        scheduler_config=scheduler_config,
-        device_config=device_config,
-        load_config=load_config,
-        compilation_config=compilation_config,
-    )
+    # VllmConfig() auto-enables breakable cudagraphs process-wide via
+    # VLLM_USE_BREAKABLE_CUDAGRAPH for breakable-by-default models; keep
+    # that from leaking into unrelated tests sharing this process.
+    breakable_env = os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH")
+    try:
+        return VllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            load_config=load_config,
+            compilation_config=compilation_config,
+        )
+    finally:
+        if breakable_env is None:
+            os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        else:
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = breakable_env
 
 
 @dataclass
@@ -403,7 +440,7 @@ def dense_kv_cache_tensor(
     layout: KVCacheLayout,
     layer_names: list[str] | None = None,
 ) -> KVCacheTensor:
-    """The ``KVCacheTensor`` for a dense allocation of ``num_layers`` layers."""
+    """The `KVCacheTensor` for a dense allocation of `num_layers` layers."""
     layer_stride, block_stride, _, _, _ = compute_layout_strides(
         spec, num_blocks, num_layers, layout
     )
@@ -423,7 +460,7 @@ def dense_kv_cache_views(
     layout: KVCacheLayout,
     kernel_block_size: int | None = None,
 ) -> list[torch.Tensor]:
-    """``create_kv_cache_views`` for a dense allocation of ``num_layers`` layers."""
+    """`create_kv_cache_views` for a dense allocation of `num_layers` layers."""
     tensor = dense_kv_cache_tensor(raw, spec, num_blocks, num_layers, layout)
     return create_kv_cache_views(
         raw,

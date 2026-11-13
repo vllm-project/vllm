@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
@@ -20,6 +20,7 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.config import SchedulerConfig
+from vllm.exceptions import PromptUpdateMismatchError
 from vllm.inputs import (
     MultiModalEncDecInput,
     MultiModalHashes,
@@ -238,7 +239,7 @@ instead of a function if it does not depend on the input.
 """
 
 
-class UpdateMode(str, Enum):
+class UpdateMode(StrEnum):
     INSERT = "insert"
     REPLACE = "replace"
 
@@ -1272,7 +1273,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        mm_inputs: Mapping[str, object],
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
@@ -1416,6 +1417,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
+        # A request can exceed the cache capacity. Retain local payloads before
+        # inserting misses can evict hits that occur later in this request.
+        cached_items = {
+            item_hash: cache.get_cached_item(item_hash)
+            for hashes in mm_hashes.values()
+            for item_hash in hashes
+        }
+
         # Need to touch all mm hashes before update to avoid hash in updated
         # list evict during update
         for hashes in mm_hashes.values():
@@ -1433,6 +1442,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
             for item_idx, item_hash in enumerate(hashes):
+                item = cached_items.get(item_hash)
                 if not mm_is_cached[modality][item_idx]:
                     missing_next_idx = mm_missing_next_idx[modality]
                     missing_kwargs_item = missing_kwargs[missing_next_idx]
@@ -1441,8 +1451,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     mm_missing_next_idx[modality] += 1
 
                     item = missing_kwargs_item, missing_updates_item
-                else:
-                    item = None
 
                 kwargs, updates = cache.get_and_update_item(item, item_hash)
 
@@ -1685,10 +1693,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
         for modality, update_idxs in match_result.items():
             for item_idx, update_idx in enumerate(update_idxs):
-                assert update_idx is not None, (
-                    "Failed to apply prompt replacement for "
-                    f"mm_items[{modality!r}][{item_idx}]"
-                )
+                if update_idx is None:
+                    raise PromptUpdateMismatchError(
+                        "Failed to apply prompt replacement for "
+                        f"mm_items[{modality!r}][{item_idx}]"
+                    )
 
                 matched_updates[modality].append(
                     [mm_prompt_updates[modality][item_idx][update_idx]]

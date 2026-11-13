@@ -134,15 +134,42 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
     - READ mode: **Completion:** once the decoder has read all blocks from the prefiller, it notifies the prefiller so it can free its KV cache blocks.
 
 !!! note
-    `notify_port` is used as a *base* port: each (DP rank, TP rank) pair within an instance uses `notify_port + offset` where the offset is based on the rank. Make sure the range starting at `notify_port` is free on the host.
+    `notify_port` and `handshake_port` are *base* ports: each (PP rank, DP rank, TP rank) worker within an instance uses `base + offset` where the offset is based on the ranks. Make sure the ranges starting at both ports are free on the host.
 
 ### Hybrid attention and recurrent state
 
-WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark, with equal producer and consumer TP sizes. Use matching cache layouts on both instances, `--mamba-cache-mode align`, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Sliding-window WRITE and hybrid speculative methods other than DSpark remain unsupported.
+WRITE mode supports hybrid attention plus Mamba/KDA models, including DSpark. Use matching cache layouts on both instances, `--mamba-cache-mode align`, and `read_mode: false` in each instance's `kv_connector_extra_config`. Both peers must support hybrid WRITE. Sliding-window WRITE and hybrid speculative methods other than DSpark remain unsupported.
 
 For DSpark, configure the same draft model on both instances through `--speculative-config`. Target and draft attention groups retain their own block IDs and token spans; only the running recurrent state is transferred, not speculative scratch slots. The producer transfers the state after the first N-1 prompt tokens, and the consumer recomputes the last prompt token. Convolution and SSM transfers must both finish before the layer is complete.
 
-Hybrid READ keeps its existing single-transferable-attention-group requirement. Plain-attention WRITE retains its existing notification format.
+Hybrid READ transfers every attention group, so drafters that share the target's attention groups (such as MTP) also work. Plain-attention WRITE retains its existing notification format.
+
+### Kimi-K3 specialized decode
+
+Kimi-K3 on MI355X supports specialized decode on built-in MoRIIO READ and WRITE consumers. Set `--additional-config '{"decode_backend":"latency_specialized"}'` on the consumer and keep the producer on the default `decode_backend=auto`.
+
+Use matching transfer modes and cache layouts. See [supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/kimi_k3/amd/specialized_decode/README.md#supported-deployments) for the hardware, state dtype, and execution requirements.
+
+### Different prefill and decode TP sizes
+
+In WRITE mode, the prefill and decode instances can use different tensor-parallel sizes, as long as one is a multiple of the other. Each prefill rank writes its shard into the decode ranks that hold it:
+
+- With a larger decode TP size, MLA latents and replicated KV heads are copied to every decode rank that needs them, while split KV heads and Mamba/KDA state are sliced so that each decode rank receives its own part.
+- With a larger prefill TP size, the prefill ranks feeding a decode rank write their parts side by side into its blocks. Identical copies (MLA latents, replicated KV heads) are written once.
+
+The number of KV heads must be a multiple or a divisor of each TP size. Blocks are copied as units, so both instances must use the same number of tokens per attention block. Hybrid models size attention blocks to the per-rank recurrent state; with MLA attention (e.g. Kimi-Linear) that size changes with the TP size, so pass the same `--block-size`, at least the larger of the two automatic sizes, to both instances. Mismatched block sizes fail with an error naming the layer. Both instances must advertise their KV head and recurrent-state layouts in the MoRIIO handshake, so they must run a vLLM version with this support; otherwise a transfer between different TP sizes fails with an error naming the layer.
+
+!!! note
+    On a single node with the xGMI backend, a larger decode TP size does not work yet: MoRI cannot open a session from a prefill rank to memory on a decode rank's second or later visible GPU when the prefill rank sees fewer GPUs, and the transfer fails with an error naming the decode rank. A larger prefill TP size works on xGMI, and the RDMA backend is not affected.
+
+### Pipeline-parallel prefill
+
+In WRITE mode the prefill instance can run with `--pipeline-parallel-size` greater than 1, for example `--tensor-parallel-size 1 --pipeline-parallel-size 4` against a decode instance with `--tensor-parallel-size 4`. Each pipeline stage writes the layers it holds into the decode blocks, and a decode rank starts decoding only after every stage has reported its writes. The block allocations from the decode instance is sent to the first pipeline stage, which then forwards them to the other stages.
+
+Pipeline parallelism is supported only on a prefill instance (`kv_producer`) in WRITE mode with a layer-outermost KV cache layout (the default unless an attention backend requires a block-outermost one). A pipeline-parallel decode or `kv_both` instance, READ mode, and a block-outermost layout fail at startup. All pipeline stages must run on one node, since the first stage forwards the decode instance's messages to the other stages on its own host. A prefill instance over several nodes (`--nnodes` greater than 1) fails at startup.
+
+!!! note
+    GLM-5 (`GlmMoeDsaForCausalLM`) layers reuse the sparse-attention top-k selection of the nearest earlier layer that runs the indexer, so a pipeline stage must start on a layer that runs its own indexer (for GLM-5.2: layers 0, 1, 2, 6, 10, ..., 74). vLLM's default split of the 78 layers at pipeline size 4 (19, 20, 20, 19) does not; set `VLLM_PP_LAYER_PARTITION=22,20,20,16`.
 
 ### Transport configuration
 

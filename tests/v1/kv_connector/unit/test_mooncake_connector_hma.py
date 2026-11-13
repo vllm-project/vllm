@@ -19,16 +19,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeXferMetadata,
+    MooncakeXferResponse,
+    MooncakeXferResponseStatus,
     PullReqMeta,
     SendBlockMeta,
     TransferRegion,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
 )
 
+from .offloading_connector.utils import make_kv_cache_group
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
 from .utils import (
     create_request,
@@ -45,9 +47,9 @@ from .utils import (
 @pytest.mark.parametrize(
     "swa_enabled,expected_blocks_per_sw",
     [
-        # SWA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128+1)
+        # SWA enabled: full attention (0) + sliding window (2048/16=128+1)
         (True, [0, 128 + 1]),
-        # SWA disabled: only FullAttentionSpec (0)
+        # SWA disabled: only AttentionSpec (0)
         (False, [0]),
     ],
 )
@@ -240,6 +242,7 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         block_len = 4096
         # Call _build_transfer_params directly (avoids send_kv_to_decode
@@ -335,6 +338,7 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         block_len = 4096
         transfer_id = "xfer-mismatch"
@@ -424,6 +428,7 @@ def test_request_finished_with_hma_groups():
     )
 
     request = create_request(request_id=1, do_remote_decode=True)
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params["transfer_id"] = request.request_id
 
     from vllm.v1.request import RequestStatus
@@ -503,18 +508,18 @@ def test_worker_is_hma_required_multiple_full_attention_groups():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer0"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=16,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=2 * block_size,
                     num_kv_heads=4,
                     head_size=16,
@@ -553,3 +558,36 @@ def test_worker_failed_recv_reports_block_ids_without_hma():
     results = worker.get_transfer_results()
     assert results.failed_recving == set()
     assert results.finished_recving == {"d-req-1"}
+
+
+@pytest.mark.parametrize("swa_enabled", [False, True])
+@pytest.mark.parametrize("outcomes", [(False, True), (True, False), (False, False)])
+def test_failed_receive_waits_for_every_peer(swa_enabled, outcomes):
+    """A failed request keeps its destinations until the last peer completes."""
+    worker = _make_kv_consumer_worker(swa_enabled=swa_enabled)
+    meta = _make_pull_meta("d-req-1", [[1, 2], [3, 4]])
+    meta.pull_tasks_count = 2
+    error_reports = 0
+    try:
+        for index, successful in enumerate(outcomes):
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH,
+                ok_reqs=["d-req-1"] if successful else None,
+                err_reqs=None if successful else ["d-req-1"],
+                err_msg=None if successful else "peer failed",
+            )
+            worker.process_pulling_result(response, {"d-req-1": meta})
+            result = worker.get_transfer_results()
+            invalid = worker.get_block_ids_with_load_errors()
+            error_reports += bool(result.failed_recving or invalid)
+            assert meta.pull_tasks_count == 1 - index
+            assert result.finished_recving == ({"d-req-1"} if index else set())
+            assert meta.failed == (not all(outcomes[: index + 1]))
+            if result.failed_recving:
+                assert result.failed_recving == {"d-req-1"}
+            if invalid:
+                assert invalid == {1, 2, 3, 4}
+        assert error_reports == 1
+        assert worker.get_transfer_results().finished_recving == set()
+    finally:
+        worker.shutdown()

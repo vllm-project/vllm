@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -24,7 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.b12x import (
     B12X_BLOCK_CODECS,
@@ -175,9 +176,17 @@ def _replace_parameter_with_empty(
     parameter = getattr(layer, name, None)
     if not isinstance(parameter, torch.Tensor):
         return None
-    empty = torch.empty((0,), dtype=parameter.dtype, device=parameter.device)
-    replace_parameter(layer, name, empty)
-    return getattr(layer, name)
+    # The prepared experts may own this parameter object, so register a new
+    # empty one instead of emptying it in place.
+    empty = torch.nn.Parameter(
+        torch.empty((0,), dtype=parameter.dtype, device=parameter.device),
+        requires_grad=False,
+    )
+    weight_loader = getattr(parameter, "weight_loader", None)
+    if weight_loader is not None:
+        set_weight_attrs(empty, {"weight_loader": weight_loader})
+    setattr(layer, name, empty)
+    return empty
 
 
 def _normalize_expert_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -450,7 +459,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         ):
             return False, "kernel supports only SiTU beta=4 and linear_beta=25"
         if (
-            activation_key is not None
+            cls.executed_activation_key(weight_key, activation_key) is not None
             and moe_config.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
         ):
             return (
@@ -502,6 +511,15 @@ class B12xExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
         return True
+
+    @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        if weight_key == kNvfp4Static and envs.VLLM_B12X_MOE_FP4_FORCE_A16:
+            return None
+        return activation_key
 
     @staticmethod
     def _supports_quant_scheme(

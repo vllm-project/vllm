@@ -13,7 +13,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilde
 from vllm.v1.attention.backends.triton_attn_diffkv import (
     TritonAttentionDiffKVMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
 
 def _build(
@@ -46,14 +46,14 @@ def _build(
             if num_speculative_tokens is None
             else SimpleNamespace(
                 num_speculative_tokens=num_speculative_tokens,
-                parallel_drafting=parallel_drafting,
+                speculator_config=SimpleNamespace(parallel_drafting=parallel_drafting),
             )
         ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.NONE, static_forward_context={}
         ),
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=num_kv_heads,
         head_size=128,

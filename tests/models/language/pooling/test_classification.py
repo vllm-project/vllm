@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
     "model",
     [
         pytest.param(
-            "jason9693/Qwen2.5-1.5B-apeach",
+            "vllm-project/Qwen2.5-1.5B-apeach",
             marks=[
                 pytest.mark.core_model,
                 pytest.mark.cpu_model,
@@ -52,7 +52,7 @@ def test_models(
 
 
 @pytest.mark.core_model
-def test_bert_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
+def test_bert_model_runner_v2(hf_runner, vllm_runner) -> None:
     model = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
     score_inputs = (
         "What is the capital of France?",
@@ -83,14 +83,12 @@ def test_bert_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
     with hf_runner(model, dtype="half", is_cross_encoder=True) as hf_model:
         hf_scores = hf_model.predict(text_pairs).tolist()
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     with vllm_runner(
         model,
         runner="pooling",
         dtype="half",
         max_model_len=64,
     ) as vllm_model:
-        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = [vllm_model.classify(prompts) for prompts in prompt_batches]
         vllm_scores = vllm_model.score(*score_inputs)
 

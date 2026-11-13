@@ -62,12 +62,24 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
 # range.
 _FUSED_POST_PRE_N_THR = 128
 _FUSED_POST_PRE_MAX_TOKENS = 32
+# At up to this many tokens the grid is too small to hide the latency of each
+# thread's serial loads, so when the hidden size allows, a twice wider block
+# over twice as many k-slices gives every thread a single pass instead of four
+# (hidden_size 4096, fused post + pre op on GB300 and SM120: 1.11-1.19x at one
+# token, 0.99-1.05x at four, no gain from five on). Tuned on SM100+ only.
+_FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS = 4
+_FUSED_POST_PRE_SINGLE_PASS = (2, 16, 256)
+
+
+@cache
+def _fused_post_pre_single_pass_supported() -> bool:
+    return current_platform.is_cuda() and current_platform.has_device_capability(100)
 
 
 def mhc_fused_post_pre_split_config(
     num_tokens: int, hidden_size: int, hc_mult: int
 ) -> tuple[int, int, int] | None:
-    """Pick ``(tile_n, n_splits, n_thr)`` for the fused post + pre-norm GEMM.
+    """Pick `(tile_n, n_splits, n_thr)` for the fused post + pre-norm GEMM.
 
     Returns None when a separate post kernel followed by a split-k GEMM is the
     better choice, or when the hidden size does not divide evenly across the
@@ -76,6 +88,14 @@ def mhc_fused_post_pre_split_config(
     """
     if num_tokens > _FUSED_POST_PRE_MAX_TOKENS:
         return None
+    tile_n, n_splits, n_thr = _FUSED_POST_PRE_SINGLE_PASS
+    if (
+        num_tokens <= _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS
+        and hidden_size == n_splits * n_thr
+        and (hc_mult * (hc_mult + 2)) % tile_n == 0
+        and _fused_post_pre_single_pass_supported()
+    ):
+        return tile_n, n_splits, n_thr
     n_thr = _FUSED_POST_PRE_N_THR
     if hidden_size % n_thr:
         return None
@@ -405,14 +425,19 @@ def mhc_pre_big_fuse_with_norm_tilelang(
             for j, k in T.Parallel(hc_mult, hc_mult):
                 cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
 
-            for _ in T.serial(sinkhorn_repeat - 1):
-                T.reduce_sum(cm, row_sum, dim=1)
-                for j, k in T.Parallel(hc_mult, hc_mult):
-                    cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
+            # A NaN input row (e.g. CUDA-graph padding) has a NaN RMS, so every
+            # logit and the whole result is NaN already. Skip the remaining
+            # iterations: IEEE division takes a slow path on NaN. rms is an
+            # rsqrt, so it is >= 0 unless NaN (T.isfinite does not lower on HIP).
+            if rms[0] >= 0.0:
+                for _ in T.serial(sinkhorn_repeat - 1):
+                    T.reduce_sum(cm, row_sum, dim=1)
+                    for j, k in T.Parallel(hc_mult, hc_mult):
+                        cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
 
-                T.reduce_sum(cm, col_sum, dim=0)
-                for j, k in T.Parallel(hc_mult, hc_mult):
-                    cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
+                    T.reduce_sum(cm, col_sum, dim=0)
+                    for j, k in T.Parallel(hc_mult, hc_mult):
+                        cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
 
             for j, k in T.Parallel(hc_mult, hc_mult):
                 comb_mix[i, j * hc_mult + k] = cm[j, k]
@@ -1134,7 +1159,7 @@ class HcPrenormGemmTileLangKernel(
             return hc_prenorm_gemm_block_m_tilelang
         return hc_prenorm_gemm_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
@@ -1345,7 +1370,7 @@ class MhcPreBigFuseTileLangKernel(
             compile_key.hc_mult,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         hidden_size: int,
@@ -1591,7 +1616,7 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
     def kernel() -> Any:
         return mhc_post_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:
@@ -1672,7 +1697,7 @@ class MhcFusedTileLangKernel(
     def kernel() -> Any:
         return mhc_fused_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
@@ -1706,9 +1731,16 @@ class MhcFusedTileLangKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        num_tokens = 1 if compile_key.tile_n == 2 else 16
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
+        # __call__ derives the config from the token count, so warm with one
+        # that selects this key's config.
+        config = (compile_key.tile_n, compile_key.n_splits, compile_key.n_thr)
+        num_tokens = next(
+            t
+            for t in range(1, _FUSED_POST_PRE_MAX_TOKENS + 1)
+            if mhc_fused_post_pre_split_config(t, hidden_size, hc_mult) == config
+        )
         hc_mult3 = hc_mult * (2 + hc_mult)
         comb_mix = make_tilelang_warmup_tensor(
             torch.float32, num_tokens, hc_mult, hc_mult
@@ -1787,7 +1819,7 @@ class HcHeadFusedTileLangKernel(
     def kernel() -> Any:
         return hc_head_fuse_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         hidden_size: int,

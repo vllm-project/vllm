@@ -38,8 +38,6 @@ model:
     - "16384"
     - "--max-num-seqs"
     - "64"
-    - "--gpu-memory-utilization"
-    - "0.85"
     - "--enable-prefix-caching"
   base_env: {}
 
