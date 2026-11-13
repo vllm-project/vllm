@@ -1710,3 +1710,29 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
     (meta,) = second.kv_connector_metadata.requests
     assert meta.num_hash_lookahead_tokens == 1
     assert meta.token_ids[-1] == 32
+
+
+@pytest.mark.cpu_test
+def test_reset_running_requests_resumes_in_reporting_step():
+    with patch.object(scheduler, "LookupKeyClient") as lookup:
+        lookup.return_value.lookup.return_value = MooncakeLookupResult(0)
+        engine_scheduler = create_scheduler(_make_vllm_config(), num_blocks=64)
+    init_none_hash(sha256)
+    engine_scheduler.add_request(
+        Request(
+            "req-0",
+            list(range(32)),
+            SamplingParams(max_tokens=8),
+            None,
+            block_hasher=get_request_block_hasher(16, sha256, 1),
+        )
+    )
+    engine_scheduler.schedule()
+    # The in-flight save fails the reset, but only after the preemption.
+    with pytest.raises(RuntimeError):
+        engine_scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    resumed = engine_scheduler.schedule()
+    assert resumed.preempted_req_ids == {"req-0"}
+    (meta,) = resumed.kv_connector_metadata.requests
+    assert meta.can_save
