@@ -99,7 +99,7 @@ pub(super) fn prepare_generate_request(
         decode_options,
         intermediate: stream,
         prompt_truncation: None,
-        priority: request.priority,
+        priority: ctx.priority.unwrap_or(request.priority),
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
@@ -129,6 +129,7 @@ pub(super) fn prepare_generate_request(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::{Prompt, TextDecodeOptions};
 
@@ -136,7 +137,7 @@ mod tests {
     use crate::lora::LoraModelResolution;
     use crate::model_names::ServedModelNames;
     use crate::routes::inference::generate::types::GenerateRequest;
-    use crate::utils::ResolvedRequestContext;
+    use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
@@ -261,6 +262,27 @@ mod tests {
                 detokenize: false,
             }
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_header_priority_overrides_body() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {},
+            "priority": 10,
+        }))
+        .expect("parse request");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Vllm-Priority", "-5".parse().unwrap());
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["test-model"]),
+            resolve_request_context(&headers, None),
+            None,
+        )
+        .expect("prepare");
+        assert_eq!(prepared.text_request.priority, -5);
     }
 
     #[test]
