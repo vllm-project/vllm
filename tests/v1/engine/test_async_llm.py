@@ -1001,8 +1001,8 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
-        # Warm up so first-request latency (e.g. kernel JIT on XPU) doesn't
-        # make the abort land before any token is generated.
+        # Warm up so cold-start latency doesn't make the abort land before
+        # any token is generated.
         await _generate(engine, "test-abort-final-output-warmup")
 
         request_id = "test-abort-final-output"
