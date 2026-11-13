@@ -146,6 +146,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_FP8_MOE_REQUANT: Literal["none", "mxfp4"] = "none"
+    VLLM_FP8_MOE_REQUANT_ACT: Literal["a8w4", "a4w4", "a16w4"] = "a8w4"
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
@@ -683,13 +685,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),
-    # Use tensor descriptors for Q/K/V loads and output stores in the
-    # Triton unified-attention kernel.  Enables HW 2D block reads on
-    # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
-    # compile time so other platforms see no overhead.  Tri-state override:
-    # unset (default) lets the `triton_attn` backend auto-select per
-    # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
-    # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
+    # Use tensor descriptors (TD) for loads/stores in Triton kernels that
+    # have a TD path: unified attention (`triton_attn` backend), the fused
+    # MoE kernels (`fused_moe_kernel` for unquantized weights,
+    # `fused_moe_kernel_gptq_awq` for grouped int4_w4a16 weights, batched
+    # MoE) and the compressed-tensors `triton_scaled_mm`.  Enables HW 2D
+    # block reads on Intel XPU; the non-TD branch is dead-code-eliminated
+    # at Triton compile time so other platforms see no overhead.
+    # Tri-state override: unset (default) auto-enables TD on XPU only;
+    # ``1`` forces TD on (on CUDA the MoE TD paths need sm100+; the int4
+    # WNA16 MoE kernel stays on the pointer path below sm100 and for shapes
+    # its TD path does not cover); ``0`` forces TD off.  Useful for A/B
+    # benchmarking the TD path.
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
@@ -1363,6 +1370,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.
+    # ROCm: re-quantize block-FP8 routed experts to MXFP4 at load (half the
+    # expert bytes, aiter MXFP4 MoE kernels). _ACT picks the activation dtype:
+    # a8w4 (fp8 per-token, FlyDSL interleaved kernels; default), a4w4 (MXFP4
+    # activations, FlyDSL separated kernels) or a16w4 (bf16, aiter Triton).
+    "VLLM_FP8_MOE_REQUANT": env_with_choices(
+        "VLLM_FP8_MOE_REQUANT", "none", ["none", "mxfp4"], case_sensitive=False
+    ),
+    "VLLM_FP8_MOE_REQUANT_ACT": env_with_choices(
+        "VLLM_FP8_MOE_REQUANT_ACT",
+        "a8w4",
+        ["a8w4", "a4w4", "a16w4"],
+        case_sensitive=False,
+    ),
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
