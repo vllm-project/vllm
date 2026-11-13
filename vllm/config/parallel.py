@@ -74,6 +74,8 @@ class EPLBConfig:
 
     Note that if this is greater than the EPLB window size, only the metrics
     of the last `lb_window_size` steps will be used for rearranging experts.
+    With async EPLB, the interval starts when the previous rearrangement has
+    committed all layers.
     """
 
     num_redundant_experts: int = Field(default=None, ge=0)  # type: ignore[assignment]
