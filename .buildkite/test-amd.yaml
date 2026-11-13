@@ -2858,9 +2858,15 @@ steps:
   - vllm/model_executor/layers/vocab_parallel_embedding.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/platforms/rocm.py
+  - vllm/distributed/device_communicators/cuda_communicator.py
+  - vllm/distributed/device_communicators/quick_all_reduce.py
+  - vllm/distributed/device_communicators/aiter_custom_all_reduce.py
+  - vllm/_aiter_ops.py
   - tests/models/qwen4_exp/test_ple.py
+  - tests/models/qwen4_exp/test_sp_int4_router.py
   - tests/models/qwen4_exp/test_tpsp.py
   commands:
+  - pytest -v -s models/qwen4_exp/test_sp_int4_router.py
   - pytest -v -s models/qwen4_exp/test_tpsp.py
 
 - label: ":amd: (MI355) Distributed DP Basic" # TBD
@@ -3073,6 +3079,8 @@ steps:
   - vllm/_custom_ops.py
   - vllm/platforms/rocm.py
   - vllm/envs.py
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/models/qwen4_exp/amd/ops/sequence_parallel.py
   - tests/distributed/test_context_parallel.py
   - tests/distributed/test_rocm_aiter_custom_ar.py
   - tests/distributed/test_rocm_quick_reduce.py

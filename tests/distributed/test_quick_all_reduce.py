@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 import multiprocessing
 import random
 import sys
@@ -80,6 +81,8 @@ def _make_quick_allreduce_for_test(
 ) -> QuickAllReduce:
     quick_reduce = QuickAllReduce.__new__(QuickAllReduce)
     quick_reduce._flydsl_int4 = None
+    quick_reduce._sp_collectives = None
+    quick_reduce._sp_collectives_built = False
     quick_reduce.disabled = False
     quick_reduce.qr_max_size = 16 * MB
     quick_reduce.qr_min_size = min_size_mb * MB if min_size_mb is not None else None
@@ -149,6 +152,92 @@ def test_close_closes_flydsl_int4():
 
     assert fake.closed
     assert quick_reduce._flydsl_int4 is None
+
+
+def _stub_create_sp_collectives(monkeypatch: pytest.MonkeyPatch, router):
+    """Replace AITER's factory; returns the list of engines it was called with."""
+    engines = []
+
+    def create(flydsl_int4):
+        engines.append(flydsl_int4)
+        return router
+
+    monkeypatch.setattr(
+        aiter_ops.rocm_aiter_ops, "create_sp_collectives", staticmethod(create)
+    )
+    return engines
+
+
+@pytest.mark.parametrize("router", [object(), None], ids=["router", "none"])
+def test_sp_collectives_are_built_once_over_the_flydsl_engine(
+    monkeypatch: pytest.MonkeyPatch, router
+):
+    # A None (AITER has no router for this platform) is cached as well: the build
+    # is a collective, so asking again on some ranks only would hang the others.
+    quick_reduce = _make_quick_allreduce_for_test()
+    quick_reduce._flydsl_int4 = engine = _FakeFlyDSLInt4()
+    engines = _stub_create_sp_collectives(monkeypatch, router)
+
+    assert quick_reduce.sp_collectives() is router
+    assert quick_reduce.sp_collectives() is router
+    assert engines == [engine]
+
+
+def test_sp_collectives_without_an_engine_are_none_and_never_requested(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    quick_reduce = _make_quick_allreduce_for_test()
+    engines = _stub_create_sp_collectives(monkeypatch, object())
+
+    assert quick_reduce.sp_collectives() is None
+    assert engines == []
+
+
+def test_close_drops_the_sp_collectives(monkeypatch: pytest.MonkeyPatch):
+    quick_reduce = _make_quick_allreduce_for_test()
+    quick_reduce.disabled = True  # skip the HIP teardown
+    quick_reduce._flydsl_int4 = _FakeFlyDSLInt4()
+    engines = _stub_create_sp_collectives(monkeypatch, object())
+    assert quick_reduce.sp_collectives() is not None
+
+    quick_reduce.close()
+
+    assert quick_reduce.sp_collectives() is None
+    assert len(engines) == 1
+
+
+def _install_fake_sp_module(monkeypatch: pytest.MonkeyPatch, module):
+    """Make `import aiter.dist.device_communicators.sp_collectives` give `module`
+    (an ImportError for None), whether or not aiter is installed."""
+    monkeypatch.setitem(
+        sys.modules, "aiter.dist.device_communicators.sp_collectives", module
+    )
+
+
+def test_create_sp_collectives_is_none_for_an_aiter_without_them(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _install_fake_sp_module(monkeypatch, None)
+
+    assert aiter_ops.rocm_aiter_ops.create_sp_collectives(object()) is None
+
+
+def test_create_sp_collectives_returns_what_aiter_builds(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    engine, router = _FakeFlyDSLInt4(), object()
+    seen: list[object] = []
+
+    def create(quick):
+        seen.append(quick)
+        return router
+
+    module = types.ModuleType("sp_collectives")
+    monkeypatch.setattr(module, "create_sp_collectives", create, raising=False)
+    _install_fake_sp_module(monkeypatch, module)
+
+    assert aiter_ops.rocm_aiter_ops.create_sp_collectives(engine) is router
+    assert seen == [engine]
 
 
 def test_should_quick_allreduce_uses_builtin_min_size_when_unset():
@@ -630,6 +719,129 @@ def test_custom_quick_allreduce_bf16_cast(monkeypatch: pytest.MonkeyPatch):
         pytest.skip("Not enough GPUs to run the test.")
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "FP")
     multi_process_parallel(monkeypatch, 2, 1, bf16_cast_quickreduce)
+
+
+def on_gfx950() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950 as rocm_on_gfx950
+
+        return rocm_on_gfx950()
+    return False
+
+
+def _aiter_has_sp_router() -> bool:
+    try:
+        spec = importlib.util.find_spec(
+            "aiter.dist.device_communicators.sp_collectives"
+        )
+    except ImportError:  # no aiter, or one without the module's parent packages
+        return False
+    return spec is not None
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def sp_int4_router_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+
+        from vllm.models.common.ops import sequence_parallel as common_sp
+        from vllm.models.qwen4_exp.amd.ops import sequence_parallel as sp
+
+        # The test runs only where AITER has the router and gfx950 TP2 has a window
+        # for it, so a None here is a broken detection in vLLM.
+        router = sp._sp_router()
+        assert router is not None
+        calls: dict[str, list[bool]] = {"reduce_scatter": [], "all_gather": []}
+
+        def spy(call, log):
+            def wrapper(x):
+                out = call(x)
+                log.append(out is not None)
+                return out
+
+            return wrapper
+
+        for name, log in calls.items():
+            m.setattr(router, name, spy(getattr(router, name), log))
+
+        group = get_tp_group().device_group
+
+        def draw(shape, salt):
+            gen = torch.Generator(device=device).manual_seed(100 * salt + rank)
+            return torch.randn(
+                shape, dtype=torch.bfloat16, device=device, generator=gen
+            )
+
+        def nmse(got, ref):
+            return (((got.float() - ref) ** 2).sum() / (ref**2).sum()).item()
+
+        # 20 MiB of full tensor is inside the 8 MiB window, 1.25 MiB is below it.
+        # 1641 tokens are odd: the wrapper pads them to 1642, and the router pads
+        # the 821 rows of a block to 832 (8,407,040 B as sent, inside the window).
+        for tokens, served in ((4096, True), (1641, True), (256, False)):
+            padded = tokens + (-tokens) % tp_size
+            rows = padded // tp_size
+            x = draw((tokens, 2560), 1)
+            total = x.float()
+            dist.all_reduce(total, group=group)
+            total = torch.nn.functional.pad(total, (0, 0, 0, padded - tokens))
+            out = sp.sp_reduce_scatter_int4(x)
+            assert calls["reduce_scatter"].pop() is served
+            if served:
+                # lossy: INT4 error is of order 1e-2, an exact bf16 sum's rounding
+                # error 1e-5, so the bounds tell the INT4 kernel's result apart
+                ref = total[rank * rows : (rank + 1) * rows]
+                assert 1e-4 < nmse(out, ref) <= 2e-2
+                assert not torch.equal(out, common_sp.sp_reduce_scatter(x))
+            else:
+                assert torch.equal(out, common_sp.sp_reduce_scatter(x))
+
+            s = draw((rows, 2560), 2)
+            blocks = [torch.empty_like(s) for _ in range(tp_size)]
+            dist.all_gather(blocks, s, group=group)
+            gathered = torch.cat(blocks).float()
+            out = sp.sp_all_gather_int4(s)
+            assert calls["all_gather"].pop() is served
+            if served:
+                assert 1e-4 < nmse(out, gathered) <= 2e-2
+                assert not torch.equal(out, common_sp.sp_all_gather(s))
+            else:
+                assert torch.equal(out, common_sp.sp_all_gather(s))
+
+        config = SimpleNamespace(
+            parallel_config=SimpleNamespace(use_ubatching=False, enable_hc_sp=True)
+        )
+        assert sp.decoder_layer_sp_collectives(config, True) == (
+            sp.sp_all_gather_int4,
+            sp.sp_reduce_scatter_int4,
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
+)
+def test_qwen4_exp_sp_collectives_take_aiter_int4(monkeypatch: pytest.MonkeyPatch):
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Not enough GPUs to run the test.")
+    if not on_gfx950():
+        pytest.skip("AITER's INT4 sequence-parallel window is tuned for gfx950 TP2")
+    if not _aiter_has_sp_router():
+        pytest.skip("this AITER has no INT4 sequence-parallel router yet")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "INT4")
+    multi_process_parallel(monkeypatch, 2, 1, sp_int4_router_worker)
 
 
 def qr_variable_input(rank, world_size):

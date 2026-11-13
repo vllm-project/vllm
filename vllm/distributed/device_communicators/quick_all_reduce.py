@@ -91,6 +91,8 @@ class QuickAllReduce:
         """
         self.disabled = True
         self._flydsl_int4: Any = None
+        self._sp_collectives: Any = None
+        self._sp_collectives_built = False
         if not self._rocm_arch_available():
             logger.debug(
                 "Custom quick allreduce is only supported on ROCm MI300 series."
@@ -409,7 +411,32 @@ class QuickAllReduce:
             return QuickReduceRegime.FP.value
         return self.qr_quant_level.value
 
+    def sp_collectives(self) -> Any:
+        """AITER's INT4 sequence-parallel reduce-scatter and all-gather over this
+        object's FlyDSL engine, or None when it has no engine or AITER has none
+        for this platform (or an AITER without them).
+
+        Built on the first call, which is a collective: every rank calls it in
+        the same order, outside CUDA graph capture. So only a model with
+        sequence parallelism pays for compiling the kernels. Whether a call is
+        served is AITER's decision from the shape and dtype; the caller continues
+        with its exact collective where it is not.
+        """
+        if not self._sp_collectives_built:
+            if self._flydsl_int4 is not None:
+                self._sp_collectives = rocm_aiter_ops.create_sp_collectives(
+                    self._flydsl_int4
+                )
+                if self._sp_collectives is not None:
+                    logger.info(
+                        "Using AITER INT4 sequence-parallel collectives (lossy) "
+                        "above their size window for the HC SP layers."
+                    )
+            self._sp_collectives_built = True
+        return self._sp_collectives
+
     def close(self):
+        self._sp_collectives = None
         if self._flydsl_int4 is not None:
             self._flydsl_int4.close()
             self._flydsl_int4 = None

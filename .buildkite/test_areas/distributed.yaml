@@ -620,6 +620,8 @@ steps:
       - vllm/v1/worker/
       - vllm/_custom_ops.py
       - vllm/envs.py
+      - vllm/models/common/ops/sequence_parallel.py
+      - vllm/models/qwen4_exp/amd/ops/sequence_parallel.py
       - tests/distributed/test_rocm_aiter_custom_ar.py
       - tests/distributed/test_rocm_quick_reduce.py
       - tests/distributed/test_quick_all_reduce.py

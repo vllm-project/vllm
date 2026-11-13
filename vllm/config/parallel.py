@@ -197,6 +197,9 @@ class ParallelConfig:
     """Enable sequence parallelism for HyperConnection (HC) computation.
     Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
     Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
+    On ROCm with VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4,
+    Qwen4Exp's decoder-layer SP collectives take AITER's lossy INT4 ones above AITER's
+    size window.
     """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
