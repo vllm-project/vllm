@@ -119,11 +119,12 @@ def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first, spec_slot
 
     Row 0 checkpoints 32 tokens in, its state being chunk 3 rather than the
     program's own row, so the store only passes if `chunk_idx` is used.
-    Row 1 declines and must write nothing. The conv input is a column slice of
-    a wider projection, the SD conv layout is a transposed view, and SSM rows
-    are padded pages, matching the strides the mixer passes. Spec decoding
-    widens the conv state, and the store must still fill only the first
-    `state_len` slots with the newest inputs.
+    Row 1 has an offset but a null destination (a non-final chunk under
+    sparse retention) and must write nothing, not even into block 0. The conv
+    input is a column slice of a wider projection, the SD conv layout is a
+    transposed view, and SSM rows are padded pages, matching the strides the
+    mixer passes. Spec decoding widens the conv state, and the store must
+    still fill only the first `state_len` slots with the newest inputs.
     """
     dim, state_len, heads, head_dim, d_state = 16, 4, 2, 4, 8
     projection = torch.randn(64, dim + 8, device=DEVICE)
@@ -139,11 +140,11 @@ def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first, spec_slot
     ssm_storage = torch.zeros(3, row + 8, device=DEVICE)
     ssm_state = ssm_storage[:, :row].view(3, heads, head_dim, d_state)
     checkpoint = MambaPrefillCheckpointMetadata(
-        checkpoint_offsets=torch.tensor([32, 0], dtype=torch.int32, device=DEVICE),
+        checkpoint_offsets=torch.tensor([32, 16], dtype=torch.int32, device=DEVICE),
         state_indices=torch.tensor(
             [2, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
         ),
-        offsets=[32, 0],
+        offsets=[32, 16],
     )
 
     MambaPrefillCheckpointExporter(state_len=state_len).export(
@@ -164,3 +165,48 @@ def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first, spec_slot
     torch.testing.assert_close(ssm_state[2], varlen_states[3], **exact)
     assert not conv_state[:2].any() and not ssm_storage[:2].any()
     assert not ssm_storage[:, row:].any(), "wrote into the page padding"
+
+
+def test_batched_rows_keep_their_own_states():
+    """With several prefills in one batch, each row's chunks carry only that
+    row's state: every row ends where a solo run ends, and a checkpoint in one
+    row still equals a run over that row's prefix."""
+    lens, chunk_size, n_heads, d_head = [128, 40], 32, 4, 32
+    inputs = generate_random_inputs(1, sum(lens), n_heads, d_head, torch.float32)
+    A, dt, X, B, C = (t.squeeze(0) if t.dim() > 1 else t for t in inputs)
+    cu_seqlens = [0, lens[0], sum(lens)]
+    cu, seq_idx, last, ckpt = compute_chunk_metadata(
+        chunk_size,
+        2,
+        torch.tensor([0, 0]),
+        torch.tensor(cu_seqlens),
+        checkpoint_offsets_p=[48, 0],
+    )
+
+    def int_tensor(values):
+        return torch.tensor(values, dtype=torch.int32, device=DEVICE)
+
+    states = mamba_chunk_scan_combined_varlen(
+        X,
+        dt,
+        A,
+        B,
+        C,
+        chunk_size,
+        cu_seqlens=int_tensor(cu_seqlens),
+        cu_chunk_seqlens=int_tensor(cu),
+        last_chunk_indices=int_tensor(last),
+        seq_idx=int_tensor(seq_idx),
+        out=torch.empty_like(X),
+        D=None,
+        return_intermediate_states=True,
+        state_dtype=torch.float32,
+    )
+
+    tol = dict(atol=8e-3, rtol=5e-3)
+    for row, (start, end) in enumerate(zip(cu_seqlens, cu_seqlens[1:])):
+        row_inputs = (A, dt[start:end], X[start:end], B[start:end], C[start:end])
+        solo_final, _ = _run(row_inputs, end - start, chunk_size, 0)
+        torch.testing.assert_close(states[last[row]], solo_final[0], **tol)
+    prefix_final, _ = _run((A, dt, X, B, C), 48, chunk_size, 0)
+    torch.testing.assert_close(states[ckpt[0]], prefix_final[0], **tol)

@@ -52,7 +52,8 @@ kernel_tests() {
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
     pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
-    pytest -x -v -s tests/v1/worker/cpu"
+    pytest -x -v -s tests/v1/worker/cpu
+    pytest -x -v -s tests/kernels/mamba/test_mamba2_checkpoint_state.py"
 }
 
 model_tests() {
