@@ -99,6 +99,7 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 | `qwen2-vl`                 | `Qwen2VLForConditionalGeneration`          | `Qwen/Qwen2-VL-2B-Instruct`, etc.                     |
 | `qwen2.5-omni`             | `Qwen2_5OmniModel`                         | `Qwen/Qwen2.5-Omni-3B`, etc.                          |
 | `qwen2.5-vl`               | `Qwen2_5_VLForConditionalGeneration`       | `Qwen/Qwen2.5-VL-3B-Instruct`, etc.                   |
+| `qwen3-omni`               | `Qwen3OmniMoeForConditionalGeneration`     | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc.              |
 | `qwen3-vl`                 | `Qwen3VLForConditionalGeneration`          | `Qwen/Qwen3-VL-4B-Instruct`, etc.                     |
 | `qwen3-vl-moe`             | `Qwen3VLMoeForConditionalGeneration`       | `Qwen/Qwen3-VL-30B-A3B-Instruct`, etc.                |
 | `qwen3.5`                  | `Qwen3_5ForConditionalGeneration`          | `Qwen/Qwen3.5-0.8B`, etc.                             |
