@@ -2,6 +2,36 @@
 
 The purpose of this document is to provide an overview of the various MoE kernels (both modular and non-modular) so it will be easier to select an appropriate set of kernels for any particular situation. This includes information about the all2all backends used by modular kernels.
 
+## Experimental DeepSeek V4 TP MegaMoE
+
+`--moe-backend aiter_mega_moe_tp` selects AITER TP MegaMoE for the original
+DeepSeek-V4-Pro geometry on gfx950: hidden size 7168, expert intermediate
+size 3072, 384 routed experts, and top-k 6. It requires BF16 model activations,
+MXFP4 routed weights, native block-128 FP8 shared weights, and TP8/DP1/PP1.
+EP, EPLB, context parallelism, sequence parallelism, and DBO are unsupported.
+Set `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0`; the native shared MLP is
+retained and runs without overlap with the persistent expert kernel.
+
+| Environment variable | Default | Accepted values |
+| --- | --- | --- |
+| `VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE` | `fp8` | `fp8`, `fp4` |
+| `VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE` | `bf16` | `bf16`, `fp8` |
+| `VLLM_ROCM_TP_MEGA_MOE_AR_GATHER` | `bf16` | `bf16`, `fp8`, `auto` |
+
+FP8 activations use MegaMoE for at most 256 token rows, padded to a multiple
+of eight, and ordinary AITER A8W4 for larger calls. FP4 activations change
+precision explicitly and support at most 8192 rows. Both limits are capped
+by scheduler capacity. Reachable fallback retains a separate interleaved
+W13/scale cache, while W2/scales share storage. Routed outputs are already
+TP-reduced; the native shared-expert partial is reduced separately once.
+
+This backend requires `aiter.ops.flydsl.mega_moe_tp.MegaMoeTP`, including
+`prepare`, `set_weights`, and `error_flag`. The persistent kernel requires
+exclusive GPU execution. Operator-level graph and numerical checks do not
+establish complete model graph or serving-lifecycle support. Measure against
+the ordinary AITER backend on the target workload before enabling it;
+performance and model-quality equivalence are not guaranteed.
+
 ## Fused MoE Modular All2All backends
 
 There are a number of all2all communication backends that are used to implement expert parallelism (EP) for the `MoERunner` layer. The different `FusedMoEPrepareAndFinalizeModular` subclasses provide an interface for each all2all backend.
