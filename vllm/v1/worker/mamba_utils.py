@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from collections.abc import Sequence
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.logger import init_logger
@@ -16,7 +18,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_utils import MambaStateGather
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -1164,6 +1168,72 @@ class MambaSpecDecodeGPUContext:
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=idx_mapping is not None,
             ZERO_TEMPORAL_TOKEN_BIAS=self.replayssm is not None,
+            TEMPORAL_TILES=_TEMPORAL_TILES,
+        )
+
+    def run_state_gathers(self, gathers: Sequence[MambaStateGather]) -> None:
+        """Fold each gather's draft column into the first column of a
+        finished request's published state, in place, in every Mamba group:
+        the recurrent state of the source block into the destination block,
+        and the destination's convolution window `column` tokens left.
+
+        Each gather becomes a row `[dst, dst, src, ...]` of a per-group table
+        that the pre-copy kernel reads with destination column 0, source
+        column 1 and token bias `column`: the window comes from `row[1]`
+        (`dst`) and the recurrent state from `row[1 + column]` (`src`).
+        Block ids come from the gathers, not from a request's block-table row,
+        which a new request may already reuse."""
+        assert self.is_initialized
+        num_rows = len(gathers)
+        width = 2 + max(gather.column for gather in gathers)
+        local_index = {gid: i for i, gid in enumerate(self.mamba_group_ids)}
+        tables = np.zeros((self.num_groups, num_rows, width), dtype=np.int32)
+        for row, gather in enumerate(gathers):
+            assert gather.column > 0
+            assert sorted(gather.group_ids) == sorted(local_index)
+            for gid, dst, src in zip(
+                gather.group_ids, gather.dst_block_ids, gather.src_block_ids
+            ):
+                tables[local_index[gid], row, :2] = dst
+                tables[local_index[gid], row, 2:] = src
+        device = self.block_table_ptrs.device
+        # The kernel reads `tables_gpu` through raw pointers only. Freeing it
+        # when this returns is safe because every later use of that memory is
+        # ordered after the kernel on the current stream.
+        tables_gpu = async_tensor_h2d(tables, device=device)
+        group_stride = tables_gpu.stride(0) * tables_gpu.element_size()
+        table_ptrs = async_tensor_h2d(
+            [
+                _reinterpret_u64_as_i64(tables_gpu.data_ptr() + i * group_stride)
+                for i in range(self.num_groups)
+            ],
+            device=device,
+            dtype=torch.int64,
+        )
+        token_bias = async_tensor_h2d(
+            [gather.column for gather in gathers], device=device, dtype=torch.int32
+        )
+        dst_col = torch.zeros(num_rows, dtype=torch.int32, device=device)
+        src_col = torch.ones(num_rows, dtype=torch.int32, device=device)
+        precopy_mamba_align_fused_kernel[(num_rows, self.num_states, _TEMPORAL_TILES)](
+            dst_col,
+            src_col,
+            token_bias,
+            table_ptrs,
+            width,
+            self.state_base_addrs,
+            self.state_block_strides,
+            self.state_elem_sizes,
+            self.state_inner_sizes,
+            self.state_conv_widths,
+            self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
+            None,
+            num_rows,
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            HAS_IDX_MAPPING=False,
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 

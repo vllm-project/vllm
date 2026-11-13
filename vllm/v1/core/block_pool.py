@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any
+from typing import Any, Protocol
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -33,6 +33,20 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class CachedBlockEvictionPolicy(Protocol):
+    """Chooses which cached free blocks an allocation evicts. The free queue
+    stays the pool's record of the order; a policy moves the blocks it chooses
+    to the front before they are taken."""
+
+    def on_blocks_freed(self, blocks: list[KVCacheBlock]) -> None:
+        """Cached `blocks` just went back to the free queue."""
+        ...
+
+    def prepare_eviction(self, num_blocks: int) -> None:
+        """`num_blocks` blocks are about to leave the queue front."""
+        ...
 
 
 class BlockHashToBlockMap:
@@ -67,6 +81,14 @@ class BlockHashToBlockMap:
         """Gets any block with the given block hash key."""
         block_id = self._cache.get(key)
         return None if block_id is None else self._blocks[block_id]
+
+    def get_all_blocks(self, key: BlockHashWithGroupId) -> list[KVCacheBlock]:
+        """Gets every block with the given block hash key."""
+        dup_ids = self._dup_ids.get(key)
+        if dup_ids is not None:
+            return [self._blocks[block_id] for block_id in dup_ids]
+        block_id = self._cache.get(key)
+        return [] if block_id is None else [self._blocks[block_id]]
 
     def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
         """Checks whether the key maps to the given block ID."""
@@ -171,6 +193,13 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # Called with the keys that blocks lose through eviction or
+        # replacement, once the operation is complete.
+        self.key_removal_listener: (
+            Callable[[list[BlockHashWithGroupId]], None] | None
+        ) = None
+        # None keeps the free queue's LRU order.
+        self.eviction_policy: CachedBlockEvictionPolicy | None = None
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -249,6 +278,7 @@ class BlockPool:
         )
         # Appended per block below: much cheaper than packing the group id each time.
         group_suffix = make_block_hash_with_group_id(BlockHash(b""), kv_cache_group_id)
+        promoted: list[BlockHashWithGroupId] = []
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -269,6 +299,7 @@ class BlockPool:
                 )
                 removed_hashes = self._remove_cached_block_hashes(blk)
                 self._emit_block_removed_events(removed_hashes)
+                promoted.extend(removed_hashes)
             self._insert_block_hash(
                 block_hash_with_group_id,
                 blk,
@@ -276,6 +307,7 @@ class BlockPool:
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+        self._notify_keys_removed(promoted)
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -514,6 +546,7 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
+        removed_hashes: list[BlockHashWithGroupId] = []
         if replace_existing_hashes:
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
@@ -531,6 +564,7 @@ class BlockPool:
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
         )
+        self._notify_keys_removed(removed_hashes)
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
@@ -576,6 +610,32 @@ class BlockPool:
                 )
             )
         return block_hash_with_group_id
+
+    def cache_block_under_key(
+        self,
+        block: KVCacheBlock,
+        block_hash_with_group_id: BlockHashWithGroupId,
+        num_tokens: int,
+    ) -> None:
+        """Make `block` reachable under a key that is not a hash of its own
+        token range (a Mamba frontier checkpoint's key). No KV cache event is
+        published: frontier checkpoints refuse KV cache events."""
+        assert not block.is_null
+        self._insert_block_hash(block_hash_with_group_id, block, num_tokens=num_tokens)
+
+    def uncache_key(
+        self,
+        block: KVCacheBlock,
+        block_hash_with_group_id: BlockHashWithGroupId,
+    ) -> None:
+        """Remove one key that `block` holds beside its own hash, keeping its
+        other keys and its place in the free queue."""
+        keys = self.cached_block_hashes_by_block[block.block_id]
+        keys.remove(block_hash_with_group_id)
+        if not keys:
+            del self.cached_block_hashes_by_block[block.block_id]
+        self.cached_block_hash_to_block.pop(block_hash_with_group_id, block.block_id)
+        self._notify_keys_removed([block_hash_with_group_id])
 
     def _get_partial_block_hash(
         self,
@@ -693,6 +753,8 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
+        if self.eviction_policy is not None and self.enable_caching:
+            self.eviction_policy.prepare_eviction(num_blocks)
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
         if self._reuse_watchers:
@@ -769,7 +831,12 @@ class BlockPool:
             return False
 
         self._emit_block_removed_events(evicted_hashes)
+        self._notify_keys_removed(evicted_hashes)
         return True
+
+    def _notify_keys_removed(self, block_hashes: list[BlockHashWithGroupId]) -> None:
+        if self.key_removal_listener is not None and block_hashes:
+            self.key_removal_listener(block_hashes)
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
@@ -835,6 +902,8 @@ class BlockPool:
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
+        if self.eviction_policy is not None and blocks_to_evict_last:
+            self.eviction_policy.on_blocks_freed(blocks_to_evict_last)
         for pool, blocks in other_pools.items():
             pool.free_blocks(blocks, evict_first=evict_first)
 

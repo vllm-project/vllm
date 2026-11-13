@@ -208,7 +208,7 @@ The second question is the cache eviction policy. For now, we use one LRU queue 
 
 ### Case 3: mamba models
 
-Models with mamba layers + full attention layers support prefix caching via the full attention + X algorithm in case 2, with the Mamba state cached at block boundaries. See [Automatic Prefix Caching](../features/automatic_prefix_caching.md).
+Models with mamba layers + full attention layers support prefix caching via the full attention + X algorithm in case 2, with the Mamba state cached at block boundaries. See [Automatic Prefix Caching](../features/automatic_prefix_caching.md). States past the block grid, such as a finished request's exact end, can be kept as well; see [Hybrid State Checkpoints](hybrid_state_checkpoints.md).
 
 ## Implementation
 

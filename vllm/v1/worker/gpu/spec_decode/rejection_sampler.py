@@ -23,6 +23,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+from vllm.v1.worker.gpu.spec_decode.stop_conditions import StopConditions
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -157,9 +158,13 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
+        stop_conditions: StopConditions | None = None,
     ):
+        """`stop_conditions`: cut each request's accepted tokens at its
+        stop (`speculative_config.truncate_acceptance_at_stop`)."""
         self.sampler = sampler
         self.watermark_key = watermark_key
+        self.stop_conditions = stop_conditions
         if watermark_key is not None:
             assert isinstance(sampler, GPUWatermarkSampler)
         self.num_speculative_steps = spec_config.num_speculative_tokens
@@ -465,12 +470,17 @@ class RejectionSampler:
             logprobs_dims,
         )
 
+        req_states = self.sampler.req_states
         num_sampled, num_rejected = get_num_sampled_and_rejected(
             num_sampled,
             input_batch.seq_lens,
             input_batch.cu_num_logits,
             input_batch.idx_mapping,
-            self.sampler.req_states.prefill_len.gpu,
+            req_states.prefill_len.gpu,
+            stop_conditions=self.stop_conditions,
+            sampled=sampled,
+            last_sampled_tokens=req_states.last_sampled_tokens,
+            prompt_len=req_states.prompt_len.gpu,
         )
 
         return SamplerOutput(

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
         AdmittedDraftCounts,
     )
+    from vllm.v1.worker.gpu.spec_decode.stop_conditions import StopConditions
 
 
 class InputBuffers:
@@ -514,6 +515,14 @@ def combine_sampled_and_draft_tokens(
 
 
 @triton.jit
+def _is_stop_token(token, eos_token_id, stop_token_ids):
+    # token: [N]; stop_token_ids: [S], -1 in unused slots.
+    matches = token[:, None] == stop_token_ids[None, :]
+    in_stop_token_ids = tl.max(matches.to(tl.int32), axis=1)
+    return (token == eos_token_id) | (in_stop_token_ids > 0)
+
+
+@triton.jit
 def _get_num_sampled_and_rejected_kernel(
     num_sampled_ptr,
     num_rejected_ptr,
@@ -521,6 +530,19 @@ def _get_num_sampled_and_rejected_kernel(
     cu_num_logits_ptr,
     idx_mapping_ptr,
     prefill_len_ptr,
+    sampled_ptr,
+    sampled_stride,
+    last_sampled_ptr,
+    last_sampled_stride,
+    prompt_len_ptr,
+    eos_token_id_ptr,
+    max_len_ptr,
+    num_stop_token_ids_ptr,
+    stop_token_ids_ptr,
+    stop_token_ids_stride,
+    TRUNCATE_AT_STOP: tl.constexpr,
+    NUM_SAMPLED_SLOTS: tl.constexpr,
+    BLOCK_STOP: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -531,12 +553,50 @@ def _get_num_sampled_and_rejected_kernel(
 
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
     num_sampled = tl.where(is_chunked_prefilling, 0, num_sampled)
-    tl.store(num_sampled_ptr + batch_idx, num_sampled)
 
     logits_start = tl.load(cu_num_logits_ptr + batch_idx)
     logits_end = tl.load(cu_num_logits_ptr + batch_idx + 1)
     num_logits = logits_end - logits_start
 
+    if TRUNCATE_AT_STOP:
+        # The step's first input token sits at position `start`; sampled token
+        # i makes the request `start + 2 + i` tokens long.
+        start = seq_len - num_logits
+        prompt_len = tl.load(prompt_len_ptr + req_state_idx)
+        eos_token_id = tl.load(eos_token_id_ptr + req_state_idx)
+        max_len = tl.load(max_len_ptr + req_state_idx)
+        num_stop_token_ids = tl.load(num_stop_token_ids_ptr + req_state_idx)
+        stop_offs = tl.arange(0, BLOCK_STOP)
+        stop_token_ids = tl.load(
+            stop_token_ids_ptr + req_state_idx * stop_token_ids_stride + stop_offs,
+            mask=stop_offs < num_stop_token_ids,
+            other=-1,
+        )
+        # A step scheduled before the previous step's stop was known: its
+        # first input token already ended the request.
+        first_input = tl.load(last_sampled_ptr + req_state_idx * last_sampled_stride)
+        first_input_is_stop = tl.max(
+            _is_stop_token(
+                tl.full((1,), first_input, tl.int64), eos_token_id, stop_token_ids
+            ).to(tl.int32),
+            axis=0,
+        )
+        ended = (start + 1 >= max_len) | (
+            (start >= prompt_len) & (first_input_is_stop > 0)
+        )
+        offs = tl.arange(0, NUM_SAMPLED_SLOTS)
+        valid = offs < num_sampled
+        tokens = tl.load(
+            sampled_ptr + batch_idx * sampled_stride + offs, mask=valid, other=-1
+        )
+        hit = _is_stop_token(tokens, eos_token_id, stop_token_ids)
+        hit = (hit | (start + 2 + offs >= max_len)) & valid
+        first_hit = tl.min(tl.where(hit, offs, NUM_SAMPLED_SLOTS), axis=0)
+        truncated = tl.where(first_hit < NUM_SAMPLED_SLOTS, first_hit + 1, num_sampled)
+        truncated = tl.where(ended, tl.minimum(num_sampled, 1), truncated)
+        num_sampled = tl.where(num_sampled > 0, truncated, num_sampled)
+
+    tl.store(num_sampled_ptr + batch_idx, num_sampled)
     num_rejected = num_logits - num_sampled
     num_rejected = tl.where(is_chunked_prefilling, 0, num_rejected)
     tl.store(num_rejected_ptr + batch_idx, num_rejected)
@@ -548,9 +608,39 @@ def get_num_sampled_and_rejected(
     cu_num_logits: torch.Tensor,
     idx_mapping: torch.Tensor,
     prefill_len: torch.Tensor,
+    *,
+    stop_conditions: "StopConditions | None" = None,
+    sampled: torch.Tensor | None = None,
+    last_sampled_tokens: torch.Tensor | None = None,
+    prompt_len: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """With `stop_conditions` (and `sampled`, `last_sampled_tokens` and
+    `prompt_len`), also cut each request's sampled tokens at its stop; see
+    `speculative_config.truncate_acceptance_at_stop`."""
     num_reqs = idx_mapping.shape[0]
     num_rejected = torch.empty_like(num_sampled)
+    if stop_conditions is not None:
+        assert sampled is not None
+        assert last_sampled_tokens is not None
+        assert prompt_len is not None
+        stop_token_ids = stop_conditions.stop_token_ids.gpu
+        stop_args = (
+            sampled,
+            sampled.stride(0),
+            last_sampled_tokens,
+            last_sampled_tokens.stride(0),
+            prompt_len,
+            stop_conditions.eos_token_id.gpu,
+            stop_conditions.max_len.gpu,
+            stop_conditions.num_stop_token_ids.gpu,
+            stop_token_ids,
+            stop_token_ids.stride(0),
+        )
+        num_sampled_slots = triton.next_power_of_2(sampled.shape[1])
+        block_stop = triton.next_power_of_2(stop_token_ids.shape[1])
+    else:
+        stop_args = (None, 0, None, 0, None, None, None, None, None, 0)
+        num_sampled_slots = block_stop = 1
     _get_num_sampled_and_rejected_kernel[(num_reqs,)](
         num_sampled,
         num_rejected,
@@ -558,6 +648,10 @@ def get_num_sampled_and_rejected(
         cu_num_logits,
         idx_mapping,
         prefill_len,
+        *stop_args,
+        TRUNCATE_AT_STOP=stop_conditions is not None,
+        NUM_SAMPLED_SLOTS=num_sampled_slots,
+        BLOCK_STOP=block_stop,
     )
     return num_sampled, num_rejected
 

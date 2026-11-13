@@ -23,6 +23,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.core.kv_cache_utils import MambaStateGather
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -3061,3 +3062,38 @@ class TestPostprocessMambaFusedKernel:
             atol=0,
             msg="DS num_accepted_tokens result is wrong",
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("column", [1, 2, 3])
+def test_state_gathers_fold_a_draft_column_into_the_first(column: int):
+    """A finished request's exact state sits in draft column `column`: the
+    gather copies that column's recurrent state into the first column's block
+    and shifts that block's convolution window `column` tokens left, in place.
+    Other blocks keep their contents."""
+    cfg = _TestConfig(num_layers=1)
+    device = torch.device("cuda")
+    torch.manual_seed(1003)
+    kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
+    _, _, conv, temporal, _, forward_context = _make_dual_layer_state(cfg, device)
+    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context)
+    block_table = torch.zeros(cfg.max_num_reqs, 4, dtype=torch.int32, device=device)
+    gpu_ctx.initialize_from_forward_context(
+        kv_cache_config, forward_context, _COPY_FUNCS, [block_table]
+    )
+    conv_before, temporal_before = conv.clone(), temporal.clone()
+    gathers = [
+        MambaStateGather(column, (0,), (5,), (9,)),
+        MambaStateGather(1, (0,), (12,), (13,)),
+    ]
+
+    gpu_ctx.run_state_gathers(gathers)
+    torch.accelerator.synchronize()
+
+    conv_ref, temporal_ref = conv_before.clone(), temporal_before.clone()
+    for gather in gathers:
+        [dst], [src], c = gather.dst_block_ids, gather.src_block_ids, gather.column
+        conv_ref[dst, : cfg.conv_width - c] = conv_before[dst, c:]
+        temporal_ref[dst] = temporal_before[src]
+    torch.testing.assert_close(conv, conv_ref, rtol=0, atol=0)
+    torch.testing.assert_close(temporal, temporal_ref, rtol=0, atol=0)
