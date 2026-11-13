@@ -23,8 +23,7 @@ Weights loaded by the Run:ai streamer, Tensorizer, ModelExpress and sharded-stat
 
 ## Reading the identity
 
-- The `kv_identity` label of `vllm:cache_config_info` carries the identity, so a router can pair engines whose labels are equal.
-- `GET /kv_identity` returns the identity and its components for each data-parallel rank, so a mismatch names its cause:
+- `GET /kv_identity` returns the current identity and its components for each data-parallel rank, so a router can pair engines whose identities are equal and a mismatch names its cause:
 
 ```json
 {
@@ -41,7 +40,7 @@ Weights loaded by the Run:ai streamer, Tensorizer, ModelExpress and sharded-stat
 }
 ```
 
-The engine also logs the identity and its components at startup.
+The `kv_identity` label of `vllm:cache_config_info` carries the identity the engine started with, and the engine logs the identity and its components whenever it changes.
 
 ## Enforcing it
 
@@ -54,5 +53,23 @@ Enforcement is opt-in. Set `enforce_kv_identity` in `kv_connector_extra_config` 
 - **NixlConnector** adds the identity to its handshake compatibility hash, so engines with different identities refuse to pair. See [What must match between P and D](nixl_connector_compatibility.md#what-must-match-between-p-and-d).
 - **OffloadingConnector** adds the identity to the storage namespace of its secondary tiers and to the P2P peer fingerprint, so engines with different identities neither read each other's files nor connect as P2P peers. Enabling it moves the namespace, so blocks stored before are no longer found.
 
+## Weight changes
+
+The identity follows weights changed at runtime. While the engine cannot identify its weights, the identity is `unknown-<random>`, which matches no other engine; `weights_source` is then `unknown`.
+
+| Change | Identity |
+| - | - |
+| `reload_weights` from files, with no `weights_iterator` | Identified by the files, when they are in the Hugging Face cache or hashed with `--kv-identity-hash-local-weights` and every weight was reloaded; otherwise unknown |
+| `reload_weights` with a `weights_iterator`, `reset_weights`, sleep level 2 | Unknown |
+| A weight update, from `start_weight_update` to `finish_weight_update` | Unknown |
+| `finish_weight_update` with a `weight_version`, or `update_weight_version` | The last files loaded and the version; `weights_source` is `weight_version` |
+| Sleep level 1, draft model updates | Unchanged |
+
+A weight version identifies the weights only as well as the caller assigns it: engines that loaded the same files and set the same version match, so use a version for exactly one set of weights. Setting a version while a weight update is incomplete does not change the identity.
+
 !!! note
-    The identity is computed once at startup. Weights changed at runtime, through `reload_weights`, weight updates or sleep mode, do not update it yet.
+    `enforce_kv_identity` enforces the identity the engine started with. Connectors do not follow weight changes yet.
+
+Change weights while generation is paused, as in the RL weight-transfer API, so that no KV is computed while the weights change. Methods of a custom `--worker-extension-cls` that change weights are not detected: pause generation, change the weights, and set the weight version before resuming.
+
+The identity assumes that LoRA adapters do not change under the same name and path, since cached KV is keyed by them.
