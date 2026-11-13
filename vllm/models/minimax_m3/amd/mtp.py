@@ -25,7 +25,10 @@ import torch.nn as nn
 from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    in_single_pp_stage,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -266,7 +269,7 @@ class MiniMaxM3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        self._tracks_own_embed = get_pp_group().world_size > 1
+        self._tracks_own_embed = in_single_pp_stage()
         if self._tracks_own_embed:
             # Preserve embeddings from loaders that bypass load_weights.
             self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"
