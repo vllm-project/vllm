@@ -240,7 +240,7 @@ class ReadStrategy(ABC):
             tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
             # The warm's one-token output is discarded; detokenizing it
             # would decode the shared prefix on the event loop.
-            SamplingParams(max_tokens=1, temperature=0.0, detokenize=False),
+            SamplingParams(max_tokens=1, temperature=0.0, extra_args=extra_args, detokenize=False),
             f"{request_id}-prefix",
             lora_request=lora_request,
             trace_headers=trace_headers,
