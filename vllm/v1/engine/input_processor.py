@@ -5,10 +5,13 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
+import torch
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
+    EmbedsInput,
     EngineInput,
     PromptType,
     SingletonInput,
@@ -425,6 +428,11 @@ class InputProcessor:
             prompt_embeds = decoder_input["prompt_embeds"]
             prompt_token_ids = decoder_input.get("prompt_token_ids")
             prompt_is_token_ids = decoder_input.get("is_token_ids")
+            if prompt_is_token_ids is not None and len(prompt_embeds) != (
+                prompt_is_token_ids.count(False)
+            ):
+                # Mixed prompts travel compact: keep only the embeds rows.
+                prompt_embeds = prompt_embeds[~torch.tensor(prompt_is_token_ids)]
         else:
             prompt_token_ids = decoder_input["prompt_token_ids"]
             prompt_embeds = None
@@ -596,31 +604,49 @@ class InputProcessor:
                 f"model length of {max_prompt_len}. {suggestion}"
             )
 
+    @staticmethod
+    def _embeds_input_len(prompt_input: EmbedsInput) -> int:
+        """Return the length of an embeds input, validating a mixed prompt.
+
+        A mixed prompt's length is that of its token ids, and its
+        `prompt_embeds` hold either one row per position or only the rows of
+        the `False` positions of `is_token_ids`.
+        """
+        prompt_embeds = prompt_input["prompt_embeds"]
+        is_token_ids = prompt_input.get("is_token_ids")
+        if is_token_ids is None:
+            return len(prompt_embeds)
+
+        prompt_ids = prompt_input.get("prompt_token_ids")
+        prompt_len = len(prompt_embeds if prompt_ids is None else prompt_ids)
+        if len(is_token_ids) != prompt_len:
+            raise VLLMValidationError(
+                "prompt_is_token_ids must have the same length as the prompt "
+                f"(expected {prompt_len}, got {len(is_token_ids)}).",
+                parameter="prompt_is_token_ids",
+            )
+        num_embeds = is_token_ids.count(False)
+        if len(prompt_embeds) not in (num_embeds, prompt_len):
+            raise VLLMValidationError(
+                "prompt_embeds must have one row per prompt position "
+                f"({prompt_len}) or per False entry of prompt_is_token_ids "
+                f"({num_embeds}), got {len(prompt_embeds)}.",
+                parameter="prompt_embeds",
+            )
+        return prompt_len
+
     def _validate_model_input(
         self,
         prompt_input: SingletonInput,
         prompt_type: Literal["encoder", "decoder"],
     ) -> None:
-        prompt_ids = (
-            None
-            if prompt_input["type"] == "embeds"
-            else prompt_input["prompt_token_ids"]
-        )
-        prompt_embeds = (
-            prompt_input["prompt_embeds"] if prompt_input["type"] == "embeds" else None
-        )
-
-        prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
-        self._validate_prompt_len(prompt_len, prompt_type)
-
         if prompt_input["type"] == "embeds":
-            is_token_ids = prompt_input.get("is_token_ids")
-            if is_token_ids is not None and len(is_token_ids) != prompt_len:
-                raise VLLMValidationError(
-                    "prompt_is_token_ids must have the same length as prompt_embeds "
-                    f"(expected {prompt_len}, got {len(is_token_ids)}).",
-                    parameter="prompt_is_token_ids",
-                )
+            prompt_ids = None
+            prompt_len = self._embeds_input_len(prompt_input)
+        else:
+            prompt_ids = prompt_input["prompt_token_ids"]
+            prompt_len = len(prompt_ids)
+        self._validate_prompt_len(prompt_len, prompt_type)
 
         if prompt_input["type"] == "multimodal":
             decoder_mm_positions = prompt_input["mm_placeholders"]

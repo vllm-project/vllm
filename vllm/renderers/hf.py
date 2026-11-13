@@ -9,6 +9,7 @@ import itertools
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
 
@@ -232,25 +233,36 @@ def _build_prompt_embeds_positions(
     return [(f.start_idx, f.length) for f in features]
 
 
+@dataclass(frozen=True, slots=True)
+class MixedPromptEmbeds:
+    """`prompt_embeds` of a mixed prompt, in the compact form the engine and
+    workers use: token-id positions get no placeholder rows, so none are
+    serialized, hashed or copied to the GPU."""
+
+    embeds: torch.Tensor
+    """Rows of the `False` positions of `is_token_ids`, in position order."""
+
+    is_token_ids: list[bool]
+    """Per-position mask aligned to the prompt's token ids."""
+
+
 def _build_mixed_prompt_embeds(
     token_ids: list[int],
     prompt_embeds_tensors: Sequence[torch.Tensor],
     positions: list[tuple[int, int]],
-) -> tuple[torch.Tensor, list[bool]]:
-    """Build the full-length `prompt_embeds` tensor and the `is_token_ids`
-    mask aligned to `token_ids`."""
-    total_len = len(token_ids)
-    hidden_size = prompt_embeds_tensors[0].shape[1]
-    dtype = prompt_embeds_tensors[0].dtype
-
-    full_embeds = torch.zeros(total_len, hidden_size, dtype=dtype)
-    is_token_ids = torch.ones(total_len, dtype=torch.bool)
-
-    for (start, length), tensor in zip(positions, prompt_embeds_tensors, strict=True):
-        full_embeds[start : start + length] = tensor
-        is_token_ids[start : start + length] = False
-
-    return full_embeds, is_token_ids.tolist()
+) -> MixedPromptEmbeds:
+    """Build the compact `prompt_embeds` of a mixed prompt from its embeds
+    spans, given as `(start, length)` positions in `token_ids` that are
+    aligned with `prompt_embeds_tensors` and hence in position order."""
+    is_token_ids = [True] * len(token_ids)
+    for start, length in positions:
+        is_token_ids[start : start + length] = [False] * length
+    embeds = (
+        prompt_embeds_tensors[0]
+        if len(prompt_embeds_tensors) == 1
+        else torch.cat(list(prompt_embeds_tensors))
+    )
+    return MixedPromptEmbeds(embeds=embeds, is_token_ids=is_token_ids)
 
 
 _PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, str | None, str | None, bool], str | None]()
@@ -1428,8 +1440,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         Pure `prompt_embeds` path only (no other MM modalities).  Expands
         each `<prompt_embeds>` sentinel token into an N-token span and builds
-        the full-length `prompt_embeds` tensor + `prompt_is_token_ids` mask
-        that the engine's `enable_prompt_embeds` worker branch consumes.
+        the compact `prompt_embeds` tensor + `prompt_is_token_ids` mask that
+        the engine's `enable_prompt_embeds` worker branch consumes.
         """
         token_ids = cast(list[int] | None, prompt.get("prompt_token_ids"))
         if token_ids is None:
@@ -1455,11 +1467,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         embeds_prompt = cast(EmbedsPrompt, prompt)
         embeds_prompt["prompt_token_ids"] = expanded
-        full_embeds, is_token_ids_mask = _build_mixed_prompt_embeds(
-            expanded, prompt_embeds_tensors, positions
-        )
-        embeds_prompt["prompt_embeds"] = full_embeds
-        embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask
+        mixed = _build_mixed_prompt_embeds(expanded, prompt_embeds_tensors, positions)
+        embeds_prompt["prompt_embeds"] = mixed.embeds
+        embeds_prompt["prompt_is_token_ids"] = mixed.is_token_ids
 
     def _apply_prompt_embeds_to_engine_input(
         self,

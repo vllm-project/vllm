@@ -44,7 +44,8 @@ class UncomputedPromptEmbeds:
     embeds: "torch.Tensor | None"
     is_token_ids: list[bool] | None
     offset: int
-    """Prompt position of the first row of `embeds`."""
+    """Prompt position of the first entry of `is_token_ids`, and of the first
+    row of `embeds` when there is no mask (mixed prompts' rows are compact)."""
 
 
 def strip_computed_prompt_embeds(
@@ -55,10 +56,14 @@ def strip_computed_prompt_embeds(
     """Slice the prompt embeddings and token ID flags to remove computed tokens."""
     if prompt_embeds is None or not num_computed_tokens:
         return UncomputedPromptEmbeds(prompt_embeds, prompt_is_token_ids, 0)
-    offset = min(num_computed_tokens, len(prompt_embeds))
-    if prompt_is_token_ids is not None:
-        prompt_is_token_ids = prompt_is_token_ids[offset:]
-    return UncomputedPromptEmbeds(prompt_embeds[offset:], prompt_is_token_ids, offset)
+    if prompt_is_token_ids is None:
+        offset = min(num_computed_tokens, len(prompt_embeds))
+        return UncomputedPromptEmbeds(prompt_embeds[offset:], None, offset)
+    offset = min(num_computed_tokens, len(prompt_is_token_ids))
+    first_row = prompt_is_token_ids[:offset].count(False)
+    return UncomputedPromptEmbeds(
+        prompt_embeds[first_row:], prompt_is_token_ids[offset:], offset
+    )
 
 
 @dataclass

@@ -614,12 +614,28 @@ def _gen_prompt_embeds_extra_hash_keys(
     """
     if request.prompt_embeds is None:
         return []
+    offsets = request.prompt_embeds_row_offsets
+    if offsets is None:
+        first_row, end_row = start_token_idx, end_token_idx
+    else:
+        # Mixed prompt: hash the block's compact rows with its mask, so the
+        # rows' positions are part of the key. A block of only token ids is
+        # covered by its token ids.
+        first_row, end_row = offsets[start_token_idx], offsets[end_token_idx]
+        if first_row == end_row:
+            return []
     block_range = (start_token_idx, end_token_idx)
     embeds_hash = request._prompt_embeds_per_block_hashes.get(block_range)
     if embeds_hash is None:
-        block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
+        hasher = hashlib.sha256()
+        if offsets is not None:
+            assert request.prompt_is_token_ids is not None
+            hasher.update(
+                bytes(request.prompt_is_token_ids[start_token_idx:end_token_idx])
+            )
+        hasher.update(tensor_data(request.prompt_embeds[first_row:end_row]))
         # Hash prompt embeds once per block and cache on request
-        embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
+        embeds_hash = hasher.digest()
         request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
     return [("prompt_embeds", embeds_hash)]
 

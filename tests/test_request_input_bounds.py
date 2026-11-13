@@ -82,8 +82,8 @@ def test_prompt_embeds_mask_length_rejected_before_engine_submission(
 
 @pytest.mark.parametrize(
     ("token_ids", "mask"),
-    [(None, None), ([1, 2, 3], None), ([1, 2, 3], [True, False, True])],
-    ids=["pure-embeds", "token-ids-without-mask", "mixed"],
+    [(None, None), ([1, 2, 3], None), ([1, 2, 3], [False, False, False])],
+    ids=["pure-embeds", "token-ids-without-mask", "mixed-all-embeds"],
 )
 def test_prompt_embeds_valid_inputs_preserved(prompt_embeds_processor, token_ids, mask):
     embeds = torch.zeros(3, 4)
@@ -96,6 +96,52 @@ def test_prompt_embeds_valid_inputs_preserved(prompt_embeds_processor, token_ids
     assert request.prompt_embeds is embeds
     assert request.prompt_token_ids == token_ids
     assert request.prompt_is_token_ids == mask
+
+
+def test_compact_mixed_prompt_embeds_accepted(prompt_embeds_processor):
+    """Mixed prompts may carry only their embeds rows; they are sent as is."""
+    embeds = torch.zeros(1, 4)
+    prompt = embeds_input(
+        embeds, prompt_token_ids=[1, 2, 3], is_token_ids=[True, False, True]
+    )
+
+    request = prompt_embeds_processor.process_inputs(
+        "compact", prompt, SamplingParams(max_tokens=1), ("generate",)
+    )
+
+    assert request.prompt_embeds is embeds
+    assert request.prompt_is_token_ids == [True, False, True]
+
+
+def test_full_length_mixed_prompt_embeds_compacted(prompt_embeds_processor):
+    """One row per position is accepted, but only the embeds rows are sent."""
+    embeds = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    prompt = embeds_input(
+        embeds, prompt_token_ids=[1, 2, 3], is_token_ids=[True, False, True]
+    )
+
+    request = prompt_embeds_processor.process_inputs(
+        "full", prompt, SamplingParams(max_tokens=1), ("generate",)
+    )
+
+    assert torch.equal(request.prompt_embeds, embeds[1:2])
+
+
+@pytest.mark.parametrize("num_rows", [0, 2, 4])
+def test_mixed_prompt_embeds_row_count_rejected(prompt_embeds_processor, num_rows):
+    """Rows must match the embeds positions (1) or the whole prompt (3)."""
+    prompt = embeds_input(
+        torch.zeros(num_rows, 4),
+        prompt_token_ids=[1, 2, 3],
+        is_token_ids=[True, False, True],
+    )
+
+    with pytest.raises(VLLMValidationError, match="prompt_embeds") as exc_info:
+        prompt_embeds_processor.process_inputs(
+            "invalid", prompt, SamplingParams(max_tokens=1), ("generate",)
+        )
+
+    assert exc_info.value.parameter == "prompt_embeds"
 
 
 @pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])

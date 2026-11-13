@@ -31,16 +31,16 @@ class PromptEmbedsState:
         self.dtype = dtype
         self.device = device
 
-        # req_id -> (embeds, is_token_ids mask or None). Holds the references
-        # that keep the pointer table below valid.
+        # req_id -> (embeds, row map or None). Holds the references that keep
+        # the pointer table below valid.
         self.gpu_tensors: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
 
         # Indexed by req_state index. Stale entries after removal are
         # harmless: add_request rewrites all fields for every index it claims.
         self.embeds_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
-        self.mask_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
-        # Row 0 holds position `offset`: rows below it were prefix-cache hits
-        # and are not sent. `embeds_lens` is the end position, offset + rows.
+        self.row_map_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
+        # Rows start at position `offset`: those below it were prefix-cache
+        # hits and are not sent. `embeds_lens` is the end position.
         self.embeds_offsets = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.embeds_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
@@ -56,21 +56,29 @@ class PromptEmbedsState:
         embeds = async_tensor_h2d(prompt_embeds, device=self.device, dtype=self.dtype)
         embeds = embeds.contiguous()
         is_token_ids = new_req_data.prompt_is_token_ids
-        mask = None
+        row_map = None
+        num_positions = embeds.shape[0]
         if is_token_ids is not None:
-            mask = async_tensor_h2d(is_token_ids, device=self.device, dtype=torch.uint8)
-        self.gpu_tensors[new_req_data.req_id] = (embeds, mask)
+            # Mixed prompts carry only their embeds positions' rows: map each
+            # position to its row, or to -1 for a token-id position.
+            is_embeds = ~torch.tensor(is_token_ids)
+            rows = torch.cumsum(is_embeds, dim=0, dtype=torch.int32) - 1
+            row_map = async_tensor_h2d(
+                torch.where(is_embeds, rows, -1), device=self.device, dtype=torch.int32
+            )
+            num_positions = len(is_token_ids)
+        self.gpu_tensors[new_req_data.req_id] = (embeds, row_map)
         self.embeds_ptrs.np[req_index] = embeds.data_ptr()
-        self.mask_ptrs.np[req_index] = 0 if mask is None else mask.data_ptr()
+        self.row_map_ptrs.np[req_index] = 0 if row_map is None else row_map.data_ptr()
         self.embeds_offsets.np[req_index] = offset
-        self.embeds_lens.np[req_index] = offset + embeds.shape[0]
+        self.embeds_lens.np[req_index] = offset + num_positions
 
     def remove_request(self, req_id: str) -> None:
         self.gpu_tensors.pop(req_id, None)
 
     def apply_staged_writes(self) -> None:
         self.embeds_ptrs.copy_to_uva()
-        self.mask_ptrs.copy_to_uva()
+        self.row_map_ptrs.copy_to_uva()
         self.embeds_offsets.copy_to_uva()
         self.embeds_lens.copy_to_uva()
 
@@ -92,7 +100,7 @@ class PromptEmbedsState:
             inputs_embeds,
             inputs_embeds.stride(0),
             self.embeds_ptrs.gpu,
-            self.mask_ptrs.gpu,
+            self.row_map_ptrs.gpu,
             self.embeds_offsets.gpu,
             self.embeds_lens.gpu,
             input_batch.idx_mapping,
@@ -109,7 +117,7 @@ def _apply_prompt_embeds_kernel(
     inputs_embeds_ptr,
     inputs_embeds_stride,
     embeds_ptrs_ptr,  # uint64 [max_num_reqs], device pointers (0-len = unused)
-    mask_ptrs_ptr,  # uint64 [max_num_reqs], 0 = no is-token-ids mask
+    row_map_ptrs_ptr,  # uint64 [max_num_reqs], 0 = row is the position
     embeds_offsets_ptr,  # int32 [max_num_reqs], position of row 0
     embeds_lens_ptr,  # int32 [max_num_reqs], end position
     idx_mapping_ptr,
@@ -139,17 +147,17 @@ def _apply_prompt_embeds_kernel(
         tl.pointer_type(inputs_embeds_ptr.dtype.element_ty)
     )
     offset = tl.load(embeds_offsets_ptr + req_state_idx)
-    mask_int = tl.load(mask_ptrs_ptr + req_state_idx)
-    mask_ptr = mask_int.to(tl.pointer_type(tl.int8))
+    row_map_int = tl.load(row_map_ptrs_ptr + req_state_idx)
+    row_map_ptr = row_map_int.to(tl.pointer_type(tl.int32))
 
     for t_offset in tl.static_range(TOKEN_BLOCK):
         t = t_start + t_offset
         if t < num_rows:
             src_row = (num_computed + t - offset).to(tl.int64)
-            is_token_id = 0
-            if mask_int != 0:
-                is_token_id = tl.load(mask_ptr + src_row).to(tl.int32)
-            if is_token_id == 0:
+            if row_map_int != 0:
+                # -1 marks a token-id position, which keeps its base embedding.
+                src_row = tl.load(row_map_ptr + src_row).to(tl.int64)
+            if src_row >= 0:
                 dst_row = (query_start + t).to(tl.int64)
                 for h in tl.range(0, hidden_size, BLOCK_SIZE):
                     offs = h + tl.arange(0, BLOCK_SIZE)

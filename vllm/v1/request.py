@@ -142,8 +142,18 @@ class Request:
         self.prompt_embeds = prompt_embeds
         # Per-position mask used in mixed-mode (chat completion with
         # prompt_embeds). `None` except when both `prompt_token_ids` and
-        # `prompt_embeds` are set and their positions are interleaved.
+        # `prompt_embeds` are set and their positions are interleaved. Then
+        # prompt_embeds is compact: it holds only the rows of the `False`
+        # positions, and position i reads row prompt_embeds_row_offsets[i].
         self.prompt_is_token_ids = prompt_is_token_ids
+        self.prompt_embeds_row_offsets: np.ndarray | None = None
+        if prompt_is_token_ids is not None:
+            row_offsets = np.concatenate(
+                ([0], np.cumsum(np.logical_not(prompt_is_token_ids)))
+            )
+            assert prompt_embeds is not None
+            assert len(prompt_embeds) == row_offsets[-1]
+            self.prompt_embeds_row_offsets = row_offsets
         # Cache per-block prompt-embed hashes to avoid rehashing the same
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}

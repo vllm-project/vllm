@@ -119,20 +119,27 @@ def test_overlay_clamps_to_embeds_length():
 
 def test_overlay_respects_is_token_ids_mask():
     """Mixed mode: positions marked as real token ids keep the base
-    embedding; only embed positions are overwritten."""
+    embedding; embed positions read the compact rows (one per embed position,
+    in order), also across a chunked-prefill boundary."""
     state = _make_state()
-    embeds = torch.randn(5, HIDDEN, dtype=torch.float32)
     is_token_ids = [True, False, False, True, False]
+    embeds = torch.randn(is_token_ids.count(False), HIDDEN, dtype=torch.float32)
     state.add_request(0, _NewReqData("a", embeds, is_token_ids))
     state.apply_staged_writes()
 
-    batch = _batch(num_scheduled=[5], idx_mapping=[0])
-    out, base = _apply(state, batch, num_computed=[0], num_tokens=5)
-
     embeds_gpu = embeds.to(DEVICE)
-    for pos, is_token in enumerate(is_token_ids):
-        expected = base[pos] if is_token else embeds_gpu[pos]
-        torch.testing.assert_close(out[pos], expected)
+    rows = iter(embeds_gpu)
+    expected_rows = [None if is_token else next(rows) for is_token in is_token_ids]
+    for num_computed, num_scheduled in [(0, 2), (2, 3)]:
+        batch = _batch(num_scheduled=[num_scheduled], idx_mapping=[0])
+        out, base = _apply(
+            state, batch, num_computed=[num_computed], num_tokens=num_scheduled
+        )
+        for t in range(num_scheduled):
+            expected = expected_rows[num_computed + t]
+            torch.testing.assert_close(
+                out[t], base[t] if expected is None else expected
+            )
 
 
 def test_index_reuse_clears_stale_entry():
@@ -158,10 +165,11 @@ def test_index_reuse_clears_stale_entry():
 
 @pytest.mark.parametrize("is_token_ids", [None, [False, True, False]])
 def test_overlay_prompt_embeds_offset(is_token_ids):
-    """After a prefix-cache hit only the rows from `prompt_embeds_offset` on are
-    sent: row 0 holds that position, and the mask is sliced alike."""
+    """After a prefix-cache hit only the positions from `prompt_embeds_offset`
+    on are sent: their rows (compact for a mixed prompt) and their mask."""
     state = _make_state()
-    embeds = torch.randn(3, HIDDEN, dtype=torch.float32)
+    num_rows = 3 if is_token_ids is None else is_token_ids.count(False)
+    embeds = torch.randn(num_rows, HIDDEN, dtype=torch.float32)
     state.add_request(
         0,
         _NewReqData(
@@ -178,13 +186,15 @@ def test_overlay_prompt_embeds_offset(is_token_ids):
     out, base = _apply(state, _batch([2], [0]), num_computed=[4], num_tokens=2)
     out2, base2 = _apply(state, _batch([2], [0]), num_computed=[6], num_tokens=2)
 
-    expected = embeds.to(DEVICE)
-    if is_token_ids is not None:
-        torch.testing.assert_close(out[0], expected[0])
-        torch.testing.assert_close(out[1], base[1])
+    # Positions 4, 5, 6: a mixed prompt's position 5 is a token id.
+    rows = embeds.to(DEVICE)
+    if is_token_ids is None:
+        torch.testing.assert_close(out, rows[0:2])
+        torch.testing.assert_close(out2[0], rows[2])
     else:
-        torch.testing.assert_close(out, expected[0:2])
-    torch.testing.assert_close(out2[0], expected[2])
+        torch.testing.assert_close(out[0], rows[0])
+        torch.testing.assert_close(out[1], base[1])
+        torch.testing.assert_close(out2[0], rows[1])
     torch.testing.assert_close(out2[1], base2[1])
 
 

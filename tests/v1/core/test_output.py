@@ -193,19 +193,20 @@ def test_strip_computed_prompt_embeds() -> None:
     """Workers never read prompt-embeds rows below num_computed_tokens (prefix
     cache hits), so they are dropped; mixed prompts drop the mask alike."""
     prompt_embeds = torch.randn(6, 4)
-    is_token_ids = [True, False, False, True, False, False]
-
     uncomputed = strip_computed_prompt_embeds(prompt_embeds, None, 4)
     assert uncomputed.offset == 4 and uncomputed.is_token_ids is None
     torch.testing.assert_close(uncomputed.embeds, prompt_embeds[4:])
 
-    uncomputed = strip_computed_prompt_embeds(prompt_embeds, is_token_ids, 3)
+    # Mixed prompts hold one row per False position: positions 0-2 hold two.
+    is_token_ids = [True, False, False, True, False, False]
+    mixed_rows = torch.randn(4, 4)
+    uncomputed = strip_computed_prompt_embeds(mixed_rows, is_token_ids, 3)
     assert uncomputed.offset == 3
     assert uncomputed.is_token_ids == is_token_ids[3:]
-    torch.testing.assert_close(uncomputed.embeds, prompt_embeds[3:])
+    torch.testing.assert_close(uncomputed.embeds, mixed_rows[2:])
 
-    uncomputed = strip_computed_prompt_embeds(prompt_embeds, is_token_ids, 0)
-    assert uncomputed == UncomputedPromptEmbeds(prompt_embeds, is_token_ids, 0)
+    uncomputed = strip_computed_prompt_embeds(mixed_rows, is_token_ids, 0)
+    assert uncomputed == UncomputedPromptEmbeds(mixed_rows, is_token_ids, 0)
 
 
 def test_strip_computed_prompt_embeds_clamps_offset() -> None:

@@ -367,6 +367,7 @@ def make_request(
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
     num_hash_lookahead_tokens: int = 0,
+    prompt_is_token_ids: list[bool] | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -395,6 +396,7 @@ def make_request(
             block_size, hash_fn, num_hash_lookahead_tokens
         ),
         prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=prompt_is_token_ids,
     )
 
 
@@ -976,6 +978,28 @@ def test_generate_block_hash_extra_keys_prompt_embeds():
     expected_embeds = prompt_embeds[5:10]
     expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
     assert extra_keys == (("prompt_embeds", expected_hash),)
+
+
+def test_generate_block_hash_extra_keys_compact_mixed_prompt_embeds():
+    """A mixed prompt keeps prompt_embeds compact (only its embeds rows): each
+    block hashes its mask slice and its own rows, and a block of only token
+    ids gets no embeds key, as its token ids already identify it."""
+    is_token_ids = [True] * 5 + [False] * 3 + [True] * 2
+    compact = torch.randn(is_token_ids.count(False), 3)
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=list(range(len(is_token_ids))),
+        prompt_embeds=compact,
+        prompt_is_token_ids=is_token_ids,
+    )
+
+    assert request.num_prompt_tokens == len(is_token_ids)
+    assert generate_block_hash_extra_keys(request, 0, 5, 0)[0] is None
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
+    expected = hashlib.sha256(bytes(is_token_ids[5:10]))
+    expected.update(kv_cache_utils.tensor_data(compact))
+    assert extra_keys == (("prompt_embeds", expected.digest()),)
 
 
 def test_generate_block_hash_extra_keys_prompt_embeds_cached(monkeypatch):
