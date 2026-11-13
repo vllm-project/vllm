@@ -72,6 +72,9 @@ from .weight_transfer import WeightTransferConfig
 if TYPE_CHECKING:
     from transformers import PreTrainedConfig
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        HiddenStatesRequest,
+    )
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.sampling_params import BeamSearchParams, SamplingParams
     from vllm.v1.kv_cache_interface import KVCacheGroup
@@ -609,6 +612,10 @@ class VllmConfig:
             factors["additional"] = self.additional_config.compile_factors()
         elif self.additional_config:
             factors["additional"] = self.additional_config
+        # A KV connector that receives hidden states adds model outputs (its
+        # auxiliary layers), which the KV transfer config's factors ignore.
+        if (request := self._kv_connector_hidden_states_request()) is not None:
+            factors["kv_connector_hidden_states"] = str(request)
         return factors
 
     @property
@@ -1292,24 +1299,30 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
-    def _verify_kv_connector_hidden_states(self) -> None:
-        """Reject configurations unsupported by a KV connector that receives
-        hidden states."""
+    def _kv_connector_hidden_states_request(self) -> "HiddenStatesRequest | None":
+        """The hidden states the KV connector receives each step, or None."""
         if (
             self.kv_transfer_config is None
             or not self.kv_transfer_config.is_kv_transfer_instance
         ):
-            return
+            return None
         from vllm.distributed.kv_transfer.kv_connector.factory import (
             KVConnectorFactory,
         )
 
         connector_cls = KVConnectorFactory.get_connector_class(self.kv_transfer_config)
-        if connector_cls.get_required_hidden_states(self) is None:
+        return connector_cls.get_required_hidden_states(self)
+
+    def _verify_kv_connector_hidden_states(self) -> None:
+        """Reject configurations unsupported by a KV connector that receives
+        hidden states."""
+        if self._kv_connector_hidden_states_request() is None:
             return
+        assert self.kv_transfer_config is not None
+        connector = self.kv_transfer_config.kv_connector
         if self.parallel_config.pipeline_parallel_size > 1:
             raise ValueError(
-                f"KV connector {connector_cls.__name__} receives hidden states, "
+                f"KV connector {connector} receives hidden states, "
                 "which does not support pipeline parallelism yet."
             )
 
