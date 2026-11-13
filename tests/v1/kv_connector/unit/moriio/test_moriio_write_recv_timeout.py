@@ -52,6 +52,8 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
     worker.moriio_wrapper = SimpleNamespace(pop_failed_write_req_ids=list)
     worker._unmatched_write_failures = OrderedDict()
     worker._write_recv_timed_out = set()
+    worker._write_recv_reported = set()
+    worker._write_recv_unreleased = set()
     worker.write_done = set()
 
     def get_finished():
@@ -84,21 +86,26 @@ class _Engine:
             else None
         )
 
-    def step(self, write_done: frozenset[str] = frozenset()):
-        self.finish(self.scheduler.schedule(), write_done)
+    def step(self, write_done: frozenset[str] = frozenset(), ranks=None):
+        self.finish(self.scheduler.schedule(), write_done, ranks)
 
-    def finish(self, out, write_done: frozenset[str] = frozenset()):
+    def finish(self, out, write_done: frozenset[str] = frozenset(), ranks=None):
+        """Runs one step's workers; `write_done` reaches the TP `ranks` (all)."""
         scheduled = [self.scheduler.requests[i] for i in out.num_scheduled_tokens]
         outputs = []
-        for worker in self.workers:
+        for rank, worker in enumerate(self.workers):
             worker.start_load_kv(out.kv_connector_metadata)
-            worker.write_done |= write_done
+            if ranks is None or rank in ranks:
+                worker.write_done |= write_done
             results = worker.get_transfer_results()
-            output = create_model_runner_output(
-                scheduled, finished_recving=results.finished_recving
+            outputs.append(
+                create_model_runner_output(
+                    scheduled,
+                    finished_sending=results.finished_sending,
+                    finished_recving=results.finished_recving,
+                    failed_recving=results.failed_recving,
+                )
             )
-            output.kv_connector_output.failed_recving = results.failed_recving
-            outputs.append(output)
         if self.aggregator is not None:
             outputs = [self.aggregator.aggregate(outputs)]
         self.scheduler.update_from_output(out, outputs[0])
@@ -175,3 +182,31 @@ def test_timeout_reported_once_when_two_schedules_precede_the_output(engine):
     engine.finish(second)
     assert request.status == RequestStatus.FINISHED_ERROR
     assert engine.pool.get_num_free_blocks() == held
+
+
+def test_blocks_freed_once_every_rank_has_its_write_done(engine):
+    if len(engine.workers) < 2:
+        pytest.skip("needs more than one TP rank")
+    free_before = engine.pool.get_num_free_blocks()
+    request = engine.add_waiting_request()
+    held = engine.pool.get_num_free_blocks()
+
+    # Rank 0's write lands before the timeout, rank 1's after it.
+    engine.step(write_done=frozenset({request.request_id}), ranks={0})
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert engine.pool.get_num_free_blocks() == held
+
+    engine.step(write_done=frozenset({request.request_id}), ranks={1})
+    assert request.request_id not in engine.scheduler.requests
+    assert engine.pool.get_num_free_blocks() == free_before
+
+
+def test_write_done_with_the_timeout_completes_the_request(engine):
+    request = engine.add_waiting_request()
+    engine.clock.now += TIMEOUT_S + 1
+
+    engine.step(write_done=frozenset({request.request_id}))
+    engine.step()
+    assert request.status == RequestStatus.RUNNING
