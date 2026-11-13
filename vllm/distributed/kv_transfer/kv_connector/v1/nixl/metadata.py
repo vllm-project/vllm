@@ -242,6 +242,9 @@ class RemoteMeta:
     num_tokens: int | None = None
     # Bumped each time the remote publishes a changed KV cache registration.
     registration_generation: int = 0
+    # Local requests reading this remote request, e.g. the `n` children of a
+    # parallel sampling request.
+    num_readers: int = 1
 
 
 @dataclass
@@ -348,5 +351,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             registration_generation=kv_transfer_params.get(
                 "remote_registration_generation", 0
             ),
+            num_readers=kv_transfer_params.get("num_readers", 1),
         )
         self.reqs_to_recv[request_id] = req

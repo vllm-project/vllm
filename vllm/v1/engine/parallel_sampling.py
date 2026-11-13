@@ -73,6 +73,14 @@ class ParentRequest:
         # Build child sampling_params
         child_sampling_params = copy(self.sampling_params)
         child_sampling_params.n = 1
+        extra_args = child_sampling_params.extra_args
+        if extra_args and (kv_transfer_params := extra_args.get("kv_transfer_params")):
+            # Every child reads the same remote KV, so its producer has to
+            # wait for all of them before freeing it.
+            child_sampling_params.extra_args = {
+                **extra_args,
+                "kv_transfer_params": {**kv_transfer_params, "num_readers": self.n},
+            }
         if seed is None:
             # Cache child sampling_params for later reuse
             self.cached_child_sampling_params = child_sampling_params

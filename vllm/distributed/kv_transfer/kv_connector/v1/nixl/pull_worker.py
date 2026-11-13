@@ -172,6 +172,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             return
 
         plan = self.tp_mappings[engine_id]
+        expected_consumers = plan.local_consumers * meta.remote.num_readers
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
@@ -458,7 +459,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 local_xfer_side_handle=local_xfer_side_handle,
                 local_dram_handle=local_dram_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
-                expected_consumers=plan.local_consumers,
+                expected_consumers=expected_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
             ):
                 return
@@ -468,7 +469,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # have the blocks we need so they can update the request state.
             # Same thing for DCP (tp_size == dcp_size), so the raw tp_ratio already
             # reflects whether any remote replica is left unchosen.
-            notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
+            notif_id = f"{meta.remote.request_id}:{expected_consumers}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
                 if rank_to_notify != (0, read_specs[0].remote_rank):
