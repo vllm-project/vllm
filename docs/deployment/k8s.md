@@ -477,7 +477,7 @@ For production deployments, vLLM can drain in-flight requests before it exits, s
 
 When the vLLM process receives `SIGTERM` (sent by Kubernetes when a pod terminates):
 
-1. The server stops taking new requests.
+1. The server stops taking new requests. On a single API server, a request that still reaches it during the drain fails with HTTP 500 before any generation starts.
 1. In-flight requests keep running until they finish, for at most `--shutdown-timeout` seconds.
 1. The engine and the server exit.
 
@@ -504,23 +504,9 @@ terminationGracePeriodSeconds >= preStop sleep + --shutdown-timeout + margin
 
 The margin covers the engine's teardown and the process exit after the drain; leave at least 10 seconds.
 
-<details>
-<summary>Yaml</summary>
-
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm-server
 spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: vllm
   template:
-    metadata:
-      labels:
-        app: vllm
     spec:
       # 15 s preStop + 40 s drain + 15 s margin
       terminationGracePeriodSeconds: 70
@@ -535,30 +521,15 @@ spec:
           preStop:
             exec:
               command: ["/bin/sleep", "15"]
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 60
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 60
-          periodSeconds: 5
-        resources:
-          limits:
-            nvidia.com/gpu: "1"
 ```
-
-</details>
 
 ### Key Considerations
 
 - **`terminationGracePeriodSeconds`**: When it runs out, Kubernetes kills the pod regardless of the drain. Keep it above the `preStop` sleep plus `--shutdown-timeout`, with a margin for teardown.
 
 - **Pre-stop hook**: Kubernetes removes a terminating pod from the Service endpoints at the same time as it starts terminating the containers, and the removal takes a few seconds to reach every node. The `preStop` sleep delays `SIGTERM` until then. Do not rely on the readiness probe for this: `/health` reports whether the engine is alive, not whether the server is draining. A value of 15 seconds is typically sufficient.
+
+- **Proxies and retries**: The `preStop` sleep keeps new connections away from a draining pod, but a proxy can still send requests over keep-alive connections it opened earlier. By default, proxies such as nginx and Istio do not retry a POST that fails with HTTP 500. If you enable retries for these requests, the same setting also retries genuine server errors.
 
 - **Choosing a timeout**: Pick a value that covers most of your requests, for example the p99 of `vllm:e2e_request_latency_seconds` from `/metrics`. As a rough guide, 40 seconds is enough to generate about 2000 tokens at 50 tokens/s per request. Increase `--shutdown-timeout`, and `terminationGracePeriodSeconds` with it, for workloads with longer requests.
 
