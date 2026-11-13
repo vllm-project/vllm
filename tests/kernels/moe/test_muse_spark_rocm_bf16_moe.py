@@ -999,6 +999,7 @@ def _fake_online_mxfp4_init(monkeypatch, backend: Mxfp4MoeBackend) -> None:
     monkeypatch.setattr(Mxfp4OnlineMoEMethod, "__init__", _init)
 
 
+@pytest.mark.skip_global_cleanup
 def test_muse_online_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
 
@@ -1027,6 +1028,7 @@ def test_muse_online_mxfp4_method_requires_w4a4_aiter(monkeypatch) -> None:
         ),
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_muse_online_quantization_config_selects_the_experts_method(
     monkeypatch, default_vllm_config, quantization_config, first_layers_method
 ) -> None:
@@ -1051,6 +1053,7 @@ def test_muse_online_quantization_config_selects_the_experts_method(
         assert type(method) is first_layers_method
 
 
+@pytest.mark.skip_global_cleanup
 def test_muse_online_quantization_rejects_other_formats() -> None:
     online_config = OnlineQuantizationConfig(
         QuantizationConfigArgs(moe="fp8_per_block")
@@ -1062,6 +1065,7 @@ def test_muse_online_quantization_rejects_other_formats() -> None:
         )
 
 
+@pytest.mark.skip_global_cleanup
 def test_muse_deprecated_online_quant_env_redirects_to_quantization_config(
     monkeypatch, default_vllm_config
 ) -> None:

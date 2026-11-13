@@ -13,6 +13,7 @@ import pytest
 import torch
 from torch.distributed import ProcessGroup
 
+from tests.model_executor.layers.test_fused_shared_expert import _SingleRankGroup
 from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
@@ -33,6 +34,7 @@ from vllm.config.quantization import (
     resolve_quantization_config,
 )
 from vllm.config.vllm import VllmConfig
+from vllm.distributed.parallel_state import override_parallel_groups
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
@@ -831,38 +833,35 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
     assert isinstance(layer.quant_method, QuarkLinearMethod)
 
 
-@pytest.mark.parametrize(
-    "checkpoint, moe, expected_activation",
-    [
-        pytest.param("quark_int8", "mxfp4", kMxfp4Dynamic, id="quark_int8-mxfp4"),
-        # Replaces VLLM_FP8_MOE_REQUANT=mxfp4: block-FP8 experts to a4w4 MXFP4
-        # (the default activation), a8w4 (`activation: mxfp8`) or a16w4
-        # (`activation: null`).
-        pytest.param("block_fp8", "mxfp4", kMxfp4Dynamic, id="block_fp8-mxfp4"),
-        pytest.param(
-            "block_fp8",
-            {"weight": "mxfp4", "activation": "mxfp8"},
-            kMxfp8Dynamic,
-            id="block_fp8-mxfp4-activation_mxfp8",
-        ),
-        pytest.param(
-            "block_fp8",
-            {"weight": "mxfp4", "activation": None},
-            None,
-            id="block_fp8-mxfp4-activation_null",
-        ),
-    ],
-)
-def test_online_quantization_configures_prequantized_moe(
-    checkpoint, moe, expected_activation, default_vllm_config, dist_init, monkeypatch
+# (id, checkpoint, online MoE spec, expected activation). Replaces
+# VLLM_FP8_MOE_REQUANT=mxfp4: block-FP8 experts to a4w4 MXFP4 (the default
+# activation), a8w4 (`activation: mxfp8`) or a16w4 (`activation: null`).
+_PREQUANTIZED_MOE_CASES: list[tuple[str, str, Any, Any]] = [
+    ("quark_int8-mxfp4", "quark_int8", "mxfp4", kMxfp4Dynamic),
+    ("block_fp8-mxfp4", "block_fp8", "mxfp4", kMxfp4Dynamic),
+    (
+        "block_fp8-mxfp4-activation_mxfp8",
+        "block_fp8",
+        {"weight": "mxfp4", "activation": "mxfp8"},
+        kMxfp8Dynamic,
+    ),
+    (
+        "block_fp8-mxfp4-activation_null",
+        "block_fp8",
+        {"weight": "mxfp4", "activation": None},
+        None,
+    ),
+]
+
+
+def _check_online_quantization_configures_prequantized_moe(
+    index, checkpoint, moe, expected_activation, default_vllm_config, monkeypatch
 ) -> None:
     """Configure the checkpoint method as the online MoE's weight source."""
     default_vllm_config.model_config = ModelConfig()
-    prefix = "model.layers.0.mlp.experts"
+    prefix = f"model.layers.{index}.mlp.experts"
     if isinstance(moe, dict):
         # MXFP8 or bf16 activations with MXFP4 weights need the AITER backend.
-        if not current_platform.is_rocm():
-            pytest.skip("MXFP4 weights with MXFP8/bf16 activations need ROCm AITER.")
         _enable_aiter_mxfp4_moe(monkeypatch)
     if checkpoint == "block_fp8":
         quant_config = Fp8Config(weight_block_size=[128, 128])
@@ -897,6 +896,27 @@ def test_online_quantization_configures_prequantized_moe(
         assert method.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
 
 
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(_SingleRankGroup())
+def test_online_quantization_configures_prequantized_moe(
+    default_vllm_config, monkeypatch
+) -> None:
+    """Configure the checkpoint method as the online MoE's weight source (one
+    test for all cases)."""
+    for index, (case_id, checkpoint, moe, expected) in enumerate(
+        _PREQUANTIZED_MOE_CASES
+    ):
+        if isinstance(moe, dict) and not current_platform.is_rocm():
+            continue  # MXFP8 / bf16 activations with MXFP4 weights need ROCm AITER.
+        try:
+            _check_online_quantization_configures_prequantized_moe(
+                index, checkpoint, moe, expected, default_vllm_config, monkeypatch
+            )
+        except Exception as e:
+            e.add_note(f"case: {case_id}")
+            raise
+
+
 @pytest.mark.parametrize(
     "moe, strict, expected_bound",
     [
@@ -913,6 +933,7 @@ def test_online_quantization_configures_prequantized_moe(
         ),
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
     moe, strict, expected_bound, default_vllm_config, monkeypatch
 ) -> None:
@@ -936,6 +957,7 @@ def test_aiter_mxfp4_bf16_activation_bound_follows_the_requested_activation(
     "requested, expected_bound",
     [(kMxfp8Dynamic, "0"), (None, str(2**31 - 1))],
 )
+@pytest.mark.skip_global_cleanup
 def test_aiter_mxfp4_bf16_activation_bound_uses_the_resolved_layer_request(
     requested, expected_bound, default_vllm_config, monkeypatch
 ) -> None:
@@ -956,6 +978,7 @@ def test_aiter_mxfp4_bf16_activation_bound_uses_the_resolved_layer_request(
 
 @pytest.mark.parametrize("gfx950", [True, False])
 @pytest.mark.parametrize("strict", ["0", "1"])
+@pytest.mark.skip_global_cleanup
 def test_aiter_mxfp4_bf16_serves_mxfp8_only_on_gfx950(
     gfx950, strict, default_vllm_config, monkeypatch
 ) -> None:
@@ -983,6 +1006,7 @@ def test_aiter_mxfp4_bf16_serves_mxfp8_only_on_gfx950(
         assert selected[0] == backend
 
 
+@pytest.mark.skip_global_cleanup
 def test_block_fp8_moe_dequantize_weight_uses_the_tp_refined_scale_block() -> None:
     """The scale grid may be finer than the checkpoint block shape under TP; the
     block shape recorded at weight creation is used, not the checkpoint's."""
@@ -3123,6 +3147,7 @@ def _fp8_moe_source_method(source: str, block_size: list[int] | None):
         pytest.param([64, 32], 96, 96, id="block_small"),
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_block_fp8_moe_dequantize_weight_numerics(
     source, block_size, intermediate_size, hidden_size, chunk_experts, monkeypatch
 ) -> None:
@@ -3158,23 +3183,19 @@ def test_block_fp8_moe_dequantize_weight_numerics(
         )
         + 0.5
     )
-    expected_w13 = torch.empty(w13.shape)
-    for e in range(num_experts):
-        for shard in range(2):
-            for r in range(intermediate_size):
-                for c in range(0, hidden_size, bk):
-                    row = shard * intermediate_size + r
-                    expected_w13[e, row, c : c + bk] = (
-                        w13[e, row, c : c + bk].float()
-                        * w13_scale[e, shard * n_w13 + r // bn, c // bk]
-                    )
-    expected_w2 = torch.empty(w2.shape)
-    for e in range(num_experts):
-        for r in range(hidden_size):
-            for c in range(intermediate_size):
-                expected_w2[e, r, c] = (
-                    w2[e, r, c].float() * w2_scale[e, r // bn, c // bk]
-                )
+    # Each w13 shard (w1, w3) has its own block grid.
+    expected_w13 = torch.cat(
+        [
+            _naive_block_fp8_dequant(
+                w13[:, shard * intermediate_size : (shard + 1) * intermediate_size],
+                w13_scale[:, shard * n_w13 : (shard + 1) * n_w13],
+                block_size,
+            )
+            for shard in range(2)
+        ],
+        dim=1,
+    )
+    expected_w2 = _naive_block_fp8_dequant(w2, w2_scale, block_size)
 
     layer = SimpleNamespace(
         w13_weight=w13,
@@ -3204,6 +3225,7 @@ def test_block_fp8_moe_dequantize_weight_numerics(
 
 
 @pytest.mark.parametrize("source", ["fp8", "compressed_tensors", "quark"])
+@pytest.mark.skip_global_cleanup
 def test_non_block_fp8_moe_dequantize_weight_is_not_implemented(source) -> None:
     """Per-tensor / per-channel FP8 experts cannot be a requantization source."""
     method = _fp8_moe_source_method(source, None)
@@ -3242,17 +3264,8 @@ def _enable_aiter_mxfp4_moe(monkeypatch) -> None:
     rocm_aiter_ops.refresh_env_variables()
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm AITER.")
-@pytest.mark.parametrize(
-    "activation_key",
-    [
-        pytest.param(kMxfp4Dynamic, id="a4w4"),
-        pytest.param(kMxfp8Dynamic, id="a8w4"),
-        pytest.param(None, id="a16w4"),
-    ],
-)
-def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
-    activation_key, default_vllm_config, dist_init, monkeypatch
+def _check_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
+    index, activation_key, default_vllm_config, monkeypatch
 ) -> None:
     """A block-FP8 checkpoint requantized to MXFP4 by online quantization
     (`--quantization-config '{"moe": "mxfp4"}'`, which replaces
@@ -3285,8 +3298,8 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
 
     torch.manual_seed(0)
     with torch.device(device):
-        source_layer = make_layer("fp8_source_layer")
-        reference_layer = make_layer("bf16_layer")
+        source_layer = make_layer(f"fp8_source_layer_{index}")
+        reference_layer = make_layer(f"bf16_layer_{index}")
 
         # The FP8 checkpoint method only creates and loads the FP8 parameters.
         fp8_method = Fp8MoEMethod(Fp8Config(weight_block_size=block), source_layer)
@@ -3376,6 +3389,25 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
     )
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm AITER.")
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(_SingleRankGroup())
+def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
+    default_vllm_config, monkeypatch
+) -> None:
+    """All activations (a4w4, a8w4, a16w4) in one test."""
+    for index, (case_id, activation_key) in enumerate(
+        [("a4w4", kMxfp4Dynamic), ("a8w4", kMxfp8Dynamic), ("a16w4", None)]
+    ):
+        try:
+            _check_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
+                index, activation_key, default_vllm_config, monkeypatch
+            )
+        except Exception as e:
+            e.add_note(f"case: {case_id}")
+            raise
+
+
 @pytest.mark.parametrize(
     "act, expected",
     [
@@ -3387,6 +3419,7 @@ def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
         pytest.param("a4w4", "mxfp4", id="a4w4"),
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_deprecated_fp8_moe_requant_env_redirects_to_quantization_config(
     act, expected, monkeypatch
 ) -> None:
@@ -3405,6 +3438,7 @@ def test_deprecated_fp8_moe_requant_env_redirects_to_quantization_config(
     assert fp8_moe_requant_args() == quant_config_args(moe=expected)
 
 
+@pytest.mark.skip_global_cleanup
 def test_deprecated_fp8_moe_requant_env_warns_and_applies_to_block_fp8_on_rocm(
     caplog, monkeypatch
 ) -> None:

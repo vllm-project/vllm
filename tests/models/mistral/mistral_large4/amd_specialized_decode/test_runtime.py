@@ -91,6 +91,7 @@ def test_switches():
         )
 
 
+@pytest.mark.skip_global_cleanup
 def test_refusal_lists_every_reason():
     cfg = vllm_config(**{
         "model_config.quantization_config": QuantizationConfigArgs(
@@ -124,6 +125,7 @@ def test_refusal_lists_every_reason():
         (None, False),
     ],
 )  # fmt: skip
+@pytest.mark.skip_global_cleanup
 def test_fp8_checkpoint_needs_online_mxfp4_a4w4_experts(quantization_config, supported):
     cfg = vllm_config(**{"model_config.quantization_config": quantization_config})
     reasons = DECODE_CONFIG.refusal_reasons(cfg)
