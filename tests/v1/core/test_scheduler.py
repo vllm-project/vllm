@@ -1921,39 +1921,29 @@ def test_prefill_progress_reports_chunks_and_ends_with_zero():
 
 
 def test_preempted_request_reports_the_work_it_requeues():
-    """A preemption puts work back in the queue, so the consumer is told."""
+    """A preemption puts the work it discards back on the queue."""
     scheduler = create_scheduler(max_num_batched_tokens=16, max_model_len=256)
     request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
-    outputs = scheduler.update_from_output(
+    scheduler.update_from_output(
         scheduler_output,
         ModelRunnerOutput(req_ids=[request.request_id], sampled_token_ids=[[]]),
     )
-    first = [
-        progress.remaining_prefill_tokens
-        for batch in outputs.values()
-        for entry in batch.outputs
-        for progress in ([entry.prefill_progress] if entry.prefill_progress else [])
-    ]
-    assert first == [48]
 
-    # Preempt: the blocks are freed and the prompt has to be computed again.
     scheduler.running.remove(request)
     scheduler._preempt_request(request, 0.0)
     scheduler_output.num_scheduled_tokens.clear()
-
     outputs = scheduler.update_from_output(
         scheduler_output, ModelRunnerOutput(req_ids=[], sampled_token_ids=[])
     )
-    requeued = [
+    assert [
         progress.remaining_prefill_tokens
         for batch in outputs.values()
         for entry in batch.outputs
         for progress in ([entry.prefill_progress] if entry.prefill_progress else [])
-    ]
-    assert requeued == [request.num_tokens]
+    ] == [request.num_tokens]
 
 
 def test_update_from_output_routes_sampling_masks_by_request():

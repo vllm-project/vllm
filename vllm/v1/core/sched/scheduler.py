@@ -87,15 +87,12 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
-# A request reports at most this many times during its prefill, spaced evenly
-# over the work it had left when it first reported.
+# Reports per prefill; the spacing is fixed by the work left at the first one.
 PREFILL_PROGRESS_UPDATES_PER_REQUEST = 32
 
 
 @dataclass
 class _PrefillProgressState:
-    """Reporting state for one request that is still prefilling."""
-
     client_index: int
     # Remaining tokens at the last report; None reports on the first step.
     last_remaining: int | None = None
@@ -2268,13 +2265,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         pending: dict[int, list[PrefillProgress]],
     ) -> None:
-        """Queue a progress update for one scheduled request.
-
-        A request that finishes prefill reports a final zero and stops being
-        tracked; while it is prefilling it reports at most
-        `PREFILL_PROGRESS_UPDATES_PER_REQUEST` times, evenly spaced over the
-        work it had left when it first reported.
-        """
+        """Queue a progress update; a finished request reports a final zero."""
         computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
         remaining = max(0, request.num_tokens - computed)
         state = self._prefill_progress.get(request.request_id)
@@ -2385,8 +2376,7 @@ class Scheduler(SchedulerInterface):
                     output_is_stale = True
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
-                # In-flight is settled above, so this step's tokens count as
-                # done while other chunks in flight stay counted as work left.
+                # In-flight is settled, so this step's tokens count as done.
                 if request.num_output_tokens == 0:
                     self._report_prefill_progress(request, prefill_progress)
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -2649,8 +2639,7 @@ class Scheduler(SchedulerInterface):
                     continue
                 del self._prefill_progress[request_id]
                 if request_id not in stopped_req_ids:
-                    # Preempted: its work is queued again, so say how much is
-                    # left now instead of leaving the consumer on a stale value.
+                    # Preempted: it has work queued again.
                     request = self.requests.get(request_id)
                     if request is None:
                         continue
