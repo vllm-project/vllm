@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
+    get_mla_metadata,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -182,6 +183,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         kernel_metadata: FlashMLASparseMetadata.FP8KernelMetadata,
+        topk_length: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
@@ -204,11 +206,17 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             block_table=kernel_metadata.dummy_block_table,
             head_dim_v=512,
             cache_seqlens=kernel_metadata.cache_lens,
-            tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
+            # The shared schedule is only valid without `topk_length`.
+            tile_scheduler_metadata=(
+                kernel_metadata.scheduler_metadata
+                if topk_length is None
+                else get_mla_metadata()[0]
+            ),
             is_fp8_kvcache=True,
             indices=topk_indices,
             softmax_scale=self.softmax_scale,
             attn_sink=attn_sink,
+            topk_length=topk_length,
         )
 
         # Slice output and lse back to actual head count if we padded

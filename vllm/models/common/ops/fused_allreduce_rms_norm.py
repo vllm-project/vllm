@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     flashinfer_trtllm_fused_allreduce_norm,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
 
 
 def fused_allreduce_rms_norm(
@@ -25,13 +26,14 @@ def fused_allreduce_rms_norm(
     residual: torch.Tensor,
     norm: RMSNorm,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """All-reduce + add residual + (standard) RMSNorm, fused via flashinfer.
+    """All-reduce + add residual + (standard) RMSNorm, fused via flashinfer
+    (CUDA) or AITER's one-stage custom all-reduce kernel (ROCm).
 
     ``hidden_states`` is the per-rank *partial* output of a row-parallel linear
     run with ``reduce_results=False``; ``norm`` is the RMSNorm applied right
     after. Returns ``(normed_output, new_residual)``, equivalent to
     ``norm(all_reduce(hidden_states), residual)``. Falls back to an explicit
-    all-reduce + RMSNorm when the flashinfer fast path is unavailable.
+    all-reduce + RMSNorm when no fused path applies.
     """
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
@@ -58,6 +60,17 @@ def fused_allreduce_rms_norm(
                 norm_out=norm_out,
             )
             return norm_out, hidden_states
+
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        # decode-size inputs only: beyond the one-stage kernel's limits the
+        # fused op's two-stage variant is slower than all-reduce + norm
+        aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+        if aiter_ar is not None and aiter_ar.use_1stage_fused_ar_rms(hidden_states):
+            return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
+                hidden_states, residual, norm.weight, norm.variance_epsilon
+            )
 
     reduced = tensor_model_parallel_all_reduce(hidden_states)
     return norm(reduced, residual)
