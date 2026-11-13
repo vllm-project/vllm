@@ -24,7 +24,8 @@ inline torch::Tensor mm(const torch::Tensor& a, const torch::Tensor& packed_w,
 enum ActivationKind : int64_t {
   SwiGLU_Gu = 0,  // act = SiLU(g) * u
   SwiGLUOAI = 1,  // act = SiLU(u) * g
-  SiLU = 2        // SiLU
+  SiLU = 2,       // SiLU
+  GELU_TANH = 3,  // Gelu_Tanh
 };
 
 torch::Tensor dynamic_4bit_int_moe_cpu(
@@ -144,6 +145,8 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
         auto up_c = at::clamp(u_part, -kLimit, kLimit);
         auto glu = gate_c.mul(at::sigmoid(gate_c.mul(kAlpha)));
         act = up_c.add(1.0).mul(glu);
+      } else if (activation_kind == ActivationKind::GELU_TANH) {
+        act = at::gelu(g_part, "tanh").mul(u_part);
       } else {  // SiLU , SwiGLU_GU, vLLM maps silu to SiluAndMul()
         act = at::silu(g_part).mul(u_part);
       }

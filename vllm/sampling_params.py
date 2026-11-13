@@ -63,7 +63,7 @@ def _verify_num_sequences(value: int, parameter_name: str) -> None:
 
 
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
-    """Validate ``thinking_token_budget``; return ``None`` if unset."""
+    """Validate `thinking_token_budget`; return `None` if unset."""
     if value is None:
         return None
     if isinstance(value, (bool, float)) or not isinstance(value, int):
@@ -285,7 +285,7 @@ class SamplingParams(
     n: int = 1
     """Number of outputs to return for the given prompt request.
 
-    The maximum allowed value is controlled by the ``VLLM_MAX_N_SEQUENCES``
+    The maximum allowed value is controlled by the `VLLM_MAX_N_SEQUENCES`
     environment variable (default: 16384).
 
     NOTE:
@@ -311,7 +311,7 @@ class SamplingParams(
     means greedy sampling."""
     watermarking: bool | None = None
     """Whether to apply the engine's configured watermark to this request.
-    ``None`` defaults to enabled."""
+    `None` defaults to enabled."""
     top_p: float = 1.0
     """Controls the cumulative probability of the top tokens to consider. Must
     be in (0, 1]. Set to 1 to consider all tokens."""
@@ -1125,10 +1125,6 @@ class SamplingParams(
             raise ValueError(
                 "trace_decode_token_ids is not supported with prompt_logprob_token_ids."
             )
-        if speculative_config is not None:
-            raise ValueError(
-                "trace_decode_token_ids is not supported with speculative decoding."
-            )
         if self.structured_outputs is not None:
             raise ValueError(
                 "trace_decode_token_ids is not supported with structured outputs."
@@ -1546,9 +1542,6 @@ class BeamSearchParams(
         if config.model_config.is_diffusion:
             # The diffusion sampler does not consume logprob_token_ids.
             raise ValueError("Beam allowlists with diffusion models are not supported")
-        if not config.use_v2_model_runner:
-            # V1 exact-ID logprobs overwrite other rows in a mixed batch.
-            raise ValueError("Beam allowlists require the V2 model runner")
         # Score the original distribution without applying a sampling mask.
         sampling_params.logprobs = None
         sampling_params.logprob_token_ids = ids

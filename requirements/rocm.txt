@@ -11,14 +11,14 @@ numba == 0.65.0 # Required for N-gram speculative decoding
 datasets
 peft
 pytest-asyncio
-tensorizer==2.10.1
+tensorizer==2.12.1
 packaging>=24.2
 setuptools>=78.1.1,<80.0.0
 setuptools-scm>=8
 setuptools-rust>=1.9.0
-runai-model-streamer[s3,gcs,azure]==0.15.7
+runai-model-streamer[s3,gcs,azure]==0.17.1
 conch-triton-kernels==1.2.1
-timm>=1.0.17
+timm>=1.0.30
 # amd-quark: required for Quark quantization on ROCm
 # To be consistent with test_quark.py
 amd-quark==0.12.post1

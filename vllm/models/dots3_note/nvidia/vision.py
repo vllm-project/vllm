@@ -230,9 +230,8 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
 
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        if hasattr(self, "_fused_w13_fp8"):
-            return
-
+        # Reruns after every reload: rebuild the fused FP8 experts from the
+        # checkpoint experts, refilling the fused buffers in place.
         w13_weights = []
         w13_scales = []
         w2_weights = []
@@ -246,27 +245,18 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
             w2_weights.append(w2)
             w2_scales.append(s2)
 
-        self.register_buffer(
-            "_fused_w13_fp8",
-            torch.stack(w13_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w13_scale",
-            torch.stack(w13_scales).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_fp8",
-            torch.stack(w2_weights).contiguous(),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_fused_w2_scale",
-            torch.stack(w2_scales).contiguous(),
-            persistent=False,
-        )
-        del self.experts
+        # The checkpoint experts stay registered: a reload writes into them.
+        for name, parts in (
+            ("_fused_w13_fp8", w13_weights),
+            ("_fused_w13_scale", w13_scales),
+            ("_fused_w2_fp8", w2_weights),
+            ("_fused_w2_scale", w2_scales),
+        ):
+            fused = torch.stack(parts).contiguous()
+            if name in self._buffers:
+                self._buffers[name].copy_(fused)
+            else:
+                self.register_buffer(name, fused, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not hasattr(self, "_fused_w13_fp8"):
@@ -405,8 +395,8 @@ def _pixel_shuffle(x, scale_factor=0.5):
 class PixelShuffleAdapter(nn.Module):
     """Legacy adapter: NHWC pixel-shuffle spatial merge + LayerNorm + 2-layer MLP.
 
-    Mirrors ``cybertron`` ``FCAdapter(pool_kind='pixel_shuffle', proj_kind='mlp2x_ln_gelu')``.
-    State-dict keys: ``proj.0`` (LayerNorm of in_dim*merge**2), ``proj.1`` / ``proj.3`` (Linear).
+    Mirrors `cybertron` `FCAdapter(pool_kind='pixel_shuffle', proj_kind='mlp2x_ln_gelu')`.
+    State-dict keys: `proj.0` (LayerNorm of in_dim*merge**2), `proj.1` / `proj.3` (Linear).
     """
 
     def __init__(self, config: DotsMoEVitConfig):
@@ -448,12 +438,12 @@ class PixelShuffleAdapter(nn.Module):
 
 
 class PatchMergerAdapter(nn.Module):
-    """Cybertron ``PatchMerger`` (``pool_kind='patch_merger', proj_kind='identity'``).
+    """Cybertron `PatchMerger` (`pool_kind='patch_merger', proj_kind='identity'`).
 
-    Assumes the encoder output is already laid out in ``merge_size``x``merge_size`` groups
-    (qwen ``pre_pixel_shuffle`` preprocessor + RoPE grouped accordingly), so merging is a
-    simple ``view(-1, merge**2 * in_dim)`` of consecutive tokens. State-dict layout matches
-    cybertron's ``PatchMerger`` (``ln_q`` over the per-token dim, ``mlp.0`` / ``mlp.2`` Linear).
+    Assumes the encoder output is already laid out in `merge_size`x`merge_size` groups
+    (qwen `pre_pixel_shuffle` preprocessor + RoPE grouped accordingly), so merging is a
+    simple `view(-1, merge**2 * in_dim)` of consecutive tokens. State-dict layout matches
+    cybertron's `PatchMerger` (`ln_q` over the per-token dim, `mlp.0` / `mlp.2` Linear).
     """
 
     def __init__(self, config: DotsMoEVitConfig):
@@ -547,17 +537,18 @@ class DotsMoEVitModel(PreTrainedModel):
         return self.patch_embed.proj.weight.device
 
     def process_weights_after_loading(self) -> None:
-        for block in self.blocks:
-            if isinstance(block.mlp, MoESwiGLUFFNFP8):
-                block.mlp.process_weights_after_loading()
         if self.config.enable_torch_compile:
             self.compile_block_modules()
 
     def compile_block_modules(self, **compile_kwargs: Any) -> None:
+        # In-place compile keeps checkpoint parameter names (no ``_orig_mod``);
+        # post-load processing reruns on every reload, so compile once.
+        if getattr(self, "_blocks_compiled", False):
+            return
         for block in self.blocks:
-            block.attn = torch.compile(block.attn, **compile_kwargs)
-            block.norm_1 = torch.compile(block.norm_1, **compile_kwargs)
-            block.norm_2 = torch.compile(block.norm_2, **compile_kwargs)
+            for module in (block.attn, block.norm_1, block.norm_2):
+                module.compile(**compile_kwargs)
+        self._blocks_compiled = True
 
     def get_pos_ids_by_grid(self, grid_thw_cpu: torch.Tensor):
         # Mirrors ``cybertron`` ``AIMv2NativeModel.rot_pos_emb``: when ``pre_pixel_shuffle``

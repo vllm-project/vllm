@@ -1,25 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for the decode top-k row->token mapping (no GPU required).
+"""Tests for the decode top-k row->token mapping.
 
-On non-uniform decode batches (``requires_padding`` -- mixed plain-decode and
+On non-uniform decode batches (`requires_padding` -- mixed plain-decode and
 spec-verify requests, or variable MTP verify lens; taken on Hopper where the
 varlen/flatten logits path is unavailable), the pool-topk rows follow the
-PADDED ``[batch_size, next_n]`` grid: row ``(b, t)`` is flat decode token
-``offset_b + t``. The former inline ``dec_seq = positions[:n] + 1``
-(``n = batch_size * next_n``) indexes the flat per-token layout with padded
+PADDED `[batch_size, next_n]` grid: row `(b, t)` is flat decode token
+`offset_b + t`. The former inline `dec_seq = positions[:n] + 1`
+(`n = batch_size * next_n`) indexes the flat per-token layout with padded
 coordinates, so rows after the first non-uniform request read another
 request's positions and rows past the decode region read prefill tokens --
-``expand_pools_and_append_tail`` then anchors the tail at a foreign length.
+`expand_pools_and_append_tail` then anchors the tail at a foreign length.
 
 These tests pin the defect with the exact production arithmetic and verify
-the layout-aware replacement (``_decode_topk_seq_lens``), including the tail
+the layout-aware replacement (`_decode_topk_seq_lens`), including the tail
 expansion consequences via the pure-torch expand/append pair that the fused
 kernel is documented to replicate.
 """
 
 from types import ModuleType
 
+import pytest
 import torch
 
 # Bootstrap the glm5next package before importing kpool_compress directly: its
@@ -35,8 +36,10 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import (  # noqa: E402
 # isort: on
 
 from vllm.models.glm5next.common.sparse_indexer import (
+    _build_decode_scatter_indices,
     _decode_topk_seq_lens,
     _fill_short_decode_causal_indices,
+    _scatter_decode_tokens_by_request,
 )
 from vllm.platforms import current_platform
 
@@ -53,6 +56,67 @@ else:
 KPOOL = 4
 TOPK_TOKENS = 16
 SELECT_K = TOPK_TOKENS // KPOOL
+
+
+def test_decode_scatter_discards_full_graph_token_padding():
+    """Adaptive verification can leave fewer live tokens than the graph size."""
+    decode_lens = torch.tensor([3, 3, 0, 0], dtype=torch.int64)
+    # Six padding tokens is deliberately larger than lmax. They must alias a
+    # valid discard cell instead of indexing columns 0..5 in a width-3 row.
+    tokens = torch.arange(12, dtype=torch.int32)
+    scatter_indices = _build_decode_scatter_indices(decode_lens, 4, 12)
+
+    out = _scatter_decode_tokens_by_request(
+        tokens, -1, num_requests=4, lmax=3, scatter_indices=scatter_indices
+    )
+
+    assert out.tolist() == [
+        [0, 1, 2],
+        [3, 4, 5],
+        [-1, -1, -1],
+        [-1, -1, -1],
+    ]
+
+
+def test_decode_scatter_without_graph_padding_is_unchanged():
+    decode_lens = torch.tensor([1, 3, 2], dtype=torch.int64)
+    tokens = torch.arange(6, dtype=torch.int32)
+    scatter_indices = _build_decode_scatter_indices(decode_lens, 3, 6)
+
+    out = _scatter_decode_tokens_by_request(
+        tokens, -1, num_requests=3, lmax=3, scatter_indices=scatter_indices
+    )
+
+    assert out.tolist() == [[0, -1, -1], [1, 2, 3], [4, 5, -1]]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@torch.inference_mode()
+def test_decode_scatter_cuda_graph_replays_with_smaller_live_budget():
+    decode_lens = torch.full((4,), 3, dtype=torch.int64, device="cuda")
+    tokens = torch.arange(12, dtype=torch.int32, device="cuda")
+
+    def run_scatter():
+        scatter_indices = _build_decode_scatter_indices(decode_lens, 4, 12)
+        return _scatter_decode_tokens_by_request(
+            tokens, -1, num_requests=4, lmax=3, scatter_indices=scatter_indices
+        )
+
+    # Warm allocation and repeat_interleave kernels before capture.
+    run_scatter()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = run_scatter()
+
+    decode_lens.copy_(torch.tensor([3, 3, 0, 0], dtype=torch.int64, device="cuda"))
+    graph.replay()
+
+    assert out.cpu().tolist() == [
+        [0, 1, 2],
+        [3, 4, 5],
+        [-1, -1, -1],
+        [-1, -1, -1],
+    ]
 
 
 def test_kpool_ops_dispatch_matches_platform():
@@ -89,7 +153,7 @@ def make_non_uniform_batch():
       req1: [100..103]     (verify at context len 100)
       req2: [7, 8, 9]      (verify at context len 7)
     Followed by 4 prefill tokens at positions 555..558 so the flat tensor is
-    at least ``n = 3 * 4`` long, as it is in a real mixed batch.
+    at least `n = 3 * 4` long, as it is in a real mixed batch.
     """
     decode_lens = torch.tensor([1, 4, 3], dtype=torch.int64)
     per_req_positions = [[30], [100, 101, 102, 103], [7, 8, 9]]
@@ -108,7 +172,7 @@ def expected_row_seq_lens(per_req_positions, batch_size, next_n):
 
 
 def test_legacy_flat_layout_misaligns_and_bleeds():
-    """The bug: ``positions[:n] + 1`` with padded-row coordinates reads other
+    """The bug: `positions[:n] + 1` with padded-row coordinates reads other
     requests' positions and prefill positions."""
     decode_lens, per_req, positions = make_non_uniform_batch()
     batch_size = decode_lens.shape[0]
@@ -155,8 +219,8 @@ def test_helper_padded_layout_per_row():
 
 def expand_tail_region(dec_seq):
     """Run the production pure-torch expand + append pair (the fused kernel
-    replicates it exactly on the identity path) and return the tail columns
-    [TOPK_TOKENS, TOPK_TOKENS + KPOOL - 1)."""
+    replicates it exactly on the identity path) and return each row's
+    KPOOL - 1 tail columns, which follow its selected pools."""
     rows = dec_seq.shape[0]
     pool_ids = torch.arange(SELECT_K, dtype=torch.int64).expand(rows, SELECT_K)
     valid = torch.ones_like(pool_ids, dtype=torch.bool)
@@ -164,7 +228,8 @@ def expand_tail_region(dec_seq):
     seq_lens = dec_seq.to(torch.int32)
     pool_lens = (seq_lens // KPOOL).to(torch.int32)
     out = append_tail_to_topk(expanded, seq_lens, pool_lens, KPOOL)
-    return out[:, TOPK_TOKENS:]
+    history_lens = (pool_lens * KPOOL).clamp(max=TOPK_TOKENS).tolist()
+    return torch.stack([row[h : h + KPOOL - 1] for row, h in zip(out, history_lens)])
 
 
 def test_tail_expansion_legacy_vs_fixed():
@@ -193,3 +258,28 @@ def test_tail_expansion_legacy_vs_fixed():
     assert legacy_tail[10, :2].tolist() == [556, 557]
 
     assert not torch.equal(legacy_tail, fixed_tail)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Triton kernel")
+def test_pooled_rows_keep_valid_prefix():
+    """Attention backends read only the first valid-count entries of a top-k
+    row (FlashAttention MLA sparse uses them as a page table). FULL CUDA graphs
+    take the pooled decode path even when every pool fits, so a short row must
+    not leave -1 gaps between its pools and its tail."""
+    rows = [
+        # (seq_len, selected pools, expected token indices)
+        (3, [], [0, 1, 2]),
+        (10, [0, 1], list(range(10))),
+        (16, [0, 1, 2, 3], list(range(16))),
+        (23, [4, 0, 2, 3], [16, 17, 18, 19, 0, 1, 2, 3, *range(8, 16), 20, 21, 22]),
+    ]
+    pool_ids = torch.tensor(
+        [pools + [-1] * (SELECT_K - len(pools)) for _, pools, _ in rows],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    seq_lens = torch.tensor([r[0] for r in rows], dtype=torch.int32, device="cuda")
+    out = indexer_mod.kpool_ops.expand_pools_and_append_tail(pool_ids, seq_lens, KPOOL)
+    width = TOPK_TOKENS + KPOOL - 1
+    expected = [tokens + [-1] * (width - len(tokens)) for _, _, tokens in rows]
+    assert out.tolist() == expected

@@ -137,6 +137,28 @@ pub fn print_results(
         metrics.median_e2el_ms,
         &metrics.percentiles_e2el_ms,
     );
+    if let Some(stats) = &metrics.client_queue_time {
+        print_metric_section(
+            "client_queue_time",
+            "Client Queue Time",
+            "Client-side Queueing",
+            &config.selected_percentile_metrics,
+            stats.mean_ms,
+            stats.median_ms,
+            &stats.percentiles_ms,
+        );
+    }
+    if let Some(stats) = &metrics.e2el_including_client_queue {
+        print_metric_section(
+            "e2el_including_client_queue",
+            "E2EL incl. Client Queue",
+            "Queue-inclusive End-to-end Latency",
+            &config.selected_percentile_metrics,
+            stats.mean_ms,
+            stats.median_ms,
+            &stats.percentiles_ms,
+        );
+    }
 
     if let Some(stats) = spec_decode_stats {
         print_spec_decode_section(stats);

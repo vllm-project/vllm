@@ -14,12 +14,14 @@ use tokio::sync::mpsc;
 use tokio::task::yield_now;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use vllm_engine_core_client::protocol::logprobs::{MaybeWireLogprobs, WireLogprobs};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::utility::{
     EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope,
 };
@@ -55,6 +57,49 @@ fn request_output(
         finish_reason,
         ..Default::default()
     }
+}
+
+/// The number of top candidates to return for a requested logprobs count, where
+/// `-1` means the whole vocabulary.
+fn num_top_logprobs(requested: i32, vocab_size: u32) -> usize {
+    usize::try_from(requested).unwrap_or(vocab_size as usize)
+}
+
+/// Random logprobs with one row per token in `token_ids`: the token itself,
+/// ranked first, then `num_top` candidates in descending order, the first of
+/// which is the token itself again.
+fn random_logprobs(
+    rng: &mut StdRng,
+    token_ids: &[u32],
+    num_top: usize,
+    vocab_size: u32,
+) -> MaybeWireLogprobs {
+    let (rows, cols) = (token_ids.len(), num_top + 1);
+    let mut candidate_ids = Vec::with_capacity(rows * cols);
+    let mut logprobs = Vec::with_capacity(rows * cols);
+    for &token_id in token_ids {
+        let mut logprob = -rng.random_range(0.0..1.0_f32);
+        // The token itself, then as the top candidate.
+        let repeats = if num_top == 0 { 1 } else { 2 };
+        candidate_ids.extend(std::iter::repeat_n(i64::from(token_id), repeats));
+        logprobs.extend(std::iter::repeat_n(logprob, repeats));
+        for _ in 1..num_top {
+            logprob -= rng.random_range(0.0..2.0_f32);
+            candidate_ids.push(i64::from(rng.random_range(0..vocab_size)));
+            logprobs.push(logprob);
+        }
+    }
+    let wire = WireLogprobs {
+        logprob_token_ids: WireNdArray::from_i64(vec![rows, cols], candidate_ids)
+            .expect("shape matches the data"),
+        logprobs: WireNdArray::from_f32(vec![rows, cols], logprobs)
+            .expect("shape matches the data"),
+        token_ranks: WireNdArray::from_i64(vec![rows], vec![1; rows])
+            .expect("shape matches the data"),
+        cu_num_generated_tokens: None,
+        cu_num_generated_tokens_tensor: None,
+    };
+    MaybeWireLogprobs::Wire(Box::new(wire))
 }
 
 /// Produce an empty output with a terminal finish reason for an invalid request.
@@ -94,6 +139,7 @@ fn utility_response(
     let result = match request.method_name.as_str() {
         "get_supported_tasks" => utility_envelope(vec!["generate"]),
         "is_sleeping" => utility_envelope(false),
+        "is_inference_ready" => utility_envelope(true),
         "reset_prefix_cache" => utility_envelope(true),
         "wake_up" => utility_envelope(true),
         "reset_mm_cache" | "reset_encoder_cache" | "profile" | "sleep" | "execute_dummy_batch" => {
@@ -137,6 +183,11 @@ struct ActiveRequest {
     max_tokens: usize,
     generated: usize,
     rng: StdRng,
+    /// Top candidates per generated token, if the request asked for logprobs.
+    num_top_logprobs: Option<usize>,
+    /// Prompt logprobs to send with the first output, if the request asked for
+    /// them.
+    prompt_logprobs: Option<MaybeWireLogprobs>,
 }
 
 impl ActiveRequest {
@@ -149,7 +200,11 @@ impl ActiveRequest {
     ) -> Result<Self, EngineCoreFinishReason> {
         let request_id = request.request_id;
         let client_index = request.client_index;
-        let prompt_len = request.prompt_token_ids.as_ref().map(Vec::len).unwrap_or_default();
+        let prompt_len = request
+            .prompt_token_ids
+            .as_ref()
+            .map(|ids| ids.shape.iter().product())
+            .unwrap_or_default();
 
         let Some(sampling_params) = request.sampling_params else {
             warn!(
@@ -174,13 +229,38 @@ impl ActiveRequest {
             return Err(EngineCoreFinishReason::Length);
         }
 
+        let mut rng = StdRng::seed_from_u64(request_seed(opt.seed, engine_index, &request_id));
+        // Prompt logprobs score each prompt token after the first, from
+        // `prompt_logprob_start` on.
+        let prompt_logprobs = sampling_params.prompt_logprobs.and_then(|requested| {
+            let prompt_token_ids = request
+                .prompt_token_ids
+                .as_ref()
+                .and_then(|ids| ids.to_u32_vec())
+                .unwrap_or_else(|| {
+                    (0..prompt_len).map(|_| rng.random_range(0..opt.vocab_size)).collect()
+                });
+            let start = 1 + sampling_params.prompt_logprob_start.unwrap_or(0) as usize;
+            let scored = prompt_token_ids.get(start..).filter(|ids| !ids.is_empty())?;
+            Some(random_logprobs(
+                &mut rng,
+                scored,
+                num_top_logprobs(requested, opt.vocab_size),
+                opt.vocab_size,
+            ))
+        });
+
         Ok(ActiveRequest {
-            rng: StdRng::seed_from_u64(request_seed(opt.seed, engine_index, &request_id)),
+            rng,
             request_id,
             client_index,
             prompt_len,
             max_tokens,
             generated: 0,
+            num_top_logprobs: sampling_params
+                .logprobs
+                .map(|requested| num_top_logprobs(requested, opt.vocab_size)),
+            prompt_logprobs,
         })
     }
 
@@ -198,10 +278,15 @@ impl ActiveRequest {
             new_token_ids.push(self.rng.random_range(0..opt.vocab_size));
         }
         self.generated += chunk_len;
+        let new_logprobs = self
+            .num_top_logprobs
+            .map(|num_top| random_logprobs(&mut self.rng, &new_token_ids, num_top, opt.vocab_size));
 
         let finished = self.generated >= self.max_tokens;
         EngineCoreOutput {
             prefill_stats: prefill_stats.map(Box::new),
+            new_logprobs,
+            new_prompt_logprobs_tensors: self.prompt_logprobs.take(),
             ..request_output(
                 self.request_id.clone(),
                 new_token_ids,

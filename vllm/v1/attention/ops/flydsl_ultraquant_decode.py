@@ -15,6 +15,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 logger = init_logger(__name__)
 
@@ -72,7 +73,7 @@ def ultraquant_flydsl_decode_eligible(
     """Return whether decode should use the gfx950 FlyDSL kernel.
 
     Production FlyDSL covers D=256 and GQA in {6, 8, 16}. Sinks and sliding
-    window fall back to unified Triton. ``flydsl_loaded`` is the process-level
+    window fall back to unified Triton. `flydsl_loaded` is the process-level
     compiler/hardware probe so this policy can be unit-tested without a GPU.
     """
     return (
@@ -100,8 +101,8 @@ _FP4_LUT_CACHE: dict[tuple[str, torch.dtype], torch.Tensor] = {}
 def _fp4_value_lut(device: torch.device) -> torch.Tensor:
     """Return the fixed 16-entry FP4 E2M1 value table as fp32 [16] on device.
 
-    Indexed by the stored 4-bit E2M1 code, so ``lut[nibble]`` is the dequant
-    value directly (matches ``format.FP4_BITS_TO_VALUE``).
+    Indexed by the stored 4-bit E2M1 code, so `lut[nibble]` is the dequant
+    value directly (matches `format.FP4_BITS_TO_VALUE`).
     """
     from vllm.v1.attention.ops.ultraquant.format import FP4_BITS_TO_VALUE
 
@@ -182,8 +183,8 @@ def _detect_max_capture_B() -> int:
 class _SegmBufPool:
     """Single-bucket buffer pool for segm_out/segm_max/segm_sum/output + the
     pooled Q-rotation intermediates. Identical to the TQ pool except that
-    ultraquant needs an extra ``q_fp8`` (float8_e4m3fn) slot for the Q precision
-    haircut (``q_rot_fp32 -> fp8_e4m3 -> bf16``) so that no fresh allocation
+    ultraquant needs an extra `q_fp8` (float8_e4m3fn) slot for the Q precision
+    haircut (`q_rot_fp32 -> fp8_e4m3 -> bf16`) so that no fresh allocation
     lands in the HIP graph memory pool post-capture.
     """
 
@@ -529,7 +530,7 @@ _FUSE_QROT_INKERNEL = True
 
 
 def _run_fused_q_rot(query, PiT_used, out, B, Hq, D, haircut):
-    """Launch the fused prologue. ``out`` is the pooled [B_bucket, Hq, D] buf."""
+    """Launch the fused prologue. `out` is the pooled [B_bucket, Hq, D] buf."""
     M = B * Hq
     BLOCK_M = 16
     BLOCK_K = 32
@@ -773,7 +774,8 @@ def flydsl_ultraquant_decode_attention(
             num_partitions * tile_groups_per_partition * kv_compute_block,
             worst_case_max_seq_len,
         )
-    launch(
+    _run_compiled(
+        launch,
         segm_out,
         segm_sum,
         segm_max,

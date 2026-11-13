@@ -311,6 +311,7 @@ async def async_request_openai_completions(
             ) as response:
                 if response.status == 200:
                     first_chunk_received = False
+                    stream_error: str | None = None
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
@@ -323,7 +324,9 @@ async def async_request_openai_completions(
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
                             # want to check a token was generated
-                            if choices := data.get("choices"):
+                            if error := data.get("error"):
+                                stream_error = json.dumps(error)
+                            elif choices := data.get("choices"):
                                 # Note that text could be empty here
                                 # e.g. for special tokens
                                 text = choices[0].get("text")
@@ -341,7 +344,10 @@ async def async_request_openai_completions(
                                 generated_text += text or ""
                             if usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
-                    if first_chunk_received:
+                    if stream_error is not None:
+                        output.success = False
+                        output.error = stream_error
+                    elif first_chunk_received:
                         output.success = True
                     else:
                         output.success = False
@@ -370,7 +376,8 @@ def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
         return False
     if (
         delta.get("content")
-        or delta.get("reasoning")
+        or delta.get("reasoning")  # vLLM spec
+        or delta.get("reasoning_content")  # SGLang spec
         or delta.get("tool_calls")
         or delta.get("function_call")
     ):
@@ -434,6 +441,7 @@ async def async_request_openai_chat_completions(
 
         generated_text = ""
         first_chunk_received = False
+        stream_error: str | None = None
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
@@ -457,7 +465,9 @@ async def async_request_openai_chat_completions(
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
 
-                            if (
+                            if error := data.get("error"):
+                                stream_error = json.dumps(error)
+                            elif (
                                 choices := data.get("choices")
                             ) and _choice_has_streamed_output(choices[0]):
                                 content = choices[0]["delta"].get("content")
@@ -478,7 +488,10 @@ async def async_request_openai_chat_completions(
                                 output.output_tokens = usage.get("completion_tokens")
 
                     output.generated_text = generated_text
-                    if first_chunk_received:
+                    if stream_error is not None:
+                        output.success = False
+                        output.error = stream_error
+                    elif first_chunk_received:
                         output.success = True
                     else:
                         output.success = False
@@ -558,6 +571,7 @@ async def async_request_openai_audio(
 
             generated_text = ""
             first_chunk_received = False
+            stream_error: str | None = None
             st = time.perf_counter()
             most_recent_timestamp = st
             try:
@@ -575,7 +589,9 @@ async def async_request_openai_audio(
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
 
-                                if choices := data.get("choices"):
+                                if error := data.get("error"):
+                                    stream_error = json.dumps(error)
+                                elif choices := data.get("choices"):
                                     content = choices[0]["delta"].get("content")
                                     # First token
                                     if not first_chunk_received:
@@ -599,7 +615,10 @@ async def async_request_openai_audio(
                                     )
 
                         output.generated_text = generated_text
-                        if first_chunk_received:
+                        if stream_error is not None:
+                            output.success = False
+                            output.error = stream_error
+                        elif first_chunk_received:
                             output.success = True
                         else:
                             output.success = False
