@@ -426,6 +426,7 @@ def dspark_draft_config(request, dist_init):
     )
     vllm_config = SimpleNamespace(
         model_config=model_config,
+        lora_config=None,
         quant_config=None,
         kernel_config=SimpleNamespace(
             moe_backend="deep_gemm_mega_moe",
@@ -435,6 +436,7 @@ def dspark_draft_config(request, dist_init):
             pipeline_parallel_size=1,
             tensor_parallel_size=1,
             data_parallel_size=1,
+            prefill_context_parallel_size=1,
             enable_expert_parallel=True,
             enable_eplb=True,
             eplb_config=SimpleNamespace(num_redundant_experts=4),
@@ -444,6 +446,7 @@ def dspark_draft_config(request, dist_init):
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
         compilation_config=SimpleNamespace(static_forward_context={}),
         speculative_config=SimpleNamespace(draft_model_config=model_config),
+        additional_config=None,
     )
     return SimpleNamespace(
         vllm_config=vllm_config,

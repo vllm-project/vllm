@@ -152,10 +152,10 @@ def test_dspark_loads_all_local_eplb_redundant_experts(model_type):
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
-def test_eplb_registers_dspark_draft_model(
+def test_eplb_registers_dspark_draft_when_supported(
     dspark_vllm_config, monkeypatch: pytest.MonkeyPatch, model_type
 ):
-    """DSpark MoE drafts register with EPLB like MTP/Eagle drafters."""
+    """Register DSpark MoE drafts only on platforms that support draft EPLB."""
     dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
         model_type
     )
@@ -185,16 +185,22 @@ def test_eplb_registers_dspark_draft_model(
         load_dummy_weights=False,
     )
 
-    assert registered is True
+    supports_draft_eplb = not current_platform.is_rocm()
+    assert registered is supports_draft_eplb
     assert controller.state is not None
-    assert controller.state.add_model_calls == [
-        (
-            draft,
-            dspark_vllm_config.speculative_config.draft_model_config,
-            "dspark (draft)",
-        )
-    ]
-    assert speculator.eplb_state is controller.state
+    expected_calls = (
+        [
+            (
+                draft,
+                dspark_vllm_config.speculative_config.draft_model_config,
+                "dspark (draft)",
+            )
+        ]
+        if supports_draft_eplb
+        else []
+    )
+    assert controller.state.add_model_calls == expected_calls
+    assert speculator.eplb_state is (controller.state if supports_draft_eplb else None)
 
 
 def test_eplb_skips_dspark_registration_with_dummy_weights(
