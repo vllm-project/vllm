@@ -11,7 +11,7 @@ once (and, on plain verify steps, writes each token's state once), the gate
 projection runs on mma.sync (one 16-feature tile per warp) and the recurrence on
 packed FP32 FMAs, so the step runs at the HBM or FP32-pipe bound.
 
-Same operands, cache semantics and precision as ``KdaSplit`` (see its docstring):
+Same operands, cache semantics and precision as `KdaSplit` (see its docstring):
 the Triton formulas and instructions of the stock composed decode, BF16-rounded
 convolution outputs, raw gates and recurrence outputs; only FP32 reduction order
 differs."""
@@ -62,9 +62,9 @@ CTAS_PER_SM = 2
 
 
 class KdaWide:
-    """``tokens`` q (1: single-token decode with slots [B]; > 1: verify with slots
-    [B, >= q] and accepted [B]); ``record``: RecoverSSM verify (checkpoint slot,
-    records out); ``gate_mode`` as KdaSplit's F_B reduction order (0: one chain of
+    """`tokens` q (1: single-token decode with slots [B]; > 1: verify with slots
+    [B, >= q] and accepted [B]); `record`: RecoverSSM verify (checkpoint slot,
+    records out); `gate_mode` as KdaSplit's F_B reduction order (0: one chain of
     eight MMAs, 1: four chains of two)."""
 
     def __init__(
@@ -346,7 +346,7 @@ class KdaWide:
 
     @cute.jit
     def prefetch_next(self, args, head, request):
-        """L2 prefetch of the state page of item ``ahead`` CTAs on."""
+        """L2 prefetch of the state page of item `ahead` CTAs on."""
         slots, state = args[8], args[9]
         _, requests, _ = cute.arch.grid_dim()
         item = head + self.heads * request + self.ahead

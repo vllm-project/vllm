@@ -502,7 +502,12 @@ class RocmAttentionImpl(AttentionImpl):
             (16 // value_cache.element_size()) if interleaved_v else 0
         )
 
-        if block_size in (16, 32) and has_native_layout:
+        # The native kernel writes at most 512 chunks of x elements per token.
+        if (
+            block_size in (16, 32)
+            and has_native_layout
+            and self.num_kv_heads * (self.head_size // key_cache.shape[4]) <= 512
+        ):
             # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
                 key,

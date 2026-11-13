@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse Spark specialized decode: a decode executor over the stock backbone, enabled
-by ``additional_config={"decode_backend": "latency_specialized"}``."""
+by `additional_config={"decode_backend": "latency_specialized"}`."""
 
 from dataclasses import dataclass
 
@@ -29,7 +29,7 @@ class DecodeConfig:
 
 
 def decode_backend(vllm_config) -> str:
-    """The requested ``decode_backend`` (``additional_config``), "auto" if unset."""
+    """The requested `decode_backend` (`additional_config`), "auto" if unset."""
     extra = vllm_config.additional_config
     return extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
 

@@ -162,7 +162,6 @@ def test_speculators_correctness(monkeypatch, config):
         trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=128,
-        gpu_memory_utilization=0.85,
         enforce_eager=False,
         disable_log_stats=False,
     )

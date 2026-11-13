@@ -8,9 +8,9 @@ dependency with a lightweight sequential Markov head.
 
 The parallel backbone is a standard Qwen3 decoder stack reused from the
 DFlash Qwen3 draft (see qwen3_dflash.py). DSpark adds:
-  * ``markov_head``: low-rank V x r / r x V transition bias added to the base
+  * `markov_head`: low-rank V x r / r x V transition bias added to the base
     logits, sampled left-to-right by the speculator (the sequential stage).
-  * ``confidence_head``: per-position acceptance-probability estimate.
+  * `confidence_head`: per-position acceptance-probability estimate.
 
 DSparkMarkovHead and DSparkConfidenceHead are shared with the DSV4-style DSpark model.
 """
@@ -49,9 +49,9 @@ logger = init_logger(__name__)
 class DSparkMarkovHead(nn.Module):
     """Sequential transition-bias head (low-rank V x r, r x V).
 
-    ``markov_w1[token]`` embeds the previously sampled token (target vocab,
-    ``vocab_size``); ``markov_w2`` projects it to a draft-vocab bias
-    (``draft_vocab_size``) added to the base draft logits. The two sizes
+    `markov_w1[token]` embeds the previously sampled token (target vocab,
+    `vocab_size`); `markov_w2` projects it to a draft-vocab bias
+    (`draft_vocab_size`) added to the base draft logits. The two sizes
     coincide for full-vocab drafts.
 
     Both weights are replicated because the head runs sequentially for every
@@ -82,7 +82,7 @@ class DSparkMarkovHead(nn.Module):
         self.markov_w2.is_w4a16_nvfp4 = False
 
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
-        """r-dim Markov embedding of ``token_ids`` ([B] -> [B, r])."""
+        """r-dim Markov embedding of `token_ids` ([B] -> [B, r])."""
         return self.markov_w1(token_ids)
 
     def bias(
@@ -101,9 +101,9 @@ class DSparkMarkovHead(nn.Module):
         index: torch.Tensor,
         scale: float = 1.0,
     ) -> torch.Tensor:
-        """Apply the Markov bias only to selected rows of ``logits``.
+        """Apply the Markov bias only to selected rows of `logits`.
 
-        The caller initializes ``logits`` to ``-inf`` once for all draft
+        The caller initializes `logits` to `-inf` once for all draft
         positions. This method scatters the corrected candidate values into
         that dense buffer so the normal sampler sees the truncated proposal.
         """

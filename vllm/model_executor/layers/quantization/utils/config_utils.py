@@ -65,7 +65,7 @@ def _get_effective_quant_keys(
     layer_type: "type[torch.nn.Module]",
 ) -> tuple["QuantKey | None", "QuantKey | None"]:
     """Return the (weight, activation) keys a layer runs with: its online
-    quantization target if any, else its checkpoint format. ``None`` denotes an
+    quantization target if any, else its checkpoint format. `None` denotes an
     unquantized weight, or an unknown/unquantized activation.
 
     Raises:
@@ -97,7 +97,7 @@ def get_checkpoint_quant_keys(
     layer_type: "type[torch.nn.Module]",
 ) -> tuple["QuantKey | None", "QuantKey | None"]:
     """Return the (weight, activation) keys a layer is stored with in the
-    checkpoint. ``None`` denotes an unquantized weight, or an unknown/unquantized
+    checkpoint. `None` denotes an unquantized weight, or an unknown/unquantized
     activation.
 
     Raises:

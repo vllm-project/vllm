@@ -515,10 +515,10 @@ class MiMoV2FlashDecoderLayer(nn.Module):
 def _requantize_fp8(
     grouped: torch.Tensor, rows_rank: int, block: int, dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Block-quantize a rank's ``[Q | K | V]`` rows back to fp8.
+    """Block-quantize a rank's `[Q | K | V]` rows back to fp8.
 
     A rank's rows need not end on a block boundary (a single 1856-row slice is
-    14.5 blocks) while ``scaled_quantize`` requires both dims to be multiples of
+    14.5 blocks) while `scaled_quantize` requires both dims to be multiples of
     the block size, so pad the tail with zeros: zero rows cannot raise a block's
     amax, so every scale -- and the number of scale rows -- is unchanged. The
     padding is dropped again here.
@@ -543,9 +543,9 @@ def _fused_qkv_kv_chunk_rows(
     ckpt_tp: int,
     block: int = 128,
 ) -> int:
-    """Padded ``K | V`` rows per checkpoint chunk, or 0 for ``[Q | K | V]``.
+    """Padded `K | V` rows per checkpoint chunk, or 0 for `[Q | K | V]`.
 
-    0 when the de-interleaved ``[Q | K | V]`` layout is already exact: a rank
+    0 when the de-interleaved `[Q | K | V]` layout is already exact: a rank
     owns at most one checkpoint chunk, the chunk counts do not divide, or
     every chunk's Q, K and V rows span whole scale blocks (a block
     permutation; MiMo SWA layers). When a rank owns several chunks whose K
@@ -597,20 +597,20 @@ def _shard_fp8_qkv_proj(
     block: int = 128,
     kv_chunk_rows: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Shard the fp8 qkv_proj weights for ``tp_rank``.
+    """Shard the fp8 qkv_proj weights for `tp_rank`.
 
-    The checkpoint stores the fused QKV pre-sharded for ``ckpt_tp`` ranks (the
-    model config's ``num_key_value_heads``), each chunk holding that slice's
+    The checkpoint stores the fused QKV pre-sharded for `ckpt_tp` ranks (the
+    model config's `num_key_value_heads`), each chunk holding that slice's
     Q, K and V rows:
 
         [Q_0 | K_0 | V_0 | Q_1 | K_1 | V_1 | ... | Q_n | K_n | V_n]   (n = ckpt_tp)
 
-    Per chunk, Q has ``(num_heads / ckpt_tp) * head_dim`` rows, K has
-    ``(num_kv_heads / ckpt_tp) * head_dim`` rows, and V has
-    ``(num_kv_heads / ckpt_tp) * v_head_dim`` rows, and the fp8 block scales
-    are tiled per chunk too (``ceil(rows_per_chunk / block)`` rows each).
+    Per chunk, Q has `(num_heads / ckpt_tp) * head_dim` rows, K has
+    `(num_kv_heads / ckpt_tp) * head_dim` rows, and V has
+    `(num_kv_heads / ckpt_tp) * v_head_dim` rows, and the fp8 block scales
+    are tiled per chunk too (`ceil(rows_per_chunk / block)` rows each).
 
-    ``ckpt_tp`` is not the layer's KV-head count: a MiMo-V2.5 SWA layer has 8
+    `ckpt_tp` is not the layer's KV-head count: a MiMo-V2.5 SWA layer has 8
     KV heads over 4 chunks, so each chunk carries two KV heads (3712 rows = 29
     blocks) while a GA layer has 4 KV heads over 4 chunks (3392 rows each).
 
@@ -618,13 +618,13 @@ def _shard_fp8_qkv_proj(
 
         [Q_1 | Q_2 | ... | Q_g | K_1 | K_2 | ... | K_g | V_1 | V_2 | ... | V_g]
 
-    When ``tp_size == ckpt_tp`` the checkpoint chunk *is* that layout, so a
-    plain chunk of both weight and scale suffices. When ``tp_size`` is a
-    proper divisor of ``ckpt_tp`` and, under per-chunk scales, each chunk's
+    When `tp_size == ckpt_tp` the checkpoint chunk *is* that layout, so a
+    plain chunk of both weight and scale suffices. When `tp_size` is a
+    proper divisor of `ckpt_tp` and, under per-chunk scales, each chunk's
     Q, K and V segments span whole scale blocks, the rank gathers its rows
     as an exact block permutation with no dequantize-requantize round trip;
-    with ``kv_chunk_rows`` a K segment that straddles a scale block gathers
-    into the zero-padded ``[Q_1..Q_g | K_1 V_1 pad | ..]`` layout instead.
+    with `kv_chunk_rows` a K segment that straddles a scale block gathers
+    into the zero-padded `[Q_1..Q_g | K_1 V_1 pad | ..]` layout instead.
     Otherwise each rank's Q, K and V rows are gathered from the chunks that
     hold them, dequantized with the chunk's own scales, reordered, and
     re-quantized to fp8.
@@ -1014,7 +1014,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         See _shard_fp8_qkv_proj for more details.
 
         Returns:
-            True if ``tensor`` was an fp8 qkv_proj weight/scale and was consumed
+            True if `tensor` was an fp8 qkv_proj weight/scale and was consumed
             (caller should skip it); False otherwise, so the caller falls
             through to its normal loading path.
 

@@ -3,7 +3,7 @@
 """Unit tests for the V2 GPU-accelerated n-gram speculator.
 
 These tests target the Triton proposer in
-``vllm.v1.worker.gpu.spec_decode.ngram.speculator``. When multiple n-gram
+`vllm.v1.worker.gpu.spec_decode.ngram.speculator`. When multiple n-gram
 matches of the same length exist, the GPU kernel picks the right-most (most
 recent) match inside the active context.
 """

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized DSpark drafter (specialized_decode/drafter): the fused Markov
-sampling against vLLM's own loop (``DSparkSpeculator._sample_sequential``), and the
+sampling against vLLM's own loop (`DSparkSpeculator._sample_sequential`), and the
 drafter GEMM engine against an FP32 reference and cuBLAS."""
 
 import types
@@ -250,7 +250,7 @@ def test_fused_markov_precomputed_noise_bit_equal(R, k, monkeypatch):
 @pytest.mark.parametrize("R,k", [(1, 4), (3, 5), (8, 4)])
 def test_fused_markov_gumbel_keys_match_stock(R, k, rows, monkeypatch):
     """The Gumbel keys themselves, not only their argmax: every step's per-block
-    maxima (blocks of ``VB`` tokens) bit-equal vLLM's ``_gumbel_sample_kernel`` run
+    maxima (blocks of `VB` tokens) bit-equal vLLM's `_gumbel_sample_kernel` run
     on the cached logits with the same block size, with the noise hashed in the
     steps and precomputed. A token compares equal unless two keys tie within an
     ulp, so a token-only test misses a one-ulp difference in the keys."""

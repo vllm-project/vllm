@@ -374,8 +374,8 @@ class RoutingSimulatorRouter(BaseRouter):
     ) -> torch.Tensor | None:
         if e_score_correction_bias is None:
             return None
-        # Buffer assignment registers this with RoutedExperts, preserving its
-        # zeros across level-2 sleep/wake without adding a checkpoint weight.
+        # Buffer assignment registers this with RoutedExperts without adding a
+        # checkpoint weight.
         # Synthetic router logits need no such preservation: they are regenerated
         # on each forward, including CUDA graph replay.
         return torch.nn.Buffer(

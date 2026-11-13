@@ -42,6 +42,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _decode_logits_workspace,
     _max_decode_logits_rows,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -65,9 +66,9 @@ def _kpool_compress_insert(
     head_dim: int,
     round_scale: bool,
 ) -> None:
-    """Pool ``kpool`` consecutive tokens into one fp8 K and write at pool slots.
+    """Pool `kpool` consecutive tokens into one fp8 K and write at pool slots.
 
-    ``slot_mapping`` is pool-granular (compress_ratio == kpool on the spec):
+    `slot_mapping` is pool-granular (compress_ratio == kpool on the spec):
     only the *last* token of each complete pool carries a valid (>=0) slot;
     intra-pool tokens are -1. Every position is treated as a pool-completion
     candidate and non-completions are masked off inside the kernel. Compacting
@@ -202,9 +203,7 @@ def sparse_attn_indexer_kpool(
         # profiling branch returns before invoking the logits kernel itself.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
-            workspace_manager.get_simultaneous(
-                ((decode_rows, max_pool_len), torch.float32),
-            )
+            _decode_logits_workspace(decode_rows, max_pool_len)
         else:
             workspace_manager.get_simultaneous(
                 ((q_quant.shape[1], decode_rows, max_pool_len), torch.float32),

@@ -10,6 +10,10 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.abstract import (
+    get_kv_cache_checkpoint_alignment,
+    get_mamba_num_speculative_blocks,
+)
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
@@ -42,11 +46,11 @@ def plan_flashinfer_checkpoints(
 
     Args:
         offsets: Checkpoint offset into each checkpoint row's query, 0 for
-            none. The last ``len(query_lens)`` rows are the prefill kernel's.
+            none. The last `len(query_lens)` rows are the prefill kernel's.
         query_lens: Query length of each sequence the prefill kernel runs.
 
     Returns:
-        ``(every_n_tokens, cu_starts, rows)``: the stride shared by every
+        `(every_n_tokens, cu_starts, rows)`: the stride shared by every
         checkpoint in the batch, cumulative per-sequence checkpoint counts,
         and the index of each checkpoint row's state among the emitted ones.
 
@@ -159,6 +163,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
+        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
+            vllm_config, layer_names
+        )
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self._adaptive_verification = bool(
@@ -166,7 +174,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and self.speculative_config.enable_adaptive_verification
         )
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
-            vllm_config, kv_cache_spec
+            vllm_config, kv_cache_spec, self.checkpoint_alignment
         )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
@@ -179,7 +187,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
         # Only the Qwen GDN layer opts in on FlashInfer; KDA layers sharing this
         # backend export checkpoints their own way.
-        checkpoint_alignment = kv_cache_spec.prefill_checkpoint_alignment
+        checkpoint_alignment = self.checkpoint_alignment
         self.plan_flashinfer_checkpoints = (
             self.gdn_prefill_backend == "flashinfer"
             and checkpoint_alignment is not None
@@ -265,9 +273,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         """Reject a subclass whose chunk metadata the AITER path would skip.
 
         AITER brings its own varlen prefill metadata and never calls
-        ``_build_chunk_metadata``, so a builder that overrides it would lose
+        `_build_chunk_metadata`, so a builder that overrides it would lose
         that override without a word. No in-tree subclass can get here --
-        ``_resolve_gdn_prefill_backend`` only selects this backend for models
+        `_resolve_gdn_prefill_backend` only selects this backend for models
         with 128-dim GDN key and value heads, which the KDA builders are not --
         but a future one should be told rather than quietly ignored.
         """
@@ -348,6 +356,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 m.seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
+                self.num_speculative_blocks,
             )
 
         uniform_spec_sequence_length = None
@@ -753,7 +762,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         slot_mapping: torch.Tensor,
     ) -> GDNAttentionMetadata:
         """Re-gather this group's state indices. The other fields are
-        batch-level and stay shared with ``metadata``."""
+        batch-level and stay shared with `metadata`."""
         m = metadata
         checkpoint = (
             m.checkpoint.regather_state_indices(blk_table)

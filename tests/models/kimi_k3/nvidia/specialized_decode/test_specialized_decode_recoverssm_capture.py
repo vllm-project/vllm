@@ -3,16 +3,16 @@
 """Deferred RecoverSSM under the server's FULL CUDA-graph capture.
 
 A DCP deployment captures its FULL graphs with KV context
-(``set_dcp_capture_context``): the dummy requests get block ids 0, 1, ..., so
+(`set_dcp_capture_context`): the dummy requests get block ids 0, 1, ..., so
 their KDA state slots are live, while the runner binds no request slots
-(``DeferredRecoverSSMState.bind(None)``), so every record row is -1. The capture runs
+(`DeferredRecoverSSMState.bind(None)`), so every record row is -1. The capture runs
 each graph once eagerly (warmup), then captures and replays it.
 
 Every verify of such a step must stay inside the records allocation: the stock
 Triton verify and each PreparedKda policy (flush + regular core, KdaFusedWS,
 KdaFused) at the server's capture sizes 5..320 (q = 5, TP8: 12 heads), eager
 and graphed. Their writes for rows without a record slot go to the scratch row
--1 (``recoverssm.context.allocate_records``); the records of real slots, the
+-1 (`recoverssm.context.allocate_records`); the records of real slots, the
 pending counts and the checkpoints stay untouched, and the outputs equal the same
 step's with valid record slots."""
 
@@ -80,7 +80,7 @@ def _capture_slots(requests, blocks):
 
 def _graphed(fn, reset=None):
     """The server's capture of one graph: an eager warmup, capture, replay
-    (after ``reset``: restore what the warmup wrote, e.g. the conv windows)."""
+    (after `reset`: restore what the warmup wrote, e.g. the conv windows)."""
     fn()
     torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()

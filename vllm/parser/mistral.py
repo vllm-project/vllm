@@ -143,11 +143,11 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
 
 
 def _pre_v11_function_calls(parsed: Any) -> list[FunctionCall]:
-    """Decode the JSON after a pre-v11 ``[TOOL_CALLS]`` marker.
+    """Decode the JSON after a pre-v11 `[TOOL_CALLS]` marker.
 
     Mirrors the streaming path: a bare object is a single call, entries that
     are not call objects are skipped, a missing or non-string name becomes
-    ``""`` (as in the v11+ path) and string arguments are kept as-is.
+    `""` (as in the v11+ path) and string arguments are kept as-is.
     """
     if isinstance(parsed, dict):
         parsed = [parsed]
@@ -179,19 +179,19 @@ def mistral_config(
     reasoning_encoding: Literal["special_token", "text", "none"],
     name: str = "mistral",
 ) -> ParserEngineConfig:
-    """Return a :class:`ParserEngineConfig` for the Mistral output format.
+    """Return a `ParserEngineConfig` for the Mistral output format.
 
     Args:
         reasoning_encoding: Reasoning token format.
-            ``"special_token"`` – v13+ ``[THINK]``/``[/THINK]`` special
-            tokens placed in both ``terminals`` and ``token_id_terminals``.
-            ``"text"`` – v11 ``<think>``/``</think>`` plain text placed in
-            ``terminals`` only; no ``token_id_terminals`` for think tokens.
-            ``"none"`` – no reasoning support.
+            `"special_token"` – v13+ `[THINK]`/`[/THINK]` special
+            tokens placed in both `terminals` and `token_id_terminals`.
+            `"text"` – v11 `<think>`/`</think>` plain text placed in
+            `terminals` only; no `token_id_terminals` for think tokens.
+            `"none"` – no reasoning support.
         name: Name embedded in the returned config (used for debugging).
 
     Returns:
-        A frozen :class:`ParserEngineConfig` with ``initial_state=CONTENT``.
+        A frozen `ParserEngineConfig` with `initial_state=CONTENT`.
 
     """
     if reasoning_encoding == "special_token":
@@ -296,23 +296,23 @@ def mistral_config(
 
 
 class MistralParser(ParserEngine):
-    """Mistral parser: engine-based reasoning + ``[TOOL_CALLS]`` tool calls.
+    """Mistral parser: engine-based reasoning + `[TOOL_CALLS]` tool calls.
 
     Reasoning encoding is auto-detected from the tokenizer:
 
-    - ``"special_token"`` – ``[THINK]`` present in vocab (v13+).
-    - ``"text"`` – tokenizer supports grammar but has no ``[THINK]`` (v11).
-    - ``"none"`` – no grammar support; reasoning disabled.
+    - `"special_token"` – `[THINK]` present in vocab (v13+).
+    - `"text"` – tokenizer supports grammar but has no `[THINK]` (v11).
+    - `"none"` – no grammar support; reasoning disabled.
 
-    Tool calls use the ``[TOOL_CALLS]func_name{...}`` format.  The opening
-    ``{`` doubles as the NAME→ARGS separator and is included in the argument
-    buffer via an ``ARG_VALUE_CHUNK`` event on the transition (mirrors
+    Tool calls use the `[TOOL_CALLS]func_name{...}` format.  The opening
+    `{` doubles as the NAME→ARGS separator and is included in the argument
+    buffer via an `ARG_VALUE_CHUNK` event on the transition (mirrors
     kimi_k2, JSON args, `tool_args_json=True`).
 
-    When the tokenizer does not support grammar (``_reasoning_encoding ==
-    "none"``), the legacy ``[TOOL_CALLS]``-based extraction path is used
+    When the tokenizer does not support grammar (`_reasoning_encoding ==
+    "none"`), the legacy `[TOOL_CALLS]`-based extraction path is used
     instead of the declarative engine, handling both pre-v11 JSON-array and
-    v11+ ``funcname{args}`` formats.
+    v11+ `funcname{args}` formats.
     """
 
     def __init__(
@@ -465,7 +465,7 @@ class MistralParser(ParserEngine):
         """Build a guided JSON schema for pre-v11 required/named tool choice.
 
         The schema enforces the Mistral-native array format
-        ``[{"name": ..., "arguments": {...}}]`` so the model emits a parseable
+        `[{"name": ..., "arguments": {...}}]` so the model emits a parseable
         bare JSON array instead of free-form text.
 
         Args:
@@ -473,7 +473,7 @@ class MistralParser(ParserEngine):
                 `tool_choice`.
 
         Returns:
-            A JSON Schema dict, or ``None`` if the named tool is not found.
+            A JSON Schema dict, or `None` if the named tool is not found.
 
         """
         tool_choice = request.tool_choice
@@ -539,7 +539,7 @@ class MistralParser(ParserEngine):
     ) -> ExtractedToolCallInformation:
         """Pre-v11 non-streaming extraction.
 
-        Handles ``[TOOL_CALLS][{...}]`` and guided bare-array formats.
+        Handles `[TOOL_CALLS][{...}]` and guided bare-array formats.
         """
         if request is None:
             tool_choice = None
@@ -695,7 +695,7 @@ class MistralParser(ParserEngine):
     ) -> DeltaMessage | None:
         """Extract tool calls for pre-v11 Mistral models.
 
-        Handles ``[TOOL_CALLS][{"name": "add", "arguments":{"a": 3.5}}]``.
+        Handles `[TOOL_CALLS][{"name": "add", "arguments":{"a": 3.5}}]`.
         """
         assert self.parse_coro is not None
         content = None
@@ -932,11 +932,11 @@ class MistralParser(ParserEngine):
         event: SemanticEvent,
         deltas: list[DeltaToolCall],
     ) -> None:
-        """Emit the opening ``{`` as an arg delta when the name is first sent.
+        """Emit the opening `{` as an arg delta when the name is first sent.
 
-        When the TOOL_NAME→TOOL_ARGS transition fires, ``{`` arrives as an
-        ARG_VALUE_CHUNK before ``name_sent`` is True.  The parent emits the
-        name delta but not the ``{`` arg delta.  This override re-emits the
+        When the TOOL_NAME→TOOL_ARGS transition fires, `{` arrives as an
+        ARG_VALUE_CHUNK before `name_sent` is True.  The parent emits the
+        name delta but not the `{` arg delta.  This override re-emits the
         current chunk so streaming clients receive a valid JSON prefix.
         """
         idx = event.tool_index
@@ -958,11 +958,11 @@ class MistralParser(ParserEngine):
             )
 
     def _extract_args_json(self, raw_args: str, func_name: str) -> str:
-        """Return the first complete JSON value in ``raw_args``.
+        """Return the first complete JSON value in `raw_args`.
 
-        v11+ tool calls are emitted as ``name{args}`` with no terminator, so a
+        v11+ tool calls are emitted as `name{args}` with no terminator, so a
         model may append ordinary text after the closing brace. Parse the first
-        JSON value with ``raw_decode`` and drop any trailing output, mirroring
+        JSON value with `raw_decode` and drop any trailing output, mirroring
         the pre-v11 path (fixes gh#48975).
         """
         stripped = raw_args.strip()

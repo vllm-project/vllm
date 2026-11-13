@@ -41,6 +41,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.diffusion_gemma_sampler import (
     sample_row_stats,
     sample_row_stats_reference,
+    stash_converged_logprobs,
 )
 from vllm.model_executor.models.gemma4 import Gemma4Model
 from vllm.model_executor.models.gemma4_mm import (
@@ -59,6 +60,8 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
@@ -290,6 +293,7 @@ class DiffusionGemmaForConditionalGeneration(
     _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
     _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
     _embed_patches = Gemma4ForConditionalGeneration._embed_patches
+    _normalize_pixel_values = Gemma4ForConditionalGeneration._normalize_pixel_values
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input_local
     _process_video_input = Gemma4ForConditionalGeneration._process_video_input_local
     _process_image_input_local = (
@@ -398,6 +402,32 @@ def _concat_logprob_stashes(
     )
 
 
+def _masked_stash_write(
+    stash: LogprobsTensors,
+    slots: torch.Tensor,
+    keep: torch.Tensor,
+    new: LogprobsTensors,
+) -> None:
+    """Write `new` ([n * W] rows) into the per-slot stash where `keep`.
+
+    The PyTorch counterpart of `stash_converged_logprobs`,
+    for constrained reads and non-CUDA runs.
+    """
+    n = slots.shape[0]
+    pad = stash.logprobs.shape[-1] - new.logprobs.shape[1]
+    ids = F.pad(new.logprob_token_ids.to(torch.int64), (0, pad))
+    lps = F.pad(new.logprobs, (0, pad), value=float("-inf"))
+    ranks = new.selected_token_ranks.to(torch.int64).view(n, -1)
+    W = ranks.shape[1]
+    for buf, rows in (
+        (stash.logprob_token_ids, ids.view(n, W, -1)),
+        (stash.logprobs, lps.view(n, W, -1)),
+        (stash.selected_token_ranks, ranks),
+    ):
+        mask = keep.view(n, *[1] * (rows.dim() - 1))
+        buf[slots, :W] = torch.where(mask, rows, buf[slots, :W])
+
+
 _MASKED_LOGIT = -1e20
 
 
@@ -426,7 +456,7 @@ def _mask_rows_to_allowed(
         if out is None:
             out = logits.clone()
         keep.zero_()
-        keep[allowed] = True
+        keep.index_fill_(0, allowed, True)
         out[int(start) : int(start) + int(n)].masked_fill_(~keep, _MASKED_LOGIT)
     return logits if out is None else out
 
@@ -502,7 +532,7 @@ def _compiled_sample_step(
     """Compiled decode step: confidence → accept/renoise → convergence, as
     vectorized PyTorch ops over [num_decode, CL] tensors. The per-position
     statistics (argmax, Gumbel-max sample, entropy, softmax) come from one
-    pass over the logits in ``sample_row_stats``."""
+    pass over the logits in `sample_row_stats`."""
     num_decode = decode_slots.shape[0]
     device = decode_slots.device
 
@@ -644,7 +674,7 @@ def _compiled_sample_step(
 class DiffusionGemmaRequestStates:
     """Pre-allocated GPU tensors for DiffusionGemma per-request state.
 
-    Follows the indexed-slot pattern used by ``RequestState``.
+    Follows the indexed-slot pattern used by `RequestState`.
     """
 
     def __init__(
@@ -790,7 +820,7 @@ class DiffusionGemmaRequestStates:
         self.constrained.pop(slot_idx, None)
 
     def set_seed_canvas(self, slot_idx: int, ids: list[int]) -> None:
-        """``ids`` covers the slot's canvas width; positions past it are never
+        """`ids` covers the slot's canvas width; positions past it are never
         scheduled."""
         self.seed_canvas[slot_idx, : len(ids)] = async_tensor_h2d(
             ids, dtype=torch.int64, device=self.device
@@ -799,7 +829,7 @@ class DiffusionGemmaRequestStates:
         self.seeded_slots.add(slot_idx)
 
     def set_pins(self, slot_idx: int, positions: list[int]) -> None:
-        """Hold ``positions`` of the slot's seed canvas through every denoise
+        """Hold `positions` of the slot's seed canvas through every denoise
         step. Validated against the request's canvas width upstream."""
         self.pin_mask[slot_idx].fill_(False)
         self.pin_mask[
@@ -807,17 +837,17 @@ class DiffusionGemmaRequestStates:
         ] = True
 
     def allowed_tensor(self, ids: tuple[int, ...]) -> torch.Tensor:
-        """``ids`` as an int64 tensor on the device, built once per tuple."""
+        """`ids` as an int64 tensor on the device, built once per tuple."""
         t = self._allowed_cache.get(ids)
         if t is None:
-            t = torch.tensor(ids, dtype=torch.int64, device=self.device)
+            t = async_tensor_h2d(ids, dtype=torch.int64, device=self.device)
             if len(self._allowed_cache) > 64:
                 self._allowed_cache.clear()
             self._allowed_cache[ids] = t
         return t
 
     def batch_allowed(self, slots: list[int]) -> torch.Tensor | None:
-        """The allowed ids shared by every one of ``slots``, or None.
+        """The allowed ids shared by every one of `slots`, or None.
 
         None means the step runs over the full vocabulary. The sampler then
         masks each constrained slot's logit rows to its own set, so a
@@ -837,7 +867,7 @@ class DiffusionGemmaRequestStates:
     def apply_seed_canvases(
         self, slots_np: np.ndarray, slots_gpu: torch.Tensor
     ) -> None:
-        """Replace the canvas of every seeded slot among ``slots_gpu``."""
+        """Replace the canvas of every seeded slot among `slots_gpu`."""
         if self.seeded_slots.isdisjoint(slots_np.tolist()):
             return
         self.canvas[slots_gpu] = torch.where(
@@ -1148,7 +1178,7 @@ _NO_PENALTIES_STATE = SimpleNamespace(output_bin_counts=None)
 class DiffusionSampler:
     """Batched accept/renoise sampler for DiffusionGemma.
 
-    Follows the same structure as ``vllm.v1.worker.gpu.sample.sampler.Sampler``:
+    Follows the same structure as `vllm.v1.worker.gpu.sample.sampler.Sampler`:
     decomposed into named methods, all GPU state in pre-allocated buffers,
     no GPU→CPU syncs on the hot path.
     """
@@ -1219,7 +1249,18 @@ class DiffusionSampler:
         # Per-slot stash for logprobs computed on the converging denoise step.
         # Populated after the post-sample kernel detects convergence; consumed
         # on the subsequent commit step when num_sampled=CANVAS_LEN.
-        self._pending_logprobs: dict[int, LogprobsTensors] = {}
+        # Fixed width, allocated before memory profiling.
+        shape = (max_num_reqs, self.canvas_length, 1 + MAX_LOGPROB_TOKEN_IDS)
+        self._logprob_stash = LogprobsTensors(
+            logprob_token_ids=torch.zeros(shape, dtype=torch.int64, device=device),
+            logprobs=torch.full(shape, float("-inf"), device=device),
+            selected_token_ranks=torch.zeros(
+                shape[:2], dtype=torch.int64, device=device
+            ),
+        )
+        # Requests with a wider top-k, filled on the step a slot converges:
+        # a [canvas_length, vocab] stash per slot would not fit.
+        self._wide_logprobs: dict[int, LogprobsTensors] = {}
 
     def add_request(self, req_idx: int, sampling_params: Any) -> None:
         if use_penalty(sampling_params):
@@ -1229,7 +1270,7 @@ class DiffusionSampler:
             )
         # Purge any stale logprobs stashed under this slot by a prior request
         # that was aborted between its converging denoise and commit steps.
-        self._pending_logprobs.pop(req_idx, None)
+        self._wide_logprobs.pop(req_idx, None)
         self.sampling_states.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         extra = getattr(sampling_params, "extra_args", None) or {}
@@ -1390,6 +1431,199 @@ class DiffusionSampler:
             num_rejected=num_rejected,
         )
 
+    def _tile_logprobs(
+        self,
+        scaled: torch.Tensor,
+        tile_slots: torch.Tensor,
+        allowed: torch.Tensor | None,
+        num_logprobs: int,
+        max_token_ids: int,
+    ) -> LogprobsTensors:
+        """Logprobs of every row of a [n, W, vocab] tile at its argmax."""
+        n, W, _ = scaled.shape
+        logits = scaled.view(n * W, -1)
+        argmax_tokens = logits.argmax(dim=-1)
+        if allowed is not None:
+            # Column j of the K-space logits is allowed[j]: report every
+            # allowed id, renormalized over the set, with the argmax in
+            # column 0.
+            lp = logits.log_softmax(dim=-1)
+            sel_lp = lp.gather(1, argmax_tokens.unsqueeze(1))
+            # Same convention as _ranks_kernel: 1-based, ties count, so the
+            # rank is the number of columns at or above the selected one. Out
+            # of set ids have zero probability, so the rank within the set is
+            # the real rank.
+            ranks = (lp >= sel_lp).sum(dim=1)
+            return LogprobsTensors(
+                logprob_token_ids=torch.cat(
+                    (
+                        allowed[argmax_tokens].unsqueeze(1),
+                        allowed.unsqueeze(0).expand(n * W, -1),
+                    ),
+                    dim=1,
+                ),
+                logprobs=torch.cat((sel_lp, lp), dim=1),
+                selected_token_ranks=ranks,
+            )
+        per_req_ids = max_token_ids > 0
+        return compute_topk_scores(
+            logits,
+            num_logprobs,
+            argmax_tokens,
+            logprob_token_ids_state=(
+                self.logprob_token_ids_state if per_req_ids else None
+            ),
+            expanded_idx_mapping=(
+                tile_slots.to(torch.int32).repeat_interleave(W, output_size=n * W)
+                if per_req_ids
+                else None
+            ),
+            max_per_req_token_ids=max_token_ids,
+            logits_mode=self.logits_mode,
+        )
+
+    def _stash_tile_logprobs(
+        self,
+        tile_logits: torch.Tensor,
+        W: int,
+        lp_np: np.ndarray,
+        tile_slots: torch.Tensor,
+        tile_valid: torch.Tensor,
+        keep: torch.Tensor,
+        lp_temp: torch.Tensor,
+        allowed: torch.Tensor | None,
+        num_logprobs: int,
+        max_token_ids: int,
+    ) -> None:
+        """Stash the logprobs of the tile requests at `lp_np` where `keep`.
+
+        Requests without logprobs cost nothing. Which slots converged is only
+        known on the device, so the kernels skip the other rows themselves.
+        """
+        n = tile_slots.shape[0]
+        idx = async_tensor_h2d(lp_np.astype(np.int64), device=tile_slots.device)
+        slots, keep, temps = tile_slots[idx], keep[idx], lp_temp[idx]
+        stash = self._logprob_stash
+        if allowed is not None or not tile_logits.is_cuda:
+            # One PyTorch pass over every row: cheap over the narrow K-space
+            # rows of a constrained step.
+            rows = tile_logits.view(n, W, -1)
+            if len(lp_np) < n:
+                rows = rows[idx]
+            new = self._tile_logprobs(
+                rows.float() / temps[:, None, None],
+                slots,
+                allowed,
+                num_logprobs,
+                max_token_ids,
+            )
+            _masked_stash_write(stash, slots, keep, new)
+            return
+        ids_state = self.logprob_token_ids_state
+        stash_converged_logprobs(
+            tile_logits,
+            W,
+            idx,
+            slots,
+            keep,
+            tile_valid[idx],
+            temps,
+            num_logprobs,
+            ids_state.num_token_ids.gpu,
+            ids_state.token_ids.gpu if max_token_ids > 0 else None,
+            stash.logprob_token_ids,
+            stash.logprobs,
+            stash.selected_token_ranks,
+            self.logits_mode,
+        )
+
+    def _pend_wide_logprobs(
+        self,
+        tile_logits: torch.Tensor,
+        W: int,
+        wide_np: np.ndarray,
+        tile_slots_np: np.ndarray,
+        tile_valid_np: np.ndarray,
+        keep: torch.Tensor,
+        temp: torch.Tensor,
+        num_logprobs: int,
+        max_token_ids: int,
+    ) -> None:
+        """Compute the logprobs of the converged wide requests at `wide_np`.
+
+        A per-slot stash for them would hold [canvas_length, vocab] rows, and
+        a top-k over all their rows every step is a full sort. So read back
+        which of them converged and compute only those.
+        """
+        idx = async_tensor_h2d(wide_np.astype(np.int64), device=keep.device)
+        with gpu_sync_allowed():
+            converged_np = keep[idx].cpu().numpy()
+        states = self.diffusion_states
+        per_req_ids = max_token_ids > 0
+        for li in wide_np[converged_np].tolist():
+            slot = int(tile_slots_np[li])
+            k = int(tile_valid_np[li])
+            rows = tile_logits[li * W : li * W + k].float()
+            scaled = rows / temp[li].clamp(min=1e-10)
+            # Read-only slots report logprobs at temperature 1. The
+            # schedule-tempered logits share the argmax.
+            src = rows if slot in states.read_only_slots else scaled
+            self._wide_logprobs[slot] = compute_topk_scores(
+                src,
+                num_logprobs,
+                scaled.argmax(dim=-1),
+                logprob_token_ids_state=(
+                    self.logprob_token_ids_state if per_req_ids else None
+                ),
+                expanded_idx_mapping=(
+                    torch.full((k,), slot, dtype=torch.int32, device=src.device)
+                    if per_req_ids
+                    else None
+                ),
+                max_per_req_token_ids=max_token_ids,
+                logits_mode=self.logits_mode,
+            )
+
+    def _emitted_logprobs(
+        self,
+        slots_np: np.ndarray,
+        lp_req_np: np.ndarray,
+        wide_req_np: np.ndarray,
+        num_sampled: torch.Tensor,
+        width: int,
+    ) -> LogprobsTensors | None:
+        """Logprobs of the requests emitting this step, picked on the host.
+
+        For steps with a wide request: a canvas of rows for
+        every logprobs request, padded to its top-k, would not fit.
+        """
+        with gpu_sync_allowed():
+            emitted_np = num_sampled.cpu().numpy()
+        stash = self._logprob_stash
+        parts: list[LogprobsTensors] = []
+        cu_gen: list[int] = []
+        flat_offset = 0
+        for i, slot in enumerate(slots_np.tolist()):
+            cu_gen.append(flat_offset)
+            k = int(emitted_np[i])
+            if k == 0 or not lp_req_np[i]:
+                continue
+            if wide_req_np[i]:
+                part = self._wide_logprobs.pop(slot, None)
+                if part is None:
+                    continue
+            else:
+                part = LogprobsTensors(
+                    logprob_token_ids=stash.logprob_token_ids[slot, :k, :width],
+                    logprobs=stash.logprobs[slot, :k, :width],
+                    selected_token_ranks=stash.selected_token_ranks[slot, :k],
+                )
+            parts.append(part)
+            flat_offset += part.logprobs.shape[0]
+        if not parts:
+            return None
+        return _concat_logprob_stashes(parts, cu_gen)
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -1475,12 +1709,27 @@ class DiffusionSampler:
             ]
 
         slots_np = input_batch.idx_mapping_np[:num_reqs]
-        max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
+        req_num_logprobs_np = self.sampling_states.num_logprobs[slots_np]
         # Requests may ask for specific token ids' logprobs instead of, or as
         # well as, a top-k.
-        max_token_ids = self.logprob_token_ids_state.max_num_token_ids(slots_np)
-        want_logprobs = max_num_logprobs >= 0 or max_token_ids > 0
-        num_logprobs = max(max_num_logprobs, 0)
+        req_num_ids_np = self.logprob_token_ids_state.num_token_ids.np[slots_np]
+        max_token_ids = int(req_num_ids_np.max(initial=0))
+        lp_req_np = (req_num_logprobs_np >= 0) | (req_num_ids_np > 0)
+        # A top-k wider than the stash. Constrained reads report their
+        # allowed ids, whatever the top-k.
+        wide_req_np = req_num_logprobs_np > MAX_LOGPROB_TOKEN_IDS
+        if states.constrained:
+            wide_req_np &= ~np.isin(slots_np, list(states.constrained))
+        lp_decode_np = (lp_req_np & ~wide_req_np)[decode_indices_np]
+        wide_decode_np = wide_req_np[decode_indices_np]
+        # Every row gets the batch's widest top-k, as compute_topk_scores
+        # gives it.
+        num_logprobs = int(
+            req_num_logprobs_np[req_num_logprobs_np <= MAX_LOGPROB_TOKEN_IDS].max(
+                initial=0
+            )
+        )
+        lp_width = 1 + max(num_logprobs, max_token_ids)
 
         # Sample per tile. Decode requests are grouped by canvas width and each
         # tile runs the compiled step at that width over [:, :W] views of the
@@ -1589,12 +1838,12 @@ class DiffusionSampler:
                     argmax_rows = allowed[argmax_rows]
                     sample_rows = allowed[sample_rows]
                 probs = probs_rows.view(n, W, -1) if probs_rows is not None else None
-                # Only the logprob stash reads the scaled logits.
-                scaled = None
-                if want_logprobs:
-                    scaled = tile_logits.float().view(n, W, -1) / temp[
-                        :, None, None
-                    ].clamp(min=1e-10)
+                lp_np = np.flatnonzero(lp_decode_np[sel_np])
+                wide_np = np.flatnonzero(wide_decode_np[sel_np])
+                if len(lp_np):
+                    # Read-only slots report logprobs at temperature 1.
+                    lp_temp = torch.where(states.read_only[tile_slots], 1.0, temp)
+                    lp_temp = lp_temp.clamp(min=1e-10)
 
                 _compiled_sample_step(
                     sample_rows.view(n, W),
@@ -1638,95 +1887,62 @@ class DiffusionSampler:
                 )
 
                 # Stash newly converged logprobs, including reads that emit now.
-                if want_logprobs:
-                    converged_mask = states.is_encoder_phase[tile_slots] | (
-                        num_sampled[decode_idx[sel]] > 0
+                if len(lp_np) or len(wide_np):
+                    converged = (
+                        states.is_encoder_phase[tile_slots]
+                        | (num_sampled[decode_idx[sel]] > 0)
+                    ) & ~is_committing[sel]
+                if len(lp_np):
+                    self._stash_tile_logprobs(
+                        tile_logits,
+                        W,
+                        lp_np,
+                        tile_slots,
+                        tile_valid,
+                        converged,
+                        lp_temp,
+                        allowed,
+                        num_logprobs,
+                        max_token_ids,
                     )
-                    just_converged = converged_mask & ~is_committing[sel]
-                    if just_converged.any():
-                        assert scaled is not None
-                        flat_logits = scaled.reshape(-1, scaled.shape[-1])
-                        argmax_tokens = scaled.argmax(dim=-1)
-                        raw_flat: torch.Tensor | None = None
-                        for local_idx in just_converged.nonzero(as_tuple=True)[0]:
-                            li = local_idx.item()
-                            slot = tile_slots[local_idx].item()
-                            # Stash only the real canvas positions; padded tail
-                            # positions are never emitted.
-                            k_i = int(tile_valid_np[li])
-                            pos = li * W
-                            src = flat_logits
-                            if slot in states.read_only_slots:
-                                # Read-only slots report logprobs at temperature 1.
-                                # The schedule-tempered logits share the argmax.
-                                if raw_flat is None:
-                                    raw_flat = tile_logits.float()
-                                src = raw_flat
-                            if allowed is not None:
-                                # Column j of the K-space logits is allowed[j]:
-                                # report every allowed id, renormalized over
-                                # the set, with the argmax in column 0.
-                                rows = src[pos : pos + k_i]
-                                lp = rows.log_softmax(dim=-1)
-                                am = argmax_tokens[local_idx][:k_i]
-                                sel_lp = lp.gather(1, am.unsqueeze(1))
-                                # Same convention as _ranks_kernel: 1-based,
-                                # ties count, so the rank is the number of
-                                # columns at or above the selected one. Out
-                                # of set ids have zero probability, so the
-                                # rank within the set is the real rank.
-                                ranks = (lp >= sel_lp).sum(dim=1)
-                                self._pending_logprobs[slot] = LogprobsTensors(
-                                    logprob_token_ids=torch.cat(
-                                        (
-                                            allowed[am].unsqueeze(1),
-                                            allowed.unsqueeze(0).expand(k_i, -1),
-                                        ),
-                                        dim=1,
-                                    ),
-                                    logprobs=torch.cat((sel_lp, lp), dim=1),
-                                    selected_token_ranks=ranks.to(torch.int64),
-                                )
-                                continue
-                            per_req_ids = max_token_ids > 0
-                            self._pending_logprobs[slot] = compute_topk_scores(
-                                src[pos : pos + k_i],
-                                num_logprobs,
-                                argmax_tokens[local_idx][:k_i],
-                                logprob_token_ids_state=(
-                                    self.logprob_token_ids_state
-                                    if per_req_ids
-                                    else None
-                                ),
-                                # every row of this stash belongs to one slot
-                                expanded_idx_mapping=(
-                                    torch.full(
-                                        (k_i,), slot, dtype=torch.int32, device=device
-                                    )
-                                    if per_req_ids
-                                    else None
-                                ),
-                                max_per_req_token_ids=max_token_ids,
-                                logits_mode=self.logits_mode,
-                            )
+                if len(wide_np):
+                    self._pend_wide_logprobs(
+                        tile_logits,
+                        W,
+                        wide_np,
+                        decode_slots_np[sel_np],
+                        tile_valid_np,
+                        converged,
+                        temp,
+                        int(req_num_logprobs_np.max()),
+                        max_token_ids,
+                    )
             run_start = run_end
 
-        # Only emitting requests consume their stashed logprobs.
         logprobs_tensors = None
-        if want_logprobs and self._pending_logprobs:
-            emitting_slots = set(slots_np[num_sampled.cpu().numpy() > 0].tolist())
-            parts: list[LogprobsTensors] = []
-            cu_gen: list[int] = []
-            flat_offset = 0
-            for i in range(num_reqs):
-                cu_gen.append(flat_offset)
-                slot = int(slots_np[i])
-                if slot in emitting_slots and slot in self._pending_logprobs:
-                    lp = self._pending_logprobs.pop(slot)
-                    parts.append(lp)
-                    flat_offset += lp.logprobs.shape[0]
-            if parts:
-                logprobs_tensors = _concat_logprob_stashes(parts, cu_gen)
+        if wide_decode_np.any():
+            logprobs_tensors = self._emitted_logprobs(
+                slots_np, lp_req_np, wide_req_np, num_sampled, lp_width
+            )
+        elif lp_decode_np.any():
+            # Every logprobs request gets a canvas of rows; only emitting
+            # requests read theirs, so which slots emit never has to be known
+            # on the host.
+            CL = self.canvas_length
+            stash = self._logprob_stash
+            out_slots = async_tensor_h2d(
+                decode_slots_np[lp_decode_np].astype(np.int64), device=device
+            )
+            rows_np = np.zeros(num_reqs, dtype=np.int64)
+            rows_np[decode_indices_np[lp_decode_np]] = CL
+            logprobs_tensors = LogprobsTensors(
+                logprob_token_ids=stash.logprob_token_ids[
+                    out_slots, :, :lp_width
+                ].reshape(-1, lp_width),
+                logprobs=stash.logprobs[out_slots, :, :lp_width].reshape(-1, lp_width),
+                selected_token_ranks=stash.selected_token_ranks[out_slots].view(-1),
+                cu_num_generated_tokens=(np.cumsum(rows_np) - rows_np).tolist(),
+            )
 
         return self._build_output(
             input_batch,

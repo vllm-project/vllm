@@ -48,8 +48,8 @@ EXPERT_TP_TPS = (8,)
 
 
 class UnpoolerShape(NamedTuple):
-    """Launch shape of the unpooler GEMM: K split over ``splits`` CTAs of one
-    cluster, ``kw`` consecutive K per warp, ``accs`` accumulators per warp, and
+    """Launch shape of the unpooler GEMM: K split over `splits` CTAs of one
+    cluster, `kw` consecutive K per warp, `accs` accumulators per warp, and
     the token tile per batch."""
 
     splits: int

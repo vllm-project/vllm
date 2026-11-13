@@ -909,6 +909,15 @@ def get_model_params(config):
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
     elif architecture in (
+        "Glm5NextForConditionalGeneration",
+        "Glm5NextForCausalLM",
+    ):
+        text_config = config.get_text_config()
+        E = text_config.n_routed_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
+    elif architecture in (
         "DiffusionGemmaForBlockDiffusion",
         "Gemma4ForCausalLM",
         "Gemma4ForConditionalGeneration",
@@ -982,7 +991,7 @@ def get_quantization_group_size(config) -> int | None:
     """Extract the quantization group size from the HF model config.
 
     This reads directly from the HuggingFace config object (as returned by
-    ``get_config()``), not from vLLM's quantization config classes.
+    `get_config()`), not from vLLM's quantization config classes.
 
     Supports AWQ/GPTQ-style configs (direct 'group_size' key) and
     compressed-tensors configs (nested inside 'config_groups').

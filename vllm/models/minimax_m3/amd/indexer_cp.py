@@ -30,9 +30,9 @@ _HIP_PAGE = 4096
 
 
 def _ipc_alloc(nbytes: int, group) -> torch.Tensor:
-    """Allocate a zeroed, IPC-shared ``nbytes`` on every rank.
+    """Allocate a zeroed, IPC-shared `nbytes` on every rank.
 
-    Returns a ``[world]`` int64 CPU tensor of their device addresses, never freed.
+    Returns a `[world]` int64 CPU tensor of their device addresses, never freed.
     """
     from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 
@@ -45,7 +45,7 @@ def _ipc_alloc(nbytes: int, group) -> torch.Tensor:
 class IndexerCpPeers:
     """The buffers the CP selector exchanges through.
 
-    ``cand_ptrs`` is every rank's candidate buffer; ``cp_gen`` is this rank's own.
+    `cand_ptrs` is every rank's candidate buffer; `cp_gen` is this rank's own.
     """
 
     cand_ptrs: torch.Tensor
@@ -58,7 +58,7 @@ _PEERS: dict[tuple[int, int, int, int], IndexerCpPeers] = {}
 def get_indexer_cp_peers(owned_heads: int, max_rows: int, topk: int) -> IndexerCpPeers:
     """The buffers the CP selector exchanges through, allocated once per key.
 
-    Cached and shared by every layer, sized to ``max_rows`` so captured graphs
+    Cached and shared by every layer, sized to `max_rows` so captured graphs
     always address the same buffer. Every rank must reach this with the same key.
     """
     from aiter.ops.msa_block_select import CP_MAX_BLOCKS, topk_cp_candidate_numel

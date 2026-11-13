@@ -680,11 +680,11 @@ def test_engine_reasoning_no_tool_batched_content_passthrough(tokenizer, request
     The three mixed-parser tests above all pair the engine reasoning
     parser with Hermes; none exercise the engine-reasoning-only path
     through the hoisted finish_streaming() transition (where
-    ``_engine_based`` is True and there is no tool parser).  A single
-    batched delta carries ``</think>`` plus the following content
-    (as happens with stream_interval > 1).  The post-``</think>`` text
+    `_engine_based` is True and there is no tool parser).  A single
+    batched delta carries `</think>` plus the following content
+    (as happens with stream_interval > 1).  The post-`</think>` text
     must be emitted as content -- not dropped, not reclassified as
-    reasoning -- and the ``</think>`` marker must not leak either way."""
+    reasoning -- and the `</think>` marker must not leak either way."""
     parser = Qwen3ReasoningNoToolParser(tokenizer)
     assert isinstance(parser._reasoning_parser, Qwen3ParserReasoningAdapter)
     assert parser._reasoning_parser.engine_based_streaming is True
@@ -779,13 +779,13 @@ def test_engine_reasoning_no_tool_holdback_finished_and_hidden_reasoning(
 
 
 def _decode_stream_deltas(tokenizer, groups):
-    """Decode token-ID groups into ``(delta_text, group)`` pairs via the real
-    incremental ``DecodeStream``.
+    """Decode token-ID groups into `(delta_text, group)` pairs via the real
+    incremental `DecodeStream`.
 
-    This mirrors how vLLM's detokenizer feeds ``parse_delta`` in
+    This mirrors how vLLM's detokenizer feeds `parse_delta` in
     production: byte-level UTF-8 hold-back means a character whose bytes
     span multiple tokens is only surfaced once complete (a naive
-    per-token ``decode`` would instead emit U+FFFD replacement chars)."""
+    per-token `decode` would instead emit U+FFFD replacement chars)."""
     from tokenizers.decoders import DecodeStream
 
     stream = DecodeStream(skip_special_tokens=False)
@@ -807,14 +807,14 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
     Extends the ASCII '<' hold-back guard with bbrowning's multi-token
     *character* concern.  Two things must both hold:
 
-    1. The batched ``</think><`` delta relies on the hoisted
+    1. The batched `</think><` delta relies on the hoisted
        finish_streaming() to recover the engine-buffered '<'.  Without
-       the fix the Hermes parser never sees ``<tool_call>`` and emits no
+       the fix the Hermes parser never sees `<tool_call>` and emits no
        tool call at all.
-    2. The tool-call arguments carry ``東京🧑\u200d🚀``; the astronaut
+    2. The tool-call arguments carry `東京🧑\u200d🚀`; the astronaut
        ZWJ sequence's bytes span multiple Qwen3 tokens, so the rest of
        the stream is fed one token at a time through the real
-       ``DecodeStream``.  Its UTF-8 hold-back yields the correct
+       `DecodeStream`.  Its UTF-8 hold-back yields the correct
        character round-trip (a naive per-token decode would corrupt it),
        verifying the boundary stays byte-safe for multi-token
        characters."""

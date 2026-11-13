@@ -151,8 +151,8 @@ def batch_invariant_mode():
 @pytest.mark.usefixtures("batch_invariant_mode")
 @pytest.mark.parametrize("op", ["mm", "addmm", "bmm"])
 def test_compiled_matmul_reaches_batch_invariant_out_overloads(op):
-    """Inductor lowers mm/addmm/bmm to ``extern_kernels.<op>(..., out=buf)``,
-    i.e. the ``.out`` overload, which eager never dispatches."""
+    """Inductor lowers mm/addmm/bmm to `extern_kernels.<op>(..., out=buf)`,
+    i.e. the `.out` overload, which eager never dispatches."""
     if (
         op != "bmm"
         and current_platform.is_cuda()

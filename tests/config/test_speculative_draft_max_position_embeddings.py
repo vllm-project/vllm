@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the draft ``max_position_embeddings`` override (#48894, #57941).
+"""Tests for the draft `max_position_embeddings` override (#48894, #57941).
 
-Every draft except an independent ``draft_model`` (EAGLE, DFlash, DSpark,
+Every draft except an independent `draft_model` (EAGLE, DFlash, DSpark,
 MTP, ...) shares the target's positional space, but a
-draft checkpoint can ship a ``max_position_embeddings`` smaller than the
-context the target is served with: ``vllm-project/EAGLE3-LLaMA3.1-Instruct-8B`` has
+draft checkpoint can ship a `max_position_embeddings` smaller than the
+context the target is served with: `vllm-project/EAGLE3-LLaMA3.1-Instruct-8B` has
 2048, and any DFlash or DSpark draft falls short once the target's context is
 extended past the draft's training length. That value sizes the draft's rotary
-``cos_sin_cache`` while the proposer feeds positions up to the target's
-``max_model_len``, so the cache gather goes out of bounds — a device-side
+`cos_sin_cache` while the proposer feeds positions up to the target's
+`max_model_len`, so the cache gather goes out of bounds — a device-side
 assert under torch.compile, silent garbage reads or an illegal memory
-access in eager mode. ``SpeculativeConfig`` must raise the draft's value to
-the target's ``max_model_len``, with a log, for every method but draft_model,
+access in eager mode. `SpeculativeConfig` must raise the draft's value to
+the target's `max_model_len`, with a log, for every method but draft_model,
 and only when the draft's RoPE type uses that value purely to size the cache;
-otherwise the V2 model runner limits ``max_model_len`` to the draft's instead.
+otherwise the V2 model runner limits `max_model_len` to the draft's instead.
 """
 
 import logging
@@ -37,6 +37,8 @@ DFLASH_DRAFT = "z-lab/Qwen3-4B-DFlash-b16"  # max_position_embeddings=40960
 DFLASH_TARGET = "Qwen/Qwen3-4B"  # max_position_embeddings=40960
 DSPARK_DRAFT = "deepseek-ai/dspark_qwen3_8b_block7"  # max_position_embeddings=40960
 DSPARK_TARGET = "Qwen/Qwen3-8B"  # max_position_embeddings=40960
+# Ships an MTP layer; max_position_embeddings=262144 in its nested text_config.
+MTP_TARGET = "Qwen/Qwen3.5-0.8B"
 
 _LOGGER = "vllm.config.speculative"
 _OVERRIDE_MSG = "Overriding draft model max_position_embeddings"
@@ -169,6 +171,38 @@ def test_eagle_draft_inherits_target_max_model_len(
     draft_hf_config = speculative_config.draft_model_config.hf_config
     assert draft_hf_config.max_position_embeddings == target_model_config.max_model_len
     assert _override_logged(vllm_caplog)
+
+
+@pytest.mark.cpu_test
+def test_mtp_draft_inherits_target_max_model_len(
+    vllm_caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """MTP drafts get none of the target's dict hf_overrides; the raised value
+    must land in the draft's nested text config."""
+    target_model_config = ModelConfig(
+        MTP_TARGET,
+        hf_overrides={"text_config": {"max_position_embeddings": 524288}},
+    )
+    assert target_model_config.max_model_len == 524288
+    speculative_config = SpeculativeConfig(
+        target_model_config=target_model_config,
+        target_parallel_config=ParallelConfig(),
+        method="mtp",
+        num_speculative_tokens=1,
+    )
+    draft_config = speculative_config.draft_model_config
+    draft_text_config = draft_config.hf_text_config
+    assert draft_text_config.max_position_embeddings == 524288
+    assert _override_logged(vllm_caplog)
+
+    # The V2 model runner's draft limit must also read the nested text config.
+    assert draft_config.hf_config is not draft_text_config
+    monkeypatch.setattr(
+        "vllm.config.speculative._rope_only_sizes_cache",
+        lambda config: config is draft_text_config,
+    )
+    assert speculative_config.speculator_config.max_model_len is None
 
 
 @pytest.mark.cpu_test

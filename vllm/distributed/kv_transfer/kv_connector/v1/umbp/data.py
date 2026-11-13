@@ -26,23 +26,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
-
-
-def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
-    """Map each layer of a cache group to the spec describing its own pages."""
-    spec = group.kv_cache_spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return {name: spec.kv_cache_specs[name] for name in group.layer_names}
-    return dict.fromkeys(group.layer_names, spec)
 
 
 def _page_segments(
@@ -51,7 +42,7 @@ def _page_segments(
     num_blocks: int,
     layout: KVCacheLayout,
 ) -> tuple[tuple[int, int], ...]:
-    """Byte ``(offset, length)`` runs of a layer's page from its block start.
+    """Byte `(offset, length)` runs of a layer's page from its block start.
 
     Empty when the page is one contiguous run. LHBNC and BHLNC store each
     head's tokens as a separate run.
@@ -82,6 +73,29 @@ def _page_segments(
     )
 
 
+def tp_replicated_group_ids(
+    config: KVCacheConfig, topology: RankTopology
+) -> frozenset[int]:
+    """Groups whose blocks are byte-identical on every TP rank.
+
+    Every layer must declare a single TP shard (`max_tp_shards=1`, e.g. MLA
+    latents and sparse indexers); context parallelism shards them, so it opts
+    out.
+    """
+    if topology.tp_size == 1 or topology.pcp_size > 1 or topology.dcp_size > 1:
+        return frozenset()
+    return frozenset(
+        group_id
+        for group_id, group in enumerate(config.kv_cache_groups)
+        if group.enable_kv_transfer
+        and group.layer_names
+        and all(
+            isinstance(spec, AttentionSpec) and spec.max_tp_shards == 1
+            for spec in group.kv_cache_specs.values()
+        )
+    )
+
+
 def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
     """Every field that shapes a layer's stored bytes, in a stable form."""
     return {
@@ -93,7 +107,7 @@ def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
 def _model_fingerprint(model_config: Any) -> dict[str, Any]:
     """Effective model settings that change the KV a checkpoint produces.
 
-    ``hf_config`` already has ``hf_overrides`` applied, so overridden RoPE or
+    `hf_config` already has `hf_overrides` applied, so overridden RoPE or
     attention settings separate engines that share the same model path.
     """
     hf_config = getattr(model_config, "hf_config", None)
@@ -187,6 +201,25 @@ class RankTopology:
         )
 
 
+def _engine_may_load_foreign_kv(vllm_config: Any) -> bool:
+    """Whether any connector of this engine may load KV that vLLM's own cache
+    writer did not produce, e.g. a MultiConnector sibling of UMBP.
+
+    MultiConnector hands each child a config copy holding only that child's
+    kv_transfer_config, so read the engine's current config, which workers set
+    while they create their connector.
+    """
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        kv_connector_may_load_foreign_kv,
+    )
+
+    engine_config = get_current_vllm_config_or_none()
+    if engine_config is None or engine_config.kv_transfer_config is None:
+        engine_config = vllm_config
+    return kv_connector_may_load_foreign_kv(engine_config)
+
+
 @dataclass(frozen=True)
 class UMBPNamespace:
     """Compatibility namespace for objects stored outside the engine."""
@@ -195,7 +228,7 @@ class UMBPNamespace:
 
     @classmethod
     def configured(cls, vllm_config: Any) -> UMBPNamespace | None:
-        """Return the explicit ``key_namespace``, or None when it is derived."""
+        """Return the explicit `key_namespace`, or None when it is derived."""
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         configured = extra.get("key_namespace", "auto")
         if configured == "auto":
@@ -212,8 +245,8 @@ class UMBPNamespace:
     ) -> UMBPNamespace:
         """Derive the namespace from a worker's per-layer KV cache config.
 
-        The scheduler's config flattens UniformTypeKVCacheSpecs groups, so the
-        scheduler adopts the namespace its workers report instead.
+        The scheduler holds a single worker's config, so it adopts the
+        namespace its workers report instead.
         """
         if (configured := cls.configured(vllm_config)) is not None:
             return configured
@@ -242,10 +275,11 @@ class UMBPNamespace:
             "groups": [
                 {
                     "layers": group.layer_names,
-                    "block_size": group.kv_cache_spec.block_size,
+                    "block_size": group.block_size,
+                    "kind": repr(group.manager_config),
                     "layer_specs": {
                         name: _spec_fingerprint(spec)
-                        for name, spec in _layer_specs(group).items()
+                        for name, spec in group.kv_cache_specs.items()
                     },
                 }
                 for group in kv_cache_config.kv_cache_groups
@@ -259,6 +293,11 @@ class UMBPNamespace:
         if speculative is not None:
             # Added only when set, so namespaces without a drafter are unchanged.
             fields["speculative"] = speculative
+        if _engine_may_load_foreign_kv(vllm_config):
+            # Bytes another connector loaded can be stored here too. Keep them
+            # out of the namespace that UMBP-only engines restore as canonical
+            # KV. Added only when set, so UMBP-only namespaces are unchanged.
+            fields["foreign_kv"] = True
         payload = json.dumps(
             fields, sort_keys=True, separators=(",", ":"), default=str
         ).encode()
@@ -270,17 +309,26 @@ class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):
     """Namespace a worker derived, reported to the scheduler at startup."""
 
     namespace: str
+    replicated_groups: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
 class BlockIdentityCodec:
-    """Build stable rank-local keys from vLLM block hashes."""
+    """Build stable rank-local keys from vLLM block hashes.
+
+    Groups in `replicated_groups` get one TP-agnostic key (`tp*`) that
+    every TP rank loads and only TP rank 0 stores.
+    """
 
     namespace: UMBPNamespace
     tp_rank: int = 0
     pp_rank: int = 0
     pcp_rank: int = 0
     dcp_rank: int = 0
+    replicated_groups: frozenset[int] = frozenset()
+
+    def stores_group(self, group_id: int) -> bool:
+        return self.tp_rank == 0 or group_id not in self.replicated_groups
 
     def key(self, block_hash: bytes, group_id: int = 0) -> str:
         return self.key_for_namespace(
@@ -300,9 +348,10 @@ class BlockIdentityCodec:
         if group_id < 0:
             raise ValueError("group_id must be non-negative")
         tp_rank, pcp_rank, dcp_rank, pp_rank = namespace
+        tp = "*" if group_id in self.replicated_groups else tp_rank
         return (
             f"umbp:vllm:v1:{self.namespace.value}:"
-            f"tp{tp_rank}:pcp{pcp_rank}:dcp{dcp_rank}:"
+            f"tp{tp}:pcp{pcp_rank}:dcp{dcp_rank}:"
             f"pp{pp_rank}:g{group_id}:"
             f"{block_hash.hex()}"
         )
@@ -317,7 +366,14 @@ class BlockIdentityCodec:
             self.key_for_namespace(block_hash, group_id, namespace)
             for namespace in topology.all_namespaces()
             for group_id in group_ids
+            if group_id not in self.replicated_groups or namespace[0] == 0
         )
+
+    def keys_per_object(self, topology: RankTopology, group_id: int) -> int:
+        """Number of rank keys that together hold one logical block."""
+        if group_id in self.replicated_groups:
+            return topology.rank_count // topology.tp_size
+        return topology.rank_count
 
 
 @dataclass(frozen=True)
@@ -388,7 +444,7 @@ class KVLayoutPlanner:
             layer: (group_id, spec)
             for group_id, group in enumerate(config.kv_cache_groups)
             if group.enable_kv_transfer
-            for layer, spec in _layer_specs(group).items()
+            for layer, spec in group.kv_cache_specs.items()
         }
         layout = config.kv_cache_layout
         regions: list[KVRegion] = []
