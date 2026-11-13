@@ -167,8 +167,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.9,
-        help="Fraction of GPU memory to use",
+        default=None,
+        help="Fraction of GPU memory to use (default: vLLM's default)",
     )
     parser.add_argument(
         "--max-model-len",

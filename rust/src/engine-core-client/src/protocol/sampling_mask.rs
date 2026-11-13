@@ -21,11 +21,14 @@ pub struct SamplingMask {
 /// Python `SamplingMaskLists` tuple before ndarray raw views are resolved.
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct WireSamplingMask {
-    token_ids: WireNdArray,
+    /// Kept token ids of every position, concatenated.
+    pub token_ids: WireNdArray,
+    /// Row boundaries into `token_ids`; `None` for a single position.
     #[serde(default)]
-    offsets: Option<WireNdArray>,
+    pub offsets: Option<WireNdArray>,
+    /// Batch-level boundaries; `None` in a per-request output.
     #[serde(default)]
-    cu_num_generated_tokens: Option<Vec<usize>>,
+    pub cu_num_generated_tokens: Option<Vec<usize>>,
 }
 
 /// Sampling-mask field while it transitions from Python wire data to rows.
@@ -79,6 +82,17 @@ impl Serialize for MaybeWireSamplingMask {
 }
 
 impl MaybeWireSamplingMask {
+    /// Move the large arrays of a wire payload into the ordered auxiliary-frame
+    /// list.
+    pub(super) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Self::Wire(value) = self {
+            value.token_ids.extract_aux_frame(aux_frames, threshold);
+            if let Some(offsets) = &mut value.offsets {
+                offsets.extract_aux_frame(aux_frames, threshold);
+            }
+        }
+    }
+
     pub(super) fn resolve(self, frames: &[Bytes], field_prefix: &str) -> Result<Self> {
         match self {
             Self::Direct(value) => Ok(Self::Direct(value)),
@@ -144,9 +158,7 @@ impl WireSamplingMask {
 mod tests {
     use super::*;
     use crate::protocol::dtype::{NumpyDtype, TensorDtype};
-    use crate::protocol::output::{
-        EngineCoreOutput, RequestBatchOutputs, decode_engine_core_outputs,
-    };
+    use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs};
     use crate::protocol::tensor::WireArrayData;
     use crate::protocol::{decode_msgpack, encode_msgpack};
 
@@ -221,7 +233,7 @@ mod tests {
             [2_i32, 12, 16, 18].into_iter().flat_map(i32::to_le_bytes).collect::<Vec<_>>();
         let offsets = [0_i64, 2, 4].into_iter().flat_map(i64::to_le_bytes).collect::<Vec<_>>();
 
-        let decoded = decode_engine_core_outputs(&[
+        let decoded = EngineCoreOutputs::from_frames(&[
             Bytes::from(primary),
             Bytes::from(token_ids),
             Bytes::from(offsets),
