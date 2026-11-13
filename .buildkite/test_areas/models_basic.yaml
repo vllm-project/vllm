@@ -223,6 +223,7 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/kimi_k3/
+  - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
@@ -250,6 +251,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/models/kimi_k3/
+      - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
       - tests/models/kimi_k3/
       - vllm/platforms/rocm.py
       commands:
@@ -286,12 +288,17 @@ steps:
   - vllm/model_executor/layers/mamba/
   - tests/models/kimi_k3/test_prefix_cache.py
   - .buildkite/scripts/check-kv-connectors.sh
+  env:
+    # The test checks prompt-checkpoint reuse, not the transport, and not every
+    # b200-k8s pod exposes an RDMA device to the container.
+    MOONCAKE_PROTOCOL: "tcp"
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - pytest -v -s models/kimi_k3/test_prefix_cache.py
   mirror:
     amd:
       label: ":amd: (MI355) Kimi K3 Prefix Cache"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 60
@@ -428,6 +435,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Qwen4 Exp HC Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_1
       depends_on:
@@ -590,6 +598,7 @@ steps:
 
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
+  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40

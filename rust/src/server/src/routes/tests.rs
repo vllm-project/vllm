@@ -4406,6 +4406,327 @@ async fn openai_non_stream_returns_routed_experts_cut_at_stop_string() {
     }
 }
 
+/// Like Python, the generate route ends the output at the token that
+/// completes a stop string, with the routed-expert rows of the kept tokens,
+/// although it returns token IDs only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_stop_string_cuts_tokens_and_routed_experts() {
+    use base64::Engine as _;
+
+    for stream in [false, true] {
+        let ipc = IpcNamespace::new().expect("create ipc namespace");
+        let handshake_address = ipc.handshake_endpoint();
+        let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-generate-stop-string".to_vec(),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request = decode_add_request(&add);
+                    // One `[layer, top_k] = [1, 2]` row per token, plus a
+                    // leading prompt row on the first output. The stop string
+                    // `!` ends the request inside the last output, so the
+                    // trailing `x` and its row are cut.
+                    for (token_ids, rows) in
+                        [(&b"h"[..], &[0, b'h'][..]), (b"i", b"i"), (b"!x", b"!x")]
+                    {
+                        let mut output = request_output(
+                            &request.request_id,
+                            bytes_to_token_ids(token_ids),
+                            None,
+                        );
+                        output.routed_experts = Some(Box::new(WireNdArray::from_raw(
+                            TensorDtype::U8,
+                            vec![rows.len(), 1, 2],
+                            rows.iter().flat_map(|&row| [row, 7]).collect(),
+                        )));
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                outputs: vec![output],
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        ));
+        let client = EngineCoreClient::connect(
+            EngineCoreClientConfig::new_single(handshake_address)
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+        )
+        .await
+        .expect("connect client");
+        let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+        let mut app = build_router_with_gates(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        );
+
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/inference/v1/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "token_ids": [11, 22],
+                            "stream": stream,
+                            "sampling_params": {
+                                "max_tokens": 8,
+                                "stop": ["!"],
+                                "routed_experts_prompt_start": 1
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "stream={stream}");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8 body");
+
+        let choices: Vec<serde_json::Value> = if stream {
+            sse_json_payloads(&text)
+                .into_iter()
+                .flat_map(|chunk| chunk["choices"].as_array().cloned().unwrap_or_default())
+                .collect()
+        } else {
+            let json: serde_json::Value = serde_json::from_str(&text).expect("json body");
+            json["choices"].as_array().cloned().expect("choices")
+        };
+        let token_ids: Vec<u64> = choices
+            .iter()
+            .flat_map(|choice| choice["token_ids"].as_array().cloned().unwrap_or_default())
+            .map(|token_id| token_id.as_u64().expect("token id"))
+            .collect();
+        assert_eq!(token_ids, b"hi!".map(u64::from), "stream={stream}: {text}");
+        let last = choices.last().expect("final choice");
+        assert_eq!(last["finish_reason"], "stop", "stream={stream}");
+        assert_eq!(last["stop_reason"], "!", "stream={stream}");
+
+        let encoded = last["routed_experts"].as_str().expect("routed_experts");
+        let npy = base64::engine::general_purpose::STANDARD.decode(encoded).expect("base64");
+        let header = String::from_utf8_lossy(&npy[10..npy.len() - 8]);
+        assert!(
+            header.contains("'shape': (4, 1, 2)"),
+            "stream={stream}: {header}"
+        );
+        assert_eq!(
+            &npy[npy.len() - 8..],
+            [0, 7, b'h', 7, b'i', 7, b'!', 7],
+            "stream={stream}"
+        );
+    }
+}
+
+/// Like Python's `output_mode="text"`, the generate route returns the decoded
+/// text next to every generated token ID: the matched stop string is left out
+/// of the text, text that may begin it is held back while streaming, and
+/// logprobs carry decoded token strings with `bytes`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_text_output_mode_returns_text_cut_at_stop_string() {
+    for stream in [false, true] {
+        let ipc = IpcNamespace::new().expect("create ipc namespace");
+        let handshake_address = ipc.handshake_endpoint();
+        let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-generate-text-output-mode".to_vec(),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request = decode_add_request(&add);
+                    // The stop string `i!` ends the request inside the last
+                    // output, so the trailing `x` is cut.
+                    for token_ids in [&b"h"[..], b"i", b"!x"] {
+                        let token_ids = bytes_to_token_ids(token_ids);
+                        let logprobs = sample_logprobs_for_tokens(&token_ids);
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                outputs: vec![request_output_with_logprobs(
+                                    &request.request_id,
+                                    token_ids,
+                                    None,
+                                    None,
+                                    Some(logprobs),
+                                    None,
+                                )],
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        ));
+        let client = EngineCoreClient::connect(
+            EngineCoreClientConfig::new_single(handshake_address)
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+        )
+        .await
+        .expect("connect client");
+        let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+        let mut app = build_router_with_gates(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        );
+
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/inference/v1/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "token_ids": [11, 22],
+                            "stream": stream,
+                            "output_mode": "text",
+                            "sampling_params": {
+                                "max_tokens": 8,
+                                "stop": ["i!"],
+                                "logprobs": 1
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "stream={stream}");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let body = String::from_utf8(bytes.to_vec()).expect("utf8 body");
+
+        let responses: Vec<serde_json::Value> = if stream {
+            sse_json_payloads(&body)
+        } else {
+            vec![serde_json::from_str(&body).expect("json body")]
+        };
+        assert!(
+            responses.iter().all(|response| response["output_mode"] == "text"),
+            "stream={stream}: {body}"
+        );
+        let choices: Vec<&serde_json::Value> = responses
+            .iter()
+            .flat_map(|response| response["choices"].as_array().into_iter().flatten())
+            .collect();
+        let texts: Vec<&str> =
+            choices.iter().map(|choice| choice["text"].as_str().expect("text")).collect();
+        let token_ids: Vec<u64> = choices
+            .iter()
+            .flat_map(|choice| choice["token_ids"].as_array().cloned().unwrap_or_default())
+            .map(|token_id| token_id.as_u64().expect("token id"))
+            .collect();
+        let logprob_tokens: Vec<(&str, &serde_json::Value)> = choices
+            .iter()
+            .flat_map(|choice| choice["logprobs"]["content"].as_array().into_iter().flatten())
+            .map(|content| (content["token"].as_str().expect("token"), &content["bytes"]))
+            .collect();
+
+        // Streaming holds `h` back until `hi` can no longer begin `i!`.
+        let expected_texts: &[&str] = if stream { &["", "h", ""] } else { &["h"] };
+        assert_eq!(texts, expected_texts, "stream={stream}: {body}");
+        assert_eq!(token_ids, b"hi!".map(u64::from), "stream={stream}");
+        assert_eq!(
+            logprob_tokens,
+            [
+                ("h", &json!([b'h'])),
+                ("i", &json!([b'i'])),
+                ("!", &json!([b'!'])),
+            ],
+            "stream={stream}"
+        );
+        let last = choices.last().expect("final choice");
+        let last_content = last["logprobs"]["content"].as_array().and_then(|c| c.last());
+        // Every candidate the engine returned, with no cut.
+        assert_eq!(
+            last_content.map(|content| &content["top_logprobs"]),
+            Some(&json!([
+                {"token": "!", "logprob": -0.1, "bytes": [b'!']},
+                {"token": "\"", "logprob": -0.2, "bytes": [b'"']},
+            ])),
+            "stream={stream}"
+        );
+        assert_eq!(last["finish_reason"], "stop", "stream={stream}");
+        assert_eq!(last["stop_reason"], "i!", "stream={stream}");
+    }
+}
+
+/// Like Python, `output_mode="text"` needs a tokenizer and detokenized output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_text_output_mode_rejects_missing_tokenizer_and_detokenize_false() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-text-output-mode-rejects",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::without_tokenizer()),
+    )
+    .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    let mut errors = Vec::new();
+    for sampling_params in [json!({}), json!({"detokenize": false})] {
+        let (status, json) = post_json(
+            &mut app,
+            "/inference/v1/generate",
+            json!({
+                "token_ids": [11, 22],
+                "output_mode": "text",
+                "sampling_params": sampling_params,
+            }),
+        )
+        .await;
+        errors.push(format!("{status}: {}", json["error"]["message"]));
+    }
+    expect_test::expect![[r#"
+        [
+            "400 Bad Request: \"output_mode='text' requires a tokenizer, but this server does not load one (--skip-tokenizer-init). Send the request to a server that loads a tokenizer, or use output_mode='tokens'.\"",
+            "400 Bad Request: \"output_mode='text' requires sampling_params.detokenize to be true\"",
+        ]
+    "#]].assert_debug_eq(&errors);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_chat_image_url_reaches_engine_mm_features() {
@@ -7008,6 +7329,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
             ..RouteGates::default()
         },
     );
+    let metrics_before = METRICS.render().unwrap();
 
     let response = app
         .call(
@@ -7049,6 +7371,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     assert_eq!(json["usage"]["completion_tokens"], 2);
     assert_eq!(json["usage"]["total_tokens"], 4);
     assert_eq!(json["choices"][0]["index"], 0);
+    assert!(json["choices"][0].get("text").is_none());
     assert_eq!(json["choices"][0]["token_ids"], json!([33, 44]));
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
     // Output logprobs carry integer token ids and rank, not the OpenAI
@@ -7067,6 +7390,17 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
         "token_id:22"
     );
     assert_eq!(json["kv_transfer_params"], json!({"connector": "x"}));
+
+    // Like Python's token-in-token-out route, generate records no render.
+    assert_eq!(
+        metric_delta(
+            &metrics_before,
+            &METRICS.render().unwrap(),
+            "vllm:request_render_duration_seconds_count",
+            Some("model_name=\"test-model\",request_type=\"completion\""),
+        ),
+        0.0
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
