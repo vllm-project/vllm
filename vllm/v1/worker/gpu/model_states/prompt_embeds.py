@@ -39,6 +39,9 @@ class PromptEmbedsState:
         # harmless: add_request rewrites all fields for every index it claims.
         self.embeds_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
         self.mask_ptrs = UvaBackedTensor(max_num_reqs, dtype=torch.uint64)
+        # Row 0 holds position `offset`: rows below it were prefix-cache hits
+        # and are not sent. `embeds_lens` is the end position, offset + rows.
+        self.embeds_offsets = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.embeds_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
@@ -48,6 +51,8 @@ class PromptEmbedsState:
             self.embeds_lens.np[req_index] = 0
             return
 
+        offset = new_req_data.prompt_embeds_offset
+        assert offset <= new_req_data.num_computed_tokens
         embeds = async_tensor_h2d(prompt_embeds, device=self.device, dtype=self.dtype)
         embeds = embeds.contiguous()
         is_token_ids = new_req_data.prompt_is_token_ids
@@ -57,7 +62,8 @@ class PromptEmbedsState:
         self.gpu_tensors[new_req_data.req_id] = (embeds, mask)
         self.embeds_ptrs.np[req_index] = embeds.data_ptr()
         self.mask_ptrs.np[req_index] = 0 if mask is None else mask.data_ptr()
-        self.embeds_lens.np[req_index] = embeds.shape[0]
+        self.embeds_offsets.np[req_index] = offset
+        self.embeds_lens.np[req_index] = offset + embeds.shape[0]
 
     def remove_request(self, req_id: str) -> None:
         self.gpu_tensors.pop(req_id, None)
@@ -65,6 +71,7 @@ class PromptEmbedsState:
     def apply_staged_writes(self) -> None:
         self.embeds_ptrs.copy_to_uva()
         self.mask_ptrs.copy_to_uva()
+        self.embeds_offsets.copy_to_uva()
         self.embeds_lens.copy_to_uva()
 
     def apply(
@@ -86,6 +93,7 @@ class PromptEmbedsState:
             inputs_embeds.stride(0),
             self.embeds_ptrs.gpu,
             self.mask_ptrs.gpu,
+            self.embeds_offsets.gpu,
             self.embeds_lens.gpu,
             input_batch.idx_mapping,
             input_batch.query_start_loc,
@@ -102,7 +110,8 @@ def _apply_prompt_embeds_kernel(
     inputs_embeds_stride,
     embeds_ptrs_ptr,  # uint64 [max_num_reqs], device pointers (0-len = unused)
     mask_ptrs_ptr,  # uint64 [max_num_reqs], 0 = no is-token-ids mask
-    embeds_lens_ptr,  # int32 [max_num_reqs]
+    embeds_offsets_ptr,  # int32 [max_num_reqs], position of row 0
+    embeds_lens_ptr,  # int32 [max_num_reqs], end position
     idx_mapping_ptr,
     query_start_loc_ptr,
     num_computed_tokens_ptr,
@@ -129,13 +138,14 @@ def _apply_prompt_embeds_kernel(
     src_ptr = tl.load(embeds_ptrs_ptr + req_state_idx).to(
         tl.pointer_type(inputs_embeds_ptr.dtype.element_ty)
     )
+    offset = tl.load(embeds_offsets_ptr + req_state_idx)
     mask_int = tl.load(mask_ptrs_ptr + req_state_idx)
     mask_ptr = mask_int.to(tl.pointer_type(tl.int8))
 
     for t_offset in tl.static_range(TOKEN_BLOCK):
         t = t_start + t_offset
         if t < num_rows:
-            src_row = (num_computed + t).to(tl.int64)
+            src_row = (num_computed + t - offset).to(tl.int64)
             is_token_id = 0
             if mask_int != 0:
                 is_token_id = tl.load(mask_ptr + src_row).to(tl.int32)

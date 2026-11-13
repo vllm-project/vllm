@@ -13,7 +13,13 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.utils import strip_covered_mm_data
-from vllm.v1.core.sched.output import NewRequestData
+from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.output import (
+    NewRequestData,
+    UncomputedPromptEmbeds,
+    strip_computed_prompt_embeds,
+)
+from vllm.v1.request import Request
 
 
 def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestData:
@@ -160,3 +166,71 @@ def test_unpickled_long_lists_are_untracked() -> None:
     new = copy.deepcopy(new)
     assert not gc.is_tracked(new.block_ids[0]) and gc.is_tracked(new.block_ids[1])
     assert new.block_ids[0] == long
+
+
+def _embeds_request(
+    prompt_embeds: torch.Tensor,
+    num_computed_tokens: int,
+    slice_prompt_embeds: bool = True,
+) -> NewRequestData:
+    request = Request(
+        request_id="test_req",
+        prompt_token_ids=None,
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        prompt_embeds=prompt_embeds,
+    )
+    request.num_computed_tokens = num_computed_tokens
+    return NewRequestData.from_request(
+        request,
+        ([],),
+        request.prefill_token_ids,
+        slice_prompt_embeds=slice_prompt_embeds,
+    )
+
+
+def test_strip_computed_prompt_embeds() -> None:
+    """Workers never read prompt-embeds rows below num_computed_tokens (prefix
+    cache hits), so they are dropped; mixed prompts drop the mask alike."""
+    prompt_embeds = torch.randn(6, 4)
+    is_token_ids = [True, False, False, True, False, False]
+
+    uncomputed = strip_computed_prompt_embeds(prompt_embeds, None, 4)
+    assert uncomputed.offset == 4 and uncomputed.is_token_ids is None
+    torch.testing.assert_close(uncomputed.embeds, prompt_embeds[4:])
+
+    uncomputed = strip_computed_prompt_embeds(prompt_embeds, is_token_ids, 3)
+    assert uncomputed.offset == 3
+    assert uncomputed.is_token_ids == is_token_ids[3:]
+    torch.testing.assert_close(uncomputed.embeds, prompt_embeds[3:])
+
+    uncomputed = strip_computed_prompt_embeds(prompt_embeds, is_token_ids, 0)
+    assert uncomputed == UncomputedPromptEmbeds(prompt_embeds, is_token_ids, 0)
+
+
+def test_strip_computed_prompt_embeds_clamps_offset() -> None:
+    """A resumed request may have computed past its prompt."""
+    uncomputed = strip_computed_prompt_embeds(torch.randn(6, 4), None, 9)
+
+    assert uncomputed.offset == 6
+    assert uncomputed.embeds is not None and len(uncomputed.embeds) == 0
+
+
+def test_from_request_sends_only_uncached_prompt_embeds() -> None:
+    """prompt_len still covers the whole prompt after slicing."""
+    prompt_embeds = torch.randn(6, 4)
+    new_req = _embeds_request(prompt_embeds, num_computed_tokens=4)
+
+    assert new_req.prompt_embeds_offset == 4
+    torch.testing.assert_close(new_req.prompt_embeds, prompt_embeds[4:])
+    assert new_req.prompt_len == 6
+
+
+def test_from_request_keeps_prompt_embeds_unless_sliced() -> None:
+    """Schedulers whose failed KV loads may roll back computed tokens send the
+    whole tensor."""
+    prompt_embeds = torch.randn(6, 4)
+    new_req = _embeds_request(prompt_embeds, 4, slice_prompt_embeds=False)
+
+    assert new_req.prompt_embeds_offset == 0
+    assert new_req.prompt_embeds is prompt_embeds

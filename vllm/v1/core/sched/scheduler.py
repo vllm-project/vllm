@@ -200,6 +200,12 @@ class Scheduler(SchedulerInterface):
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
 
+        # Workers get only the prompt embeds of uncomputed positions, unless a
+        # failed KV load may roll back a running request's computed tokens.
+        self.slice_prompt_embeds = (
+            self.connector is None or not self.recompute_kv_load_failures
+        )
+
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
             self.parallel_config.data_parallel_index,
@@ -1667,6 +1673,7 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks[req.request_id].get_block_ids(),
                 req.prefill_token_ids,
                 uses_mrope=self.model_uses_mrope,
+                slice_prompt_embeds=self.slice_prompt_embeds,
             )
             for req in scheduled_new_reqs
         ]

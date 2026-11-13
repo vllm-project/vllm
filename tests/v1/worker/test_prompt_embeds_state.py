@@ -5,8 +5,9 @@
 The overlay kernel reads each request's GPU-resident prompt embeddings through
 a per-request pointer table and writes the rows scheduled this step into
 `inputs_embeds`, honoring chunked prefill (`num_computed_tokens` offset), the
-prompt/decode boundary (rows past the embeds length untouched), and the
-mixed-mode `prompt_is_token_ids` mask (token-id rows keep the base embedding).
+prompt/decode boundary (rows past the embeds length untouched), the rows not
+sent for prefix-cache hits (`prompt_embeds_offset`), and the mixed-mode
+`prompt_is_token_ids` mask (token-id rows keep the base embedding).
 """
 
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ class _NewReqData:
     req_id: str
     prompt_embeds: torch.Tensor | None
     prompt_is_token_ids: list[bool] | None = None
+    prompt_embeds_offset: int = 0
+    num_computed_tokens: int = 0
 
 
 @dataclass
@@ -151,3 +154,60 @@ def test_index_reuse_clears_stale_entry():
 
     torch.testing.assert_close(out[0:2], base[0:2])
     torch.testing.assert_close(out[2:4], other.to(DEVICE))
+
+
+@pytest.mark.parametrize("is_token_ids", [None, [False, True, False]])
+def test_overlay_prompt_embeds_offset(is_token_ids):
+    """After a prefix-cache hit only the rows from `prompt_embeds_offset` on are
+    sent: row 0 holds that position, and the mask is sliced alike."""
+    state = _make_state()
+    embeds = torch.randn(3, HIDDEN, dtype=torch.float32)
+    state.add_request(
+        0,
+        _NewReqData(
+            "a",
+            embeds,
+            is_token_ids,
+            prompt_embeds_offset=4,
+            num_computed_tokens=4,
+        ),
+    )
+    state.apply_staged_writes()
+
+    # Chunks [4, 6) then [6, 7) plus a decode token past the prompt.
+    out, base = _apply(state, _batch([2], [0]), num_computed=[4], num_tokens=2)
+    out2, base2 = _apply(state, _batch([2], [0]), num_computed=[6], num_tokens=2)
+
+    expected = embeds.to(DEVICE)
+    if is_token_ids is not None:
+        torch.testing.assert_close(out[0], expected[0])
+        torch.testing.assert_close(out[1], base[1])
+    else:
+        torch.testing.assert_close(out, expected[0:2])
+    torch.testing.assert_close(out2[0], expected[2])
+    torch.testing.assert_close(out2[1], base2[1])
+
+
+def test_overlay_fully_cached_prompt_embeds():
+    """A request resumed past its prompt gets no rows and keeps the base
+    embedding."""
+    state = _make_state()
+    state.add_request(
+        0,
+        _NewReqData(
+            "a",
+            torch.empty(0, HIDDEN),
+            prompt_embeds_offset=6,
+            num_computed_tokens=9,
+        ),
+    )
+    # A second live embeds request so the kernel launches.
+    other = torch.randn(2, HIDDEN, dtype=torch.float32)
+    state.add_request(1, _NewReqData("other", other))
+    state.apply_staged_writes()
+
+    batch = _batch(num_scheduled=[1, 2], idx_mapping=[0, 1])
+    out, base = _apply(state, batch, num_computed=[9, 0], num_tokens=3)
+
+    torch.testing.assert_close(out[0:1], base[0:1])
+    torch.testing.assert_close(out[1:3], other.to(DEVICE))
