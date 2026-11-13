@@ -458,6 +458,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
     ),
+    "MistralLarge4ForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Large-4-1T-A52B", is_available_online=False
+    ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
         {
@@ -1640,6 +1643,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
         speculative_model="Inferact/Muse-Spark-Open-DSpark",
         is_available_online=False,
+    ),
+    "MistralLarge4DSparkModel": _HfExamplesInfo(
+        "mistralai/Mistral-Large-4-1T-A52B",
+        speculative_model="mistralai/Mistral-Large-4-1T-A52B",  # mtp_dspark.*
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark has >1 draft block
     ),
     "Qwen3DSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",

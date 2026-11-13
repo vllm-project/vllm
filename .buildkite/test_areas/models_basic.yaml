@@ -614,3 +614,31 @@ steps:
   # decode_backend=latency_specialized is for GB300 (SM103); no CI agent has four of them.
   # B200 runs the kernels and the TP4 boundary, draft norm and logits gather tests.
   - pytest -v -s models/glm5next -k specialized_decode
+
+- label: ":nvidia: (B200) Mistral Large 4"
+  key: mistral-large-4-unit-tests-b200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/mistral/
+  - tests/models/mistral/
+  commands:
+  - >-
+    pytest -v -s models/mistral
+    --ignore=models/mistral/mistral_large4/amd_specialized_decode
+  mirror:
+    amd:
+      label: ":amd: (MI355) Mistral Large 4"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/models/mistral/
+      - tests/models/mistral/
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s models/mistral
