@@ -76,6 +76,17 @@ def test_output_padding_reload_keeps_unpadded_parameters_and_addresses(dist_init
     }
 
 
+@pytest.mark.parametrize("bias", [True, False])
+def test_output_padding_flagged_for_reload_fill(dist_init, bias):
+    padded = MergedColumnParallelLinear(4, [4, 4], bias=bias, padding_size=3)
+    plain = MergedColumnParallelLinear(4, [4, 4], bias=bias)
+    flagged = {
+        n for n, p in padded.named_parameters() if getattr(p, "fill_on_reload", 0)
+    }
+    assert flagged == ({"weight", "bias"} if bias else {"weight"})
+    assert not any(hasattr(p, "fill_on_reload") for p in plain.parameters())
+
+
 class _Method(QuantizeMethodBase):
     """Post-load processing given as a function of the layer; counts runs."""
 
