@@ -732,6 +732,11 @@ class MonoLayers:
             if S > T:
                 self.b_x[T:S].zero_()
             h = self.b_x[:S]
+        if self.first == L:
+            # vLLM's graph padding gives its padded rows (slot -1) a real hidden state;
+            # the kernel must see them as zero rows or real rows drift (128k NIAH).
+            # Once per step: a zero inactive row stays zero through the layers.
+            h[:T].masked_fill_((self.b_slot[:T] < 0).unsqueeze(-1), 0)
         flat = self._flat[L]
         pos_v, slot_v, indptr_v = self._sviews[S]
         x_out = self.ops[(L, S)].forward(
