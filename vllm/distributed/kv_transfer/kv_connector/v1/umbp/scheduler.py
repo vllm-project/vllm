@@ -31,23 +31,23 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     get_block_hash,
     get_group_id,
+    is_mamba_align_group,
+    is_mamba_group,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    SparseCacheRole,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    MambaSpec,
+    SparseCacheRole,
+)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -111,12 +111,6 @@ def _free_to_cached_front(pool: BlockPool, block_ids: Sequence[int]) -> None:
         (pool.blocks[block_id] for block_id in block_ids), evict_first=True
     )
     queue.prepend_n(front)
-
-
-def _unwrap_store_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return next(iter(spec.kv_cache_specs.values()))
-    return spec
 
 
 @dataclass
@@ -184,12 +178,13 @@ _LazyCandidate = tuple[KVCacheBlock, str, int, bytes]
 class _LookupBlockPool(BlockPool):
     """Request-scoped residency view for the core hit-window algorithms."""
 
-    def __init__(self, hash_block_size: int) -> None:
+    def __init__(self, hash_block_size: int, num_hash_lookahead_tokens: int) -> None:
         super().__init__(
             num_gpu_blocks=1,
             enable_caching=True,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=False,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         self.hits: list[set[bytes]] = []
         self.hit_blocks: dict[bytes, KVCacheBlock] = {}
@@ -238,7 +233,7 @@ class UMBPStoreConnectorScheduler:
         self._dcp_size = dcp_size
         self._retention_interval = kv_cache_config.prefix_cache_retention_interval
         self.group_block_sizes = {
-            group_id: resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
+            group_id: resolve_dcp_kv_block_size(group, dcp_size)
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         }
         # Mamba "align" block tables are not append-only: a position may hold
@@ -249,8 +244,7 @@ class UMBPStoreConnectorScheduler:
         self._boundary_handoff_groups = frozenset(
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(group.kv_cache_spec, MambaSpec)
-            and getattr(group.kv_cache_spec, "mamba_cache_mode", None) == "align"
+            if is_mamba_align_group(group)
         )
         self.runtime = runtime
         self.enable_kv_cache_events = bool(
@@ -269,7 +263,7 @@ class UMBPStoreConnectorScheduler:
                 isinstance(spec, MambaSpec)
                 or getattr(spec, "cache_role", None) == SparseCacheRole.INDEXER
                 for group in kv_cache_config.kv_cache_groups
-                for spec in iter_layer_specs(group.kv_cache_spec)
+                for spec in group.kv_cache_specs.values()
             )
         ):
             # Core accepts only request-level load failures for several cache
@@ -302,8 +296,11 @@ class UMBPStoreConnectorScheduler:
         ]
         model_config = getattr(vllm_config, "model_config", None)
         speculative_config = getattr(vllm_config, "speculative_config", None)
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
         use_eagle = bool(
-            speculative_config is not None and speculative_config.use_eagle_block_drop()
+            speculative_config is not None
+            and speculative_config.use_eagle_block_drop()
+            and not self.num_hash_lookahead_tokens
         )
         self.use_eagle = use_eagle
         explicit_eagle_groups = {
@@ -312,9 +309,9 @@ class UMBPStoreConnectorScheduler:
             if group.is_eagle_group
         }
         self._eagle_store_groups = (
-            explicit_eagle_groups
-            if explicit_eagle_groups or not use_eagle
-            else set(kv_cache_config.prefix_cacheable_group_ids)
+            (explicit_eagle_groups or set(kv_cache_config.prefix_cacheable_group_ids))
+            if use_eagle
+            else set()
         )
         max_model_len = getattr(
             model_config,
@@ -349,14 +346,13 @@ class UMBPStoreConnectorScheduler:
             if lookup_groups
             and (
                 len(lookup_groups) > 1
-                or not isinstance(
-                    _unwrap_store_spec(lookup_groups[0].kv_cache_spec),
-                    FullAttentionSpec,
-                )
+                or not issubclass(lookup_groups[0].manager_cls, FullAttentionManager)
             )
             else None
         )
-        self._lookup_pool = _LookupBlockPool(self.hash_block_size)
+        self._lookup_pool = _LookupBlockPool(
+            self.hash_block_size, self.num_hash_lookahead_tokens
+        )
         self._local_cache_lookup: Callable[[int, bytes], bool] | None = None
         if self._lookup_coordinator is not None:
             self._lookup_coordinator.block_pool = self._lookup_pool
@@ -446,12 +442,13 @@ class UMBPStoreConnectorScheduler:
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
             if group_id not in prefix_group_ids:
                 continue
-            spec = group.kv_cache_spec
-            block_size = resolve_dcp_kv_block_size(spec, dcp_size)
-            if isinstance(spec, MambaSpec):
+            block_size = resolve_dcp_kv_block_size(group, dcp_size)
+            if is_mamba_group(group):
                 target += 2
-            elif isinstance(spec, SlidingWindowSpec):
-                target += cdiv(spec.sliding_window, block_size) + 1
+            elif isinstance(
+                p := group.manager_config.params, SlidingWindowManager.Params
+            ):
+                target += cdiv(p.sliding_window, block_size) + 1
             else:
                 target += cdiv(max_num_batched_tokens, block_size)
         return 2 * target
@@ -631,7 +628,7 @@ class UMBPStoreConnectorScheduler:
         assert self.codec is not None
         objects: dict[int, list[tuple[bytes, tuple[str, ...]]]] = {}
         keys: list[str] = []
-        lookup_limit = request.num_tokens - 1
+        lookup_limit = min(request.num_tokens - 1, len(hashes) * self.hash_block_size)
         if self.use_eagle and self._lookup_coordinator is not None:
             lookup_limit = min(request.num_tokens, len(hashes) * self.hash_block_size)
         for group_id, unit in self._lookup_units.items():
@@ -1463,8 +1460,10 @@ class UMBPStoreConnectorScheduler:
                     if self.enable_kv_cache_events and index > 0
                     else None
                 )
+                # The hash also covers the next lookahead tokens.
+                hash_end = token_end + self.num_hash_lookahead_tokens
                 token_ids_by_block.append(
-                    tuple(request.all_token_ids[index * group_block_size : token_end])
+                    tuple(request.all_token_ids[index * group_block_size : hash_end])
                     if self.enable_kv_cache_events
                     else ()
                 )
@@ -1553,23 +1552,23 @@ class UMBPStoreConnectorScheduler:
         if not indices:
             return []
         group = self.kv_cache_config.kv_cache_groups[group_id]
-        spec = _unwrap_store_spec(group.kv_cache_spec)
-        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
-        if manager_cls is None:
-            return None
         num_prompt_tokens = getattr(request, "num_prompt_tokens", None)
         reachable_boundaries = (
             ()
             if num_prompt_tokens is None
             else replay_boundaries(
-                num_prompt_tokens, self.block_size, use_eagle=self.use_eagle
+                num_prompt_tokens,
+                self.block_size,
+                use_eagle=self.use_eagle,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
         )
-        mask = manager_cls.reachable_block_mask(
+        mask = group.manager_cls.reachable_block_mask(
             start_block=indices.start,
             end_block=indices.stop,
             alignment_tokens=self.block_size,
-            kv_cache_spec=spec,
+            block_size=group.block_size,
+            manager_config=group.manager_config,
             use_eagle=group_id in self._eagle_store_groups,
             retention_interval=self._retention_interval,
             reachable_boundaries=reachable_boundaries,
@@ -1585,6 +1584,7 @@ class UMBPStoreConnectorScheduler:
     def request_finished(
         self, request: Request, block_ids: tuple[list[int], ...]
     ) -> tuple[bool, dict[str, Any] | None]:
+        self._register_finished_lookahead_save(request, block_ids)
         self._pending_loads.pop(request.request_id, None)
         self._load_specs.pop(request.request_id, None)
         self._requests.pop(request.request_id, None)
@@ -1597,6 +1597,49 @@ class UMBPStoreConnectorScheduler:
             self._lazy_scan_pending = True
         return False, None
 
+    def _register_finished_lookahead_save(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> None:
+        """Pin completed KV whose hash became available with the last sample."""
+        tracker = self._request_trackers.get(request.request_id)
+        # Only a request that computed KV has saved any; one still waiting for
+        # its load has not.
+        if (
+            not self.store_enabled
+            or not self.num_hash_lookahead_tokens
+            or tracker is None
+            or not tracker.saved_tokens
+        ):
+            return
+        completed_tokens = request.num_computed_tokens - (
+            request.num_in_flight_tokens - request.num_stale_output_tokens
+        )
+        save_limit = (
+            request.num_tokens if self.save_decode_cache else request.num_prompt_tokens
+        )
+        reserved_keys = {
+            key for event in self._store_events.values() for key in event.iter_keys()
+        }
+        plans = self._store_plans(
+            request,
+            tracker,
+            min(completed_tokens, save_limit),
+            block_ids_override=tuple(
+                block_ids[group_id]
+                for group_id in self.kv_cache_config.prefix_cacheable_group_ids
+            ),
+            skip_keys=reserved_keys,
+        )
+        if not plans:
+            return
+        pool = self._gpu_block_pool
+        assert pool is not None
+        # Full blocks end before the partial tail, so their pins never overlap.
+        pool.touch(
+            [pool.blocks[block_id] for block_id in dict.fromkeys(plans.block_ids)]
+        )
+        self._pending_finished_stores.setdefault(request.request_id, []).extend(plans)
+
     def _register_lazy_prefix_chains(
         self,
         request: Request,
@@ -1606,14 +1649,21 @@ class UMBPStoreConnectorScheduler:
         if self.codec is None:
             return
         prompt_tokens = request.num_prompt_tokens
-        save_to = min(prompt_tokens, request.num_computed_tokens)
         hashes = list(request.block_hashes)
+        # A lookahead hash needs tokens past its block, so the tail may have none.
+        save_to = min(
+            prompt_tokens,
+            request.num_computed_tokens,
+            len(hashes) * self.hash_block_size,
+        )
         if save_to <= 0 or not hashes:
             return
 
         for group_id in self.kv_cache_config.prefix_cacheable_group_ids:
-            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec) or group_id >= len(block_ids):
+            group = self.kv_cache_config.kv_cache_groups[group_id]
+            if not issubclass(
+                group.manager_cls, FullAttentionManager
+            ) or group_id >= len(block_ids):
                 continue
             group_block_size = self.group_block_sizes[group_id]
             num_blocks = min(save_to // group_block_size, len(block_ids[group_id]))
@@ -1679,9 +1729,11 @@ class UMBPStoreConnectorScheduler:
         # Core hands off Mamba state pages. Include the matching FA tail page
         # so every group can resolve the same fine-grained prefix boundary.
         for group_id in prefix_groups:
-            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
             if (
-                isinstance(spec, FullAttentionSpec)
+                issubclass(
+                    self.kv_cache_config.kv_cache_groups[group_id].manager_cls,
+                    FullAttentionManager,
+                )
                 and boundary % self.group_block_sizes[group_id]
             ):
                 index = boundary // self.group_block_sizes[group_id]
@@ -1872,7 +1924,12 @@ class UMBPStoreConnectorScheduler:
                                 if plan.parent_block_hash is not None
                                 else None
                             ),
-                            token_ids=list(plan.token_ids),
+                            token_ids=list(plan.token_ids[: plan.block_size]),
+                            lookahead_token_ids=(
+                                [list(lookahead)]
+                                if (lookahead := plan.token_ids[plan.block_size :])
+                                else None
+                            ),
                             block_size=plan.block_size,
                             lora_id=None,
                             medium=plan.medium,

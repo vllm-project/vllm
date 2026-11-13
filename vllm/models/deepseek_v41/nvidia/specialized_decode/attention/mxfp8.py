@@ -222,7 +222,7 @@ def pinned_mm(
     else:
         data, scale = mxfp8_e4m3_quantize(a, is_sf_swizzled_layout=True)
     out = torch.empty(rows, n, dtype=out_dtype, device=a.device)
-    workspace = gemm_base._get_cache_buf(
+    workspace = gemm_base._get_stream_cache_buf(
         "mm_mxfp8_workspace", gemm_base.DEFAULT_WORKSPACE_SIZE, a.device
     )
     inputs = [data, layer.weight, scale, layer.weight_scale, out_dtype, out, workspace]
