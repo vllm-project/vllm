@@ -84,7 +84,6 @@ class IndexerStage:
             True,  # the key is inserted by DsaIndex
             False,
             False,
-            _encode_layer_name(""),
             self.fp4,
             indexer.dcp_rank,
             indexer.dcp_world_size,

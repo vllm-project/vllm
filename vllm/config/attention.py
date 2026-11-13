@@ -89,7 +89,8 @@ class AttentionConfig:
     Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED; on ROCm,
     ROCM_AITER_FA and ROCM_AITER_FLYDSL_FP8. ROCM_AITER_FLYDSL_FP8 is opt-in
     (gfx950, bf16 models): it quantizes Q/K/V to FP8 per tensor at runtime and
-    falls back to ROCM_AITER_FA for inputs the FlyDSL kernel cannot take."""
+    falls back to ROCM_AITER_FA for inputs the FlyDSL kernel cannot take.
+    Sparse MLA layers do not use it."""
 
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
@@ -176,8 +177,9 @@ class AttentionConfig:
 
     sparse_mla_force_mqa: bool = False
     """Force sparse MLA to use forward_mqa for all requests, including prefill.
-    When False (default), pure prefill batches use forward_mha when implemented.
-    Set to True to always use the MQA path."""
+    When False (default), prefills use masked MHA (forward_mha) when the backend,
+    KV cache dtype and thresholds allow it. Set to True to always use the MQA
+    path."""
 
     sparse_mla_prefill_workspace_factor: int | None = Field(default=None, ge=2)
     """Sparse MLA prefill workspace size, in multiples of `max_model_len`.

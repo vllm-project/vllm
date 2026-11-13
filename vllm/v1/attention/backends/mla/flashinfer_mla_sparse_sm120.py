@@ -35,7 +35,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
     """SM120 FlashInfer sparse-MLA implementation."""
 
     is_sparse = True
-    supports_dense_mha_prefill = False
 
     def get_fp8_ds_mla_row_bytes(self) -> int:
         if self.kv_lora_rank == 512 and self.qk_rope_head_dim == 0:

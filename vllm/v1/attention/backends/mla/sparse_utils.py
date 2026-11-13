@@ -29,7 +29,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, get_block_table_width
 class SparseMLAPrefillRoute(Enum):
     """How a sparse MLA step runs its prefill tokens.
 
-    - DENSE_MHA: every prefill fits in the top-k, so MHA over all keys.
     - MASKED_MHA: MHA with the top-k as a per-query key mask.
     - SPARSE_MQA: the prefill tokens run in forward_mqa, like the decodes.
 
@@ -37,7 +36,6 @@ class SparseMLAPrefillRoute(Enum):
     readers use it as is instead of re-deriving it.
     """
 
-    DENSE_MHA = "dense_mha"
     MASKED_MHA = "masked_mha"
     SPARSE_MQA = "sparse_mqa"
 

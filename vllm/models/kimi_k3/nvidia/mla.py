@@ -679,7 +679,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
 
         # Decode tokens are laid out first, prefill tokens after. The fused
         # prefill covers every supported config (bf16 / plain-fp8 /
-        # fp8_ds_mla), so there is no dense-MHA (forward_mha) fallback.
+        # fp8_ds_mla), so there is no MHA (forward_mha) fallback.
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
 

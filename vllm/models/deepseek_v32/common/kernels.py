@@ -244,7 +244,7 @@ def _fused_norm_rope_kernel(
         pid != 1 or (kv_out_ptr is None and kpe_out_ptr is None)
     ):
         # Padding, or (under DCP) a token whose KV slot another rank owns.
-        # Dense prefill still consumes the materialized normalized/rotated K
+        # MHA prefill still consumes the materialized normalized/rotated K
         # rows on every rank, so pid 1 must produce them even when this rank
         # must not write the owner-local cache slot.
         return

@@ -243,12 +243,7 @@ def _check_builder_shardq_route(rank, world, port):
                 metadata = builder.build(0, common)
                 assert (metadata.shardq is not None) == enabled
                 assert metadata.prefill is not None
-                expected = (
-                    SparseMLAPrefillRoute.SPARSE_MQA
-                    if enabled
-                    else SparseMLAPrefillRoute.DENSE_MHA
-                )
-                assert metadata.prefill.route is expected, metadata.prefill.route
+                assert metadata.prefill.route is SparseMLAPrefillRoute.SPARSE_MQA
         finally:
             reset_workspace_manager()
             destroy_model_parallel()

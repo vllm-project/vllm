@@ -225,16 +225,6 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         self.skip_topk = False
-        enable_short_prefill_scoring_skip = (
-            not is_mtp_layer
-            and not skip_topk
-            and not self.use_pcp
-            and current_platform.is_cuda_alike()
-            and self.supports_dense_mha_prefill
-        )
-        self._dense_mha_metadata_layer_name = (
-            self.layer_name if enable_short_prefill_scoring_skip else ""
-        )
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
@@ -521,7 +511,6 @@ class DeepseekV32Attention(MLAAttention):
                 skip_k_cache_insert=not self.use_pcp,
                 use_pcp=self.use_pcp,
                 pcp_shard_decode_requests=self.pcp_shard_decode_requests,
-                dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
                 dcp_rank=(
                     self.dcp_manager.group.rank_in_group
                     if self.dcp_manager is not None

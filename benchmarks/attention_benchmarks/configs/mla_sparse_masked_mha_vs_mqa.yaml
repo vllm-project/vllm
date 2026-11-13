@@ -3,8 +3,6 @@
 # Dense pure-prefill sweep to generate a smooth speedup curve. The 100 points
 # run from q32 through q262144, approximately even on the log2 scale, and include
 # routing boundaries plus extra samples around the 6k-8k crossover region.
-# Dense MHA is only benchmarked through q32768 because it dominates runtime above
-# that range.
 #
 # Usage:
 #   python benchmark.py --config configs/mla_sparse_mha_vs_mqa.yaml
@@ -117,7 +115,6 @@ backends:
 
 device: "cuda:0"
 profile_memory: true
-sparse_mla_dense_mha_max_seq_len: 25349
 sparse_mla_masked_mha_max_seq_len: 8192
-sparse_mla_mha_variants: ["dense_mha", "masked_mha", "mqa"]
+sparse_mla_mha_variants: ["masked_mha", "mqa"]
 sparse_mla_topk_pattern: "random"
