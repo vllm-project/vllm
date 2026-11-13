@@ -170,3 +170,45 @@ async def test_sagemaker_multiple_adapters_load_unload(
     adapter_ids = [model.id for model in models.data]
     for adapter_name in adapter_names:
         assert adapter_name not in adapter_ids
+
+
+@pytest.fixture(scope="module")
+def server_with_lora_and_api_key(smollm2_lora_files):
+    args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+        "--enable-lora",
+        "--max-lora-rank",
+        "256",
+        "--max-cpu-loras",
+        "2",
+        "--max-num-seqs",
+        "64",
+        "--api-key",
+        RemoteOpenAIServer.DUMMY_API_KEY,
+    ]
+    envs = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+    with RemoteOpenAIServer(MODEL_NAME_SMOLLM, args, env_dict=envs) as remote_server:
+        yield remote_server
+
+
+def test_sagemaker_adapter_routes_require_api_key(
+    server_with_lora_and_api_key: RemoteOpenAIServer,
+    smollm2_lora_files,
+):
+    server = server_with_lora_and_api_key
+    auth = {"Authorization": f"Bearer {RemoteOpenAIServer.DUMMY_API_KEY}"}
+    adapter_name = "smollm2-lora-sagemaker-auth"
+    body = {"name": adapter_name, "src": smollm2_lora_files}
+
+    assert requests.post(server.url_for("adapters"), json=body).status_code == 401
+    requests.post(
+        server.url_for("adapters"), json=body, headers=auth
+    ).raise_for_status()
+
+    unload_url = server.url_for("adapters", adapter_name)
+    assert requests.delete(unload_url).status_code == 401
+    requests.delete(unload_url, headers=auth).raise_for_status()
