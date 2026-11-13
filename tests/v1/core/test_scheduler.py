@@ -3065,14 +3065,12 @@ def test_spec_decode_stats_keep_batch_after_empty_draft():
     )
     requests = create_requests(num_requests=2, num_tokens=1)
     req_ids = [req.request_id for req in requests]
-    req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
     for req in requests:
         scheduler.add_request(req)
 
     def _mk_output(sampled, num_drafted=None):
         return ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index=req_id_to_index,
             sampled_token_ids=sampled,
             num_drafted_tokens_per_req=num_drafted,
             num_verified_tokens_per_req=num_drafted,
