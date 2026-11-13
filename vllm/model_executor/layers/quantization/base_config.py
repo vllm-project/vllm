@@ -326,7 +326,7 @@ def resolve_quant_method(
         OnlineMoEMethodBase,
     )
     from vllm.model_executor.layers.quantization.online.requantization import (
-        requantization_source_scope,
+        skip_checkpoint_backend_selection,
     )
 
     online_config = quant_config.online_quantization_config
@@ -350,7 +350,11 @@ def resolve_quant_method(
     # method (all paths below return the online method or raise). It therefore
     # needs no kernel backend, which the oracles skip in this scope.
     with (
-        requantization_source_scope() if online_target is not None else nullcontext(),
+        (
+            skip_checkpoint_backend_selection()
+            if online_target is not None
+            else nullcontext()
+        ),
         layer_target_spec_scope(target_spec if online_target is None else None),
     ):
         # A `targets` spec without a weight key overrides the activation of the

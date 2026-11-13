@@ -123,7 +123,7 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
 )
 from vllm.model_executor.layers.quantization.online.requantization import (
     is_requantization_source,
-    requantization_source_scope,
+    skip_checkpoint_backend_selection,
 )
 from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkConfig,
@@ -2658,7 +2658,7 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="LUT-B MoE needs CUDA (unsupported on ROCm)."
+    not current_platform.is_cuda_alike(), reason="LUT-B MoE needs a CUDA-like GPU."
 )
 def test_online_lut_b_moe(vllm_runner, monkeypatch) -> None:
     """LUT-B quantizes only the routed experts; Rubin runs it natively."""
@@ -3169,7 +3169,7 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
 
     if source_format is None:
         # Dispatch must not read the config or any other argument.
-        with requantization_source_scope():
+        with skip_checkpoint_backend_selection():
             assert select(**_required_selector_args(select)) == (
                 none_backend,
                 RequantizationSourceExperts,
@@ -3273,7 +3273,7 @@ def test_linear_dispatch_skipped_for_requantization_source(
     assert not LinearKernelOracle.maybe_skip_for_requantization_source()
 
     if source_format is None:
-        with requantization_source_scope():
+        with skip_checkpoint_backend_selection():
             assert LinearKernelOracle.maybe_skip_for_requantization_source()
             select = getattr(linear_kernels, f"init_{kind}_linear_kernel")
             kernel = select(**_required_selector_args(select))
