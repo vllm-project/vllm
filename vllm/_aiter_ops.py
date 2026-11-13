@@ -4917,6 +4917,7 @@ class rocm_aiter_ops:
         return_lse: bool = False,
         out: torch.Tensor | None = None,
         sink_ptr: torch.Tensor | None = None,
+        logits_soft_cap: float = 0.0,
     ):
         """Flash attention with variable length sequences.
 
@@ -4939,6 +4940,7 @@ class rocm_aiter_ops:
             min_seqlen_q=min_seqlen_q,
             dropout_p=dropout_p,
             softmax_scale=softmax_scale,
+            logits_soft_cap=logits_soft_cap,
             causal=causal,
             window_size=window_size,
             alibi_slopes=alibi_slopes,
