@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 from .rocm_block32_gemm import (
@@ -342,6 +343,14 @@ _M31_TILES = {
 }
 
 
+def _wide_prefill_tile_pays(M, N):
+    """Whether the 256x256x128 large-prefill tile beats the 128x128 one."""
+    cus = num_compute_units()
+    waves_128 = triton.cdiv(triton.cdiv(M, 128) * triton.cdiv(N, 128), cus)
+    waves_256 = triton.cdiv(triton.cdiv(M, 256) * triton.cdiv(N, 256), cus)
+    return 3 * waves_128 >= 10 * waves_256
+
+
 def _select_m31_cfg(M, N, K):
     for max_m, cfg in _M31_TILES.get((N, K), ()):
         if max_m >= M:
@@ -411,6 +420,9 @@ def _select_cfg(M, N, K):
         return (64, 64, 256, 8, 2) if K % 256 == 0 else (64, 64, 128, 8, 2)
     if M <= 1024:  # medium prefill chunk: BN=64 keeps small-N occupied
         return (128, 64, 256, 8, 3) if K % 256 == 0 else (128, 64, 128, 8, 3)
+    # BLOCK_K=128 keeps the 256x256 tile within the LDS footprint of 128x128x256.
+    if _ON_GFX950 and N > 1024 and _wide_prefill_tile_pays(M, N):
+        return 256, 256, 128, 4, 2
     # large prefill (M > 1024). The previously graph-tuned tall 256x128x256 and deep
     # 128x128x512 tiles won only on triton 3.6; on triton 3.7 their larger BLOCK_M /
     # BLOCK_K register+LDS footprint spills (or hits "out of resources" on stricter

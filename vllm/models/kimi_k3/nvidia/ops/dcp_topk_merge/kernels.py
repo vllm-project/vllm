@@ -182,9 +182,7 @@ class DCPTopkPackKernel(VllmCuTeDSLJitKernel["DCPTopkPackKernel.CompileKey"]):
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
-        self, *, local_topk: int, has_row_ends: bool = False
-    ) -> CompileKey:
+    def dispatch(self, *, local_topk: int, has_row_ends: bool = False) -> CompileKey:
         return self.CompileKey(local_topk=local_topk, has_row_ends=has_row_ends)
 
     def get_warmup_keys(
@@ -971,7 +969,7 @@ class DCPTopkSelectKernel(VllmCuTeDSLJitKernel["DCPTopkSelectKernel.CompileKey"]
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk: int,
@@ -1390,7 +1388,7 @@ class DCPTopkRescueKernel(VllmCuTeDSLJitKernel["DCPTopkRescueKernel.CompileKey"]
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk: int,
