@@ -1289,7 +1289,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self, hidden_states: torch.Tensor, weight: torch.Tensor
     ) -> torch.Tensor:
         """BF16 x BF16 -> FP32 compressor score GEMM against an [N, K] weight:
-        aiter tgemm when ``rocm_aiter_ops.is_fp32_out_tgemm_enabled()``,
+        aiter tgemm when `rocm_aiter_ops.is_fp32_out_tgemm_enabled()`,
         torch.mm otherwise."""
         if self._use_aiter_fp32_score_gemm:
             from aiter.tuned_gemm import tgemm
