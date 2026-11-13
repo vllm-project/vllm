@@ -101,7 +101,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     is_quantized_kv_cache,
-    iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -947,6 +946,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             BatchPrefillWithCausalBidirectionalRangesWrapper | None
         ) = None
         self._decode_wrapper = None  # Wrapper for decode (general shape)
+        # plan() fills the wrapper's page-locked buffer and copies it to the
+        # GPU asynchronously, so it must not run again before that copy has.
+        self._plan_copied = torch.cuda.Event(blocking=True)
 
         if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
@@ -1289,43 +1291,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-        kv_specs = iter_layer_specs(kv_cache_spec)
+        use_non_causal = vllm_config.attention_config.use_non_causal
         if _use_fa2_native_decode():
             # fa2 decodes uniform causal spec queries.
-            if kv_specs and not vllm_config.attention_config.use_non_causal:
+            if not use_non_causal:
                 return AttentionCGSupport.UNIFORM_BATCH
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
         is_xqa_arch = current_platform.is_device_capability(
             90
         ) or current_platform.is_device_capability_family(120)
-        has_uniform_batch_support: bool = len(kv_specs) > 0
-        for spec in kv_specs:
-            if not isinstance(spec, AttentionSpec):
-                # FlashInfer only applies to attention, so we don't consider other types
-                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
-                continue
-            if not can_use_trtllm_attention(
-                num_qo_heads=num_qo_heads,
-                num_kv_heads=spec.num_kv_heads,
-                is_prefill=False,
-            ) or (
+        # No head-count check: each attention layer asserts that its query heads
+        # divide by its KV heads, and the model config holds the target's heads,
+        # not a draft layer's.
+        # FlashInfer only applies to attention; this is for type checking.
+        assert isinstance(kv_cache_spec, AttentionSpec)
+        has_uniform_batch_support = (
+            force_use_trtllm_attention() is not False
+            and supports_trtllm_attention(is_prefill=False)
+            and not (
                 is_xqa_arch
                 and (
                     (
-                        spec.kv_quant_mode.is_nvfp4
+                        kv_cache_spec.kv_quant_mode.is_nvfp4
                         and not current_platform.is_device_capability_family(120)
                     )
-                    or not _is_xqa_head_dim_supported(spec.head_size)
+                    or not _is_xqa_head_dim_supported(kv_cache_spec.head_size)
                 )
-            ):
-                has_uniform_batch_support = False
-                break
+            )
+        )
 
-        use_non_causal = vllm_config.attention_config.use_non_causal
         if has_uniform_batch_support and (not use_non_causal or is_xqa_arch):
             return AttentionCGSupport.UNIFORM_BATCH
         else:
@@ -1883,6 +1878,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 num_reqs,
                 page_size,
             )
+            self._plan_copied.synchronize()
         else:
             paged_kv_indices = None
 
@@ -2199,6 +2195,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     q_len_per_req=q_len_per_req,
                 )
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+        if needs_paged_kv_indices:
+            self._plan_copied.record()
         return attn_metadata
 
     def update_draft_decode_metadata(self, _metadata: FlashInferMetadata) -> None:
@@ -2355,11 +2353,16 @@ class FlashInferImpl(AttentionImpl):
         else:
             self.sinks.copy_(source_sinks)
 
+    # Only an FP8 query was quantized with the layer's q scale.
+    def get_q_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype) -> float:
+        if q_data_type in (torch.float8_e4m3fn, torch.float8_e5m2):
+            return layer._q_scale_float
+        return 1.0
+
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            if q_data_type in (torch.float8_e4m3fn, torch.float8_e5m2):
-                bmm1_scale *= layer._q_scale_float
+            bmm1_scale *= self.get_q_scale(layer, q_data_type)
             bmm1_scale *= layer._k_scale_float
         return bmm1_scale
 
@@ -2423,10 +2426,15 @@ class FlashInferImpl(AttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
+        # Only SM100 reads this (TRTLLM prefill, trtllm-gen decode), where
+        # prefill and decode share one query dtype.
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
             if is_quantized_kv_cache(self.kv_cache_dtype):
-                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
+                self.bmm1_scale *= (
+                    self.get_q_scale(layer, attn_metadata.q_data_type_prefill)
+                    * layer._k_scale_float
+                )
 
         if self.bmm2_scale is None:
             self.bmm2_scale = 1.0
@@ -2687,7 +2695,9 @@ class FlashInferImpl(AttentionImpl):
                             prefill_query,
                             kv_cache_for_fi,
                             self.sinks,
-                            self.scale * layer._q_scale_float * layer._k_scale_float,
+                            self.scale
+                            * self.get_q_scale(layer, prefill_query.dtype)
+                            * layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
                         )
@@ -2695,8 +2705,7 @@ class FlashInferImpl(AttentionImpl):
                         prefill_wrapper.run(
                             prefill_query,
                             kv_cache_for_fi,
-                            # The fa2 NVFP4 query stays in the model dtype.
-                            q_scale=1.0 if self.nvfp4_fa2 else layer._q_scale_float,
+                            q_scale=self.get_q_scale(layer, prefill_query.dtype),
                             k_scale=layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
@@ -2868,7 +2877,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
+                        q_scale=self.get_q_scale(layer, decode_query.dtype),
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=output_tmp,
@@ -2886,7 +2895,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=1.0 if self.nvfp4_fa2 else layer._q_scale_float,
+                        q_scale=self.get_q_scale(layer, decode_query.dtype),
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_decode,

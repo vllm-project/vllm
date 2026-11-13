@@ -52,7 +52,6 @@ def test_bailing_yarn_image_order_and_centered_positions(vllm_runner, encoder_mo
         max_num_batched_tokens=8192,
         enable_chunked_prefill=True,
         enable_prefix_caching=False,
-        gpu_memory_utilization=0.85,
         enforce_eager=True,
         limit_mm_per_prompt={"image": 5},
         mm_processor_kwargs={"max_pixels": 1048576},
