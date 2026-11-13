@@ -1001,7 +1001,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
             return hook
 
-        # Like native Qwen3-VL, ignore levels beyond the last decoder layer
+        # Ignore levels beyond the last decoder layer
         for level, layer in zip(range(self.deepstack_num_levels), layers):
             layer.register_forward_hook(add_deepstack(level))
 
