@@ -1,0 +1,184 @@
+diff --git a/flash_attn/cute/flash_fwd_sm100.py b/flash_attn/cute/flash_fwd_sm100.py
+index 4f931a5..c74ed91 100644
+--- a/flash_attn/cute/flash_fwd_sm100.py
++++ b/flash_attn/cute/flash_fwd_sm100.py
+@@ -142,6 +142,7 @@ class FlashAttentionForwardSm100:
+         use_2cta_instrs: bool = False,
+         use_clc_scheduler: bool = False,
+         has_bias: bool = False,
++        bias_ex2_emu: bool = False,
+         rel_extent_padded: int = 128,
+         has_scheduler_metadata: bool = False,
+         seqlen_k_per_split: Optional[int] = None,
+@@ -151,6 +152,9 @@ class FlashAttentionForwardSm100:
+         kv_sf_interleaved: bool = False,
+     ):
+         self.has_bias = has_bias
++        # Run ex2 FFMA emulation on unmasked sheared-bias blocks, matching a
++        # score_mod reference that only disables it where mask_fn applies.
++        self.bias_ex2_emu = has_bias and bias_ex2_emu
+         self.rel_extent_padded = rel_extent_padded
+         assert rel_extent_padded % n_block_size == 0
+         self.bias_n_max = rel_extent_padded//n_block_size if has_bias else 0
+@@ -3364,6 +3368,13 @@ class FlashAttentionForwardSm100:
+                     if const_expr(self.is_causal or self.is_local or self.has_bias):
+                         if const_expr(self.has_bias):
+                             n_block_min_causal_local_mask = max(n_block_max + 1 - num_bias_loads, n_block_min)
++                            if const_expr(self.bias_ex2_emu):
++                                n_block_min_bias_emu_off = block_info.get_n_block_min_causal_local_mask(
++                                    seqlen, m_block, n_block_min
++                                )
++                                n_block_left_bias_emu_off = block_info.get_n_block_min_before_local_mask(
++                                    seqlen, m_block, n_block_min
++                                )
+                         else:
+                             n_block_min_causal_local_mask = block_info.get_n_block_min_causal_local_mask(
+                                 seqlen, m_block, n_block_min
+@@ -3385,6 +3396,12 @@ class FlashAttentionForwardSm100:
+                                 mask_fn=partial(mask_fn, mask_seqlen=False) if const_expr(not self.has_bias) else None,
+                                 # mask_fn=partial(mask_fn, mask_seqlen=False),
+                                 apply_bias=True,
++                                bias_emu_off=Boolean(
++                                    n_block >= n_block_min_bias_emu_off
++                                    or n_block < n_block_left_bias_emu_off
++                                )
++                                if const_expr(self.bias_ex2_emu)
++                                else None,
+                                 bias_si_consumer_state=bias_si_consumer_state,
+                             )
+                         n_block_max = cutlass.min(n_block_max, n_block_min_causal_local_mask)
+@@ -3523,6 +3540,7 @@ class FlashAttentionForwardSm100:
+         tS2RsBias: Optional[cute.Tensor] = None, 
+         bias_s2r_thr_copy: Optional[cute.CopyAtom] = None,
+         apply_bias: bool = False,
++        bias_emu_off: Optional[Boolean] = None,
+         pipeline_bias: Optional[pipeline.PipelineAsync] = None,
+         bias_si_consumer_state: Optional[pipeline.PipelineState] = None,
+         pipeline_sf_overlap: Optional[pipeline.PipelineAsync] = None,
+@@ -3632,12 +3650,28 @@ class FlashAttentionForwardSm100:
+             cute.recast_ptr(tSrP_r2t_f32.iterator, dtype=self.v_mma_dtype), tSrS_t2r.layout
+         )
+         # softmax.scale_apply_exp2_convert(tSrS_t2r, row_max, tSrP_r2t)
+-        softmax.apply_exp2_convert(
+-            tSrS_t2r,
+-            tSrP_r2t,
+-            ex2_emu_freq=self.ex2_emu_freq if const_expr(mask_fn is None and not apply_bias) else 0,
+-            ex2_emu_start_frg=self.ex2_emu_start_frg,
+-        )
++        if const_expr(self.bias_ex2_emu and mask_fn is None and apply_bias):
++            if bias_emu_off:
++                softmax.apply_exp2_convert(
++                    tSrS_t2r,
++                    tSrP_r2t,
++                    ex2_emu_freq=0,
++                    ex2_emu_start_frg=self.ex2_emu_start_frg,
++                )
++            else:
++                softmax.apply_exp2_convert(
++                    tSrS_t2r,
++                    tSrP_r2t,
++                    ex2_emu_freq=self.ex2_emu_freq,
++                    ex2_emu_start_frg=self.ex2_emu_start_frg,
++                )
++        else:
++            softmax.apply_exp2_convert(
++                tSrS_t2r,
++                tSrP_r2t,
++                ex2_emu_freq=self.ex2_emu_freq if const_expr(mask_fn is None and not apply_bias) else 0,
++                ex2_emu_start_frg=self.ex2_emu_start_frg,
++            )
+         # Sequence barrier arrive
+         if const_expr(self.s0_s1_barrier):
+             pipeline_s0_s1_sequence.sync_object_full.arrive(1 - stage, dst=None)
+diff --git a/flash_attn/cute/interface.py b/flash_attn/cute/interface.py
+index d8d84e4..826f23a 100644
+--- a/flash_attn/cute/interface.py
++++ b/flash_attn/cute/interface.py
+@@ -286,6 +286,7 @@ def _flash_attn_fwd(
+     gather_kv_indices: Optional[torch.Tensor] = None,
+     bias: Optional[torch.Tensor] = None,
+     rel_bias: Optional[torch.Tensor] = None,
++    bias_ex2_emu: bool = False,
+     scheduler_metadata: Optional[SchedulerMetadataTensorsTorch] = None,
+     seqlen_k_per_split: Optional[int] = None,
+     disable_scheduler_metadata: bool = False,
+@@ -426,6 +427,8 @@ def _flash_attn_fwd(
+         softcap = None
+ 
+     out_torch_dtype = torch.bfloat16 if v_blockscaled else (v.dtype if blockscaled else q.dtype)
++    if out is not None and out.dtype == torch.float32:
++        out_torch_dtype = torch.float32
+     device = q.device
+     q_batch_seqlen_shape = (batch_size, seqlen_q) if cu_seqlens_q is None else (total_q,)
+     lse_shape = (batch_size, num_head, seqlen_q) if cu_seqlens_q is None else (num_head, total_q)
+@@ -856,10 +859,16 @@ def _flash_attn_fwd(
+                 window_size_left,
+                 window_size_right,
+             )
++    elif bias is not None:
++        # Already sheared as ShearingBias writes it, rows padded by tile_m.
++        rel_extent_padded = bias.shape[-1]
++        rel_extent = rel_extent_padded - 256
++        assert rel_extent % 128 == 0 and tile_m == 128 and tile_n == 128
++        assert cu_seqlens_q is not None
++        assert bias.shape == (total_q + tile_m, num_head, rel_extent_padded)
+     else:
+         rel_extent = 0
+         rel_extent_padded = 0
+-        bias = None
+ 
+     # if bias is not None:
+     #     rel_extent_padded = bias.shape[-1]
+@@ -985,6 +994,7 @@ def _flash_attn_fwd(
+ 
+     compile_key = (
+         dtype,
++        out_torch_dtype,
+         head_dim,
+         head_dim_v,
+         qhead_per_kvhead,
+@@ -1025,6 +1035,7 @@ def _flash_attn_fwd(
+         sparse_kv,
+         disable_sparse_kv_bitmask,
+         bias is not None,
++        bias_ex2_emu,
+         tile_bias,
+         rel_extent,
+         has_scheduler_metadata,
+@@ -1228,6 +1239,7 @@ def _flash_attn_fwd(
+                     use_2cta_instrs=use_2cta_instrs,
+                     use_clc_scheduler=use_clc_scheduler,
+                     has_bias=bias is not None,
++                    bias_ex2_emu=bias_ex2_emu,
+                     rel_extent_padded=rel_extent_padded,
+                     has_scheduler_metadata=has_scheduler_metadata,
+                     seqlen_k_per_split=seqlen_k_per_split,
+@@ -1536,6 +1548,7 @@ def flash_attn_varlen_func(
+     sfk: Optional[torch.Tensor] = None,
+     sfv: Optional[torch.Tensor] = None,
+     out: Optional[torch.Tensor] = None,
++    bias_ex2_emu: bool = False,
+ ):
+     del deterministic, score_mod_bwd
+     qk_sf_vec_size = None if sfq is None else 32
+@@ -1569,6 +1582,7 @@ def flash_attn_varlen_func(
+         gather_kv_indices=gather_kv_indices,
+         return_logits_max=return_logits_max,
+         rel_bias=rel_bias,
++        bias_ex2_emu=bias_ex2_emu,
+         scheduler_metadata=scheduler_metadata,
+         seqlen_k_per_split=seqlen_k_per_split,
+         disable_scheduler_metadata=disable_scheduler_metadata,
+diff --git a/flash_attn/cute/flash_fwd_sm100.py b/flash_attn/cute/flash_fwd_sm100.py
+index c74ed91..8f2b3c4 100644
+--- a/flash_attn/cute/flash_fwd_sm100.py
++++ b/flash_attn/cute/flash_fwd_sm100.py
+@@ -106,7 +106,7 @@
+     (True, False, 192, False): {"ex2_emu_freq": 16, "ex2_emu_start_frg": 0, "num_regs_softmax": 184, "num_regs_correction": 80},
+     (False, True, 192, False): {"ex2_emu_freq": 32, "ex2_emu_start_frg": 1, "num_regs_softmax": 192, "num_regs_correction": 72},
+     (True, False, 128, True): {"ex2_emu_freq": 0, "ex2_emu_start_frg": 0, "num_regs_softmax": 176, "num_regs_correction": 80},
+-    (False, True, 128, True): {"ex2_emu_freq": 0, "ex2_emu_start_frg": 0, "num_regs_softmax": 176, "num_regs_correction": 64},
++    (False, True, 128, True): {"ex2_emu_freq": 0, "ex2_emu_start_frg": 0, "num_regs_softmax": 160, "num_regs_correction": 56},
+     (True, False, 192, True): {"ex2_emu_freq": 0, "ex2_emu_start_frg": 0, "num_regs_softmax": 176, "num_regs_correction": 64},
+     (False, True, 192, True): {"ex2_emu_freq": 0, "ex2_emu_start_frg": 0, "num_regs_softmax": 176, "num_regs_correction": 72},
+     (True, False, 256, False): {"ex2_emu_freq": 14, "ex2_emu_res": 6, "ex2_emu_start_frg": 0, "num_regs_softmax": 256, "num_regs_correction": 160},

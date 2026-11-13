@@ -127,6 +127,8 @@ mod tests {
             .with_regular_token("<|message_model|>", 200001)
             .with_regular_token("<|content_text|>", 200004)
             .with_regular_token("<|content_thinking|>", 200008)
+            .with_regular_token("<|end_message|>", 200010)
+            .with_regular_token("<|content_invoke_tool_json|>", 200049)
     }
 
     #[test]

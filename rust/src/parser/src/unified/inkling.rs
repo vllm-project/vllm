@@ -9,8 +9,12 @@ use winnow::stream::Partial;
 use winnow::token::literal;
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::ToolChoice;
+use xgrammar_structural_tag::format::{Format, TokenFormat, TokenValue};
+use xgrammar_structural_tag::tool::ToolChoiceValue;
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext, OutputGrammarError};
 use crate::tool::json::{
     JsonToolCallConfig, JsonToolCallEvent, JsonToolCallWhitespace, JsonToolInput,
     tool_call_header_event,
@@ -27,6 +31,8 @@ const CONTENT_INVOKE_TOOL_JSON: &str = "<|content_invoke_tool_json|>";
 const CONTENT_INVOKE_TOOL_TEXT: &str = "<|content_invoke_tool_text|>";
 const CONTENT_MODEL_END_SAMPLING: &str = "<|content_model_end_sampling|>";
 const CONTENT_TOOL_ERROR: &str = "<|content_tool_error|>";
+const CONTENT_XML: &str = "<|content_xml|>";
+const CONTENT_AUDIO_INPUT: &str = "<|content_audio_input|>";
 const MESSAGE_MODEL: &str = "<|message_model|>";
 const END_MESSAGE: &str = "<|end_message|>";
 
@@ -41,6 +47,23 @@ const IDLE_MARKERS: &[&str] = &[
     END_MESSAGE,
 ];
 const BLOCK_END_MARKERS: &[&str] = &[END_MESSAGE, CONTENT_MODEL_END_SAMPLING];
+/// Framing spellings that free thinking text in an output grammar excludes.
+const CONTROL_MARKERS: &[&str] = &[
+    "<|endoftext|>",
+    "<|message_user|>",
+    MESSAGE_MODEL,
+    "<|message_system|>",
+    "<|message_tool|>",
+    CONTENT_TEXT,
+    "<|content_image|>",
+    CONTENT_MODEL_END_SAMPLING,
+    CONTENT_THINKING,
+    END_MESSAGE,
+    CONTENT_TOOL_ERROR,
+    CONTENT_XML,
+    CONTENT_INVOKE_TOOL_JSON,
+    CONTENT_INVOKE_TOOL_TEXT,
+];
 
 const INKLING_TOOL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Inkling",
@@ -95,6 +118,11 @@ pub struct InklingUnifiedParser {
     message_model_token_id: u32,
     content_text_token_id: u32,
     content_thinking_token_id: u32,
+    end_message_token_id: u32,
+    /// Inkling2 prompts end between messages and support JSON answers.
+    inkling2: bool,
+    /// The prompt continues a text block that already has content.
+    nonempty_text_prefix: bool,
 }
 
 impl InklingUnifiedParser {
@@ -103,6 +131,10 @@ impl InklingUnifiedParser {
         let message_model_token_id = token_id(tokenizer.as_ref(), MESSAGE_MODEL)?;
         let content_text_token_id = token_id(tokenizer.as_ref(), CONTENT_TEXT)?;
         let content_thinking_token_id = token_id(tokenizer.as_ref(), CONTENT_THINKING)?;
+        let end_message_token_id = token_id(tokenizer.as_ref(), END_MESSAGE)?;
+        // Inkling2 spells `<|content_xml|>` natively and has no audio tokens.
+        let inkling2 = tokenizer.token_to_id(CONTENT_XML).is_some()
+            && tokenizer.token_to_id(CONTENT_AUDIO_INPUT).is_none();
 
         Ok(Self {
             buffer: DecodedText::default(),
@@ -113,12 +145,16 @@ impl InklingUnifiedParser {
             message_model_token_id,
             content_text_token_id,
             content_thinking_token_id,
+            end_message_token_id,
+            inkling2,
+            nonempty_text_prefix: false,
         })
     }
 
     fn initialize_mode(&mut self, prompt_token_ids: &[u32]) {
         self.mode = InklingMode::Idle;
-        for token_id in prompt_token_ids.iter().rev().copied() {
+        self.nonempty_text_prefix = false;
+        for (index, token_id) in prompt_token_ids.iter().rev().copied().enumerate() {
             if token_id == self.message_model_token_id {
                 self.mode = InklingMode::MessageHeader {
                     pending: DecodedText::default(),
@@ -131,6 +167,7 @@ impl InklingUnifiedParser {
             }
             if token_id == self.content_text_token_id {
                 self.mode = InklingMode::Text;
+                self.nonempty_text_prefix = index > 0;
                 return;
             }
             if self.tokenizer.is_special_id(token_id) {
@@ -233,6 +270,64 @@ impl UnifiedParser for InklingUnifiedParser {
 
     fn preserve_special_tokens(&self) -> bool {
         true
+    }
+
+    /// Frame an Inkling2 JSON answer constraint (a `response_format`) with the
+    /// block grammar: any number of free thinking blocks, then a final text
+    /// block whose payload alone matches the constraint.
+    // TODO: constrain required and named tool choices to tool-call blocks.
+    fn build_output_grammar(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
+        let Some(answer) = ctx
+            .answer
+            .filter(|answer| self.inkling2 && matches!(answer, Format::JsonSchema(_)))
+        else {
+            return Ok(None);
+        };
+        if !ctx.tools.is_empty()
+            && !matches!(
+                ctx.tool_choice,
+                ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::None)
+            )
+        {
+            return Ok(None);
+        }
+        let token = |id: u32| {
+            Format::Token(TokenFormat {
+                token: TokenValue::Id(id.into()),
+            })
+        };
+        let model = token(self.message_model_token_id);
+        let end = token(self.end_message_token_id);
+        let format = match self.mode {
+            InklingMode::Idle => {
+                let thinking = Format::sequence(vec![
+                    model.clone(),
+                    token(self.content_thinking_token_id),
+                    Format::any_text_excluding(CONTROL_MARKERS),
+                    end.clone(),
+                ]);
+                Format::sequence(vec![
+                    Format::star(thinking),
+                    model,
+                    token(self.content_text_token_id),
+                    answer.clone(),
+                    end,
+                ])
+            }
+            InklingMode::Text if self.nonempty_text_prefix => {
+                return Err(OutputGrammarError::UnsupportedRequest(
+                    "Inkling JSON response formats cannot continue a nonempty \
+                     assistant message",
+                ));
+            }
+            // A continued empty text answer.
+            InklingMode::Text => Format::sequence(vec![answer.clone(), end]),
+            _ => return Ok(None),
+        };
+        Ok(Some(BuiltOutputGrammar::from_token_zero(format)))
     }
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
@@ -429,7 +524,11 @@ mod tests {
     use thiserror_ext::AsReport;
     use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution, Tokenizer};
 
-    struct FakeTokenizer;
+    /// One token per character; `inkling2` adds Inkling2's native
+    /// `<|content_xml|>` spelling.
+    struct FakeTokenizer {
+        inkling2: bool,
+    }
 
     impl Tokenizer for FakeTokenizer {
         fn encode(
@@ -463,6 +562,7 @@ mod tests {
                 "<|content_thinking|>" => Some(200008),
                 "<|end_message|>" => Some(200010),
                 "<|content_tool_error|>" => Some(200022),
+                "<|content_xml|>" if self.inkling2 => Some(200024),
                 "<|content_invoke_tool_json|>" => Some(200049),
                 "<|content_invoke_tool_text|>" => Some(200057),
                 _ => None,
@@ -562,7 +662,13 @@ mod tests {
     }
 
     fn test_parser() -> InklingUnifiedParser {
-        InklingUnifiedParser::new(&test_tools(), Arc::new(FakeTokenizer)).unwrap()
+        InklingUnifiedParser::new(&test_tools(), Arc::new(FakeTokenizer { inkling2: false }))
+            .unwrap()
+    }
+
+    fn test_inkling2_parser() -> InklingUnifiedParser {
+        InklingUnifiedParser::new(&test_tools(), Arc::new(FakeTokenizer { inkling2: true }))
+            .unwrap()
     }
 
     fn collect_stream(chunks: &[&str]) -> UnifiedParserOutput {
@@ -886,5 +992,154 @@ mod tests {
         };
 
         assert!(error.as_report().to_string().contains(CONTENT_THINKING));
+    }
+
+    /// An Inkling2 prompt: it ends between messages (no generation prefix).
+    const INKLING2_PROMPT: &[u32] = &[200002, 200004, 101, 200010, 200000, 200004, 113, 200010];
+
+    #[test]
+    fn inkling2_prompt_parses_model_framed_blocks() {
+        let mut parser = test_inkling2_parser();
+        parser.initialize(INKLING2_PROMPT).unwrap();
+        let mut output = UnifiedParserOutput::default();
+        for chunk in [
+            "<|message_model|><|content_thinking|>plan<|end_message|>",
+            "<|message_model|><|content_text|>Checking.<|end_message|>",
+            "<|message_model|><|content_invoke_tool_json|>",
+            "{\"name\":\"get_weather\",\"args\":{\"city\":\"SF\"}}<|end_message|>",
+            "<|message_model|><|content_invoke_tool_json|>",
+            "{\"name\":\"get_weather\",\"args\":{\"city\":\"NYC\"}}<|end_message|>",
+        ] {
+            output.append(parser.parse_chunk(chunk).unwrap());
+        }
+        output.append(parser.finish().unwrap());
+
+        assert_eq!(output.reasoning_text(), "plan");
+        assert_eq!(output.normal_text(), "Checking.");
+        let calls = output.calls();
+        let names = calls.iter().filter_map(|call| call.name.as_deref()).collect::<Vec<_>>();
+        assert_eq!(names, ["get_weather", "get_weather"]);
+        let args = |index| {
+            calls
+                .iter()
+                .filter(|call| call.tool_index == index)
+                .map(|call| call.arguments.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(args(0), "{\"city\":\"SF\"}");
+        assert_eq!(args(1), "{\"city\":\"NYC\"}");
+    }
+
+    #[test]
+    fn inkling2_answer_grammar_frames_the_final_text_block() {
+        use expect_test::expect;
+        use serde_json::json;
+        use xgrammar_structural_tag::ToolChoice;
+        use xgrammar_structural_tag::format::Format;
+        use xgrammar_structural_tag::tool::ToolChoiceValue;
+
+        use crate::output_grammar::test_utils::outline;
+        use crate::output_grammar::{GrammarCoverage, OutputGrammarContext};
+
+        let tools = test_tools();
+        let answer = Format::json_schema(json!({"type": "object"}));
+        let grammar = |mut parser: InklingUnifiedParser,
+                       prompt: &[u32],
+                       choice: ToolChoiceValue,
+                       answer: Option<&Format>| {
+            parser.initialize(prompt).unwrap();
+            let built = parser.build_output_grammar(&OutputGrammarContext {
+                tools: &tools,
+                tool_choice: &ToolChoice::Value(choice),
+                tool_strict_level: Default::default(),
+                parallel_tool_calls: true,
+                answer,
+            });
+            built.unwrap().map(|built| {
+                assert_eq!(built.coverage, GrammarCoverage::FromTokenZero);
+                outline(&built.format)
+            })
+        };
+
+        let auto = ToolChoiceValue::Auto;
+        assert_eq!(
+            grammar(test_inkling2_parser(), INKLING2_PROMPT, auto, None),
+            None
+        );
+        // Only JSON answers are framed.
+        assert_eq!(
+            grammar(
+                test_inkling2_parser(),
+                INKLING2_PROMPT,
+                auto,
+                Some(&Format::regex("a+"))
+            ),
+            None
+        );
+        // Inkling leaves the answer constraint unframed.
+        assert_eq!(
+            grammar(
+                test_parser(),
+                &[200010, 200001],
+                ToolChoiceValue::None,
+                Some(&answer)
+            ),
+            None
+        );
+        // Tool calls never replace the JSON answer.
+        expect![[r#"
+            sequence
+              star
+                sequence
+                  token 200001
+                  token 200008
+                  text excluding [`<|endoftext|>`, `<|message_user|>`, `<|message_model|>`, `<|message_system|>`, `<|message_tool|>`, `<|content_text|>`, `<|content_image|>`, `<|content_model_end_sampling|>`, `<|content_thinking|>`, `<|end_message|>`, `<|content_tool_error|>`, `<|content_xml|>`, `<|content_invoke_tool_json|>`, `<|content_invoke_tool_text|>`]
+                  token 200010
+              token 200001
+              token 200004
+              json(object)
+              token 200010
+        "#]]
+        .assert_eq(&grammar(test_inkling2_parser(), INKLING2_PROMPT, auto, Some(&answer)).unwrap());
+        // A continued text answer.
+        expect![[r#"
+            sequence
+              json(object)
+              token 200010
+        "#]]
+        .assert_eq(
+            &grammar(
+                test_inkling2_parser(),
+                &[200001, 200004],
+                auto,
+                Some(&answer),
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn inkling2_answer_grammar_rejects_nonempty_text_prefix() {
+        use serde_json::json;
+        use xgrammar_structural_tag::ToolChoice;
+        use xgrammar_structural_tag::format::Format;
+        use xgrammar_structural_tag::tool::ToolChoiceValue;
+
+        use crate::output_grammar::{OutputGrammarContext, OutputGrammarError};
+
+        let mut parser = test_inkling2_parser();
+        parser.initialize(&[200001, 200004, 104, 105]).unwrap();
+        let answer = Format::json_schema(json!({"type": "object"}));
+        let result = parser.build_output_grammar(&OutputGrammarContext {
+            tools: &[],
+            tool_choice: &ToolChoice::Value(ToolChoiceValue::Auto),
+            tool_strict_level: Default::default(),
+            parallel_tool_calls: true,
+            answer: Some(&answer),
+        });
+        assert!(matches!(
+            result,
+            Err(OutputGrammarError::UnsupportedRequest(_))
+        ));
     }
 }

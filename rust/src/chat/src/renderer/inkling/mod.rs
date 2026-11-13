@@ -38,6 +38,8 @@ pub struct InklingChatRenderer {
     tokenizer: DynTokenizer,
     special: InklingSpecialTokenIds,
     default_template_kwargs: HashMap<String, Value>,
+    /// Render with the Inkling2 reference semantics (see [`inkling2`]).
+    inkling2: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,12 +51,12 @@ struct InklingSpecialTokenIds {
     content_text: u32,
     content_image: u32,
     content_model_end_sampling: u32,
-    content_audio_input: u32,
+    content_audio_input: Option<u32>,
     content_thinking: u32,
     content_xml: u32,
     content_invoke_tool_json: u32,
     end_message: u32,
-    audio_end: u32,
+    audio_end: Option<u32>,
 }
 
 impl InklingSpecialTokenIds {
@@ -70,12 +72,13 @@ impl InklingSpecialTokenIds {
                 tokenizer,
                 CONTENT_MODEL_END_SAMPLING,
             )?,
-            content_audio_input: resolve_special_token(tokenizer, CONTENT_AUDIO_INPUT)?,
+            // Inkling2 has no audio input.
+            content_audio_input: tokenizer.token_to_id(CONTENT_AUDIO_INPUT),
             content_thinking: resolve_special_token(tokenizer, CONTENT_THINKING)?,
             content_xml: resolve_special_token(tokenizer, CONTENT_XML)?,
             content_invoke_tool_json: resolve_special_token(tokenizer, CONTENT_INVOKE_TOOL_JSON)?,
             end_message: resolve_special_token(tokenizer, END_MESSAGE)?,
-            audio_end: resolve_special_token(tokenizer, AUDIO_END)?,
+            audio_end: tokenizer.token_to_id(AUDIO_END),
         })
     }
 }
@@ -90,11 +93,28 @@ impl InklingChatRenderer {
             tokenizer,
             special,
             default_template_kwargs,
+            inkling2: false,
+        })
+    }
+
+    /// Create a renderer for Inkling2 checkpoints.
+    pub fn new_inkling2(
+        tokenizer: DynTokenizer,
+        default_template_kwargs: HashMap<String, Value>,
+    ) -> Result<Self> {
+        Ok(Self {
+            inkling2: true,
+            ..Self::new(tokenizer, default_template_kwargs)?
         })
     }
 
     fn write_text_tokens(&self, out: &mut Vec<u32>, text: &str) -> Result<()> {
-        out.extend(self.tokenizer.encode(text, false)?);
+        if self.inkling2 {
+            // Payload text never encodes to framing tokens.
+            out.extend(self.tokenizer.encode_ordinary(text)?);
+        } else {
+            out.extend(self.tokenizer.encode(text, false)?);
+        }
         Ok(())
     }
 
@@ -141,11 +161,17 @@ impl InklingChatRenderer {
     /// followed by the `<|audio_end|>` terminator. Multimodal preprocessing
     /// later expands the marker into per-frame audio placeholder tokens
     /// (landing before `<|audio_end|>`) once the clip length is known.
-    fn write_audio_block(&self, out: &mut Vec<u32>, role_token_id: u32) {
+    fn write_audio_block(&self, out: &mut Vec<u32>, role_token_id: u32) -> Result<()> {
+        let (Some(content_audio_input), Some(audio_end)) =
+            (self.special.content_audio_input, self.special.audio_end)
+        else {
+            return Err(Error::UnsupportedMultimodalContent("input_audio"));
+        };
         out.push(role_token_id);
-        out.push(self.special.content_audio_input);
-        out.push(self.special.audio_end);
+        out.push(content_audio_input);
+        out.push(audio_end);
         out.push(self.special.end_message);
+        Ok(())
     }
 
     fn write_reasoning_block(&self, out: &mut Vec<u32>, text: &str) -> Result<()> {
@@ -220,7 +246,7 @@ impl InklingChatRenderer {
                             self.write_image_block(out, role_token_id);
                         }
                         ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
-                            self.write_audio_block(out, role_token_id);
+                            self.write_audio_block(out, role_token_id)?;
                         }
                         // Inkling has no video modality.
                         ChatContentPart::VideoUrl { .. } => {
@@ -294,6 +320,9 @@ impl InklingChatRenderer {
 impl ChatRenderer for InklingChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
+        if self.inkling2 {
+            return self.render_inkling2(request);
+        }
         if request.chat_options.continue_final_message() {
             return Err(Error::ChatTemplate(
                 "Inkling renderer does not support continue_final_message".to_string(),
@@ -417,11 +446,19 @@ fn resolve_special_token(tokenizer: &dyn Tokenizer, token: &str) -> Result<u32> 
 }
 
 fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {
-    let name_json = serde_json::to_string(&tool_call.name)
-        .map_err(|error| Error::ChatTemplate(error.as_report().to_string()))?;
-    let arguments = Value::Object(tool_call_arguments_or_empty(&tool_call.arguments));
+    let (name, arguments) = tool_call_json_value(tool_call);
+    let name_json = compact_json(&Value::from(name))?;
     let args_json = compact_json(&sort_json(&arguments))?;
     Ok(format!("{{\"name\":{name_json},\"args\":{args_json}}}"))
+}
+
+/// Return a tool call's name and its arguments as a JSON object (anything but
+/// an object is coerced to an empty one; see `tool_call_arguments_or_empty`).
+fn tool_call_json_value(tool_call: &AssistantToolCall) -> (&str, Value) {
+    (
+        &tool_call.name,
+        Value::Object(tool_call_arguments_or_empty(&tool_call.arguments)),
+    )
 }
 
 fn compact_json(value: &Value) -> Result<String> {
@@ -443,6 +480,8 @@ fn sort_json(value: &Value) -> Value {
         _ => value.clone(),
     }
 }
+
+mod inkling2;
 
 #[cfg(test)]
 mod tests;

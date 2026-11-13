@@ -1178,6 +1178,31 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Building Beam kernels for archs: ${BEAM_KERNEL_ARCHS}")
   endif()
 
+  # Inkling2's fused all-reduce uses NVLink multicast and thread-block
+  # clusters. The mixes and norms of its kernels must not contract into FMAs.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
+      "10.0f;10.3f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(INKLING2_KERNEL_ARCHS
+      "10.0a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(INKLING2_KERNEL_ARCHS)
+    set(INKLING2_KERNEL_SRCS
+      "csrc/inkling2/allreduce_conv_mix.cu"
+      "csrc/inkling2/conv_mix.cu"
+      "csrc/inkling2/dspark_argmax.cu"
+      "csrc/inkling2/seq_parallel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${INKLING2_KERNEL_SRCS}"
+      CUDA_ARCHS "${INKLING2_KERNEL_ARCHS}")
+    set_property(SOURCE ${INKLING2_KERNEL_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${INKLING2_KERNEL_SRCS}")
+    message(STATUS
+      "Building Inkling2 kernels for archs: ${INKLING2_KERNEL_ARCHS}")
+  endif()
+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(KIMI_K3_ATTN_RES_ARCHS
       "10.0f" "${CUDA_ARCHS}")
@@ -1324,6 +1349,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(BEAM_KERNEL_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_BEAM_KERNELS=1)
+    endif()
+    if(INKLING2_KERNEL_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_INKLING2_KERNELS=1)
     endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
