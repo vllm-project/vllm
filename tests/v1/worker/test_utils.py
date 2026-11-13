@@ -518,6 +518,24 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     assert (backing[9] == -1).all()
 
 
+def test_copy_kv_cache_blocks_is_scoped_to_owning_pool():
+    target = torch.arange(4, dtype=torch.float32).view(4, 1)
+    draft = torch.tensor([[10.0], [11.0]])
+
+    copy_kv_cache_blocks_inplace(
+        [target, draft],
+        num_blocks={0: 4, 1: 2},
+        kv_cache_block_copies=[
+            KVCacheBlockCopy(src_block_id=0, dst_block_id=3, pool_id=0),
+            KVCacheBlockCopy(src_block_id=0, dst_block_id=1, pool_id=1),
+        ],
+        cache_pool_ids=[0, 1],
+    )
+
+    torch.testing.assert_close(target[:, 0], torch.tensor([0.0, 1.0, 2.0, 0.0]))
+    torch.testing.assert_close(draft[:, 0], torch.tensor([10.0, 10.0]))
+
+
 def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
     """Block copies index scheduler blocks, so the runner keeps the unmapped
     views while a packed layer is bound with kernel blocks."""

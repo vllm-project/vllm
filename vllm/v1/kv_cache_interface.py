@@ -1532,10 +1532,12 @@ class KVCacheTensor:
     block_stride: int
     offset: int = 0  # byte offset of layers[0]'s block 0
     host_resident: bool = False
+    block_pool_id: int = 0
 
 
 class KVCacheGroupRole(StrEnum):
     DEFAULT = "default"
+    DRAFT_WINDOW = "draft_window"
     HISPARSE_SOURCE = "hisparse_source"
     HISPARSE_INDEXER = "hisparse_indexer"
 
@@ -1552,13 +1554,15 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group holds draft layers and takes the EAGLE last-block drop.
     is_eagle_group: bool = False
-    # Host groups use the dedicated HiSparse pool; others share the device pool.
+    # Host groups use the HiSparse pool. Device groups use block_pool_id below.
     host_resident: bool = False
     # Whether this group is part of the externally transferable KV state.
     # Ephemeral accelerator-side replicas are rebuilt from their transferable
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+    # Independent physical block allocator used by this group.
+    block_pool_id: int = 0
 
 
 @dataclass
@@ -1594,6 +1598,9 @@ class KVCacheConfig:
     hisparse_shared_host_pool: bool = False
     """Whether local TP ranks share one physical HiSparse host pool."""
 
+    num_blocks_by_pool: list[int] = field(default_factory=list)
+    """Number of blocks in each independent physical allocator."""
+
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
@@ -1604,6 +1611,27 @@ class KVCacheConfig:
     """
 
     def __post_init__(self) -> None:
+        if not self.num_blocks_by_pool:
+            self.num_blocks_by_pool = [self.num_blocks]
+        if any(num_blocks < 0 for num_blocks in self.num_blocks_by_pool):
+            raise ValueError("KV cache block-pool sizes must be non-negative")
+        if self.num_blocks != self.num_blocks_by_pool[0]:
+            raise ValueError(
+                "KVCacheConfig.num_blocks must equal num_blocks_by_pool[0]"
+            )
+        num_pools = len(self.num_blocks_by_pool)
+        for group in self.kv_cache_groups:
+            if not 0 <= group.block_pool_id < num_pools:
+                raise ValueError(
+                    f"Invalid block_pool_id={group.block_pool_id}; "
+                    f"configuration has {num_pools} block pools"
+                )
+        for tensor in self.kv_cache_tensors:
+            if not 0 <= tensor.block_pool_id < num_pools:
+                raise ValueError(
+                    f"Invalid tensor block_pool_id={tensor.block_pool_id}; "
+                    f"configuration has {num_pools} block pools"
+                )
         self.needs_kv_cache_zeroing = (
             self.has_mamba_layers or self.has_mixed_precision_kv_cache
         )
@@ -1672,7 +1700,7 @@ class KVCacheConfig:
     def num_blocks_of(self, tensor: KVCacheTensor) -> int:
         """Number of blocks addressable by the pool backing `tensor`."""
         if not tensor.host_resident:
-            return self.num_blocks
+            return self.num_blocks_by_pool[tensor.block_pool_id]
         assert self.hisparse_host_num_blocks is not None
         return self.hisparse_host_num_blocks
 

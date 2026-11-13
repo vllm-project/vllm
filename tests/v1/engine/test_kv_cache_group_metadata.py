@@ -11,7 +11,10 @@ from vllm.config import (
     CacheConfig,
     DeviceConfig,
     KVTransferConfig,
+    ModelConfig,
     ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -23,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.worker.worker_base import WorkerBase
 
@@ -99,6 +103,79 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
                 worker.vllm_config.cache_config.kv_cache_layout == "BLHNC"
                 for worker in workers
             )
+            raise ProfilingStarted
+
+    engine = object.__new__(EngineCore)
+    engine.model_executor = LocalExecutor()
+    with pytest.raises(ProfilingStarted):
+        engine._initialize_kv_caches(config)
+
+
+def test_draft_window_pools_disable_auto_extensible_before_profiling():
+    """Exact multi-pool selection must reach Core and every worker first."""
+    config = VllmConfig(
+        cache_config=CacheConfig(
+            block_size=16,
+            enable_extensible_kv_cache=False,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+        model_config=ModelConfig(max_model_len=256),
+        scheduler_config=SchedulerConfig(
+            max_model_len=256,
+            max_num_batched_tokens=32,
+            max_num_seqs=2,
+            is_encoder_decoder=False,
+            async_scheduling=False,
+        ),
+    )
+    config.cache_config.enable_extensible_kv_cache = True
+    config.cache_config._extensible_kv_cache_requested = None
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.speculative_config = SpeculativeConfig(
+        model="ngram", num_speculative_tokens=7
+    )
+    config.speculative_config.method = "dflash"
+    specs = [
+        {
+            "target": FullAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float16,
+            ),
+            "draft": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float16,
+                sliding_window=64,
+                is_draft=True,
+            ),
+        }
+    ]
+
+    class ProfilingStarted(Exception):
+        pass
+
+    class LocalExecutor:
+        def get_kv_cache_specs(self):
+            return specs
+
+        def get_supported_kv_cache_layouts(self):
+            return [["BLHNC"]]
+
+        def extensible_kv_cache_unsupported_reason(self, kv_cache_specs):
+            return None
+
+        def disable_extensible_kv_cache(self, reason):
+            assert "independent target and draft pools" in reason
+            config.cache_config.enable_extensible_kv_cache = False
+
+        def set_kv_cache_layout(self, layout, interleave_size):
+            pass
+
+        def determine_available_memory(self):
+            assert config.cache_config.enable_extensible_kv_cache is False
             raise ProfilingStarted
 
     engine = object.__new__(EngineCore)

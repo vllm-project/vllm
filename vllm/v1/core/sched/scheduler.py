@@ -1314,7 +1314,14 @@ class Scheduler(SchedulerInterface):
                     request_token_budget = min(token_budget, input_budget - draft_slots)
                     if did_prefix_cache_lookup:
                         # Fresh admission: local and/or sync external hit.
-                        num_replay_tokens = self._mark_prefix_replay(
+                        request.draft_recovery_main_cached_end = 0
+                        num_replay_tokens = (
+                            0
+                            if window_loaded
+                            else self._mark_draft_window_recovery(
+                                request, num_computed_tokens
+                            )
+                        ) or self._mark_prefix_replay(
                             request, num_computed_tokens, window_loaded
                         )
                         num_computed_tokens -= num_replay_tokens
@@ -1462,6 +1469,10 @@ class Scheduler(SchedulerInterface):
 
                 # Replayed tokens are already counted in the adopted hit; a
                 # chunk that ends inside the replayed range needs no new slots.
+                num_scheduled_draft_recovery_tokens = min(
+                    num_new_tokens,
+                    num_replay_tokens,
+                )
                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -1480,6 +1491,11 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    num_scheduled_draft_recovery_tokens=(
+                        num_scheduled_draft_recovery_tokens
+                        if request.draft_recovery_main_cached_end
+                        else 0
+                    ),
                 )
 
                 if new_blocks is None:
@@ -1732,6 +1748,13 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
+        new_block_ids_to_zero = self._get_new_block_ids_to_zero()
+        if isinstance(new_block_ids_to_zero, dict):
+            new_block_ids_to_zero_by_pool = new_block_ids_to_zero
+            new_block_ids_to_zero = None
+        else:
+            new_block_ids_to_zero_by_pool = None
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1750,7 +1773,8 @@ class Scheduler(SchedulerInterface):
             encoder_input_updates=self._get_encoder_input_updates(
                 num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
             ),
-            new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            new_block_ids_to_zero=new_block_ids_to_zero,
+            new_block_ids_to_zero_by_pool=new_block_ids_to_zero_by_pool,
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
@@ -1797,7 +1821,9 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _get_new_block_ids_to_zero(self) -> list[int] | None:
+    def _get_new_block_ids_to_zero(
+        self,
+    ) -> list[int] | dict[int, list[int]] | None:
         # Drain new attention block ids every step so the manager-side list
         # does not grow unbounded; only kv-cache zeroing consumes them.
         new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
@@ -3559,6 +3585,23 @@ class Scheduler(SchedulerInterface):
         num_replay_tokens = min(self.prefix_replay_tokens, num_hit_tokens)
         request.replay_start = num_hit_tokens - num_replay_tokens
         return num_replay_tokens
+
+    def _mark_draft_window_recovery(self, request: Request, num_hit_tokens: int) -> int:
+        """Rewind to the first draft-window hole while preserving target KV."""
+        request.draft_recovery_main_cached_end = 0
+        plan = self.kv_cache_manager.get_draft_recovery_plan(request.request_id)
+        if plan is None or not plan.replay_ranges:
+            return 0
+        if plan.main_cached_end != num_hit_tokens:
+            return 0
+        if len(plan.replay_ranges) != 1:
+            raise ValueError("draft recovery requires one replay envelope")
+        replay_start, replay_end = plan.replay_ranges[0]
+        if replay_end != plan.main_cached_end:
+            raise ValueError("draft recovery replay must end at the target hit")
+        request.replay_start = replay_start
+        request.draft_recovery_main_cached_end = plan.main_cached_end
+        return replay_end - replay_start
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """KV Connector: update request state after async recv is finished.

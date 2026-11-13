@@ -23,11 +23,14 @@ from tests.v1.core.utils import (
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
+    KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.config.attention import HiSparseConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
@@ -51,6 +54,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
@@ -2082,6 +2086,207 @@ def test_no_eagle_groups_without_eagle_block_drop():
     assert not any(g.is_eagle_group for g in groups)
 
 
+def _dflash_speculative_config() -> SpeculativeConfig:
+    config = SpeculativeConfig(model="ngram", num_speculative_tokens=7)
+    config.method = "dflash"
+    return config
+
+
+def _dflash_vllm_config(max_model_len: int = 256, max_num_seqs: int = 2) -> VllmConfig:
+    config = VllmConfig(
+        model_config=ModelConfig(max_model_len=max_model_len),
+        scheduler_config=SchedulerConfig(
+            max_model_len=max_model_len,
+            max_num_batched_tokens=32,
+            max_num_seqs=max_num_seqs,
+            is_encoder_decoder=False,
+            async_scheduling=False,
+        ),
+    )
+    config.cache_config.block_size = 16
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.speculative_config = _dflash_speculative_config()
+    return config
+
+
+def test_dflash_sliding_draft_uses_bounded_independent_pool():
+    """A compatible windowed drafter must not widen the target KV pool."""
+    config = _dflash_vllm_config()
+    specs = {
+        "target": new_kv_cache_spec(block_size=16),
+        "draft": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+    }
+
+    result = get_kv_cache_configs(config, [specs], [2**24])[0]
+
+    assert [group.block_pool_id for group in result.kv_cache_groups] == [0, 1]
+    assert [group.role for group in result.kv_cache_groups] == [
+        KVCacheGroupRole.DEFAULT,
+        KVCacheGroupRole.DRAFT_WINDOW,
+    ]
+    assert result.num_blocks_by_pool[1] == 17
+    assert result.num_blocks_by_pool[0] > result.num_blocks_by_pool[1]
+    assert {
+        tensor.layers[0]: tensor.block_pool_id for tensor in result.kv_cache_tensors
+    } == {"target": 0, "draft": 1}
+
+
+def test_dflash_window_pool_memory_check_does_not_require_full_draft_context():
+    """Startup accounts for the bounded draft pool, not a full draft prefix."""
+    max_model_len = 16_384
+    config = _dflash_vllm_config(max_model_len=max_model_len)
+    target = new_kv_cache_spec(block_size=16)
+    draft = replace(
+        new_sliding_window_spec(block_size=16, sliding_window=64),
+        is_draft=True,
+    )
+    draft_blocks = 17
+    target_blocks = max_model_len // target.block_size + 1
+    available_memory = (
+        target_blocks * target.page_size_bytes + draft_blocks * draft.page_size_bytes
+    )
+
+    result = get_kv_cache_configs(
+        config, [{"target": target, "draft": draft}], [available_memory]
+    )[0]
+
+    assert result.num_blocks_by_pool == [target_blocks, draft_blocks]
+
+
+@pytest.mark.parametrize("connector", ["MooncakeConnector", "NixlConnector"])
+def test_dflash_window_pool_keeps_shared_layout_with_kv_transfer(connector):
+    """Independent recovery is not enabled for an unaudited transfer backend."""
+    config = _dflash_vllm_config()
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector=connector, kv_role="kv_both"
+    )
+    specs = {
+        "target": new_kv_cache_spec(block_size=16),
+        "draft": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+    }
+
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, [specs])
+
+    assert {group.block_pool_id for group in groups} == {0}
+
+
+def test_dflash_window_pool_keeps_shared_layout_with_block_override():
+    """A single block-count override has no unambiguous multi-pool meaning."""
+    config = _dflash_vllm_config()
+    config.cache_config.num_gpu_blocks_override = 32
+    specs = {
+        "target": new_kv_cache_spec(block_size=16),
+        "draft": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+    }
+
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, [specs])
+
+    assert {group.block_pool_id for group in groups} == {0}
+
+
+def test_dflash_window_pool_keeps_shared_layout_with_extensible_cache():
+    """An explicitly selected extensible cache takes precedence."""
+    config = _dflash_vllm_config()
+    config.cache_config.enable_extensible_kv_cache = True
+    config.cache_config._extensible_kv_cache_requested = True
+    specs = {
+        "target": new_kv_cache_spec(block_size=16),
+        "draft": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+    }
+
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, [specs])
+
+    assert {group.block_pool_id for group in groups} == {0}
+
+
+def test_dflash_window_pool_auto_extensible_falls_back_for_incompatible_specs():
+    """A rejected window pool must preserve automatic extensible caching."""
+    config = _dflash_vllm_config()
+    config.cache_config.enable_extensible_kv_cache = True
+    config.cache_config._extensible_kv_cache_requested = None
+    specs = {
+        "target": new_kv_cache_spec(block_size=16),
+        "draft_short": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+        "draft_long": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=128),
+            is_draft=True,
+        ),
+    }
+
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, [specs])
+
+    assert {group.block_pool_id for group in groups} == {0}
+    assert config.cache_config.enable_extensible_kv_cache is True
+
+
+def test_dflash_window_pool_keeps_shared_layout_with_kv_events():
+    """Event block IDs remain unambiguous until events carry pool identity."""
+    config = _dflash_vllm_config()
+    config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
+    specs = {
+        "target": new_kv_cache_spec(block_size=16),
+        "draft": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+    }
+
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, [specs])
+
+    assert {group.block_pool_id for group in groups} == {0}
+
+
+def test_dflash_window_pool_requires_one_draft_window_geometry():
+    """One replay envelope must not cross differently sized draft windows."""
+    config = _dflash_vllm_config()
+    specs = {
+        "target": new_kv_cache_spec(block_size=16),
+        "draft_short": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+        "draft_long": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=128),
+            is_draft=True,
+        ),
+    }
+
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, [specs])
+
+    assert {group.block_pool_id for group in groups} == {0}
+
+
+def test_dflash_window_pool_requires_full_attention_target():
+    """The preserved Main boundary represents reusable full-history KV."""
+    config = _dflash_vllm_config()
+    specs = {
+        "target": new_sliding_window_spec(block_size=16, sliding_window=128),
+        "draft": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+    }
+
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, [specs])
+
+    assert {group.block_pool_id for group in groups} == {0}
+
+
 @pytest.mark.parametrize(
     "make_specs,warns",
     [
@@ -2219,7 +2424,9 @@ def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
         vllm_config, [config, scheduler_config], 10
     )
     assert config.num_blocks == 10
+    assert config.num_blocks_by_pool == [10]
     assert scheduler_config.num_blocks == 10
+    assert scheduler_config.num_blocks_by_pool == [10]
     assert config.kv_cache_tensors == [
         replace(tensor, size=tensor.size * 10 // 16) for tensor in tensors_before
     ]
@@ -2229,6 +2436,7 @@ def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
         kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 4)
     kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 5)
     assert config.num_blocks == 5
+    assert config.num_blocks_by_pool == [5]
 
 
 def test_finalize_extensible_kv_cache_keeps_measured_count():

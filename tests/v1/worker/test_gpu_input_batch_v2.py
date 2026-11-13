@@ -11,8 +11,13 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.gpu import cp_utils
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    InputBuffers,
+    set_dummy_context,
+)
 
 DEVICE = current_platform.device_type
 
@@ -56,6 +61,42 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
     assert batch.query_start_loc_np[-1] == num_tokens
     assert torch.equal(
         batch.query_start_loc.cpu(), torch.from_numpy(batch.query_start_loc_np)
+    )
+
+
+def test_dummy_context_uses_each_group_block_pool_capacity():
+    """Dummy Draft block IDs must stay within the smaller Draft pool."""
+    device = torch.device("cpu")
+    buffers = InputBuffers(max_num_reqs=2, max_num_tokens=2, device=device)
+    batch = InputBatch.make_dummy(
+        num_reqs=2,
+        num_tokens=2,
+        input_buffers=buffers,
+        max_query_len=1,
+    )
+    block_tables = CPUBlockTables(
+        block_sizes=[2, 2],
+        max_num_reqs=2,
+        max_num_batched_tokens=2,
+        max_num_blocks_per_group=[4, 4],
+        device=device,
+    )
+
+    set_dummy_context(
+        batch,
+        block_tables,
+        context_len=3,
+        num_kv_blocks=(8, 2),
+        max_model_len=8,
+    )
+
+    torch.testing.assert_close(
+        block_tables.input_block_tables[0][:2, :2],
+        torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        block_tables.input_block_tables[1][:2, :2],
+        torch.tensor([[0, 1], [0, 1]], dtype=torch.int32),
     )
 
 

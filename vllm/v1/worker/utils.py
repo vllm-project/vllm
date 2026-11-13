@@ -623,9 +623,10 @@ def allocate_kv_cache(
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as `[B, H, N, C]` per layer.
 
-    Every KVCacheTensor places its layers in the same backing allocation: layer `l` of
-    block `b` starts at `offset + l * layer_stride + b * block_stride`. Cache
-    groups overlay each other, so tensors may address the same bytes.
+    Tensors in the same block pool share a backing allocation. Layer `l` of
+    block `b` starts at `offset + l * layer_stride + b * block_stride`.
+    Cache groups in that pool overlay each other, so their tensors may address
+    the same bytes.
 
     allocate replaces the default zeroed backing allocation: it takes the
     size in bytes and returns a one-byte-per-element tensor.
@@ -633,16 +634,24 @@ def allocate_kv_cache(
     if not kv_cache_config.kv_cache_tensors:
         return {}
 
-    sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
-    assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
-    raw_size = sizes.pop()
-    if allocate is not None:
-        buf = allocate(raw_size)
-    else:
-        buf = _allocate_kv_cache_buffer(raw_size, device)
+    pool_sizes: dict[int, set[int]] = {}
+    for tensor in kv_cache_config.kv_cache_tensors:
+        pool_sizes.setdefault(tensor.block_pool_id, set()).add(tensor.size)
+    assert all(len(sizes) == 1 for sizes in pool_sizes.values()), (
+        "KV cache tensors in one block pool must share a backing allocation."
+    )
+    buffers = {
+        pool_id: (
+            allocate(next(iter(sizes)))
+            if allocate is not None
+            else _allocate_kv_cache_buffer(next(iter(sizes)), device)
+        )
+        for pool_id, sizes in pool_sizes.items()
+    }
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
+        buf = buffers[tensor.block_pool_id]
         group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
         if not spec.has_layer_views:
             kv_caches.update((name, buf) for name in tensor.layers)
@@ -986,17 +995,34 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
 
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
-    num_blocks: int,
+    num_blocks: int | Mapping[int, int] | Sequence[int],
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+    cache_pool_ids: Iterable[int] | None = None,
 ) -> None:
     if not kv_cache_block_copies:
         return
 
-    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices: torch.Tensor | None = None
+    caches = list(kv_caches)
+    pool_ids = [0] * len(caches) if cache_pool_ids is None else list(cache_pool_ids)
+    if len(pool_ids) != len(caches):
+        raise ValueError("cache_pool_ids must match kv_caches")
+    copies_by_pool: dict[int, np.ndarray] = {}
+    for pool_id in {copy.pool_id for copy in kv_cache_block_copies}:
+        copies_by_pool[pool_id] = np.array(
+            [
+                (copy.src_block_id, copy.dst_block_id)
+                for copy in kv_cache_block_copies
+                if copy.pool_id == pool_id
+            ],
+            dtype=np.int64,
+        )
+    indices_by_device_pool: dict[tuple[torch.device, int], torch.Tensor] = {}
     seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
-    for cache in kv_caches:
+    for cache, pool_id in zip(caches, pool_ids, strict=True):
+        indices_np = copies_by_pool.get(pool_id)
+        if indices_np is None:
+            continue
         # Layers sharing KV (cross-layer sharing) alias the same view; copy it
         # once. Hybrid models overlay layers of different kinds on one tensor,
         # so views at the same address can differ in geometry (a Mamba state
@@ -1014,32 +1040,38 @@ def copy_kv_cache_blocks_inplace(
             continue
         seen.add(key)
 
+        indices_key = (cache.device, pool_id)
+        indices = indices_by_device_pool.get(indices_key)
         if indices is None:
             indices = async_tensor_h2d(indices_np, device=cache.device)
+            indices_by_device_pool[indices_key] = indices
         assert cache.device == indices.device
         src, dst = indices.unbind(dim=1)
 
-        kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
+        pool_num_blocks = (
+            num_blocks if isinstance(num_blocks, int) else num_blocks[pool_id]
+        )
+        kernel_blocks_per_block, remainder = divmod(cache.shape[0], pool_num_blocks)
         assert remainder == 0, (
             f"{cache.shape[0]} kernel blocks not divisible by "
-            f"{num_blocks} scheduler blocks"
+            f"{pool_num_blocks} scheduler blocks"
         )
         storage = cache.untyped_storage()
         storage_key = (cache.device, storage.data_ptr())
         scheduler_block_stride = (
             cache.stride(0) * cache.element_size() * kernel_blocks_per_block
         )
-        if storage.nbytes() == num_blocks * scheduler_block_stride:
+        if storage.nbytes() == pool_num_blocks * scheduler_block_stride:
             if storage_key in copied_storages:
                 continue
             copied_storages.add(storage_key)
             blocks = torch.empty(0, dtype=torch.uint8, device=cache.device)
             blocks.set_(storage)
-            blocks = blocks.view(num_blocks, -1)
+            blocks = blocks.view(pool_num_blocks, -1)
         else:
             # Fold virtual block splitting into the shape so that dim 0 counts
             # scheduler blocks; unflatten of dim 0 is always a view.
-            blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+            blocks = cache.unflatten(0, (pool_num_blocks, kernel_blocks_per_block))
         blocks[dst] = blocks[src]
 
 

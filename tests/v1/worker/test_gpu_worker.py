@@ -805,7 +805,9 @@ def test_extensible_extend_asks_connector_for_its_memory_pool(
             kv_transfer_config=SimpleNamespace(registers_kv_cache_memory=lambda: True)
         ),
     )
-    kv_cache_config = SimpleNamespace(num_blocks=16, kv_cache_tensors=[])
+    kv_cache_config = SimpleNamespace(
+        num_blocks=16, num_blocks_by_pool=[16], kv_cache_tensors=[]
+    )
 
     if connector_pool is None:
         with pytest.raises(Committed):

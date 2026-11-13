@@ -28,9 +28,11 @@ from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
@@ -249,6 +251,7 @@ def trim_null_head(blocks: _BlockSeq) -> _BlockSeq:
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int
+    pool_id: int = 0
 
 
 class FreeKVCacheBlockQueue:
@@ -1079,24 +1082,56 @@ def generate_lookahead_block_hash_extra_keys(
     return extra_keys, mm_idx
 
 
+def get_draft_window_pool_block_requirements(
+    vllm_config: VllmConfig, groups: Sequence[KVCacheGroupSpec]
+) -> tuple[int, int, int]:
+    """Return per-request, in-flight, and full-history block requirements."""
+    per_request = 0
+    in_flight = 0
+    full_history = 0
+    for group in groups:
+        specs = list(iter_layer_specs(group.kv_cache_spec))
+        if not specs or not all(isinstance(spec, SlidingWindowSpec) for spec in specs):
+            raise ValueError("Draft-window pools require sliding-window KV groups")
+        spec = specs[0]
+        assert isinstance(spec, SlidingWindowSpec)
+        # One alignment block covers a partially occupied leading edge. A
+        # second covers requests whose in-flight suffix crosses a block while
+        # the global in-flight allowance below is shared across requests.
+        per_request += (
+            cdiv(
+                spec.num_retained_tokens + vllm_config.num_lookahead_tokens,
+                spec.block_size,
+            )
+            + 2
+        )
+        in_flight += cdiv(vllm_config.max_in_flight_tokens, spec.block_size)
+        full_history += cdiv(vllm_config.model_config.max_model_len, spec.block_size)
+    return per_request, in_flight, full_history
+
+
 def get_max_concurrency_for_kv_cache_config(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> float:
     """Get the maximum concurrency for the given KV cache configuration.
 
     A request at max_model_len consumes whole blocks from each group's block
-    table — cdiv(per-request bytes, page bytes) of the group's spec — and all
-    device groups draw those block ids from one shared pool, so the per-request
-    total is the sum over groups. The memory/page ratio is identical whether
-    a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
-    a representative per-layer spec (scheduler config), so both capacity
-    call sites agree.
+    table — cdiv(per-request bytes, page bytes) of the group's spec. Groups in
+    one allocator domain share its capacity; independent pools impose separate
+    concurrency limits. The memory/page ratio is identical whether a group
+    carries an aggregated UniformTypeKVCacheSpecs (worker config) or a
+    representative per-layer spec (scheduler config), so both capacity call
+    sites agree.
 
     Host groups use a separate pool; the smaller concurrency limit applies.
     """
-    num_blocks_per_request = 0
+    blocks_per_request_by_pool = [0] * len(kv_cache_config.num_blocks_by_pool)
+    draft_groups_by_pool: dict[int, list[KVCacheGroupSpec]] = {}
     host_blocks_per_request = 0
     for group in kv_cache_config.kv_cache_groups:
+        if group.role is KVCacheGroupRole.DRAFT_WINDOW:
+            draft_groups_by_pool.setdefault(group.block_pool_id, []).append(group)
+            continue
         required = cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
@@ -1104,8 +1139,26 @@ def get_max_concurrency_for_kv_cache_config(
         if group.host_resident:
             host_blocks_per_request += required
         else:
-            num_blocks_per_request += required
-    limits = [kv_cache_config.num_blocks / num_blocks_per_request]
+            blocks_per_request_by_pool[group.block_pool_id] += required
+    limits = []
+    for pool_id, (num_blocks, required) in enumerate(
+        zip(
+            kv_cache_config.num_blocks_by_pool,
+            blocks_per_request_by_pool,
+            strict=True,
+        )
+    ):
+        draft_groups = draft_groups_by_pool.get(pool_id)
+        if draft_groups:
+            per_request, in_flight, full_history = (
+                get_draft_window_pool_block_requirements(vllm_config, draft_groups)
+            )
+            available = max(0, num_blocks - 1)
+            window_limit = max(0, available - in_flight) / per_request
+            full_history_limit = available / full_history
+            limits.append(max(window_limit, full_history_limit))
+        elif required:
+            limits.append(num_blocks / required)
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None
         limits.append(
@@ -1119,7 +1172,8 @@ def generate_scheduler_kv_cache_config(
 ) -> KVCacheConfig:
     """Generate the KV cache configuration for the scheduler."""
     assert all(
-        [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
+        cfg.num_blocks_by_pool == kv_cache_configs[0].num_blocks_by_pool
+        for cfg in kv_cache_configs
     )
     assert all(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks

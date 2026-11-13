@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -412,6 +412,31 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
     else:
         VllmConfig._resolve_extensible_kv_cache(config)
         assert config.cache_config.enable_extensible_kv_cache is False
+
+
+@pytest.mark.parametrize("method", ["dflash", "dspark"])
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_precedence_for_independent_draft_pool(
+    monkeypatch, method, requested
+):
+    from types import SimpleNamespace
+
+    import vllm.platforms
+
+    speculative_config = SpeculativeConfig(model="ngram", num_speculative_tokens=7)
+    speculative_config.method = method
+    config = VllmConfig(model_config=ModelConfig(max_model_len=256))
+    config.speculative_config = speculative_config
+    config.cache_config._extensible_kv_cache_resolved = False
+    config.cache_config.enable_extensible_kv_cache = requested
+    monkeypatch.setattr(
+        vllm.platforms, "current_platform", SimpleNamespace(is_cuda_alike=lambda: True)
+    )
+
+    config._resolve_extensible_kv_cache()
+
+    assert config.cache_config.enable_extensible_kv_cache is True
+    assert config.cache_config._extensible_kv_cache_requested is requested
 
 
 @pytest.mark.parametrize(

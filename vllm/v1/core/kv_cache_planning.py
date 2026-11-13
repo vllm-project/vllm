@@ -20,6 +20,7 @@ from vllm.v1.core.kv_cache_config_builder import (
 )
 from vllm.v1.core.kv_cache_utils import (
     _kv_cache_device_name,
+    get_draft_window_pool_block_requirements,
     update_kv_cache_capacity,
 )
 from vllm.v1.hisparse.layout import (
@@ -34,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -304,6 +306,22 @@ def _pool_bytes_per_block_from_builder(
     """
     if not kv_cache_groups:
         return 0
+    pool_ids = {group.block_pool_id for group in kv_cache_groups}
+    if len(pool_ids) > 1:
+        return sum(
+            _pool_bytes_per_block_from_builder(
+                builder,
+                vllm_config,
+                [
+                    replace(group, block_pool_id=0)
+                    for group in kv_cache_groups
+                    if group.block_pool_id == pool_id
+                ],
+            )
+            for pool_id in pool_ids
+        )
+    if pool_ids != {0}:
+        kv_cache_groups = [replace(group, block_pool_id=0) for group in kv_cache_groups]
     if vllm_config.attention_config.hisparse_config is not None:
         return _pool_bytes_per_block(vllm_config, kv_cache_groups)
     pool_bytes = builder._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
@@ -1532,9 +1550,119 @@ def _project_kv_cache_groups_to_worker(
                 host_resident=group.host_resident,
                 enable_kv_transfer=group.enable_kv_transfer,
                 role=group.role,
+                block_pool_id=group.block_pool_id,
             )
         )
     return projected_groups
+
+
+def _uses_independent_draft_pool(groups: list[KVCacheGroupSpec]) -> bool:
+    return {group.block_pool_id for group in groups} == {0, 1}
+
+
+def _draft_window_pool_blocks(
+    vllm_config: VllmConfig, draft_groups: list[KVCacheGroupSpec]
+) -> int:
+    """Return the fixed capacity of the shared draft-window allocator."""
+    window_blocks, in_flight_blocks, full_blocks = (
+        get_draft_window_pool_block_requirements(vllm_config, draft_groups)
+    )
+    num_holders = vllm_config.scheduler_config.max_num_seqs
+    window_bound = num_holders * window_blocks + in_flight_blocks
+    full_bound = num_holders * full_blocks
+    return 1 + min(window_bound, full_bound)
+
+
+def _materialize_independent_draft_pools(
+    vllm_config: VllmConfig,
+    builder: KVCacheConfigBuilder,
+    groups: list[KVCacheGroupSpec],
+    num_blocks_by_pool: list[int],
+) -> KVCacheConfig:
+    tensors: list[KVCacheTensor] = []
+    pool_configs: list[KVCacheConfig] = []
+    for pool_id, num_blocks in enumerate(num_blocks_by_pool):
+        pool_groups = [
+            replace(group, block_pool_id=0)
+            for group in groups
+            if group.block_pool_id == pool_id
+        ]
+        pool_config = builder.get_kv_cache_config_from_groups(
+            vllm_config, pool_groups, num_blocks
+        )
+        pool_configs.append(pool_config)
+        tensors.extend(
+            replace(tensor, block_pool_id=pool_id)
+            for tensor in pool_config.kv_cache_tensors
+        )
+
+    return replace(
+        pool_configs[0],
+        num_blocks=num_blocks_by_pool[0],
+        num_blocks_by_pool=num_blocks_by_pool,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+    )
+
+
+def _get_independent_draft_pool_config(
+    vllm_config: VllmConfig,
+    builder: KVCacheConfigBuilder,
+    groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    target_groups = [group for group in groups if group.block_pool_id == 0]
+    draft_groups = [group for group in groups if group.block_pool_id == 1]
+    target_bytes = _pool_bytes_per_block_from_builder(
+        builder, vllm_config, target_groups
+    )
+    draft_bytes = _pool_bytes_per_block_from_builder(builder, vllm_config, draft_groups)
+    draft_blocks = _draft_window_pool_blocks(vllm_config, draft_groups)
+    target_blocks = (available_memory - draft_blocks * draft_bytes) // target_bytes
+    if target_blocks <= 0:
+        raise ValueError(
+            "Not enough KV cache memory after reserving the draft sliding-window "
+            "pool; reduce max_num_seqs or max_num_batched_tokens."
+        )
+    logger.info(
+        "Draft window KV cache: %d target blocks and %d draft blocks (%s GiB)",
+        target_blocks,
+        draft_blocks,
+        format_gib(draft_blocks * draft_bytes),
+    )
+    return _materialize_independent_draft_pools(
+        vllm_config, builder, groups, [target_blocks, draft_blocks]
+    )
+
+
+def _get_memory_check_inputs(
+    vllm_config: VllmConfig,
+    builder: KVCacheConfigBuilder,
+    groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[list[KVCacheGroupSpec], int]:
+    """Return the groups and usable memory for max-length admission."""
+    if not groups:
+        return groups, available_memory
+    if not _uses_independent_draft_pool(groups):
+        null_block_bytes = _pool_bytes_per_block_from_builder(
+            builder, vllm_config, groups
+        )
+        return groups, available_memory - null_block_bytes
+
+    target_groups = [group for group in groups if group.block_pool_id == 0]
+    draft_groups = [group for group in groups if group.block_pool_id == 1]
+    target_block_bytes = _pool_bytes_per_block_from_builder(
+        builder, vllm_config, target_groups
+    )
+    draft_block_bytes = _pool_bytes_per_block_from_builder(
+        builder, vllm_config, draft_groups
+    )
+    draft_blocks = _draft_window_pool_blocks(vllm_config, draft_groups)
+    usable_target_memory = (
+        available_memory - draft_blocks * draft_block_bytes - target_block_bytes
+    )
+    return target_groups, usable_target_memory
 
 
 def get_kv_cache_configs(
@@ -1607,25 +1735,23 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
-    # Reserve the null block BlockPool permanently holds back, so auto-fit and
-    # the capacity check both plan against usable blocks. Allocation below
-    # still uses the full memory.
-    check_memory = [
-        (
-            avail_mem - _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
-            if groups
-            else avail_mem
-        )
+    # Reserve each pool's fixed allocations and null block. For an independent
+    # draft pool, only the target groups need max-length admission: the draft
+    # reservation is already bounded by its window and concurrency contract.
+    check_inputs = [
+        _get_memory_check_inputs(vllm_config, builder, groups, avail_mem)
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
+    check_groups_per_worker = [groups for groups, _ in check_inputs]
+    check_memory = [memory for _, memory in check_inputs]
 
     if vllm_config.model_config.original_max_model_len == -1:
         _auto_fit_max_model_len(
-            builder, vllm_config, projected_groups_per_worker, check_memory
+            builder, vllm_config, check_groups_per_worker, check_memory
         )
 
     # Check if the available memory is enough per worker.
-    for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
+    for groups, avail_mem in zip(check_groups_per_worker, check_memory):
         if not groups:
             continue
         _check_enough_kv_cache_memory(
@@ -1643,34 +1769,57 @@ def get_kv_cache_configs(
         assert sum(len(group.layer_names) for group in projected_groups) == len(
             kv_cache_spec_one_worker
         ), "Some layers are not assigned to any group."
-        bytes_per_block = _pool_bytes_per_block_from_builder(
-            builder, vllm_config, projected_groups
-        )
-        num_blocks = (
-            available_memory_one_worker // bytes_per_block if projected_groups else 1
-        )
-        kv_cache_configs.append(
-            builder.get_kv_cache_config_from_groups(
-                vllm_config, projected_groups, num_blocks
+        if _uses_independent_draft_pool(projected_groups):
+            kv_cache_configs.append(
+                _get_independent_draft_pool_config(
+                    vllm_config,
+                    builder,
+                    projected_groups,
+                    available_memory_one_worker,
+                )
             )
-        )
+        else:
+            bytes_per_block = _pool_bytes_per_block_from_builder(
+                builder, vllm_config, projected_groups
+            )
+            num_blocks = (
+                available_memory_one_worker // bytes_per_block
+                if projected_groups
+                else 1
+            )
+            kv_cache_configs.append(
+                builder.get_kv_cache_config_from_groups(
+                    vllm_config, projected_groups, num_blocks
+                )
+            )
 
-    # Change the num_blocks of each rank to the smallest among all ranks.
-    # We also need to shrink the tensor size proportionally to avoid
-    # allocating unused memory.
-    min_num_blocks = min(
-        kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
+    # Change every allocator domain to the smallest capacity across ranks.
+    num_pools = len(kv_cache_configs[0].num_blocks_by_pool)
+    assert all(
+        len(config.num_blocks_by_pool) == num_pools for config in kv_cache_configs
     )
+    min_num_blocks_by_pool = [
+        min(config.num_blocks_by_pool[pool_id] for config in kv_cache_configs)
+        for pool_id in range(num_pools)
+    ]
     for i, kv_cache_config in enumerate(kv_cache_configs):
-        if kv_cache_config.num_blocks == min_num_blocks:
+        if kv_cache_config.num_blocks_by_pool == min_num_blocks_by_pool:
             continue
-        # Re-plan with exactly the smallest rank's block count, so strides and
-        # offsets stay consistent with the shrunken allocation.
-        kv_cache_configs[i] = builder.get_kv_cache_config_from_groups(
-            vllm_config,
-            kv_cache_config.kv_cache_groups,
-            min_num_blocks,
-        )
+        if num_pools > 1:
+            kv_cache_configs[i] = _materialize_independent_draft_pools(
+                vllm_config,
+                builder,
+                kv_cache_config.kv_cache_groups,
+                min_num_blocks_by_pool,
+            )
+        else:
+            # Re-plan with exactly the smallest rank's block count, so strides
+            # and offsets stay consistent with the shrunken allocation.
+            kv_cache_configs[i] = builder.get_kv_cache_config_from_groups(
+                vllm_config,
+                kv_cache_config.kv_cache_groups,
+                min_num_blocks_by_pool[0],
+            )
 
     for kv_cache_config in kv_cache_configs:
         kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
@@ -1721,12 +1870,19 @@ def get_global_kv_cache_groups(
                 layer_spec, extra_retained_tokens=extra_retained_tokens
             )
 
-    # Get global KV cache groups. This also handles spec unification for
-    # hybrid models when disable_hybrid_kv_cache_manager is enabled.
-    # After this call, merged_kv_cache_specs may be modified in-place.
-    global_kv_cache_groups = get_kv_cache_groups_from_builder(
+    # A DFlash/DSpark drafter owns recyclable KV while its target owns stable
+    # full-context KV. Keeping those lifetimes in separate allocators prevents
+    # the draft window from widening the target's physical pages.
+    global_kv_cache_groups = _get_independent_draft_window_groups(
         builder, vllm_config, merged_kv_cache_specs
     )
+    if global_kv_cache_groups is None:
+        # This also handles spec unification for hybrid models when
+        # disable_hybrid_kv_cache_manager is enabled. The specs may be modified
+        # in-place.
+        global_kv_cache_groups = get_kv_cache_groups_from_builder(
+            builder, vllm_config, merged_kv_cache_specs
+        )
     spec_config = vllm_config.speculative_config
     if spec_config is not None and spec_config.use_eagle_block_drop():
         draft_layer_names = {
@@ -1736,6 +1892,57 @@ def get_global_kv_cache_groups(
             group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
         _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
     return global_kv_cache_groups
+
+
+def _get_independent_draft_window_groups(
+    builder: KVCacheConfigBuilder,
+    vllm_config: VllmConfig,
+    specs: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    if (
+        not vllm_config.is_draft_window_pool_candidate()
+        or vllm_config.cache_config.num_gpu_blocks_override is not None
+        or vllm_config.cache_config._extensible_kv_cache_requested is True
+    ):
+        return None
+
+    draft_specs = {name: spec for name, spec in specs.items() if spec.is_draft}
+    target_specs = {name: spec for name, spec in specs.items() if not spec.is_draft}
+    draft_window_specs = [
+        spec for spec in draft_specs.values() if isinstance(spec, SlidingWindowSpec)
+    ]
+    if (
+        not draft_specs
+        or not target_specs
+        or not all(
+            isinstance(spec, FullAttentionSpec) for spec in target_specs.values()
+        )
+        or len(draft_window_specs) != len(draft_specs)
+    ):
+        return None
+    if len({spec.block_size for spec in specs.values()}) != 1:
+        return None
+
+    target_groups = builder.get_kv_cache_groups(vllm_config, target_specs.copy())
+    draft_groups = builder.get_kv_cache_groups(vllm_config, draft_specs.copy())
+    if not target_groups or not draft_groups:
+        return None
+    draft_geometries = {
+        (spec.num_retained_tokens, spec.block_size) for spec in draft_window_specs
+    }
+    if len(draft_geometries) != 1:
+        return None
+    return [
+        *(replace(group, block_pool_id=0) for group in target_groups),
+        *(
+            replace(
+                group,
+                block_pool_id=1,
+                role=KVCacheGroupRole.DRAFT_WINDOW,
+            )
+            for group in draft_groups
+        ),
+    ]
 
 
 class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
@@ -1808,6 +2015,7 @@ def shrink_kv_cache_configs(
     """
     builder = get_kv_cache_config_builder(vllm_config)
     for kv_cache_config in kv_cache_configs:
+        assert len(kv_cache_config.num_blocks_by_pool) == 1
         assert num_blocks <= kv_cache_config.num_blocks
         kv_cache_config.kv_cache_tensors = [
             tensor
@@ -1834,6 +2042,7 @@ def shrink_kv_cache_configs(
                 _more_kv_cache_memory_hint(vllm_config),
             )
         kv_cache_config.num_blocks = num_blocks
+        kv_cache_config.num_blocks_by_pool = [num_blocks]
 
 
 def finalize_extensible_kv_cache(

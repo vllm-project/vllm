@@ -23,6 +23,7 @@ from vllm.config import (
     SpeculativeConfig,
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -36,8 +37,52 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.model_states.default import (
+    _protect_draft_recovery_main_slots_kernel,
+)
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires a CUDA-like device"
+)
+def test_draft_recovery_masks_only_main_kv_slots_on_gpu():
+    device = torch.device(current_platform.device_type)
+    query_lens = (3, 1030)
+    num_tokens = sum(query_lens)
+    backing = torch.arange(
+        3 * (num_tokens + 1), dtype=torch.int64, device=device
+    ).reshape(3, num_tokens + 1)
+    slot_mappings = backing[:, 1:]
+    expected = slot_mappings.clone()
+    query_start_loc = torch.tensor([0, 3, num_tokens], dtype=torch.int32, device=device)
+    positions = torch.cat(
+        (
+            torch.arange(3, dtype=torch.int64, device=device),
+            torch.arange(100, 100 + query_lens[1], dtype=torch.int64, device=device),
+        )
+    )
+    main_cached_ends = torch.tensor([2, 1124], dtype=torch.int32, device=device)
+    main_groups = torch.tensor([0, 2], dtype=torch.int32, device=device)
+
+    _protect_draft_recovery_main_slots_kernel[(2, 2)](
+        slot_mappings,
+        slot_mappings.stride(0),
+        main_groups,
+        query_start_loc,
+        positions,
+        main_cached_ends,
+        -1,
+        NUM_MAIN_GROUPS=2,
+        BLOCK=1024,
+    )
+    torch.accelerator.synchronize()
+
+    for group_idx in (0, 2):
+        expected[group_idx, :2] = -1
+        expected[group_idx, 3:1027] = -1
+    torch.testing.assert_close(slot_mappings, expected)
 
 
 @pytest.mark.parametrize("eligible,expected_bound", [(True, 8), (False, None)])

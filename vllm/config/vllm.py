@@ -3188,6 +3188,7 @@ class VllmConfig:
             return
         cache_config._extensible_kv_cache_resolved = True
         requested = cache_config.enable_extensible_kv_cache
+        cache_config._extensible_kv_cache_requested = requested
         unsupported = None
         if not current_platform.is_cuda_alike():
             unsupported = "it is only supported on CUDA and ROCm"
@@ -3256,6 +3257,34 @@ class VllmConfig:
                 "No IMEX channel: with the extensible KV cache, NIXL within a host "
                 "falls back to TCP. Transfers across hosts use RDMA."
             )
+
+    def is_draft_window_pool_candidate(self) -> bool:
+        """Check configuration-level requirements for a bounded draft pool.
+
+        KV specs are available only during cache planning, where the remaining
+        storage-geometry requirements are checked.
+        """
+        spec_config = getattr(self, "speculative_config", None)
+        return bool(
+            spec_config is not None
+            and spec_config.method in {"dflash", "dspark"}
+            and spec_config.uses_target_hidden_states
+            and (
+                self.kv_transfer_config is None
+                or self.kv_transfer_config.kv_connector is None
+            )
+            and not self.scheduler_config.disable_hybrid_kv_cache_manager
+            and self.parallel_config.pipeline_parallel_size == 1
+            and self.parallel_config.prefill_context_parallel_size == 1
+            and self.parallel_config.decode_context_parallel_size == 1
+            and self.attention_config.hisparse_config is None
+            and not self.observability_config.kv_cache_metrics
+            and (
+                self.kv_events_config is None
+                or not self.kv_events_config.enable_kv_cache_events
+            )
+            and not self.model_config.supports_kv_cache_grouping
+        )
 
     def _validate_adaptive_verification(self) -> None:
         spec_config = self.speculative_config

@@ -13,7 +13,9 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.request import Request
 
 
 def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestData:
@@ -46,6 +48,27 @@ def test_repr_with_multi_element_tensor() -> None:
 
     assert "prompt_embeds_shape=torch.Size([10, 768])" in repr(new_requests_data)
     assert "prompt_embeds_shape=torch.Size([10, 768])" in new_requests_data.anon_repr()
+
+
+def test_new_request_data_carries_draft_recovery_main_boundary() -> None:
+    request = Request(
+        request_id="test_req",
+        prompt_token_ids=[1, 2, 3, 4],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    assert request.draft_recovery_main_cached_end == 0
+    request.replay_start = 1
+    request.draft_recovery_main_cached_end = 4
+
+    new_request = NewRequestData.from_request(
+        request,
+        block_ids=([], []),
+        prefill_token_ids=request.prompt_token_ids,
+    )
+
+    assert new_request.replay_start == 1
+    assert new_request.draft_recovery_main_cached_end == 4
 
 
 def _mm_feature(offset: int, length: int) -> MultiModalFeatureSpec:

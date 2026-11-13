@@ -957,6 +957,45 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # cached blocks.
         self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
 
+    def count_null_blocks(
+        self,
+        blocks: Sequence[KVCacheBlock],
+        token_ranges: Sequence[tuple[int, int]],
+    ) -> int:
+        """Count missing resident pages in the requested token ranges."""
+        return sum(
+            block_index >= len(blocks) or blocks[block_index].is_null
+            for start, end in token_ranges
+            for block_index in range(start // self.block_size, end // self.block_size)
+        )
+
+    def replace_null_blocks(
+        self, request_id: str, token_ranges: Sequence[tuple[int, int]]
+    ) -> list[KVCacheBlock]:
+        """Allocate private pages for holes inside an adopted draft table."""
+        blocks = self.req_to_blocks[request_id]
+        indices = sorted(
+            {
+                block_index
+                for start, end in token_ranges
+                for block_index in range(
+                    start // self.block_size, end // self.block_size
+                )
+                if block_index < len(blocks) and blocks[block_index].is_null
+            }
+        )
+        if not indices:
+            return []
+        new_blocks = self.block_pool.get_new_blocks(len(indices))
+        for block_index, block in zip(indices, new_blocks, strict=True):
+            blocks[block_index] = block
+        self.num_cached_block[request_id] = min(
+            self.num_cached_block[request_id], indices[0]
+        )
+        if self._record_new_block_ids:
+            self.new_block_ids.extend(block.block_id for block in new_blocks)
+        return new_blocks
+
     @classmethod
     def _contiguous_blocks_for_hit(
         cls, window_size: int, block_size: int, use_eagle: bool

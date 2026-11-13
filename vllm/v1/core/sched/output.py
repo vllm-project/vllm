@@ -51,8 +51,10 @@ class NewRequestData:
     prefill_token_ids: list[int]
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
-    # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
+    # Start position for bounded sparse-KV replay; see Request.replay_start.
     replay_start: int = 0
+    # Target KV below this boundary is protected during draft-window replay.
+    draft_recovery_main_cached_end: int = 0
 
     @classmethod
     def from_request(
@@ -79,6 +81,7 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            draft_recovery_main_cached_end=request.draft_recovery_main_cached_end,
         )
 
     def __setstate__(self, state: dict) -> None:
@@ -312,10 +315,14 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
-    # Block IDs freshly allocated from the pool during this scheduling step.
-    # The worker zeros the corresponding GPU memory before the blocks are used,
-    # preventing stale NaN/data from corrupting attention or SSM computation.
+    # Block IDs freshly allocated from the shared pool during this scheduling
+    # step. The worker zeros the corresponding GPU memory before use.
     new_block_ids_to_zero: list[int] | None = None
+
+    # The same zeroing metadata keyed by allocator domain when groups use
+    # independent physical pools. Kept separate so existing workers and
+    # connectors retain the single-pool contract above.
+    new_block_ids_to_zero_by_pool: dict[int, list[int]] | None = None
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None

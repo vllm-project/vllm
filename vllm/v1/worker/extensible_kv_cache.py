@@ -459,8 +459,10 @@ def extend_kv_cache(
     """
     kv_cache = runner.extensible_kv_cache
     assert kv_cache is not None
+    assert len(kv_cache_config.num_blocks_by_pool) == 1
     kv_cache_config = copy.copy(kv_cache_config)
     kv_cache_config.num_blocks = num_blocks
+    kv_cache_config.num_blocks_by_pool = [num_blocks]
     # Connectors that derive geometry from the config must see the committed
     # storages the rebuilt views will have.
     kv_cache_config.kv_cache_tensors = kv_cache.committed_kv_cache_tensors(
@@ -494,6 +496,7 @@ def extend_kv_cache(
         shrink=True,
     )
     runner.kv_cache_config.num_blocks = kv_cache.num_committed_blocks
+    runner.kv_cache_config.num_blocks_by_pool = [kv_cache.num_committed_blocks]
     logger.info(
         "Extended KV cache to %d blocks (%.2f GiB).",
         kv_cache.num_committed_blocks,

@@ -46,15 +46,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _attention_group() -> KVCacheGroupSpec:
+def _attention_group(
+    block_pool_id: int = 0, layer_name: str = "layer"
+) -> KVCacheGroupSpec:
     return KVCacheGroupSpec(
-        ["layer"],
+        [layer_name],
         FullAttentionSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
         ),
+        block_pool_id=block_pool_id,
     )
 
 
@@ -111,7 +114,9 @@ def _make_runner(
         model_state=SimpleNamespace(max_encoder_len=0),
         scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=2048),
         kv_cache_config=SimpleNamespace(
-            kv_cache_groups=kv_cache_groups, num_blocks=1024
+            kv_cache_groups=kv_cache_groups,
+            num_blocks=1024,
+            num_blocks_by_pool=[1024],
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=num_lookahead_tokens,
@@ -216,6 +221,7 @@ def test_warmup_kernels_reserves_drafting_slots(monkeypatch):
     runner.speculative_config.max_num_new_slots_for_drafting = 1
     runner.scheduler_config.max_num_seqs = 1000
     runner.kv_cache_config.num_blocks = 100_000
+    runner.kv_cache_config.num_blocks_by_pool = [100_000]
     outputs: list[SchedulerOutput] = []
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
 
@@ -225,6 +231,28 @@ def test_warmup_kernels_reserves_drafting_slots(monkeypatch):
     num_reqs = len(prefill_output.scheduled_new_reqs)
     assert num_reqs == 2048 // (runner.decode_query_len + 1 + 1)
     assert prefill_output.total_num_scheduled_tokens + num_reqs <= runner.max_num_tokens
+
+
+def test_warmup_assigns_block_ids_within_each_pool(monkeypatch):
+    runner = _make_runner(
+        [
+            _attention_group(block_pool_id=0, layer_name="target"),
+            _attention_group(block_pool_id=1, layer_name="draft"),
+        ],
+        num_lookahead_tokens=0,
+        num_spec_steps=0,
+    )
+    runner.kv_cache_config.num_blocks = 8
+    runner.kv_cache_config.num_blocks_by_pool = [8, 4]
+    outputs: list[SchedulerOutput] = []
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+
+    warmup._warmup_kernels(runner, outputs.append, lambda grammar_output: None)
+
+    new_requests = outputs[0].scheduled_new_reqs
+    assert len(new_requests) == 3
+    assert max(block for request in new_requests for block in request.block_ids[0]) < 8
+    assert max(block for request in new_requests for block in request.block_ids[1]) < 4
 
 
 class _StubExtensibleCache:

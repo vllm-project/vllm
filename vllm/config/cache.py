@@ -435,6 +435,7 @@ class CacheConfig:
             "user_specified_block_size",
             "_block_size_resolved",
             "_extensible_kv_cache_resolved",
+            "_extensible_kv_cache_requested",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
@@ -463,6 +464,9 @@ class CacheConfig:
 
     _extensible_kv_cache_resolved: bool = field(default=False, init=False)
     """Set once `enable_extensible_kv_cache` has been settled for the model."""
+
+    _extensible_kv_cache_requested: bool | None = field(default=None, init=False)
+    """The user value before automatic extensible-cache resolution."""
 
     @field_validator("block_size", "enable_extensible_kv_cache", mode="wrap")
     @classmethod

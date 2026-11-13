@@ -2,15 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
+from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import (
+    PAD_SLOT_ID,
+    compute_mm_prefix_ranges,
+)
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupRole
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
@@ -22,6 +29,54 @@ from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+
+@triton.jit
+def _protect_draft_recovery_main_slots_kernel(
+    slot_mappings_ptr,
+    group_stride,
+    main_groups_ptr,
+    query_start_loc_ptr,
+    positions_ptr,
+    main_cached_end_ptr,
+    pad_slot_id,
+    NUM_MAIN_GROUPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    tile_idx = tl.program_id(1)
+    main_cached_end = tl.load(main_cached_end_ptr + req_idx)
+    begin = tl.load(query_start_loc_ptr + req_idx)
+    end = tl.load(query_start_loc_ptr + req_idx + 1)
+    offsets = begin + tile_idx * BLOCK + tl.arange(0, BLOCK)
+    positions = tl.load(positions_ptr + offsets, mask=offsets < end, other=0)
+    protected = (offsets < end) & (positions < main_cached_end)
+    for group_offset in tl.static_range(NUM_MAIN_GROUPS):
+        group_idx = tl.load(main_groups_ptr + group_offset)
+        tl.store(
+            slot_mappings_ptr + group_idx * group_stride + offsets,
+            pad_slot_id,
+            mask=protected,
+        )
+
+
+def _protect_draft_recovery_main_slots_cpu(
+    slot_mappings: torch.Tensor,
+    query_start_loc: tuple[int, ...],
+    positions: torch.Tensor,
+    main_cached_ends: tuple[int, ...],
+    main_group_ids: tuple[int, ...],
+    pad_slot_id: int = PAD_SLOT_ID,
+) -> None:
+    """Prevent replay from overwriting KV blocks already cached by the target."""
+    for req_idx, main_cached_end in enumerate(main_cached_ends):
+        if main_cached_end == 0:
+            continue
+        begin = query_start_loc[req_idx]
+        end = query_start_loc[req_idx + 1]
+        protected = positions[begin:end] < main_cached_end
+        for group_idx in main_group_ids:
+            slot_mappings[group_idx, begin:end].masked_fill_(protected, pad_slot_id)
 
 
 class DefaultModelState(ModelState):
@@ -71,6 +126,40 @@ class DefaultModelState(ModelState):
         ):
             self.mm_prefix_ranges = {}
 
+        self._draft_recovery_main_cached_end_np: np.ndarray | None = None
+        self._draft_recovery_main_cached_end: torch.Tensor | None = None
+        self._draft_recovery_staging: UvaBufferPool | None = None
+        self._draft_recovery_main_groups: torch.Tensor | None = None
+
+    def _init_draft_window_recovery_state(self) -> None:
+        self._draft_recovery_main_cached_end_np = np.zeros(
+            self.max_num_reqs, dtype=np.int32
+        )
+        self._draft_recovery_main_cached_end = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        self._draft_recovery_staging = (
+            UvaBufferPool(self.max_num_reqs, torch.int32)
+            if self.device.type != "cpu"
+            else None
+        )
+
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
+    ) -> None:
+        del block_tables
+        main_group_ids = tuple(
+            group_idx
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group.role is not KVCacheGroupRole.DRAFT_WINDOW
+        )
+        if len(main_group_ids) == len(kv_cache_config.kv_cache_groups):
+            return
+        self._init_draft_window_recovery_state()
+        self._draft_recovery_main_groups = torch.tensor(
+            main_group_ids, dtype=torch.int32, device=self.device
+        )
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.mm_prefix_ranges is not None:
             hf_text_config = self.model_config.hf_text_config
@@ -83,6 +172,9 @@ class DefaultModelState(ModelState):
                 or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
                 span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
             )[0]
+        main_cached_end = new_req_data.draft_recovery_main_cached_end
+        if self._draft_recovery_main_cached_end_np is not None:
+            self._draft_recovery_main_cached_end_np[req_index] = main_cached_end
         if self.rope_state is not None:
             # `prompt_embeds` is a passthrough modality with no grid info, but
             # M-RoPE assumes per-feature grids. Filter it out.
@@ -205,6 +297,7 @@ class DefaultModelState(ModelState):
             # For piecewise cudagraphs and eager, use unpadded sizes.
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
+        self._protect_draft_recovery_main_slots(input_batch, slot_mappings)
         query_start_loc_cpu = torch.from_numpy(
             input_batch.query_start_loc_np[: num_reqs + 1]
         )
@@ -255,3 +348,57 @@ class DefaultModelState(ModelState):
             model_specific_attn_metadata=model_specific_attn_metadata,
         )
         return attn_metadata
+
+    def _protect_draft_recovery_main_slots(
+        self,
+        input_batch: InputBatch,
+        slot_mappings: torch.Tensor,
+    ) -> None:
+        cached_ends = self._draft_recovery_main_cached_end_np
+        if cached_ends is None:
+            return
+        num_reqs = input_batch.num_reqs
+        batch_cached_ends = np.where(
+            input_batch.is_prefilling_np[:num_reqs],
+            cached_ends[input_batch.idx_mapping_np[:num_reqs]],
+            0,
+        ).astype(np.int32)
+        if not batch_cached_ends.any():
+            return
+
+        if self._draft_recovery_main_groups is None:
+            raise RuntimeError("draft recovery state was not initialized")
+        main_groups = self._draft_recovery_main_groups
+
+        if slot_mappings.device.type == "cpu":
+            _protect_draft_recovery_main_slots_cpu(
+                slot_mappings=slot_mappings,
+                query_start_loc=tuple(input_batch.query_start_loc_np[: num_reqs + 1]),
+                positions=input_batch.positions,
+                main_cached_ends=tuple(batch_cached_ends),
+                main_group_ids=tuple(main_groups.tolist()),
+            )
+            return
+
+        assert self._draft_recovery_main_cached_end is not None
+        assert self._draft_recovery_staging is not None
+        main_cached_end = self._draft_recovery_staging.copy_to_gpu(
+            batch_cached_ends,
+            out=self._draft_recovery_main_cached_end[:num_reqs],
+        )
+        max_query_len = int(
+            np.diff(input_batch.query_start_loc_np[: num_reqs + 1]).max()
+        )
+        _protect_draft_recovery_main_slots_kernel[
+            (num_reqs, triton.cdiv(max_query_len, 1024))
+        ](
+            slot_mappings,
+            slot_mappings.stride(0),
+            main_groups,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            main_cached_end,
+            PAD_SLOT_ID,
+            NUM_MAIN_GROUPS=main_groups.numel(),
+            BLOCK=1024,
+        )

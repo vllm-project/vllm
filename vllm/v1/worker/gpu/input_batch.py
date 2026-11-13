@@ -232,7 +232,7 @@ def set_dummy_context(
     input_batch: InputBatch,
     block_tables: "BlockTables",
     context_len: int,
-    num_kv_blocks: int,
+    num_kv_blocks: int | Sequence[int],
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
@@ -243,6 +243,12 @@ def set_dummy_context(
     if not input_block_tables:
         # Attention-free models have no KV context to fabricate.
         return
+    if isinstance(num_kv_blocks, int):
+        group_num_kv_blocks = (num_kv_blocks,) * len(input_block_tables)
+    else:
+        group_num_kv_blocks = tuple(num_kv_blocks)
+        if len(group_num_kv_blocks) != len(input_block_tables):
+            raise ValueError("num_kv_blocks must contain one value per KV group")
     num_reqs = input_batch.num_reqs
     query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
     context_len = max(min(context_len, max_model_len - query_len), 0)
@@ -261,7 +267,12 @@ def set_dummy_context(
     input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
 
     seq_len = context_len + query_len
-    for block_table, block_size in zip(input_block_tables, block_tables.block_sizes):
+    for block_table, block_size, group_blocks in zip(
+        input_block_tables,
+        block_tables.block_sizes,
+        group_num_kv_blocks,
+        strict=True,
+    ):
         num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
@@ -271,7 +282,7 @@ def set_dummy_context(
                 dtype=block_table.dtype,
                 device=block_table.device,
             )
-            % num_kv_blocks
+            % group_blocks
         )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 

@@ -40,6 +40,11 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+Compatible DFlash and DSpark deployments automatically use a bounded,
+independent KV pool for their sliding-window draft model. See the
+[draft-window KV-cache design](../../design/draft_window_kv_cache.md) for the
+compatibility conditions and recovery behavior.
+
 ## Custom Speculators (Experimental)
 
 You can plug in your own speculator by registering it as a speculative method

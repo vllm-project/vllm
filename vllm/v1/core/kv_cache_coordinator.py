@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 from vllm.utils.math_utils import cdiv, round_down
@@ -117,14 +117,18 @@ class KVCacheCoordinator(ABC):
         self.scheduler_block_size = scheduler_block_size
         self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
 
-        self.block_pool = BlockPool(
-            num_gpu_blocks=kv_cache_config.num_blocks,
-            enable_caching=enable_caching,
-            hash_block_size=hash_block_size,
-            enable_kv_cache_events=enable_kv_cache_events,
-            metrics_collector=metrics_collector,
-            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+        self.block_pools = tuple(
+            BlockPool(
+                num_gpu_blocks=num_blocks,
+                enable_caching=enable_caching,
+                hash_block_size=hash_block_size,
+                enable_kv_cache_events=enable_kv_cache_events,
+                metrics_collector=metrics_collector,
+                num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            )
+            for num_blocks in kv_cache_config.num_blocks_by_pool
         )
+        self.block_pool = self.block_pools[0]
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {
@@ -163,7 +167,7 @@ class KVCacheCoordinator(ABC):
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
-                block_pool=self.block_pool,
+                block_pool=self.block_pools[kv_cache_group.block_pool_id],
                 role=kv_cache_group.role,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
@@ -233,14 +237,41 @@ class KVCacheCoordinator(ABC):
             The number of blocks to allocate.
 
         """
-        num_blocks_to_allocate = 0
+        return sum(
+            self.get_num_blocks_to_allocate_by_pool(
+                request_id=request_id,
+                num_tokens=num_tokens,
+                new_computed_blocks=new_computed_blocks,
+                num_encoder_tokens=num_encoder_tokens,
+                total_computed_tokens=total_computed_tokens,
+                num_local_computed_tokens=num_local_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
+                prefill_end=prefill_end,
+            )
+        )
+
+    def get_num_blocks_to_allocate_by_pool(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_encoder_tokens: int,
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+        prefill_end: int = 0,
+    ) -> tuple[int, ...]:
+        """Return allocation requirements for each physical block pool."""
+        required = [0] * len(self.block_pools)
         if self.retention_interval != 0:
             prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                num_blocks = manager.get_num_blocks_to_allocate(
                     request_id,
                     num_encoder_tokens,
                     [],
@@ -250,7 +281,7 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                num_blocks = manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
                     new_computed_blocks[i],
@@ -260,7 +291,9 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                     prefill_end=prefill_end,
                 )
-        return num_blocks_to_allocate
+            pool_id = self.kv_cache_config.kv_cache_groups[i].block_pool_id
+            required[pool_id] += num_blocks
+        return tuple(required)
 
     def allocate_new_computed_blocks(
         self,
@@ -355,7 +388,12 @@ class KVCacheCoordinator(ABC):
         # tokens can be re-prefilled during multi-module MTP.
         return max(0, num_computed_tokens - self.num_reprefillable_tokens)
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        token_limits_by_group: Mapping[int, int] | None = None,
+    ) -> None:
         """Cache the blocks for the request.
 
         Args:
@@ -363,6 +401,8 @@ class KVCacheCoordinator(ABC):
             num_computed_tokens: The total number of tokens
                 that need to be cached
                 (including tokens that are already cached).
+            token_limits_by_group: Optional upper token boundary for groups
+                whose KV restoration is still in progress.
 
         """
         boundaries = replay_boundaries(
@@ -373,9 +413,12 @@ class KVCacheCoordinator(ABC):
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue
+            num_tokens = self.get_num_cacheable_tokens(num_computed_tokens, group_id)
+            if token_limits_by_group is not None and group_id in token_limits_by_group:
+                num_tokens = min(num_tokens, token_limits_by_group[group_id])
             manager.cache_blocks(
                 request,
-                self.get_num_cacheable_tokens(num_computed_tokens, group_id),
+                num_tokens,
                 retention_interval=self.retention_interval,
                 replay_boundaries=boundaries,
             )

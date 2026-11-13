@@ -321,6 +321,12 @@ class EngineCore:
         )
 
         global_kv_cache_groups = get_global_kv_cache_groups(vllm_config, kv_cache_specs)
+        if vllm_config.cache_config.enable_extensible_kv_cache and any(
+            group.block_pool_id for group in global_kv_cache_groups
+        ):
+            self.model_executor.disable_extensible_kv_cache(
+                "independent target and draft pools require fixed capacities"
+            )
         vllm_config.adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)
         self.model_executor.set_kv_cache_layout(
             layout.name, vllm_config.parallel_config.cp_kv_cache_interleave_size

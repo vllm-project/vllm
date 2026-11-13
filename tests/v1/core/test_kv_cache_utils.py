@@ -73,6 +73,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
@@ -294,6 +295,239 @@ def make_request(
         ),
         prompt_embeds=prompt_embeds,
     )
+
+
+def test_independent_kv_pools_allocate_and_free_by_group():
+    """Each group must draw blocks only from its configured allocator."""
+    block_size = 4
+    config = KVCacheConfig(
+        num_blocks=8,
+        num_blocks_by_pool=[8, 4],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target"], new_kv_cache_spec(block_size=block_size), block_pool_id=0
+            ),
+            KVCacheGroupSpec(
+                ["draft"],
+                new_sliding_window_spec(
+                    block_size=block_size, sliding_window=2 * block_size
+                ),
+                block_pool_id=1,
+                role=KVCacheGroupRole.DRAFT_WINDOW,
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        config,
+        max_model_len=16,
+        max_in_flight_tokens=4,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
+        enable_caching=False,
+        watermark=0.25,
+    )
+    assert manager.watermark_blocks_by_pool == (2, 0)
+    request = make_request("separate-pools", list(range(8)), block_size=block_size)
+
+    assert manager.allocate_slots(request, 8) is not None
+    blocks = manager.get_blocks(request.request_id).blocks
+    assert all(
+        block.pool is not None and block.pool() is manager.block_pools[0]
+        for block in blocks[0]
+    )
+    assert all(
+        block.pool is not None and block.pool() is manager.block_pools[1]
+        for block in blocks[1]
+    )
+
+    managers = manager.coordinator.single_type_managers
+    managers[0].new_block_ids.append(6)
+    managers[1].new_block_ids.append(2)
+    assert manager.take_new_block_ids() == {0: [6], 1: [2]}
+
+    manager.free(request)
+    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [7, 3]
+
+
+def test_independent_kv_pools_allocate_distinct_worker_backings():
+    """Worker views must use the block count and storage of their own pool."""
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    block_size = 4
+    target = new_kv_cache_spec(block_size=block_size)
+    draft = new_sliding_window_spec(
+        block_size=block_size, sliding_window=2 * block_size
+    )
+    counts = [8, 4]
+    config = KVCacheConfig(
+        num_blocks=counts[0],
+        num_blocks_by_pool=counts,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=target.page_size_bytes * counts[0],
+                layers=["target"],
+                layer_stride=target.page_size_bytes * counts[0],
+                block_stride=target.page_size_bytes,
+                block_pool_id=0,
+            ),
+            KVCacheTensor(
+                size=draft.page_size_bytes * counts[1],
+                layers=["draft"],
+                layer_stride=draft.page_size_bytes * counts[1],
+                block_stride=draft.page_size_bytes,
+                block_pool_id=1,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target"], target, block_pool_id=0),
+            KVCacheGroupSpec(["draft"], draft, block_pool_id=1),
+        ],
+    )
+
+    caches = allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout.LBHNC)
+
+    assert caches["target"].shape[0] == counts[0]
+    assert caches["draft"].shape[0] == counts[1]
+    assert (
+        caches["target"].untyped_storage().data_ptr()
+        != caches["draft"].untyped_storage().data_ptr()
+    )
+
+
+def test_draft_window_hole_keeps_main_prefix_hit():
+    """A missing draft page must recover its tail without discarding main KV."""
+    block_size = 4
+    config = KVCacheConfig(
+        num_blocks=32,
+        num_blocks_by_pool=[32, 24],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target"], new_kv_cache_spec(block_size=block_size), block_pool_id=0
+            ),
+            KVCacheGroupSpec(
+                ["draft"],
+                replace(
+                    new_sliding_window_spec(block_size=block_size, sliding_window=16),
+                    extra_retained_tokens=4,
+                ),
+                block_pool_id=1,
+                role=KVCacheGroupRole.DRAFT_WINDOW,
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        config,
+        max_model_len=128,
+        max_in_flight_tokens=8,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
+        enable_caching=True,
+    )
+    producer = make_request(
+        "producer", list(range(64)), block_size=block_size, hash_fn=sha256
+    )
+    assert manager.allocate_slots(producer, producer.num_tokens) is not None
+    draft_block_ids = [
+        block.block_id for block in manager.get_blocks(producer.request_id).blocks[1]
+    ]
+    producer.num_computed_tokens = producer.num_tokens
+    manager.remove_skipped_blocks(
+        producer.request_id,
+        producer.num_computed_tokens,
+        num_prompt_tokens=producer.num_prompt_tokens,
+    )
+    manager.cache_blocks(producer, producer.num_computed_tokens)
+    evicted_block_ids = {
+        block_id
+        for index, block_id in enumerate(draft_block_ids)
+        if index < 12 or index == 14
+    }
+    manager.free(producer)
+    manager.block_pools[1].evict_blocks(evicted_block_ids)
+
+    consumer = make_request(
+        "consumer", list(range(64)), block_size=block_size, hash_fn=sha256
+    )
+    cached, num_cached, _ = manager.get_computed_blocks(consumer)
+
+    assert num_cached == 60
+    plan = manager.get_draft_recovery_plan(consumer.request_id)
+    assert plan is not None
+    assert plan.required_ranges == ((40, 60),)
+    assert plan.replay_ranges == ((40, 60),)
+    assert all(cached.blocks[1][index].is_null for index in range(10, 15))
+
+    allocated = manager.allocate_slots(
+        consumer,
+        4,
+        num_new_computed_tokens=num_cached,
+        new_computed_blocks=cached,
+    )
+    assert allocated is not None
+    repaired_blocks = manager.get_blocks(consumer.request_id).blocks[1][10:15]
+    assert all(not block.is_null for block in repaired_blocks)
+    consumer.num_computed_tokens = num_cached
+    manager.cache_blocks(consumer, num_cached)
+    manager.free(consumer)
+    assert manager.get_draft_recovery_plan(consumer.request_id) is None
+
+    verifier = make_request(
+        "verifier", list(range(64)), block_size=block_size, hash_fn=sha256
+    )
+    verifier_blocks, _, _ = manager.get_computed_blocks(verifier)
+    # Prefix lookup exposes the attention window. The extra retained page is
+    # reconstructed when needed but is not part of the reusable hit itself.
+    restored = verifier_blocks.blocks[1][11:15]
+    assert all(not block.is_null for block in restored)
+    assert restored[0] is repaired_blocks[1]
+    assert restored[-1] is repaired_blocks[-1]
+
+
+def test_draft_window_recovery_falls_back_when_replay_is_not_shorter():
+    block_size = 4
+    config = KVCacheConfig(
+        num_blocks=16,
+        num_blocks_by_pool=[16, 8],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target"], new_kv_cache_spec(block_size=block_size), block_pool_id=0
+            ),
+            KVCacheGroupSpec(
+                ["draft"],
+                new_sliding_window_spec(block_size=block_size, sliding_window=16),
+                block_pool_id=1,
+                role=KVCacheGroupRole.DRAFT_WINDOW,
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        config,
+        max_model_len=32,
+        max_in_flight_tokens=4,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
+        enable_caching=True,
+    )
+    producer = make_request(
+        "producer", list(range(8)), block_size=block_size, hash_fn=sha256
+    )
+    assert manager.allocate_slots(producer, producer.num_tokens) is not None
+    producer.num_computed_tokens = producer.num_tokens
+    manager.cache_blocks(producer, producer.num_computed_tokens)
+    draft_block_id = manager.get_blocks(producer.request_id).blocks[1][0].block_id
+    manager.free(producer)
+    manager.block_pools[1].evict_blocks({draft_block_id})
+
+    consumer = make_request(
+        "consumer", list(range(8)), block_size=block_size, hash_fn=sha256
+    )
+    _, num_cached, _ = manager.get_computed_blocks(consumer)
+
+    assert num_cached == 0
+    assert manager.get_draft_recovery_plan(consumer.request_id) is None
 
 
 @pytest.mark.parametrize("dcp", [1, 4])
@@ -1717,6 +1951,31 @@ def test_get_max_concurrency_for_kv_cache_config():
         vllm_config, kv_cache_config_hybrid_model
     )
     assert max_concurrency_hybrid_model == 3
+
+    independent_pool_config = KVCacheConfig(
+        num_blocks=1024 * 3,
+        # Draft pool: one null block, three bounded request windows, and the
+        # global in-flight allowance.
+        num_blocks_by_pool=[1024 * 3, 1 + 66 * 3 + 64],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [f"layer_{i}" for i in range(32)],
+                full_attention_spec,
+                block_pool_id=0,
+            ),
+            KVCacheGroupSpec(
+                [f"draft_layer_{i}" for i in range(4)],
+                sliding_window_spec,
+                block_pool_id=1,
+                role=KVCacheGroupRole.DRAFT_WINDOW,
+            ),
+        ],
+    )
+    assert (
+        get_max_concurrency_for_kv_cache_config(vllm_config, independent_pool_config)
+        == 3
+    )
     num_tokens, max_concurrency = get_kv_cache_capacity(
         vllm_config, kv_cache_config_hybrid_model
     )

@@ -484,7 +484,10 @@ def _warmup_kernels(
     kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
     prefill_block_counts = [block_count(prompt_len, s) for s in kv_cache_specs]
     decode_block_counts = [block_count(decode_len, s) for s in kv_cache_specs]
-    max_blocks_per_req = sum(decode_block_counts)
+    group_pool_ids = [group.block_pool_id for group in kv_cache_groups]
+    blocks_per_req_by_pool = [0] * len(model_runner.kv_cache_config.num_blocks_by_pool)
+    for count, pool_id in zip(decode_block_counts, group_pool_ids, strict=True):
+        blocks_per_req_by_pool[pool_id] += count
 
     num_reqs = _cap_num_warmup_reqs(
         model_runner,
@@ -495,14 +498,26 @@ def _warmup_kernels(
     null_blocks = block_tables is not None and (
         block_tables.redirect_writes_to_null_block
     )
-    if max_blocks_per_req > 0 and not null_blocks:
+    if any(blocks_per_req_by_pool) and not null_blocks:
         # Reserve block 0 (null block) and ensure we have enough blocks.
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
+        pool_capacities = list(model_runner.kv_cache_config.num_blocks_by_pool)
+        if len(pool_capacities) == 1:
+            pool_capacities[0] = num_committable_kv_blocks(model_runner)
         num_reqs = min(
             num_reqs,
-            max(1, (num_committable_kv_blocks(model_runner) - 1) // max_blocks_per_req),
+            *(
+                max(1, (capacity - 1) // required)
+                for capacity, required in zip(
+                    pool_capacities, blocks_per_req_by_pool, strict=True
+                )
+                if required
+            ),
         )
-        ensure_kv_cache_blocks(model_runner, 1 + num_reqs * max_blocks_per_req)
+        if len(pool_capacities) == 1:
+            ensure_kv_cache_blocks(
+                model_runner, 1 + num_reqs * blocks_per_req_by_pool[0]
+            )
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
 
@@ -522,17 +537,21 @@ def _warmup_kernels(
         )
         pooling_params = None
 
-    # Assign distinct block IDs per request per group. 0 null block, start from 1.
-    next_block_id = 1
+    # Assign distinct block IDs within each allocator domain. Block 0 is the
+    # null block in every pool.
+    next_block_ids = [1] * len(model_runner.kv_cache_config.num_blocks_by_pool)
 
-    def _alloc_blocks(num_blocks: int) -> list[int]:
-        nonlocal next_block_id
-        return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
+    def _alloc_blocks(group_id: int, num_blocks: int) -> list[int]:
+        pool_id = group_pool_ids[group_id]
+        start = next_block_ids[pool_id]
+        next_block_ids[pool_id] += num_blocks
+        return list(range(start, start + num_blocks))
 
     # The KV-block zeroing kernel is driven by the scheduler's
     # new_block_ids_to_zero, so none of the steps below reach it.
     if model_runner.kv_block_zeroer is not None:
-        model_runner.kv_block_zeroer.warmup(model_runner.kv_cache_config.num_blocks)
+        for pool_id, zeroer in model_runner.kv_block_zeroers.items():
+            zeroer.warmup(model_runner.kv_cache_config.num_blocks_by_pool[pool_id])
 
     # Step 1: Prefill all requests with 1 + decode_query_len prompt tokens each.
     new_reqs = [
@@ -544,7 +563,10 @@ def _warmup_kernels(
                 pooling_params,
                 mm_features=warmup_mm_features,
             ),
-            block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
+            block_ids=tuple(
+                _alloc_blocks(group_id, count)
+                for group_id, count in enumerate(prefill_block_counts)
+            ),
             prefill_token_ids=prompt_token_ids,
         )
         for i in range(num_reqs)
@@ -602,7 +624,12 @@ def _warmup_kernels(
                     for spec, held in zip(kv_cache_specs, req_blocks[i])
                 ]
                 cached_req_data.new_block_ids.append(
-                    tuple(_alloc_blocks(n) for n in deltas) if any(deltas) else None
+                    tuple(
+                        _alloc_blocks(group_id, count)
+                        for group_id, count in enumerate(deltas)
+                    )
+                    if any(deltas)
+                    else None
                 )
                 req_blocks[i] = [
                     held + delta for held, delta in zip(req_blocks[i], deltas)
@@ -662,5 +689,12 @@ def _warmup_kernels(
         model_runner.speculator.reset_state()
     model_runner.kv_connector.set_disabled(False)
     if model_runner.kv_block_zeroer is not None:
-        model_runner.kv_block_zeroer.zero_block_ids([0])
+        model_runner._zero_new_kv_blocks(
+            {
+                pool_id: [0]
+                for pool_id in range(
+                    len(model_runner.kv_cache_config.num_blocks_by_pool)
+                )
+            }
+        )
     torch.accelerator.synchronize()
