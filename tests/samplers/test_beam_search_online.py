@@ -10,17 +10,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.config import VllmConfig, WatermarkConfig
-from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
-from vllm.entrypoints.generate.beam_search.utils import (
-    BeamSearchInstance,
-    BeamSearchSequence,
-)
-from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EngineInput, TokensInput
-from vllm.logprobs import Logprob, SampleLogprobs
-from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
-from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 from vllm import (
     CompletionOutput,
@@ -30,7 +19,18 @@ from vllm import (
     TokensPrompt,
 )
 from vllm import logger as vllm_logger
+from vllm.config import VllmConfig, WatermarkConfig
+from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
+from vllm.entrypoints.generate.beam_search.utils import (
+    BeamSearchInstance,
+    BeamSearchSequence,
+)
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EngineInput, TokensInput
+from vllm.logprobs import Logprob, SampleLogprobs
+from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
+from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 
 @pytest.fixture

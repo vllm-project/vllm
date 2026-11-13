@@ -3,9 +3,10 @@
 """Compare offline and HTTP beam search when a real model has tied logits."""
 
 import torch
-from tests.utils import RemoteOpenAIServer
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import GPT2Config, GPT2LMHeadModel, TokenizersBackend
+
+from tests.utils import RemoteOpenAIServer
 from vllm.sampling_params import BeamSearchParams
 
 
