@@ -8,20 +8,23 @@ rows per RDMA WRITE (one SGE per row) and writes them into the requester's
 landing buffer. The requester's GPU builds those WRs; the proxies (`proxy.py`)
 carry them to the owners and post them.
 
-A fetch is four stream-ordered kernels and no host work, so it captures into
+A fetch is five stream-ordered kernels and a host function, so it captures into
 CUDA graphs:
 1. `_plan_kernel` copies rows this GPU or its node's GPUs own straight into
    the output, zeroes dead ones, and numbers the rest within their owner's group.
 2. `_wr_kernel` writes each owner's gathering WRs and SGEs, in the owner proxy's
    addresses, into this GPU's descriptor buffer.
-3. `_go_wait_kernel` (one program) publishes each owner's slots and WRs, bumps
-   the device-side sequence number, raises the go flag, and holds the stream
-   until every owner's flag says its rows have landed.
+3. `_go_kernel` (one program) publishes each gatherer's slots and WRs, bumps
+   the device-side sequence number and raises the go flag. A CUDA host
+   function (libc's `sem_post`) then wakes the sleeping proxy, and
+   `_wait_kernel` (one program) holds the stream until every gatherer's flag
+   says its rows have landed.
 4. `_scatter_kernel` moves the landed rows from owner order into the output.
 
 Shards live in host memory, or in dmabuf-registered HBM.
 """
 
+import ctypes
 import json
 import os
 import socket
@@ -195,23 +198,20 @@ def _wr_kernel(
     )
 
 
-@triton.jit(debug=True)
-def _go_wait_kernel(
+@triton.jit
+def _go_kernel(
     counts,
     seq_ptr,
     ctrl,
-    flags,
     world,
-    timeout_ns,
     GO: tl.constexpr,
-    DONE: tl.constexpr,
     STARTS: tl.constexpr,
     WR_STARTS: tl.constexpr,
     ROWS_PER_WR: tl.constexpr,
     WORLD_P2: tl.constexpr,
 ):
-    """Hand this fetch to the proxy and wait for every owner's rows: each
-    owner writes `seq` (low 32 bits, negated on failure) into `flags` after them.
+    """Publish each gatherer's first slot and WR, then raise go with the next
+    sequence number. Every fetch raises go, as every fetch wakes the proxy.
 
     Launch with one warp: every thread holds copies of these values, and the
     counts are read before they are reset."""
@@ -219,31 +219,48 @@ def _go_wait_kernel(
     in_world = peers < world
     sizes = tl.load(counts + peers, mask=in_world, other=0).to(tl.int64)
     tl.store(ctrl + STARTS + peers, tl.cumsum(sizes, 0) - sizes, mask=in_world)
-    total = tl.sum(sizes)
-    tl.store(ctrl + STARTS + world, total)
+    tl.store(ctrl + STARTS + world, tl.sum(sizes))
     wrs = tl.cdiv(sizes, ROWS_PER_WR)
     tl.store(ctrl + WR_STARTS + peers, tl.cumsum(wrs, 0) - wrs, mask=in_world)
     tl.store(ctrl + WR_STARTS + world, tl.sum(wrs))
     tl.debug_barrier()
     tl.store(counts + peers, tl.zeros_like(peers), mask=in_world)
-    if total > 0:
-        # One read-modify-write, so every thread agrees on the sequence number.
-        seq = tl.atomic_add(seq_ptr, 1) + 1
-        tl.debug_barrier()
-        tl.atomic_xchg(ctrl + GO, seq, sem="release", scope="sys")
-        mine = seq & 0xFFFFFFFF
-        owners = in_world & (sizes > 0)
-        deadline = tl.extra.cuda.globaltimer() + timeout_ns
+    # One read-modify-write, so every thread agrees on the sequence number.
+    seq = tl.atomic_add(seq_ptr, 1) + 1
+    tl.debug_barrier()
+    tl.atomic_xchg(ctrl + GO, seq, sem="release", scope="sys")
+
+
+@triton.jit(debug=True)
+def _wait_kernel(
+    seq_ptr,
+    ctrl,
+    flags,
+    world,
+    timeout_ns,
+    DONE: tl.constexpr,
+    STARTS: tl.constexpr,
+    WORLD_P2: tl.constexpr,
+):
+    """Hold the stream until every gatherer of this fetch has written `seq`
+    (low 32 bits, negated on failure) into its flag, after its rows."""
+    peers = tl.arange(0, WORLD_P2)
+    starts = tl.load(ctrl + STARTS + peers, mask=peers <= world, other=0)
+    ends = tl.load(ctrl + STARTS + peers + 1, mask=peers < world, other=0)
+    owners = (peers < world) & (ends > starts)
+    seq = tl.load(seq_ptr)
+    mine = seq & 0xFFFFFFFF
+    deadline = tl.extra.cuda.globaltimer() + timeout_ns
+    landed = tl.load(flags + peers, mask=owners, other=mine, volatile=True)
+    waiting = tl.sum((landed != mine).to(tl.int32))
+    failed = tl.load(ctrl + DONE, volatile=True) == -seq
+    while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
         landed = tl.load(flags + peers, mask=owners, other=mine, volatile=True)
         waiting = tl.sum((landed != mine).to(tl.int32))
         failed = tl.load(ctrl + DONE, volatile=True) == -seq
-        while (waiting > 0) & ~failed & (tl.extra.cuda.globaltimer() < deadline):
-            landed = tl.load(flags + peers, mask=owners, other=mine, volatile=True)
-            waiting = tl.sum((landed != mine).to(tl.int32))
-            failed = tl.load(ctrl + DONE, volatile=True) == -seq
-            failed |= tl.sum((landed == -mine).to(tl.int32)) > 0
-        tl.device_assert(~failed, "Engram pool RDMA fetch failed")
-        tl.device_assert(waiting == 0, "Engram pool RDMA fetch timed out")
+        failed |= tl.sum((landed == -mine).to(tl.int32)) > 0
+    tl.device_assert(~failed, "Engram pool RDMA fetch failed")
+    tl.device_assert(waiting == 0, "Engram pool RDMA fetch timed out")
 
 
 @triton.jit(do_not_specialize=["num_items"])
@@ -295,6 +312,15 @@ class RdmaTransport:
             16, max(2, 128 // max(self.world - 1, 1))
         )
         self.ctrl = SharedHost(proxy.CTRL_BYTES, "ctrl")
+        # The proxy sleeps on this process-shared semaphore; a CUDA host
+        # function posts it from the stream, with no Python on that path.
+        libc = ctypes.CDLL(None, use_errno=True)
+        self.sem = self.ctrl.cpu.data_ptr() + proxy.SEM_OFFSET
+        if libc.sem_init(ctypes.c_void_p(self.sem), 1, 0):
+            raise OSError(ctypes.get_errno(), "sem_init failed")
+        self.sem_post = ctypes.cast(libc.sem_post, ctypes.c_void_p)
+        self.launch_host_func = ctypes.CDLL("libcuda.so.1").cuLaunchHostFunc
+        self.launch_host_func.argtypes = [ctypes.c_void_p] * 3
         ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.sock = ours
         self.process = subprocess.Popen(
@@ -365,7 +391,7 @@ class RdmaTransport:
         # This GPU's mailbox at each owner, in that owner proxy's addresses.
         box_bytes = proxy.mailbox_bytes(self.max_wrs, max_items)
         self.boxes = torch.tensor(
-            [box + self.rank * box_bytes for box, _, _, _ in boxes],
+            [box + self.rank * box_bytes for box, *_ in boxes],
             dtype=torch.int64,
             device=gpu,
         )
@@ -508,19 +534,31 @@ class RdmaTransport:
             WORDS=words,
             BLOCK=128,
         )
-        _go_wait_kernel[(1,)](
+        _go_kernel[(1,)](
             self.counts,
+            self.seq,
+            self.ctrl_words,
+            self.world,
+            GO=proxy.GO,
+            STARTS=proxy.STARTS,
+            WR_STARTS=proxy.WR_STARTS,
+            ROWS_PER_WR=rows_per_wr,
+            WORLD_P2=world_p2,
+            num_warps=1,
+        )
+        # Wake the sleeping proxy once go is up; no Python runs on this path.
+        stream = torch.cuda.current_stream().cuda_stream
+        if error := self.launch_host_func(stream, self.sem_post, self.sem):
+            raise RuntimeError(f"cuLaunchHostFunc failed: {error}")
+        _wait_kernel[(1,)](
             self.seq,
             self.ctrl_words,
             self.flags,
             self.world,
             TIMEOUT_NS,
-            GO=proxy.GO,
             DONE=proxy.DONE,
             STARTS=proxy.STARTS,
-            WR_STARTS=proxy.WR_STARTS,
-            ROWS_PER_WR=rows_per_wr,
-            WORLD_P2=world_p2,
+            WORLD_P2=triton.next_power_of_2(self.world + 1),
             num_warps=1,
         )
         _scatter_kernel[(triton.cdiv(n, 64),)](

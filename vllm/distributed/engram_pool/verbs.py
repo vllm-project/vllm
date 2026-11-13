@@ -14,8 +14,12 @@ import struct
 from functools import cache
 
 SEND_WR_BYTES = 128
+RECV_WR_BYTES = 32
 WC_BYTES = 48
 SEND_SIGNALED, SEND_INLINE = 2, 8
+WR_WRITE_WITH_IMM = 1
+# ibv_wc opcodes from here on are receive completions.
+WC_RECV = 128
 
 _REMOTE_WRITE = 1 | 2  # local write, remote write
 _RELAXED = 1 << 20
@@ -24,12 +28,14 @@ _RELAXED = 1 << 20
 LOCAL, BULK, FLAGS = _RELAXED, _REMOTE_WRITE | _RELAXED, _REMOTE_WRITE
 _QPT_RC = 2
 _QPS_INIT, _QPS_RTR, _QPS_RTS = 1, 2, 3
-_OPS_POLL_CQ, _OPS_POST_SEND = 8 + 88, 8 + 200
+_OPS_POLL_CQ, _OPS_NOTIFY_CQ = 8 + 88, 8 + 96
+_OPS_POST_SEND, _OPS_POST_RECV = 8 + 200, 8 + 208
 MTU_BYTES = {1: 256, 2: 512, 3: 1024, 4: 2048, 5: 4096}
 
 _POST_SEND = ctypes.CFUNCTYPE(
     ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)
 )
+_NOTIFY_CQ = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
 _POLL_CQ = ctypes.CFUNCTYPE(
     ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p
 )
@@ -48,6 +54,9 @@ def _lib() -> ctypes.CDLL:
         ("ibv_query_port", i, [p, ctypes.c_uint8, p]),
         ("ibv_query_gid", i, [p, ctypes.c_uint8, i, p]),
         ("ibv_create_cq", p, [p, i, p, p, i]),
+        ("ibv_create_comp_channel", p, [p]),
+        ("ibv_get_cq_event", i, [p, p, p]),
+        ("ibv_ack_cq_events", None, [p, ctypes.c_uint]),
         ("ibv_create_qp", p, [p, p]),
         ("ibv_modify_qp", i, [p, p, i]),
         ("ibv_reg_mr", p, [p, p, ctypes.c_size_t, i]),
@@ -163,6 +172,8 @@ class Device:
         ops = ctypes.cast(self.context, ctypes.POINTER(ctypes.c_void_p))
         self._post = _POST_SEND(ops[_OPS_POST_SEND // 8])
         self._poll = _POLL_CQ(ops[_OPS_POLL_CQ // 8])
+        self._post_recv = _POST_SEND(ops[_OPS_POST_RECV // 8])
+        self._notify = _NOTIFY_CQ(ops[_OPS_NOTIFY_CQ // 8])
         self._bad = ctypes.c_void_p()
         self._bad_ref = ctypes.byref(self._bad)
 
@@ -197,19 +208,53 @@ class Device:
         lkey, rkey = struct.unpack_from("<II", ctypes.string_at(mr + 36, 8))
         return lkey, rkey
 
-    def create_cq(self, depth: int) -> int:
-        return _check(
-            _lib().ibv_create_cq(self.context, depth, None, None, 0), "ibv_create_cq"
+    def create_cq(self, depth: int) -> tuple[int, int, int]:
+        """A CQ whose completions can wake a sleeper: returns it, its
+        completion channel and the channel's fd."""
+        channel = _check(_lib().ibv_create_comp_channel(self.context), "channel")
+        cq = _check(
+            _lib().ibv_create_cq(self.context, depth, None, channel, 0),
+            "ibv_create_cq",
+        )
+        return (
+            cq,
+            channel,
+            struct.unpack_from("<i", ctypes.string_at(channel + 8, 4))[0],
         )
 
+    def notify_cq(self, cq: int) -> None:
+        """Raise one event on the CQ's channel at its next completion."""
+        if error := self._notify(cq, 0):
+            raise RuntimeError(f"ibv_req_notify_cq failed: {os.strerror(error)}")
+
+    def cq_event(self, channel: int) -> None:
+        """Consume one event of `channel` (its fd is readable)."""
+        cq, context = ctypes.c_void_p(), ctypes.c_void_p()
+        _check(
+            _lib().ibv_get_cq_event(channel, ctypes.byref(cq), ctypes.byref(context))
+            == 0,
+            "ibv_get_cq_event",
+        )
+        _lib().ibv_ack_cq_events(cq, 1)
+
+    def post_recv(self, qp: int, wr: int) -> None:
+        if error := self._post_recv(qp, wr, self._bad_ref):
+            raise RuntimeError(f"ibv_post_recv failed: {os.strerror(error)}")
+
     def create_qp(
-        self, cq: int, max_send_wr: int, max_send_sge: int = 1, max_inline: int = 0
+        self,
+        cq: int,
+        max_send_wr: int,
+        max_send_sge: int = 1,
+        max_inline: int = 0,
+        max_recv_wr: int = 1,
     ) -> tuple[int, int]:
-        """An RC QP sending only; returns it and its number."""
+        """An RC QP; it receives only WRITE_WITH_IMM notices. Returns it and
+        its number."""
         attr = ctypes.create_string_buffer(64)
         struct.pack_into("<QQ", attr, 8, cq, cq)
         struct.pack_into(
-            "<IIIII", attr, 32, max_send_wr, 1, max_send_sge, 1, max_inline
+            "<IIIII", attr, 32, max_send_wr, max_recv_wr, max_send_sge, 1, max_inline
         )
         struct.pack_into("<i", attr, 52, _QPT_RC)
         qp = _check(_lib().ibv_create_qp(self.pd, attr), "ibv_create_qp")
