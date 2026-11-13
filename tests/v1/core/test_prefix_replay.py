@@ -11,17 +11,17 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import MockKVConfig, create_model_runner_output
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    SlidingWindowMLASpec,
+    MLAAttentionSpec,
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from .utils import create_requests, create_scheduler
+from .utils import create_requests, create_scheduler, new_kv_cache_group
 
 BLOCK_SIZE = 16
 WINDOW = 32
@@ -49,22 +49,24 @@ def _replay_scheduler(
         num_blocks=10000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=BLOCK_SIZE,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa"],
-                SlidingWindowMLASpec(
-                    block_size=BLOCK_SIZE,
-                    num_kv_heads=1,
-                    head_size=64,
-                    dtype=torch.bfloat16,
+                SlidingWindowManager.layer_config(
+                    MLAAttentionSpec(
+                        block_size=BLOCK_SIZE,
+                        num_kv_heads=1,
+                        head_size=64,
+                        dtype=torch.bfloat16,
+                    ),
                     sliding_window=WINDOW,
                     bounded_replay=True,
                 ),
