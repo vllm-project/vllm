@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Layout of the row each rank reports per step.
+ROW_SIZE = 14
 (
     _DONE,  # a step with scheduled tokens finished since the previous sync
     _PERIOD,  # seconds since the previous sync
@@ -49,8 +50,7 @@ logger = init_logger(__name__)
     _ARRIVED,  # requests that arrived since the previous sync
     _ARRIVED_UNCACHED,  # their prompt tokens not in the prefix cache
     _ARRIVED_CACHED,  # their prompt tokens in the prefix cache
-) = range(14)
-ROW_SIZE = 14
+) = range(ROW_SIZE)
 
 # Time constant of the arrival rate and request size estimates.
 _RATE_TAU_S = 30.0
@@ -98,7 +98,8 @@ class _StepCostFit:
     weight decaying by `1 - 1 / _FIT_WINDOW` per later mixed step. There is no
     prior: a tiny ridge only keeps the solve finite along combinations the
     steps never varied, and `sd` reports how poorly a prediction is pinned
-    there. A residual beyond 3 sigma is down-weighted to 3 sigma.
+    there. A residual beyond 3 times the running mean absolute residual is
+    down-weighted to that bound.
     """
 
     def __init__(self) -> None:
@@ -169,10 +170,12 @@ class PrefillHold:
     Args:
         scheduler: This rank's scheduler.
         ttft_target_s: TTFT target `T` in seconds.
-        alpha: Seconds of decode stall per request worth one second of TTFT.
+        alpha: Weight of one second of TTFT per waiting request against one
+            second of decode stall per running request.
         token_budget: Max tokens per step per rank.
         lag_steps: Steps between a decision and the step it takes effect on
-            the GPU beyond the next one (1 with async scheduling).
+            the GPU beyond the next one (`batch_queue_size - 1`, so 1 with
+            async scheduling and no pipeline parallelism).
         log_stats: Whether this rank logs a periodic summary.
 
     """

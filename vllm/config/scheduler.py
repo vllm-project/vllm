@@ -248,9 +248,10 @@ class SchedulerConfig:
     without data parallelism on a MoE model."""
 
     prefill_hold_alpha: float = Field(default=1.0, gt=0)
-    """Seconds of decode stall per running request that one second of TTFT per
-    waiting request is worth to `prefill_hold_ttft_target`. Higher values hold
-    less, favouring TTFT over ITL."""
+    """How much one second of TTFT per waiting request weighs against one
+    second of decode stall per running request, for `prefill_hold_ttft_target`.
+    At 1 the two weigh the same. Higher values hold less, favouring TTFT over
+    ITL; lower values hold longer."""
 
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting

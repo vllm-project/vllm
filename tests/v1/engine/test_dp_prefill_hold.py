@@ -53,7 +53,9 @@ def _warm(hold: PrefillHold, rng: random.Random, max_work: int = RANKS) -> None:
     hold.update(decode_only)
     _measure(hold, rng, 100, max_work)
     # 50 req/s of 4K uncached tokens each.
-    hold.update([_row(arrived=1500 / RANKS, arrived_uncached=4000 * 1500 / RANKS)] * 8)
+    hold.update(
+        [_row(arrived=1500 / RANKS, arrived_uncached=4000 * 1500 / RANKS)] * RANKS
+    )
 
 
 def _one_rank_queued(slack: float = T) -> list[list[float]]:

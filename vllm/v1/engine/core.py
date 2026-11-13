@@ -2634,7 +2634,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 scheduler_config.prefill_hold_ttft_target,
                 scheduler_config.prefill_hold_alpha,
                 scheduler_config.max_num_batched_tokens,
-                lag_steps=int(self.batch_queue is not None),
+                lag_steps=self.batch_queue_size - 1,
                 log_stats=dp_rank == 0,
             )
 
