@@ -83,8 +83,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         """
         if concurrency_limit is not None and concurrency_limit <= 0:
             raise ValueError("concurrency_limit must be greater than zero")
-        if not prompts:
-            return []
 
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?

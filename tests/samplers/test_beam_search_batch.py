@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Exercise empty and bounded beam-search batches with a local model."""
+"""Exercise beam-search concurrency limits with a local model."""
 
 import pytest
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import GPT2Config, GPT2LMHeadModel, TokenizersBackend
 
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 
 
@@ -55,7 +56,7 @@ def beam_batch_llm(tmp_path_factory, vllm_runner):
 @pytest.mark.parametrize("concurrency_limit", [None, 1, 8])
 @pytest.mark.parametrize("use_tqdm", [False, True])
 @pytest.mark.parametrize("structured", [False, True])
-def test_beam_batch_empty(beam_batch_llm, concurrency_limit, use_tqdm, structured):
+def test_beam_batch_empty_is_rejected(beam_batch_llm, concurrency_limit, use_tqdm, structured):
     params = BeamSearchParams(
         beam_width=2,
         max_tokens=3,
@@ -63,15 +64,13 @@ def test_beam_batch_empty(beam_batch_llm, concurrency_limit, use_tqdm, structure
         if structured
         else None,
     )
-    assert (
+    with pytest.raises(VLLMValidationError, match="at least one prompt"):
         beam_batch_llm.beam_search(
             [],
             params,
             concurrency_limit=concurrency_limit,
             use_tqdm=use_tqdm,
         )
-        == []
-    )
 
 
 @pytest.mark.parametrize("concurrency_limit", [0, -1, -8])
