@@ -2,9 +2,10 @@
 
 A decode executor for small decode batches of DeepSeek-V4.1 on GB300, enabled
 with `--additional-config '{"decode_backend": "latency_specialized"}'` (the
-default, `auto`, keeps the stock decode). With it off, the model runs exactly as
-without this package. One executor runs the target model and another the
-DSpark draft model, on the target's kernels and streams.
+default, `auto`, keeps the stock backbone decode). DSpark's vocabulary-sharded
+Markov sampler also serves eligible default decode batches. One executor runs
+the target model and another the DSpark draft model, on the target's kernels
+and streams.
 
 ## Scope
 
@@ -103,7 +104,7 @@ graph.
 | The fused kernel also writes the attention input as MXFP8, which `fused_wqa_wkv` reads instead of quantizing again | all executor steps |
 | DSpark draft layers through the same steps, finalizing their MoE in the layer; the last layer's output in the fused kernel's residual-only variant | all draft executor steps |
 | DSpark Markov sampling on the fused loop of `ops/fused_markov.py`, as with `dspark_fused_markov` | probabilistic drafting without adaptive verification, watermarking, FP64 Gumbel or batch-sharded sampling |
-| The whole Markov chain in one cooperative kernel per rank, the Markov head sharded by vocabulary over the TP ranks (`sampling/sharded_markov.py`) | the same, at up to 8 request rows (4 at 8 ranks) |
+| The whole Markov chain in one cooperative kernel per rank, the Markov head sharded by vocabulary over the TP ranks (`sampling/sharded_markov.py`) | the same, at up to 8 request rows (4 at 8 ranks); also default decode on supported CUDA devices, with the eager loop as fallback; explicit `dspark_fused_markov` keeps its fused loop |
 | Aux hidden-state means on the mHC side stream | all executor steps |
 | Routed experts on CuTe DSL routing and `tcgen05` GEMM kernels (`moe/routed_expert_gemm.py`) | 1-192 rows; the DSpark draft's, with a finalize kernel, 1-8 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's low-latency CuTe DSL MXFP8 GEMM with pinned tactics | 1-8 rows |

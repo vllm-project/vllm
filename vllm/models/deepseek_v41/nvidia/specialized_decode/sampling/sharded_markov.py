@@ -35,10 +35,13 @@ rounding, temperature division and `torch.argmax` tie-breaking) except for
 the bias reduction order before its BF16 rounding, so a bias element can differ
 from cuBLAS's in its last bit.
 
-With `decode_backend=latency_specialized`, the DSpark draft model's
+On the default decode path and with `decode_backend=latency_specialized`,
+the DSpark draft model's
 `sample_sequential` (the hook `DSparkSpeculator._sample_sequential` asks
 first) is a `ShardedMarkovSampling`: batches of up to `max_rows` request
-rows take this chain, larger ones the fused loop of `ops/fused_markov.py`.
+rows take this chain. Other batches use the speculator's eager loop on the
+default path, or the fused loop of `ops/fused_markov.py` with specialized decode.
+Explicit `dspark_fused_markov` keeps the fused loop on the default path.
 
 The exchange is a cross-rank spin wait inside the draft step (and its FULL
 CUDA graph): every rank must launch the kernel the same number of times.
@@ -466,7 +469,8 @@ def make_sharded_sampler(
 
 class ShardedMarkovSampling:
     """The DSpark draft model's `sample_sequential` hook: the sharded chain
-    for the batches it takes, `fallback` (the fused loop) for the others.
+    for the batches it takes, `fallback` for the others. Without a fallback,
+    returns False to let the speculator run its eager loop.
 
     `local_logits` (agreed by every rank) has the chain read this rank's
     vocabulary shard of the draft logits, skipping their all-gather.
@@ -475,7 +479,7 @@ class ShardedMarkovSampling:
     def __init__(
         self,
         sharded: DSparkShardedMarkovSampler,
-        fallback: "Callable[[DSparkSpeculator, int, torch.Tensor], bool]",
+        fallback: "Callable[[DSparkSpeculator, int, torch.Tensor], bool] | None",
         local_logits: bool,
     ):
         self.sharded = sharded
@@ -490,7 +494,11 @@ class ShardedMarkovSampling:
         their logits; returns True, as the fused loop does."""
         sharded = self.sharded
         if not sharded.supports_batch(num_reqs):
-            return self.fallback(spec, num_reqs, head_hidden)
+            return (
+                self.fallback(spec, num_reqs, head_hidden)
+                if self.fallback is not None
+                else False
+            )
         assert spec.draft_logits is not None
         assert spec.draft_logits.row_mapping is None
         model, num_steps = spec.model, spec.num_speculative_steps
@@ -508,7 +516,11 @@ class ShardedMarkovSampling:
         if not sharded.supports(num_reqs, base_logits):
             # Logits in a dtype the chain lacks; decided by configuration, so
             # every rank falls back alike.
-            return self.fallback(spec, num_reqs, head_hidden)
+            return (
+                self.fallback(spec, num_reqs, head_hidden)
+                if self.fallback is not None
+                else False
+            )
         sharded.sample(
             base_logits,
             spec.input_buffers.input_ids,
@@ -522,9 +534,9 @@ class ShardedMarkovSampling:
 
 
 def build_sharded_markov_sampling(
-    model: "DSparkDeepseekV4ForCausalLM", fused: "FusedMarkovSampler"
-) -> "FusedMarkovSampler | ShardedMarkovSampling":
-    """Wrap `fused` with the sharded chain where supported, agreed by all ranks."""
+    model: "DSparkDeepseekV4ForCausalLM", fallback: "FusedMarkovSampler | None" = None
+) -> "FusedMarkovSampler | ShardedMarkovSampling | None":
+    """Wrap `fallback` with the sharded chain where supported on all ranks."""
     tp_group = get_tp_group()
     sharded = make_sharded_sampler(
         model.model.markov_head.markov_w1.weight,
@@ -536,6 +548,6 @@ def build_sharded_markov_sampling(
         model.max_num_reqs,
     )
     if sharded is None:
-        return fused
+        return fallback
     local_logits = sharded.accepts_shard(model.draft_logits_shard())
-    return ShardedMarkovSampling(sharded, fused, local_logits)
+    return ShardedMarkovSampling(sharded, fallback, local_logits)

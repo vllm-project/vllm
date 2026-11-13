@@ -564,6 +564,8 @@ steps:
   - vllm/models/deepseek_v41/attention.py
   - vllm/models/deepseek_v41/common/
   - vllm/v1/worker/gpu/model_states/
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - vllm/v1/worker/gpu/sample/gumbel.py
   - vllm/model_executor/layers/fused_moe/config.py
   - vllm/model_executor/warmup/
   - tests/models/deepseek_v41/nvidia/test_swapab_decode.py

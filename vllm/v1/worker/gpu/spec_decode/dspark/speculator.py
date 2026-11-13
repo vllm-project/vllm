@@ -158,6 +158,8 @@ class DSparkSpeculator(DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = load_dspark_model(target_model, self.vllm_config)
+        if hasattr(model, "build_default_markov_sampling"):
+            model.build_default_markov_sampling()
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
         # scratch buffer to scatter logits into target vocab before sampling.

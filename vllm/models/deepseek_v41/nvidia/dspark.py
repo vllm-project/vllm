@@ -51,6 +51,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v4.nvidia.dspark import _duplicate_context_wkv_weights
+from vllm.platforms import current_platform
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
@@ -342,17 +343,28 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         # sample a full draft-logits cache with plain Gumbel noise.
         spec_config = vllm_config.speculative_config
         extra = vllm_config.additional_config
-        if (
-            (
-                specialized_decode_requested
-                or (isinstance(extra, dict) and extra.get("dspark_fused_markov", False))
-            )
-            and spec_config.draft_sample_method == "probabilistic"
+        fused_markov_requested = specialized_decode_requested or (
+            isinstance(extra, dict) and extra.get("dspark_fused_markov", False)
+        )
+        markov_sampling_supported = (
+            spec_config.draft_sample_method == "probabilistic"
             and not spec_config.enable_adaptive_verification
             and not vllm_config.model_config.use_fp64_gumbel
             and getattr(vllm_config, "watermark_config", None) is None
             and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        )
+        self._use_default_sharded_markov = (
+            markov_sampling_supported
+            and not fused_markov_requested
+            and current_platform.is_cuda()
+        )
+        if markov_sampling_supported and (
+            fused_markov_requested or self._use_default_sharded_markov
         ):
+            self.markov_cache_dtype = vllm_config.model_config.head_dtype
+            self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self.num_speculative_steps = spec_config.num_speculative_tokens
+        if markov_sampling_supported and fused_markov_requested:
             self.sample_sequential: FusedMarkovSampler | ShardedMarkovSampling
             self.sample_sequential = FusedMarkovSampler(
                 vllm_config.scheduler_config.max_num_seqs,
@@ -360,10 +372,18 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 self.config.dspark_markov_rank,
                 self.draft_model_config.dtype,
             )
-            # The sharded chain's settings, for build_specialized_decode.
-            self.markov_cache_dtype = vllm_config.model_config.head_dtype
-            self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-            self.num_speculative_steps = spec_config.num_speculative_tokens
+
+    def build_default_markov_sampling(self) -> None:
+        """Set up sampling after weight loading, collectively on every TP rank."""
+        if not self._use_default_sharded_markov:
+            return
+        from .specialized_decode.sampling.sharded_markov import (
+            build_sharded_markov_sampling,
+        )
+
+        sampler = build_sharded_markov_sampling(self)
+        if sampler is not None:
+            self.sample_sequential = sampler
 
     def build_specialized_decode(self, target: "SpecializedDecode") -> "DraftDecode":
         """Build this model's decode executor on `target`, the target
@@ -380,7 +400,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 build_sharded_markov_sampling,
             )
 
-            self.sample_sequential = build_sharded_markov_sampling(self, fused)
+            sampler = build_sharded_markov_sampling(self, fused)
+            assert sampler is not None
+            self.sample_sequential = sampler
         return self.specialized_decode
 
     # --- Hooks used by the speculator -------------------------------------

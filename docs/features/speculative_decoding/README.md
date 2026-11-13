@@ -40,6 +40,15 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+DeepSeek-V4.1 DSpark probabilistic drafting uses vocabulary-sharded Markov
+sampling by default on supported SM100-family CUDA GPUs, for up to eight request
+rows (four at TP8). Setup requires compatible BF16 Markov weights, TP1/2/4/8,
+and a BF16 or FP32 logits cache. Adaptive verification, FP64 Gumbel,
+watermarking and batch-sharded sampling keep their existing paths. Unsupported
+configurations and larger batches use the eager sampling loop.
+Explicit `additional_config={"dspark_fused_markov": true}` and
+`decode_backend=latency_specialized` retain their existing sampling behavior.
+
 ## Custom Speculators (Experimental)
 
 You can plug in your own speculator by registering it as a speculative method

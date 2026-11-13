@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-GPU kernels of the DeepSeek-V4.1 specialized decode
+"""Kernels of the DeepSeek-V4.1 specialized decode
 (`vllm/models/deepseek_v41/nvidia/specialized_decode`), each against the stock path
 it replaces, eagerly and replayed from a CUDA graph where the decode captures
-it. Needs one SM100-family GPU; about 5 minutes, mostly kernel compilation.
+it. Needs SM100-family GPUs: one for most tests, two or four for Markov peer
+exchange; about 5 minutes, mostly kernel compilation.
 
 Run: pytest -v tests/models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
 """
@@ -1344,24 +1345,28 @@ MARKOV_STEPS = 5
 MARKOV_QUERY = 6  # draft query rows per request; the anchor token is the first
 
 
-def _markov_case(dtype: torch.dtype) -> SimpleNamespace:
-    """Four request rows, the last a padding row (request-state index -1), at
-    temperatures 0, 1 and 0.6. The Markov weights are integer multiples of
+def _markov_case(dtype: torch.dtype, rows: int, padding: bool) -> SimpleNamespace:
+    """Request rows at temperatures 0, 1 and 0.6, optionally ending in padding.
+    The Markov weights are integer multiples of
     1/16, so every bias element is an exact sum whatever the reduction order,
     and cuBLAS and the sharded kernel round it to BF16 alike."""
     gen = torch.Generator(device=DEVICE).manual_seed(0)
-    rows, max_reqs = 4, 6
+    max_reqs = 10
 
     def ternary(*shape):
         values = torch.randint(-1, 2, shape, generator=gen, device=DEVICE)
         return values.to(torch.bfloat16)
 
-    states = torch.tensor([3, 0, 5, -1], device=DEVICE)
+    states = torch.tensor([3, 0, 5, 2, 7, 1, 9, 4][:rows], device=DEVICE)
+    if padding:
+        states[-1] = -1
     temperature = torch.zeros(max_reqs, dtype=torch.float32, device=DEVICE)
-    temperature[states[:3]] = torch.tensor([0.0, 1.0, 0.6], device=DEVICE)
+    temperatures = torch.tensor([0.0, 1.0, 0.6], device=DEVICE).repeat(3)[:rows]
+    temperature[states[states >= 0]] = temperatures[states >= 0]
     base = torch.randn(rows, MARKOV_STEPS, MARKOV_VOCAB, generator=gen, device=DEVICE)
     return SimpleNamespace(
         rows=rows,
+        real_rows=rows - int(padding),
         max_reqs=max_reqs,
         embed=ternary(MARKOV_VOCAB, RANK_DIM),
         head=ternary(MARKOV_VOCAB, RANK_DIM) / 16,
@@ -1397,12 +1402,17 @@ def _markov_outputs(case: SimpleNamespace) -> tuple[torch.Tensor, torch.Tensor]:
 
 def _markov_eager(case, cache, tokens):
     """The speculator's eager loop: per position, the Markov bias of the
-    previous token, the logits add and `gumbel_sample`."""
+    previous token and `gumbel_sample`, fusing the bias for matching dtypes."""
     prev = case.input_ids[::MARKOV_QUERY].long()
     idx_mapping = case.idx_mapping.view(case.rows, MARKOV_STEPS)
     sample_pos = case.sample_pos.view(case.rows, MARKOV_STEPS)
     for i in range(MARKOV_STEPS):
-        logits = case.base[:, i] + case.embed[prev] @ case.head.t()
+        logits = case.base[:, i]
+        bias = case.embed[prev] @ case.head.t()
+        # DSparkSpeculator fuses the bias only when both dtypes match.
+        if bias.dtype != logits.dtype:
+            logits = logits + bias
+            bias = None
         prev = gumbel_sample(
             logits,
             idx_mapping[:, i],
@@ -1413,29 +1423,36 @@ def _markov_eager(case, cache, tokens):
             is_drafting=True,
             logits_cache=cache,
             logits_cache_col=torch.tensor(i, dtype=torch.int32, device=DEVICE),
+            bias=bias,
         )
         tokens[: case.rows, i] = prev
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_sharded_markov_chain_matches_eager(dtype):
+@pytest.mark.parametrize("rows", range(1, 9))
+@pytest.mark.parametrize("padding", [False, True])
+def test_sharded_markov_chain_matches_eager(dtype, rows, padding):
     """The vocabulary-sharded chain on one rank (the whole head) draws the
     eager loop's tokens and caches its logits bitwise, eagerly and replayed
     from a CUDA graph."""
-    case = _markov_case(dtype)
+    _check_sharded_markov_chain(dtype, rows, padding)
+
+
+def _check_sharded_markov_chain(dtype, rows, padding, group=None):
+    case = _markov_case(dtype, rows, padding)
     want_cache, want_tokens = _markov_outputs(case)
     _markov_eager(case, want_cache, want_tokens)
     sampler = make_sharded_sampler(
-        case.embed, case.head, MARKOV_VOCAB, MARKOV_STEPS, dtype, None, case.max_reqs
+        case.embed, case.head, MARKOV_VOCAB, MARKOV_STEPS, dtype, group, case.max_reqs
     )
     assert sampler is not None and sampler.supports(case.rows, case.base)
     cache, tokens = _markov_outputs(case)
 
-    def run():
+    def run(base):
         sampler.fork_noise(case.idx_mapping, case.sample_pos, case.seeds)
         sampler.join_noise()
         sampler.sample(
-            case.base,
+            base,
             case.input_ids,
             MARKOV_QUERY,
             case.idx_mapping,
@@ -1444,17 +1461,54 @@ def test_sharded_markov_chain_matches_eager(dtype):
             tokens,
         )
 
-    graph, _ = _capture(run)
-    # Padding rows draw nothing that is read.
-    real = case.rows - 1
-    for replay in range(3):
-        if replay:
+    start = sampler.vocab_offset
+    for base in (case.base, case.base[..., start : start + sampler.vocab_local]):
+        graph, _ = _capture(lambda base=base: run(base))
+        real = case.real_rows
+        assert torch.equal(tokens[:real], want_tokens[:real])
+        assert torch.equal(cache, want_cache)
+        for replay in range(3):
             cache.zero_()
             tokens.zero_()
             graph.replay()
             torch.accelerator.synchronize()
-        assert torch.equal(tokens[:real], want_tokens[:real]), replay
-        assert torch.equal(cache, want_cache), replay
+            assert torch.equal(tokens[:real], want_tokens[:real]), replay
+            assert torch.equal(cache, want_cache), replay
+
+
+def _markov_distributed_worker(rank: int, world: int, port: int) -> None:
+    from tests.utils import init_test_distributed_environment
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.distributed import cleanup_dist_env_and_memory, get_tp_group
+
+    torch.accelerator.set_device_index(rank)
+    with set_current_vllm_config(VllmConfig()), torch.inference_mode():
+        init_test_distributed_environment(world, 1, rank, str(port), local_rank=rank)
+        try:
+            for dtype in (torch.bfloat16, torch.float32):
+                for rows in range(1, 9):
+                    for padding in (False, True):
+                        _check_sharded_markov_chain(
+                            dtype, rows, padding, get_tp_group().cpu_group
+                        )
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize(
+    "world",
+    [
+        pytest.param(2, marks=pytest.mark.distributed(num_gpus=2)),
+        pytest.param(4, marks=pytest.mark.distributed(num_gpus=4)),
+    ],
+)
+def test_sharded_markov_chain_matches_eager_distributed(world):
+    """Peer exchange preserves eager draws and the full cache on every rank."""
+    from vllm.utils.network_utils import get_open_port
+
+    torch.multiprocessing.spawn(
+        _markov_distributed_worker, args=(world, get_open_port()), nprocs=world
+    )
 
 
 @pytest.mark.parametrize("rows", [1, 12, 48, 192])

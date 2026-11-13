@@ -16,9 +16,9 @@ requests decode together once the last prefill is done, finish one by one
 and leave the last on its own: FULL decode graphs of 12 down to 1 requests
 (6 rows each), above 48 rows (the pinned projections), padded,
 row-sharded (from two requests) and low-batch (one request). The draft samples
-probabilistically (the requests at temperature 0), so the specialized-decode
-run samples on the vocabulary-sharded Markov chain and, above its batch limit,
-the fused loop.
+probabilistically (the requests at temperature 0), so both runs sample on the
+vocabulary-sharded Markov chain. Above its batch limit, specialized decode uses
+the fused loop and default decode uses the eager loop.
 
 Every decoder layer's residual streams and FFN input and the model's output
 are kept for every decode token and every 16th prefill position, and the two
@@ -66,6 +66,12 @@ def _truncate(config):
     `dspark_target_layer_ids`. Module level, so engine processes unpickle it."""
     for key, value in TRUNCATED.items():
         setattr(config, key, value)
+    return config
+
+
+def _truncate_unsupported_markov(config):
+    config = _truncate(config)
+    config.dspark_markov_rank = 128
     return config
 
 
@@ -388,7 +394,17 @@ class StepRecorder:
             torch.save(self._steps, path)
 
 
-def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str):
+def _serve(
+    vllm_runner,
+    specialized_decode: bool,
+    prompts,
+    max_tokens,
+    path: str,
+    *,
+    draft_sample_method="probabilistic",
+    fused_markov=False,
+    supported_markov=True,
+):
     """Greedy decode of `prompts`: each prompt's output tokens and the
     paths each rank took; the steps' rows saved under `path`."""
     from vllm import SamplingParams
@@ -398,15 +414,16 @@ def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str
         MODEL,
         tensor_parallel_size=4,
         load_format=LOAD_FORMAT,
-        hf_overrides=_truncate,
+        hf_overrides=_truncate if supported_markov else _truncate_unsupported_markov,
         worker_extension_cls=f"{__name__}.StepRecorder",
         additional_config={
-            "decode_backend": "latency_specialized" if specialized_decode else "auto"
+            "decode_backend": "latency_specialized" if specialized_decode else "auto",
+            "dspark_fused_markov": fused_markov,
         },
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": DRAFTS,
-            "draft_sample_method": "probabilistic",
+            "draft_sample_method": draft_sample_method,
             "enable_adaptive_verification": False,
         },
         attention_config={
@@ -536,7 +553,7 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["model_state"] == "DeepseekV41ModelState", rank
         assert rank["logits"] == ["LogitsProcessor"], rank
         assert rank["draft_logits"] == "LogitsProcessor", rank
-        assert rank["markov_sampling"] == "NoneType", rank
+        assert rank["markov_sampling"] == "ShardedMarkovSampling", rank
         assert rank["metadata_graphs"] == 0, rank
     stock = ("attention", "ffn", "stock_fused_mhc_max_rows", "draft_attention")
     for key in stock:
@@ -585,3 +602,39 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
     replay_start = paths_on[0]["decoder_replay_start"]
     assert replay_start == paths_off[0]["decoder_replay_start"]
     _check_close(got, want, prefill, range(replay_start), output=False)
+
+
+@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="needs four SM100-family GPUs",
+)
+@pytest.mark.parametrize(
+    "method,fused,supported,expected",
+    [
+        ("probabilistic", False, True, "ShardedMarkovSampling"),
+        ("greedy", False, True, "NoneType"),
+        ("probabilistic", False, False, "NoneType"),
+        ("probabilistic", True, True, "FusedMarkovSampler"),
+    ],
+)
+def test_default_markov_sampling(
+    vllm_runner, tmp_path, method, fused, supported, expected
+):
+    """Loaded draft weights select the sampler before graph capture."""
+    outputs, paths = _serve(
+        vllm_runner,
+        False,
+        [[1000] * (32 + i) for i in range(9)],
+        [12] * 9,
+        str(tmp_path / "steps"),
+        draft_sample_method=method,
+        fused_markov=fused,
+        supported_markov=supported,
+    )
+    assert len(outputs) == 9
+    assert all(len(tokens) == 12 for tokens in outputs)
+    assert len(paths) == 4
+    for rank in paths:
+        assert rank["markov_sampling"] == expected, rank
+        assert rank["draft_decode"] == "NoneType", rank
