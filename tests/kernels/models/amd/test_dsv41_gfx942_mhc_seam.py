@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The gfx942 delayed mHC seam of the DeepSeek-V4.1 AMD decoder."""
 
+from functools import partial
+from types import SimpleNamespace
+
 import pytest
 import torch
+import torch.nn as nn
 
 from tests.kernels.utils import opcheck
 from vllm.model_executor.kernels.mhc.torch import (
@@ -114,6 +118,58 @@ def test_seam_dispatch(num_tokens, strided, carried, default_vllm_config, monkey
     expected = mhc_pre_delayed_torch(actual[0], *pre_args, pre_mix=pre_mix)
     for got, want in zip(actual[1:], expected, strict=True):
         torch.testing.assert_close(got, want.reshape(got.shape), atol=2e-2, rtol=8e-3)
+
+
+@requires_seam
+def test_write_kv_takes_seam(default_vllm_config, monkeypatch):
+    """The replay KV write runs the seam from 64 tokens and hands its layer
+    input to `forward_kv`."""
+    from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
+
+    set_random_seed(0)
+    num_tokens = amd_mhc.MHC_SEAM_MIN_TOKENS
+    residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(
+        num_tokens, False, True
+    )
+    fused = torch.ops.vllm.deepseek_v41_mhc_fused_post_pre_delayed_aiter
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return fused(*args, **kwargs)
+
+    monkeypatch.setattr(
+        torch.ops.vllm, "deepseek_v41_mhc_fused_post_pre_delayed_aiter", spy
+    )
+    written: dict[str, torch.Tensor] = {}
+    attn_norm = nn.Identity()
+    attn_norm.variance_epsilon = 1e-6
+    layer = SimpleNamespace(
+        engram=None,
+        use_sequence_parallel=False,
+        fuse_seam_norm=False,
+        mhc_seam=partial(amd_mhc.mhc_pre_delayed_seam, MHCPreDelayedOp()),
+        mhc_pre_delayed=None,
+        hc_attn_fn=fn,
+        hc_attn_scale=scale,
+        hc_attn_base=base,
+        rms_norm_eps=1e-2,
+        hc_eps=1e-3,
+        hc_post_alpha=2.0,
+        hc_sinkhorn_iters=20,
+        attn_norm=attn_norm,
+        attn=SimpleNamespace(forward_kv=lambda positions, h: written.update(x=h)),
+    )
+    positions = torch.arange(num_tokens, device=DEVICE)
+    DeepseekV4DecoderLayer.write_kv(
+        layer, x, positions, None, pre_mix, post, comb, residual
+    )
+
+    assert calls == [1]
+    expected = fused(
+        residual, fn, scale, base, 1e-2, 1e-3, 1e-3, 2.0, 20, pre_mix, x, post, comb
+    )
+    torch.testing.assert_close(written["x"], expected[3])
 
 
 def test_no_post_seam_keeps_pre_delayed(monkeypatch):
