@@ -405,7 +405,7 @@ build_ep_cmd() {
     "handshake_port": "${HANDSHAKE_PORT}",
     "notify_port": "${NOTIFY_PORT}",
     "remote_hosts": [${peer_hosts%,}],
-    "remote_dp_size_local": ${GPUS_PER_NODE}${read_mode_kv}
+    "remote_dp_size_local": ${DP_SIZE}${read_mode_kv}
   }
 }
 EOF
