@@ -186,14 +186,16 @@ def _describe_backend(module: nn.Module) -> tuple[str, str] | None:
     kind = "moe" if isinstance(quant_method, FusedMoEMethodBase) else "linear"
     # Compressed-tensors keeps the per-layer scheme, and its kernel, on the layer.
     method = getattr(module, "scheme", None) or quant_method
+    if (kernel := _describe_kernel(method)) is not None:
+        return kind, kernel
+    # No kernel to name: an unquantized layer, or a method that runs its own op.
     scheme = type(method).__name__
     if "Unquantized" in scheme:
         weight = getattr(module, "weight", None)
         scheme = "unquantized"
         if weight is not None:
             scheme += f" [{_dtype_name(weight.dtype)}]"
-    kernel = _describe_kernel(method)
-    return kind, f"{scheme} -> {kernel}" if kernel else scheme
+    return kind, scheme
 
 
 def _format_layer_indices(indices: set[int], max_ranges: int = 3) -> str:
@@ -203,7 +205,7 @@ def _format_layer_indices(indices: set[int], max_ranges: int = 3) -> str:
     return f"[{min(indices)}-{max(indices)} ({len(indices)})]"
 
 
-def _format_layer_names(names: list[str], max_patterns: int = 6) -> list[str]:
+def _format_layer_names(names: list[str], max_patterns: int = 6) -> str:
     """Collapse layer names: `layers.[0-47].attn.{q_proj,k_proj}`."""
     # Layers that differ only in their numeric indices share a pattern.
     indices: dict[tuple[str, ...], list[set[int]]] = {}
@@ -231,7 +233,7 @@ def _format_layer_names(names: list[str], max_patterns: int = 6) -> list[str]:
     if len(formatted) > max_patterns:
         hidden = len(formatted) - max_patterns + 1
         formatted = [*formatted[: max_patterns - 1], f"... {hidden} more"]
-    return formatted
+    return ", ".join(formatted)
 
 
 def format_backend_summary(model: nn.Module) -> str | None:
@@ -245,15 +247,13 @@ def format_backend_summary(model: nn.Module) -> str | None:
         return None
 
     kinds = ("attention", "linear", "moe")
-    rows = []
-    for (kind, backend), names in sorted(
-        layers.items(), key=lambda item: kinds.index(item[0][0])
-    ):
-        first, *rest = _format_layer_names(names)
-        rows.append((kind, f"{len(names)}x", backend, first))
-        # Further layer names continue under the same backend.
-        rows.extend(("", "", "", pattern) for pattern in rest)
-
+    rows = [("layer", "count", "backend", "modules")]
+    rows += [
+        (kind, str(len(names)), backend, _format_layer_names(names))
+        for (kind, backend), names in sorted(
+            layers.items(), key=lambda item: kinds.index(item[0][0])
+        )
+    ]
     widths = [max(len(row[col]) for row in rows) for col in range(3)]
     return "\n".join(
         f"  {kind:<{widths[0]}} | {count:>{widths[1]}} | "

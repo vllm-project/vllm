@@ -35,16 +35,15 @@ You can check if this is happening by trying the old defaults with `--generation
 After loading a model, vLLM logs a table of the attention backend and the linear and MoE kernels its layers selected, with the layers that run each. It is on by default and logged once per model:
 
 ```text
-Qwen3MoeForCausalLM backends:
-  attention | 48x | FLASHINFER                                                                    | model.layers.[0-47].self_attn.attn
-  linear    | 50x | unquantized [bfloat16]                                                        | model.embed_tokens
-            |     |                                                                               | model.layers.[0-47].mlp.gate
-            |     |                                                                               | lm_head
-  linear    | 96x | Fp8LinearMethod -> DeepGemmFp8BlockScaledMMKernel                             | model.layers.[0-47].self_attn.{qkv_proj,o_proj}
-  moe       | 48x | Fp8MoEMethod -> TrtLlmFp8ExpertsMonolithic [w=float8_e4m3fn, a=float8_e4m3fn] | model.layers.[0-47].mlp.experts.routed_experts
+Backends selected for Qwen3MoeForCausalLM:
+  layer     | count | backend                                                       | modules
+  attention |    48 | FLASHINFER                                                    | model.layers.[0-47].self_attn.attn
+  linear    |    50 | unquantized [bfloat16]                                        | model.embed_tokens, model.layers.[0-47].mlp.gate, lm_head
+  linear    |    96 | DeepGemmFp8BlockScaledMMKernel                                | model.layers.[0-47].self_attn.{qkv_proj,o_proj}
+  moe       |    48 | TrtLlmFp8ExpertsMonolithic [w=float8_e4m3fn, a=float8_e4m3fn] | model.layers.[0-47].mlp.experts.routed_experts
 ```
 
-Each row is one backend: the kind of layer, how many layers run it, the quantization method and the kernel it selected, and the layer names with index ranges collapsed. MoE rows also show the weight and activation precision the kernel runs, so `a=none` means activations are not quantized. Shared experts that are not fused into the routed experts are linear layers and appear in the `linear` rows.
+Each row is one backend: the kind of layer, how many layers run it, the kernel or attention backend selected, and the layer names with index ranges collapsed. Unquantized linear layers show their weight dtype instead of a kernel. MoE rows also show the weight and activation precision the kernel runs, so `a=none` means activations are not quantized. Shared experts that are not fused into the routed experts are linear layers and appear in the `linear` rows.
 
 For the full module tree instead, set `VLLM_LOG_MODEL_INSPECTION=1` or call `LLM.get_model_inspection()`.
 

@@ -141,7 +141,10 @@ def log_backend_summary(model: nn.Module) -> None:
         return
     if summary is not None:
         logger.info_once(
-            "%s backends:\n%s", type(model).__name__, summary, scope="global"
+            "Backends selected for %s:\n%s",
+            type(model).__name__,
+            summary,
+            scope="global",
         )
 
 

@@ -18,13 +18,12 @@ def test_layer_names_collapse_indices_and_leaves():
         for i in range(4)
         for proj in ("qkv_proj", "o_proj")
     ]
-    assert _format_layer_names([*names, "lm_head"]) == [
-        "model.layers.[0-3].self_attn.{qkv_proj,o_proj}",
-        "lm_head",
-    ]
+    assert _format_layer_names([*names, "lm_head"]) == (
+        "model.layers.[0-3].self_attn.{qkv_proj,o_proj}, lm_head"
+    )
     # Scattered indices would not fit on a line: show the span and the count.
     scattered = [f"layers.{i}.attn" for i in (3, 7, 11, 15, 19)]
-    assert _format_layer_names(scattered) == ["layers.[3-19 (5)].attn"]
+    assert _format_layer_names(scattered) == "layers.[3-19 (5)].attn"
 
 
 def test_backend_summary_groups_layers_by_backend():
@@ -46,7 +45,8 @@ def test_backend_summary_groups_layers_by_backend():
     model = nn.ModuleDict({"layers": nn.ModuleList(Block() for _ in range(3))})
 
     assert format_backend_summary(model) == (
-        "  linear | 3x | unquantized [float32] | layers.[0-2].proj"
+        "  layer  | count | backend               | modules\n"
+        "  linear |     3 | unquantized [float32] | layers.[0-2].proj"
     )
     assert format_backend_summary(nn.Linear(4, 4)) is None
 
