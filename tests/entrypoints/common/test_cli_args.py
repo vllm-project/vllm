@@ -310,6 +310,13 @@ def test_reasoning_parser_none_disables_parser(serve_parser, value, expected):
     assert args.reasoning_parser == expected
 
 
+def test_max_vad_workers_must_be_non_negative(serve_parser):
+    validate_parsed_serve_args(serve_parser.parse_args(["--max-vad-workers", "0"]))
+    args = serve_parser.parse_args(["--max-vad-workers", "-1"])
+    with pytest.raises(ValueError, match="--max-vad-workers"):
+        validate_parsed_serve_args(args)
+
+
 def test_chat_template_validation_for_happy_paths(serve_parser):
     """Ensure validation passes if the chat template exists."""
     args = serve_parser.parse_args(

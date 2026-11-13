@@ -578,6 +578,11 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "Error: --sse-keep-alive-interval must be a non-negative integer "
             "(0 disables keep-alive comments)."
         )
+    if getattr(args, "max_vad_workers", 0) < 0:
+        raise ValueError(
+            "Error: --max-vad-workers must be a non-negative integer "
+            "(0 runs VAD on the audio preprocessing pool)."
+        )
 
     if getattr(args, "enable_per_request_metrics", False) and getattr(
         args, "disable_log_stats", False
