@@ -304,11 +304,14 @@ message MediaItem {
 // Engine-ready multimodal features produced by a version-compatible frontend.
 // `kwargs` is the MessagePack wire representation of one MmKwargsItem.
 message PreprocessedMediaFeatures {
-  // Required inline payload. Cache-only references are not accepted.
+  // Optional MessagePack wire representation of one MmKwargsItem.
   optional bytes kwargs = 1;
   string identifier = 2;
   uint64 offset = 3;
   uint64 length = 4;
   optional string mm_hash = 5;
   repeated bool is_embed = 6;
+  // Optional MessagePack metadata subset used when encoder outputs are
+  // supplied by an encoder-cache connector.
+  optional bytes mm_metadata = 7;
 }
