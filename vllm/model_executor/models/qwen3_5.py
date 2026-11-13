@@ -59,6 +59,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.qwen3_5_replicate import setup_replicated_ffn
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -211,31 +212,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             )
 
 
-def _setup_replicated_ffn(config, parallel_config) -> None:
-    """Checks and cross-rank determinism for VLLM_QWEN3_5_REPLICATE_FFN."""
-    if config.model_type != "qwen3_5_text":
-        raise NotImplementedError(
-            "VLLM_QWEN3_5_REPLICATE_FFN applies to dense Qwen3.5 models only."
-        )
-    if (
-        parallel_config.decode_context_parallel_size > 1
-        or parallel_config.prefill_context_parallel_size > 1
-    ):
-        # Context parallelism turns the TP-synced autotune off.
-        raise NotImplementedError(
-            "VLLM_QWEN3_5_REPLICATE_FFN is not supported with context parallelism."
-        )
-    # Nothing re-syncs ranks after a replicated MLP: autotune must agree.
-    from vllm.triton_utils.tp_synced_autotune import install
-
-    install()
-    # Same for kernels torch.compile generates: Inductor benchmarks configs that
-    # change numerics per process unless told not to.
-    import torch._inductor.config as inductor_config
-
-    inductor_config.deterministic = True
-
-
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -266,7 +242,7 @@ class Qwen3_5Model(Qwen3NextModel):
         )
         parallel_config = vllm_config.parallel_config
         if envs.VLLM_QWEN3_5_REPLICATE_FFN:
-            _setup_replicated_ffn(config, parallel_config)
+            setup_replicated_ffn(config, parallel_config)
 
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
