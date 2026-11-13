@@ -7,6 +7,7 @@ import torch
 from tests.kernels.utils import to_int8
 from vllm import _cpu_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -25,6 +26,12 @@ M_FACTORS = [
 ]
 CACHE_SIZES = [2]
 DTYPE = [torch.bfloat16]
+
+
+@pytest.fixture(autouse=True)
+def seed_each_test():
+    # Any subset of this file (a CI shard) then draws the same inputs.
+    set_random_seed(0)
 
 
 def rand_int8(shape: tuple, device: str = "cpu"):
