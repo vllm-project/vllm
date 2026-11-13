@@ -803,6 +803,63 @@ def _check_arrival_equals_whole(method, moe, name):
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="quantization kernels")
+def test_online_lm_head_reloads_as_it_cold_starts(dist_init):
+    # an online per-channel FP8 lm_head: its loader zero-fills the padded
+    # vocab rows, so a load is buffered whole (not quantized on arrival) and
+    # the padded layer is quantized at `finish`; its per-row scale is not
+    # reduced across ranks (the vocab shards the output dim)
+    from vllm.config import get_current_vllm_config
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PtpcOnlineLinearMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    get_current_vllm_config().model_config = SimpleNamespace(dtype=torch.bfloat16)
+
+    def cold_start(weight):
+        with torch.device("cuda"):
+            head = ParallelLMHead(
+                100,
+                64,
+                params_dtype=torch.bfloat16,
+                quant_config=SimpleNamespace(online_quantization_config=None),
+                quant_method=Fp8PtpcOnlineLinearMethod(),
+                prefix="lm_head",
+            )
+            model = torch.nn.ModuleDict({"lm_head": head})
+            record_metadata_for_reloading(model)
+        head.weight.weight_loader(head.weight, weight)
+        finalize_layerwise_processing(model, _MODEL_CONFIG)
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        return model
+
+    gen = torch.Generator().manual_seed(0)
+    old, new = (torch.randn(100, 64, generator=gen).bfloat16() for _ in range(2))
+    model = cold_start(old)
+    head = model["lm_head"]
+    assert not head.quant_method.reduces_across_ranks(
+        SimpleNamespace(
+            tp_size=2,
+            input_size=64,
+            input_size_per_partition=64,
+            output_size=128,
+            output_size_per_partition=64,
+        ),
+        "weight",
+    )
+    ptrs = _ptrs(_state(model))
+
+    begin_direct_reload(model)
+    head.weight.weight_loader(head.weight, new.cuda())
+    info = get_layerwise_info(head)
+    assert info.loaded_weights and not info.arrival
+    finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+
+    _assert_same(_state(model), _state(cold_start(new)))
+    assert _ptrs(_state(model)) == ptrs
+
+
 class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
