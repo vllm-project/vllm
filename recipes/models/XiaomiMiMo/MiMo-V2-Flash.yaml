@@ -49,8 +49,6 @@ variants:
     extra_args:
       - "--tensor-parallel-size"
       - "4"
-      - "--gpu-memory-utilization"
-      - "0.9"
 
 compatible_strategies:
   - single_node_tp
@@ -106,7 +104,6 @@ guide: |
     --served-model-name mimo_v2_flash \
     --tensor-parallel-size 4 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
     --generation-config vllm
   ```
 
@@ -114,7 +111,7 @@ guide: |
 
   ```bash
   vllm serve XiaomiMiMo/MiMo-V2-Flash \
-    --tensor-parallel-size 4 --trust-remote-code --gpu-memory-utilization 0.9 \
+    --tensor-parallel-size 4 --trust-remote-code \
     --tool-call-parser mimo \
     --reasoning-parser qwen3 \
     --generation-config vllm \
@@ -129,7 +126,6 @@ guide: |
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
     --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
     --generation-config vllm \
     --served-model-name mimo_v2_flash
   ```
@@ -139,13 +135,12 @@ guide: |
   ```bash
   export VLLM_ROCM_USE_AITER=0
   vllm serve XiaomiMiMo/MiMo-V2-Flash --tensor-parallel-size 4 \
-    --trust-remote-code --gpu-memory-utilization 0.9 --generation-config vllm
+    --trust-remote-code --generation-config vllm
   ```
 
   Tunable flags:
   - `--max-model-len=65536` works well; max is 128K.
   - `--max-num-batched-tokens=32768` for prompt-heavy; 16K/8K for lower latency.
-  - `--gpu-memory-utilization=0.95` to maximize KV cache.
 
   ## Client Usage
 

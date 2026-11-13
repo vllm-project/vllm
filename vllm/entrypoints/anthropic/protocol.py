@@ -369,7 +369,13 @@ class AnthropicMessagesRequest(BaseModel):
     @field_validator("max_tokens")
     @classmethod
     def validate_max_tokens(cls, v):
-        if v <= 0:
+        if v == 0:
+            raise ValueError(
+                "max_tokens=0 (prompt-cache pre-warming) is not supported: "
+                "vLLM samples at least one token per request, so use "
+                "max_tokens=1 to warm the cache"
+            )
+        if v < 0:
             raise ValueError("max_tokens must be positive")
         return v
 

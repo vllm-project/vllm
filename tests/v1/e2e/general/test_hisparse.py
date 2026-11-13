@@ -173,6 +173,7 @@ def test_hisparse_spill_and_prefix_restore(
     ) as runner:
         worker = _get_hisparse_worker(runner)
         engine_core = runner.llm.llm_engine.engine_core.engine_core
+        assert engine_core.vllm_config.num_hash_lookahead_tokens > 0
         model_runner = engine_core.model_executor.driver_worker.worker.model_runner
         full_graph_calls = 0
         full_replay_pending = False
