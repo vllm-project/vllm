@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
+from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import (
@@ -15,6 +16,7 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     build_mm_input_norm,
 )
 from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
@@ -34,6 +36,37 @@ from ...utils import build_model_context
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
 DIFFUSION_GEMMA_MODEL_ID = "google/diffusiongemma-26B-A4B-it"
+
+
+@pytest.mark.parametrize(
+    "sample_counts", [(161,), (320,), (321,), (161, 320), (161, 321)]
+)
+def test_audio_batching_preserves_single_frame(sample_counts):
+    """Single-frame clips retain the batch and time axes consumed by the tower."""
+    extractor = Gemma4AudioFeatureExtractor()
+    extracted = extractor(
+        [np.zeros(n, dtype=np.float32) for n in sample_counts],
+        sampling_rate=16000,
+        return_tensors="pt",
+    )
+    masks = extracted["input_features_mask"].bool()
+    features = [f[m] for f, m in zip(extracted["input_features"], masks)]
+    masks = [m[m] for m in masks]
+    field = MultiModalFieldConfig.batched("audio").field
+    batched_features, batched_masks = batch_audio_features(
+        field.reduce_data(list(field.build_elems("audio", "input_features", features))),
+        field.reduce_data(
+            list(field.build_elems("audio", "input_features_mask", masks))
+        ),
+    )
+
+    max_frames = max(f.shape[0] for f in features)
+    assert batched_features.shape == (len(sample_counts), max_frames, 128)
+    assert batched_masks.shape == (len(sample_counts), max_frames)
+    for i, (feature, mask) in enumerate(zip(features, masks)):
+        torch.testing.assert_close(batched_features[i, : len(feature)], feature)
+        assert torch.equal(batched_masks[i, : len(mask)], mask)
+        assert not batched_masks[i, len(mask) :].any()
 
 
 def test_gemma4_image_schema_accepts_variable_patch_counts():
