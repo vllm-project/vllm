@@ -127,8 +127,7 @@ guide: |
     --distributed-executor-backend mp \
     --max-num-batched-tokens 32768 \
     --max-model-len 32768 \
-    --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.8
+    --no-enable-prefix-caching
   ```
 
   ### FP8 on MI300X/MI325X/MI355X (4 GPUs)
@@ -145,8 +144,7 @@ guide: |
     --distributed-executor-backend mp \
     --max-num-batched-tokens 32768 \
     --max-model-len 32768 \
-    --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.8
+    --no-enable-prefix-caching
   ```
 
   ### TPU Deployment
@@ -171,7 +169,7 @@ guide: |
   ## Troubleshooting
 
   - Use `--max-num-batched-tokens` and `--max-model-len` to fit memory constraints on smaller nodes.
-  - If OOM at startup, lower `--gpu-memory-utilization` (e.g. 0.8) and disable prefix caching.
+  - If OOM at startup, lower `--max-num-batched-tokens` or `--max-model-len` and disable prefix caching. On GPUs, vLLM sizes the KV cache from memory measured after warmup, so leave `--gpu-memory-utilization` unset unless the GPU is shared ([details](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization)).
   - AMD builds require `VLLM_ROCM_USE_AITER=1` for best performance.
 
   ## References

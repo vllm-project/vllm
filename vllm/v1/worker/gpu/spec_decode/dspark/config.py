@@ -134,7 +134,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         pcp_size = parallel_config.prefill_context_parallel_size
         if (
             dcp_size not in (1, pcp_size)
-            and self.spec_config.draft_model_config.use_mla
+            and self.spec_config.draft_decode_context_parallel_size != 1
         ):
             return (
                 "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
