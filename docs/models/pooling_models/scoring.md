@@ -122,6 +122,13 @@ The three supported scoring functions are as illustrated in the figure below.
 
 All models that support token embedding task also support using the score API to compute similarity scores by calculating the late interaction of two input prompts. See [this page](token_embed.md) for more information about token embedding models.
 
+During inference, the worker-side reference MaxSim scorer limits each temporary similarity
+matrix to 64 million FP32 elements. It also tiles a single query/document pair
+when that pair exceeds the limit. This bounds the similarity matrix allocation;
+it does not include model weights, token embeddings, or attention memory. The
+fused GPU scorer uses its own memory strategy. Gradient-tracked calls retain
+the original full-matrix reduction.
+
 --8<-- "docs/models/pooling_models/token_embed.md:supported-token-embed-models"
 
 ### Bi-encoder

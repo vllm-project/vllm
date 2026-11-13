@@ -56,6 +56,30 @@ def build_late_interaction_doc_params(
     )
 
 
+def _compute_maxsim_score_chunked(
+    q_emb: torch.Tensor,
+    d_emb: torch.Tensor,
+    max_score_matrix_elements: int,
+) -> torch.Tensor:
+    q_emb = q_emb.float()
+    d_emb = d_emb.float()
+    query_chunk_size = max(1, max_score_matrix_elements // len(d_emb))
+    doc_chunk_size = max(1, max_score_matrix_elements // query_chunk_size)
+    maxima = []
+    for query_chunk in q_emb.split(query_chunk_size):
+        max_per_query = None
+        for doc_chunk in d_emb.split(doc_chunk_size):
+            tile_max = (query_chunk @ doc_chunk.T).amax(dim=-1)
+            max_per_query = (
+                tile_max
+                if max_per_query is None
+                else torch.maximum(max_per_query, tile_max)
+            )
+        assert max_per_query is not None
+        maxima.append(max_per_query)
+    return torch.cat(maxima).sum()
+
+
 def compute_maxsim_score_batched(
     q_embs: Sequence[torch.Tensor],
     d_embs: Sequence[torch.Tensor],
@@ -98,6 +122,20 @@ def compute_maxsim_score_batched(
             end -= 1
             max_q = max(int(x.shape[0]) for x in q_embs[start:end])
             max_d = max(int(x.shape[0]) for x in d_embs[start:end])
+
+        # A single long pair cannot be made smaller by shrinking the batch.
+        # Keep the existing full-matrix autograd path unchanged.
+        if max_q * max_d > max_score_matrix_elements and not (
+            torch.is_grad_enabled()
+            and (q_embs[start].requires_grad or d_embs[start].requires_grad)
+        ):
+            scores.append(
+                _compute_maxsim_score_chunked(
+                    q_embs[start], d_embs[start], max_score_matrix_elements
+                )
+            )
+            start = end
+            continue
 
         batch_q = q_embs[start:end]
         batch_d = d_embs[start:end]
