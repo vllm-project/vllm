@@ -442,9 +442,12 @@ def stage_route(c, t):
     lane, wave = c["lane"], c["wave"]
     experts, topk = c["rs"].experts, c["rs"].topk
     a = c["args"]
+    # a Python bool: assigned inside the traced `if` below it would be
+    # carried as one of the branch's results, which a bool cannot be
+    early_bias = c["rs"].tuned or c.get("early_bias", False)
     if wave == 0:
         ept = experts // 64
-        if const_expr(c["rs"].tuned):
+        if const_expr(early_bias):
             # the bias in flight before the logits' wait
             bias = [ld_f32(a["bias"], lane + 64 * i) for i in range(ept)]
         # each logit's router part sums, added in part order (vLLM's gate: f32 out)
@@ -470,7 +473,7 @@ def stage_route(c, t):
             sc = _score(logits[i])
             # aiter's NaN guards: a NaN score weighs 0 and never wins
             orig.append(fx.Float32(fx.isnan(sc).select(fx.Float32(0.0), sc)))
-            b = bias[i] if c["rs"].tuned else ld_f32(a["bias"], e)
+            b = bias[i] if early_bias else ld_f32(a["bias"], e)
             val = fx.max(sc + b, neg)
             vals.append(fx.isnan(val).select(neg, val))
             idxs.append(fx.Int32(e))
@@ -1146,20 +1149,14 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
         c["poll"]([(c["x8rdy"], token_of(fx.min(tid, live - 1)), 1)])
     gpu.barrier()
     tuned = c["rs"].tuned
-    if const_expr(tuned and isinstance(live, int)):
+    batched = tuned or (c["push_bases"] is not None and not GFX942)
+    if const_expr(batched and isinstance(live, int)):
         load_x8_rows_all(c, words_mb, codes_mb, xl, xsl, token_of, live)
         gpu.barrier()
         return
-    got, x8all = [], c["push_bases"] and not GFX942 and isinstance(live, int)
     for mb, width, dst in ((words_mb, X8_WORDS, xl), (codes_mb, HIDDEN // 32, xsl)):
         quads = width // 4
-        for i in range_constexpr(-(-live * quads // THREADS) if x8all else 0):
-            q = fx.Uint32(fx.min(tid + THREADS * i, live * quads - 1))
-            row = fx.Int32(q // quads)
-            r, off = rsrc(c[mb].value), token_of(row) * width + fx.Int32(q % quads) * 4
-            x = fx.Vector(bo.buffer_load(r, off, dtype=T.i32, cache_modifier=CM_DEV))
-            got.append((tid + THREADS * i, row, x, dst, lds_row(width), quads))
-        for i in range_constexpr(0 if x8all else -(-TILE * quads // THREADS)):
+        for i in range_constexpr(-(-TILE * quads // THREADS)):
             q = tid + THREADS * i
             row = udiv(q, quads, tuned)
             if (q < TILE * quads) & (row < live):
@@ -1175,9 +1172,6 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
                 fx.ptr_store(
                     v, dst + (row * lds_row(width) + umod(q, quads, tuned) * 4)
                 )
-    for q, row, x, dst, stride, quads in got:
-        if q < live * quads:
-            fx.ptr_store(x, dst + (row * stride + fx.Int32(fx.Uint32(q) % quads) * 4))
     gpu.barrier()
 
 
@@ -2472,7 +2466,6 @@ def moe_context(s, rs, lds, mb, bases, layout, scratch, args, rank, sym):
         # x (``ffn_normed``) before this launch: plain loads, no readiness wait
         "x_cm": 0,
         "x_ready": False,
-        # TP4 K2: the push's peer bases, loaded late; also batches the X8 copies
         "push_bases": None,
     }
     for name, off in stage_lds(s, rs)["offsets"].items():
@@ -2608,8 +2601,9 @@ def run_moe(c, key, bid, tls, tl0):
     else:
         stage_down(c, [down_task], dsh)
     stamp(timeline, tls, tid, tl0 + 6)
-    for task in range(first_task(bid, RED0), RED_TASKS, BLOCKS):
-        stage_reduce(c, task)
+    if const_expr(not c.get("skip_reduce", False)):
+        for task in range(first_task(bid, RED0), RED_TASKS, BLOCKS):
+            stage_reduce(c, task)
     stamp(timeline, tls, tid, tl0 + 7)
 
 

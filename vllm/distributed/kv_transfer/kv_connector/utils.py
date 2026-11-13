@@ -22,7 +22,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, iter_layer_specs
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -60,6 +60,20 @@ def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
         if required_kvcache_layout is not None:
             return required_kvcache_layout
     return None
+
+
+def kv_connector_may_load_foreign_kv(vllm_config: VllmConfig) -> bool:
+    """Whether the configured KV connector may load bytes that vLLM's own
+    cache writer did not produce for this KV cache layout.
+
+    Attention backends whose fast paths assume no foreign bytes (e.g. NaNs in
+    unwritten slots) reach the KV cache keep them only when this is False.
+    """
+    kv_config = vllm_config.kv_transfer_config
+    if kv_config is None:
+        return False
+    connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+    return not connector_cls.only_restores_canonical_kv(kv_config)
 
 
 class KVOutputAggregator:
@@ -385,22 +399,26 @@ def get_current_attn_backends_and_specs(
 ) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
     """Distinct (backend, spec) pairs of the transfer layers, else `fallback`.
 
-    Compressed caches are skipped: their kernel pages never split transferred
-    blocks.
+    Attention caches in a block-outermost layout are skipped: blocks there are
+    never split group-wide (`prepare_kernel_block_sizes`), and a cache that
+    needs smaller kernel blocks views them inside each block, so its kernel
+    pages never split transferred blocks. Compressed caches are skipped too
+    (`check_compressed_kernel_split` guards them).
     """
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
+    has_layers = False
     layer_type = cast(type[Any], AttentionLayerBase)
     for group in kv_cache_config.transfer_groups:
-        specs = getattr(group.kv_cache_spec, "kv_cache_specs", {})
         layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
         for name, layer in layers.items():
-            spec = specs.get(name, group.kv_cache_spec)
-            if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
-                continue
+            has_layers = True
+            spec = group.kv_cache_specs[name]
             if not isinstance(spec, AttentionSpec):
-                spec = None
-            pairs[layer.get_attn_backend(), spec] = None
-    if not pairs:
+                pairs[layer.get_attn_backend(), None] = None
+            elif spec.tokens_per_state == 1 and not layout.is_block_outermost:
+                pairs[layer.get_attn_backend(), spec] = None
+    if not has_layers:
         return fallback, [None] * len(fallback)
     return [backend for backend, _ in pairs], [spec for _, spec in pairs]
 
@@ -412,7 +430,7 @@ def check_compressed_kernel_split(
     if vllm_config.cache_config.get_resolved_kv_cache_layout().is_block_outermost:
         return
     for group in kv_cache_config.transfer_groups:
-        for spec in iter_layer_specs(group.kv_cache_spec):
+        for spec in group.kv_cache_specs.values():
             if (
                 isinstance(spec, AttentionSpec)
                 and spec.tokens_per_state > 1
