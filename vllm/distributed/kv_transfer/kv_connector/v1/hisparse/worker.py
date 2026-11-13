@@ -21,8 +21,8 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.single_type_kv_cache_manager import HiSparseHotManager
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
@@ -35,7 +35,6 @@ from vllm.v1.hisparse.runtime import (
 )
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
-    HiSparseHotSpec,
     KVCacheConfig,
 )
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
@@ -197,7 +196,7 @@ class HiSparseConnectorWorker:
         cache_handles: list[HiSparseCacheHandle] = []
         cache_layer_names: list[str] = []
         for group in self.kv_cache_config.kv_cache_groups:
-            if not isinstance(group.kv_cache_spec, HiSparseHotSpec):
+            if not issubclass(group.manager_cls, HiSparseHotManager):
                 continue
             for cache_name in group.layer_names:
                 assert cache_name.endswith(HISPARSE_HOT_SUFFIX)
@@ -294,6 +293,7 @@ class HiSparseConnectorWorker:
         )
         self._dma_submitted = False
         self._per_layer_mirrored: set[int] = set()
+        self._in_step = False
         self._submitted_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
         self._forward_ready_event = torch.Event()
@@ -420,6 +420,7 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
         self._clear_forward_mirror_state()
+        self._in_step = True
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
         self._copy_host_blocks(metadata.host_block_copies, previous_host_write_event)
@@ -691,7 +692,7 @@ class HiSparseConnectorWorker:
 
     def _enqueue_layer_mirror(self, layer_index: int) -> None:
         handle = self.cache_handles[layer_index]
-        if not handle.host_mirror_required:
+        if not self._in_step or not handle.host_mirror_required:
             return
         if layer_index in self._per_layer_mirrored:
             raise RuntimeError(f"HiSparse layer {layer_index} mirrored twice.")
@@ -741,30 +742,59 @@ class HiSparseConnectorWorker:
         self._enqueued_transfer_ids.extend(transfer_ids)
 
     def _restore_pages(self, transfers: list[SparseKVPageTransfer]) -> None:
-        """Restore imported tails on every rank before its forward or graph replay."""
+        """Copy host pages into resident pages on every rank before its forward.
+
+        Covers imported tails and promoted imports. One batched H2D call per
+        step, instead of one copy per page and layer, keeps a long promoted
+        import from flooding the stream with launches.
+        """
         if not transfers:
             return
+        num_layers = len(self.cache_handles)
+        descriptor_count = len(transfers) * num_layers
+        descriptors = self._acquire_dma_descriptors(descriptor_count)
+        host_rows = np.fromiter(
+            (transfer.host_block_id * self.kernel_block_size for transfer in transfers),
+            dtype=np.int64,
+            count=len(transfers),
+        )
+        resident_blocks_by_transfer = np.asarray(
+            [transfer.resident_block_ids for transfer in transfers], dtype=np.int64
+        )
         for layer_index, cache in enumerate(self.cache_handles):
-            source_index = cache.runtime.resident_source_index
+            resident_blocks = resident_blocks_by_transfer[
+                :, cache.runtime.resident_source_index
+            ]
             source = self.host_caches[layer_index]
             destination = self.resident_caches[layer_index]
-            for transfer in transfers:
-                host_start = transfer.host_block_id * self.kernel_block_size
-                resident_block = transfer.resident_block_ids[source_index]
-                # Each import pays one H2D page copy and enqueue per layer/rank
-                # instead of tail prefill on D. Restore the prompt rows before
-                # decode appends to this page; unused rows do not extend the
-                # logical sequence.
-                # cudaHostRegister pins this pool outside PyTorch's allocator,
-                # so the sync checker cannot recognize it via is_pinned().
-                with gpu_sync_allowed():
-                    destination[resident_block].copy_(
-                        source[host_start : host_start + self.kernel_block_size],
-                        non_blocking=True,
-                    )
-        self._record_transfer_completion(
-            transfers, stream=torch.accelerator.current_stream()
+            if np.any(resident_blocks < 0) or np.any(
+                resident_blocks >= destination.shape[0]
+            ):
+                raise RuntimeError("HiSparse restore destination is out of range.")
+            if np.any(host_rows < 0) or np.any(
+                host_rows + self.kernel_block_size > source.shape[0]
+            ):
+                raise RuntimeError("HiSparse restore source is out of range.")
+            row_bytes = destination.shape[-1] * destination.element_size()
+            descriptor_slice = slice(layer_index, descriptor_count, num_layers)
+            descriptors.src_np[descriptor_slice] = (
+                source.data_ptr() + host_rows * row_bytes
+            )
+            descriptors.dst_np[descriptor_slice] = (
+                destination.data_ptr()
+                + resident_blocks * destination.stride(0) * destination.element_size()
+            )
+            descriptors.sizes_np[descriptor_slice] = self.kernel_block_size * row_bytes
+        stream = torch.accelerator.current_stream()
+        self.backend.swap_blocks_batch(
+            descriptors.src[:descriptor_count],
+            descriptors.dst[:descriptor_count],
+            descriptors.sizes[:descriptor_count],
         )
+        completion_event = torch.Event()
+        completion_event.record(stream)
+        self._pending_dma_descriptors.append((completion_event, descriptors))
+        self._record_transfer_completion(transfers, stream=stream)
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
         if self.cache_handles[0].runtime.eager_host_mirror:
@@ -896,6 +926,7 @@ class HiSparseConnectorWorker:
         compute_stream = torch.accelerator.current_stream()
         self._forward_ready_event.record()
         self._finish_mirror_phase(self._forward_ready_event)
+        self._in_step = False
         if self.is_host_writer:
             if self._dma_submitted:
                 compute_stream.wait_event(self.host_write_event)

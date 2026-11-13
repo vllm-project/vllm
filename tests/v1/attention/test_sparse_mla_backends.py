@@ -1073,6 +1073,15 @@ def test_sparse_backend_decode_correctness(
             (128, 128, 64, 128),
             id="FlashInferTRTLLM",
         ),
+        # Blocks only whole rows apart.
+        pytest.param(
+            FlashInferMLASparseTRTLLMBackend,
+            "auto",
+            128,
+            1155,
+            (128, 128, 64, 128),
+            id="FlashInferTRTLLM-unaligned",
+        ),
         # GLM-5.3 on SM90: the fp8 kernel's 64-token pages in larger blocks.
         pytest.param(
             FlashMLASparseBackend,
@@ -1110,6 +1119,51 @@ def test_sparse_mla_packed_stride(
         monkeypatch,
         block_stride_rows=block_stride_rows,
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="trtllm-gen sparse MLA needs SM100",
+)
+def test_flashinfer_sparse_mla_reads_rows_past_the_last_whole_page():
+    """Top-k indices address flat rows, so the kernel must read rows that lie
+    after the last whole page of the cache it is given (blocks only whole rows
+    apart leave such a tail)."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    torch.manual_seed(0)
+    device = torch.device(DEVICE_TYPE)
+    rows, tail, width, heads, tokens, topk = 192, 40, 576, 64, 4, 128
+    kv = torch.zeros(rows + 64, width, dtype=torch.bfloat16, device=device)
+    kv[: rows + tail].normal_()
+    q = torch.randn(tokens, 1, heads, width, dtype=torch.bfloat16, device=device)
+    indices = torch.full((tokens, 1, topk), -1, dtype=torch.int32, device=device)
+    indices[:, 0, :tail] = torch.arange(rows, rows + tail, device=device)
+    seq_lens = torch.full((tokens,), tail, dtype=torch.int32, device=device)
+    workspace = torch.zeros(256 << 20, dtype=torch.uint8, device=device)
+
+    def decode(kv_cache: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros(tokens, 1, heads, 512, dtype=torch.bfloat16, device=device)
+        trtllm_batch_decode_with_kv_cache_mla(
+            query=q,
+            kv_cache=kv_cache.view(-1, 64, width).unsqueeze(1),
+            workspace_buffer=workspace,
+            qk_nope_head_dim=512,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            block_tables=indices,
+            seq_lens=seq_lens,
+            max_seq_len=topk,
+            out=out,
+            bmm1_scale=0.04,
+            bmm2_scale=1.0,
+            sparse_mla_top_k=topk,
+        )
+        return out
+
+    out = decode(kv[:rows])
+    assert out.any()
+    torch.testing.assert_close(out, decode(kv), rtol=0, atol=0)
 
 
 def _triton_convert_reference_impl(
@@ -2052,6 +2106,9 @@ def test_sparse_backend_prefill_correctness(
     assert torch.isfinite(out_buffer).all(), "Non-finite values in output"
     if kv_cache_dtype.startswith("fp8"):
         torch.testing.assert_close(out_buffer, ref_output, rtol=0.065, atol=0.05)
+    elif batch_name == "masked_mha_chunked_context":
+        # Each context-chunk merge rounds the running partial to bf16.
+        torch.testing.assert_close(out_buffer, ref_output, rtol=0.02, atol=0.01)
     else:
         torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
 
@@ -3517,7 +3574,10 @@ def test_hisparse_row_dma_copies_discontiguous_spans_across_layers():
 
 
 @requires_hisparse_ops
-def test_hisparse_remaps_strided_hma_rows_for_attention():
+@pytest.mark.parametrize("stride_rows", [12, 13])
+def test_hisparse_remaps_strided_hma_rows_for_attention(stride_rows):
+    """Hot rows are addressed by the row stride between blocks, which need
+    only be whole rows apart."""
     device = torch.device(DEVICE_TYPE)
     block_size, row_width = 4, 8
     runtime = _make_hisparse_runtime(
@@ -3526,7 +3586,7 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
         row_width=row_width,
     )
     page_elements = block_size * row_width
-    stride_elements = 3 * page_elements
+    stride_elements = stride_rows * row_width
     byte_offset = page_elements * torch.float32.itemsize
     raw = torch.zeros(2 * stride_elements, dtype=torch.float32, device=device).view(
         torch.int8
@@ -3560,7 +3620,9 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
     )
 
     assert runtime.hot.attention_cache is not None
-    assert runtime.hot.attention_cache.is_contiguous()
+    assert runtime.hot.attention_cache.is_contiguous() == (
+        stride_rows % block_size == 0
+    )
     physical_indices = runtime.index_group.shared_topk.device_topk_rows[0]
     expected = (
         physical_indices // block_size * (stride_elements // row_width)
@@ -4210,7 +4272,8 @@ def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
 
 
 def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
-    """Verification rows resolve in one swap_in; FP8 attention sees them batched."""
+    """Verification rows resolve in one swap_in; FP8 attention sees them batched
+    over the hot cache as the kernel's 64-token pages."""
     device = torch.device("cpu")
     num_decodes = 2
     query_len = 3
@@ -4222,18 +4285,20 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         .expand(-1, 4)
     )
     kernel_shapes: list[torch.Size] = []
+    kv_shapes: list[torch.Size] = []
 
     def swap_in(req_ids, *, logical_topk_indices, **kwargs):  # noqa: ARG001
         return logical_topk_indices + 10
 
-    def run_kernel(self, *, q, **kwargs):  # noqa: ARG001
+    def run_kernel(self, *, q, kv_c_and_k_pe_cache, **kwargs):  # noqa: ARG001
         kernel_shapes.append(q.shape)
+        kv_shapes.append(kv_c_and_k_pe_cache.shape)
         return q[..., :1], None
 
     swap_in_mock = MagicMock(side_effect=swap_in)
     cache = _StubHiSparseCacheHandle(
         runtime=SimpleNamespace(
-            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device)),
+            hot=SimpleNamespace(attention_cache=torch.empty(2, 128, 4, device=device)),
             max_swap_rows=num_tokens,
         ),
         source_block_table=torch.empty(
@@ -4277,6 +4342,7 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
         swap_in_mock.call_args.kwargs["logical_topk_indices"], topk
     )
     assert kernel_shapes == [(num_decodes, query_len, 2, 4)]
+    assert kv_shapes == [(4, 64, 4)]
     assert output.shape == (num_tokens, 2, 1)
 
 
