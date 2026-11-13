@@ -5,7 +5,7 @@ import contextlib
 import os
 import threading
 import weakref
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import connection
@@ -206,7 +206,7 @@ def _node_ip_from_resources(node_resources: dict) -> str | None:
 @contextlib.contextmanager
 def _configure_uniproc_startup_threads(
     executor_class: type[Executor], local_engine_count: int
-) -> Iterator[None]:
+) -> Generator[None]:
     if (
         not issubclass(executor_class, UniProcExecutor)
         or current_platform.is_cpu()
@@ -1208,7 +1208,7 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     addresses: EngineZmqAddresses,
-) -> Iterator[CoreEngineLaunch]:
+) -> Generator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
     parallel_config = vllm_config.parallel_config
     dp_size = parallel_config.data_parallel_size

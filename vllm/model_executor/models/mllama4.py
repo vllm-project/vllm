@@ -942,11 +942,11 @@ class Llama4ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
-            inputs["pixel_values"],
+            values["pixel_values"],
             use_data_parallel=False,
         ).flatten(0, 1)
 
