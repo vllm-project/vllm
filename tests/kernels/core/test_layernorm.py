@@ -232,6 +232,49 @@ def test_fused_rms_norm_quant(
         )
 
 
+def _non_unit_innermost_stride(layout: str, num_tokens: int, hidden_size: int, dtype):
+    if layout == "transposed":
+        x = torch.randn(hidden_size, num_tokens, dtype=dtype).T
+    else:  # every other column
+        x = torch.randn(num_tokens, 2 * hidden_size, dtype=dtype)[:, ::2]
+    assert x.stride(-1) != 1
+    return x
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("layout", ["transposed", "column_strided"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_rms_norm_static_fp8_quant_non_unit_innermost_stride(
+    layout, dtype, device
+) -> None:
+    """The static FP8 RMSNorm kernels only read input, so an input whose last
+    dimension is not contiguous gives the same result as a contiguous copy."""
+    set_random_seed(0)
+    torch.set_default_device(device)
+    num_tokens, hidden_size = 4, 1024
+    weight = torch.empty(hidden_size, dtype=dtype).normal_(mean=1.0, std=0.1)
+    x = _non_unit_innermost_stride(layout, num_tokens, hidden_size, dtype)
+    residual = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    scale = torch.tensor(1.0, dtype=torch.float32)
+    out = torch.empty(num_tokens, hidden_size, dtype=FP8_DTYPE)
+    out_ref = torch.empty_like(out)
+
+    torch.ops._C.rms_norm_static_fp8_quant(out, x, weight, scale, 1e-6)
+    torch.ops._C.rms_norm_static_fp8_quant(out_ref, x.contiguous(), weight, scale, 1e-6)
+    torch.testing.assert_close(out.float(), out_ref.float(), atol=0, rtol=0)
+
+    residual_ref = residual.clone()
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+        out, x, residual, weight, scale, 1e-6
+    )
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+        out_ref, x.contiguous(), residual_ref, weight, scale, 1e-6
+    )
+    torch.testing.assert_close(out.float(), out_ref.float(), atol=0, rtol=0)
+    torch.testing.assert_close(residual, residual_ref, atol=0, rtol=0)
+
+
 @torch.inference_mode()
 def test_gemma_rms_norm_mixed_input_weight_dtype(default_vllm_config) -> None:
     if not torch.cuda.is_available():
