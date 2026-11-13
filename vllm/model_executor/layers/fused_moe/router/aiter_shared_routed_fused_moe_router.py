@@ -16,12 +16,19 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
 
 
 class AiterSharedRoutedFusedMoERouter(BaseRouter):
-    """ROCm AITER router for models with fused shared experts (e.g. Qwen3-MoE).
+    """ROCm AITER router for models with fused shared experts.
 
-    When the AITER topk_softmax kernel supports sigmoid fusion, the routing
-    softmax and shared-expert sigmoid are computed in a single kernel launch.
-    Otherwise the shared-expert weights are injected into the pre-allocated
-    AITER buffer via a fallback path.
+    With a shared-expert gate (e.g. Qwen3-Next), the gate logits are appended
+    to router_logits and each token's shared-expert weight is
+    sigmoid(gate logit). When the AITER topk_softmax kernel supports sigmoid
+    fusion, the routing softmax and shared-expert sigmoid are computed in a
+    single kernel launch. Otherwise the shared-expert weights are injected into
+    the pre-allocated AITER buffer via a fallback path.
+
+    Without a shared-expert gate (e.g. DeepSeek-V2 style), router_logits only
+    hold the routed experts and every token uses the shared experts with
+    weight 1.0. The routed top-k is written directly into the pre-allocated
+    AITER buffer, whose shared-expert slots are pre-filled.
 
     Only instantiated when rocm_aiter fused-MoE is active and
     num_fused_shared_experts > 0.
@@ -35,6 +42,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         eplb_state: EplbLayerState | None = None,
         scoring_func: str = "softmax",
         renormalize: bool = True,
+        has_shared_expert_gate: bool = False,
     ):
         super().__init__(
             top_k=top_k,
@@ -44,6 +52,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         self.renormalize = renormalize
         self.scoring_func = scoring_func
         self.num_fused_shared_experts = num_fused_shared_experts
+        self.has_shared_expert_gate = has_shared_expert_gate
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -79,29 +88,48 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             M, topk, dtype=torch.int32, device=hidden_states.device
         )
 
-        if rocm_aiter_ops.fuse_sigmoid_in_kernel(aiter_topK_meta_data):
-            total_topk_weights, total_topk_ids = aiter_topK_meta_data  # type: ignore[misc]
-            total_topk_weights_slice = total_topk_weights[:M]
-            topk_ids_slice = total_topk_ids[:M, :topk]
+        if not self.has_shared_expert_gate or rocm_aiter_ops.fuse_sigmoid_in_kernel(
+            aiter_topK_meta_data
+        ):
+            assert aiter_topK_meta_data is not None, (
+                "AITER topK meta data is not initialized. Ensure "
+                "init_aiter_topK_meta_data is called before routing."
+            )
+            total_topk_weights, total_topk_ids = aiter_topK_meta_data
+            assert total_topk_weights.shape[0] >= M, (
+                f"AITER topK meta data supports {total_topk_weights.shape[0]} "
+                f"tokens, but got {M} tokens."
+            )
+            total_topk_weights = total_topk_weights[:M]
+            total_topk_ids = total_topk_ids[:M]
+            topk_ids = total_topk_ids[:, :topk]
 
+            # The kernel writes the routed slots in place. With a gate it also
+            # writes sigmoid(gate logit) into the shared slots; without one the
+            # pre-filled shared slots are left untouched.
+            if self.has_shared_expert_gate:
+                topk_weights = total_topk_weights
+                shared_args = (num_fse, "sigmoid")
+            else:
+                topk_weights = total_topk_weights[:, :topk]
+                shared_args = (0, "")
             topk_func = dispatch_topk_softmax_func(
                 use_rocm_aiter=True,
-                topk_weights=total_topk_weights_slice,
-                topk_indices=topk_ids_slice,
+                topk_weights=topk_weights,
+                topk_indices=topk_ids,
                 gating_output=router_logits,
-                num_shared_experts=num_fse,
-                shared_expert_scoring_func="sigmoid",
+                num_shared_experts=shared_args[0],
+                shared_expert_scoring_func=shared_args[1],
             )
             topk_func(
-                total_topk_weights_slice,
-                topk_ids_slice,
+                topk_weights,
+                topk_ids,
                 token_expert_indices,
                 router_logits,
                 self.renormalize,
-                num_fse,
-                "sigmoid",
+                *shared_args,
             )
-            return total_topk_weights_slice, total_topk_ids[:M]
+            return total_topk_weights, total_topk_ids
 
         routing_logits = router_logits[:, :-num_fse]
         shared_logits = router_logits[:, -num_fse:]
