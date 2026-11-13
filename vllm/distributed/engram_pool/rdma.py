@@ -125,9 +125,11 @@ def _wr_kernel(
     lkey,
     num_items,
     world,
-    SHORT_CHAIN: tl.constexpr,
-    LONG_CHAIN: tl.constexpr,
     LONG_FROM: tl.constexpr,
+    LONG_CHAIN: tl.constexpr,
+    MID_FROM: tl.constexpr,
+    MID_CHAIN: tl.constexpr,
+    SHORT_CHAIN: tl.constexpr,
     WORLD_P2: tl.constexpr,
     WORDS: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -145,7 +147,11 @@ def _wr_kernel(
     start = tl.sum(tl.where(peers[None, :] < owner[:, None], sizes[None, :], 0), 1)
     size = tl.load(counts + owner, mask=remote, other=0)
     slot = start + position
-    chain = tl.where(size >= LONG_FROM, LONG_CHAIN, SHORT_CHAIN)
+    chain = tl.where(
+        size >= LONG_FROM,
+        LONG_CHAIN,
+        tl.where(size >= MID_FROM, MID_CHAIN, SHORT_CHAIN),
+    )
     last = (position % chain == chain - 1) | (position == size - 1)
     wr_proxy = wrs_proxy + slot * 128
     raddr = tl.load(remote_addr + item, mask=remote, other=0)
@@ -417,9 +423,11 @@ class RdmaTransport:
             self.lkey,
             n,
             self.world,
-            SHORT_CHAIN=proxy.SHORT_CHAIN,
-            LONG_CHAIN=proxy.LONG_CHAIN,
-            LONG_FROM=proxy.LONG_FROM,
+            LONG_FROM=proxy.CHAINS[0][0],
+            LONG_CHAIN=proxy.CHAINS[0][1],
+            MID_FROM=proxy.CHAINS[1][0],
+            MID_CHAIN=proxy.CHAINS[1][1],
+            SHORT_CHAIN=proxy.CHAINS[2][1],
             WORLD_P2=world_p2,
             WORDS=words,
             BLOCK=256,

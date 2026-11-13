@@ -37,14 +37,14 @@ else:
 # Shared control block, in int64 words. go and done sit on their own lines.
 GO, DONE, STARTS = 0, 16, 32
 WR_OFFSET = 4096
-# WRs per posted chain; the GPU signals only each chain's last. Short chains
-# spread a small fetch over more QPs, long ones cut posting calls.
-SHORT_CHAIN, LONG_CHAIN, LONG_FROM = 64, 256, 2048
+# WRs per posted chain by the rows a peer serves (from, length); the GPU
+# signals only each chain's last. Short chains spread few rows over more QPs.
+CHAINS = ((2048, 256), (512, 64), (0, 32))
 
 
 def chain_length(rows: int) -> int:
     """WRs per chain for a peer that serves `rows` rows of a fetch."""
-    return LONG_CHAIN if rows >= LONG_FROM else SHORT_CHAIN
+    return next(length for start, length in CHAINS if rows >= start)
 
 
 # Spin this long after the last fetch, then nap between checks.
@@ -72,7 +72,7 @@ class Proxy:
         self.wr_va = ctrl_va + WR_OFFSET
         self.sq_depth = min(sq_depth, dev.max_qp_wr)
         # Chains a QP may have in flight before its SQ fills.
-        self.capacity = self.sq_depth // LONG_CHAIN
+        self.capacity = self.sq_depth // CHAINS[0][1]
         self.peers = [p for p in range(world) if p != rank]
         depth = self.capacity * qps_per_peer * max(len(self.peers), 1)
         self.cq = dev.create_cq(min(depth, dev.max_cqe))
