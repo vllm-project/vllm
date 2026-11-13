@@ -46,6 +46,10 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         "bfloat16",
     ]
 
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(64)]
