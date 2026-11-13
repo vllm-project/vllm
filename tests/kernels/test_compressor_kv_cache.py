@@ -66,8 +66,8 @@ def test_pipeline_cache_relay_matches_direct_insert(
     )
 
     indexer = row_bytes in (132, 68)
-    if row_bytes == 68 and not current_platform.is_device_capability_family(100):
-        pytest.skip("MXFP4 indexer cache requires an SM100-family GPU")
+    if row_bytes in (288, 68) and not current_platform.is_device_capability_family(100):
+        pytest.skip("FP4 cache writer test requires an SM100-family GPU")
     torch.manual_seed(0)
     block_size = 32
     num_blocks = math.ceil(num_tokens / block_size) + 1
