@@ -19,7 +19,7 @@ steps:
 #   - tests/quantization
 #   commands:
 #   # Pin torchao to the version compatible with the CI PyTorch and CUDA stack.
-#   - uv pip install --system torchao==0.18.0 --index-url https://download.pytorch.org/whl/cu130
+#   - uv pip install --system torchao==0.18.0 --index-url https://download.pytorch.org/whl/cu132
 #   - uv pip install --system conch-triton-kernels
 #   # The SM90-only checkpoint currently contains a removed weight_chan_scale
 #   # parameter. It was not exercised by the previous L4 job.
@@ -118,7 +118,7 @@ steps:
       tests/quantization/test_blackwell_moe.py
       tests/quantization/test_keep_param_objects.py
       tests/model_executor/model_loader/test_reload_moe_kernels.py
-      tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_balanced_routing
+      tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_synthetic_routing
   mirror:
     amd:
       automatic_shard: true

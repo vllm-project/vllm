@@ -10,11 +10,12 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
 from vllm.utils.torch_utils import (
     TORCH_DTYPE_TO_ARRAY_TYPECODE,
     get_accelerator_view_from_cpu_tensor,
 )
+from vllm.v1.conf_compute_utils import register_inplace_h2d_target
 
 logger = init_logger(__name__)
 
@@ -48,18 +49,36 @@ class UvaBuffer:
 
 
 class NonUvaBuffer:
-    """Explicit-copy fallback for platforms without pinned memory."""
+    """Explicit-copy fallback for platforms without UVA."""
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         from vllm.platforms import current_platform
 
-        logger.warning_once(
-            "Pinned memory is not available on this platform; falling back "
-            "to device memory for UVA buffers."
-        )
-        self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
+        # Pinned memory can be available without UVA, e.g. under NVIDIA
+        # Confidential Computing, where UVA is disabled because the device
+        # view of pinned host memory is not coherent.
+        pin_memory = is_pin_memory_available()
+        if current_platform.is_confidential_compute():
+            logger.info_once(
+                "NVIDIA Confidential Computing detected; using explicit "
+                "host-to-device copies instead of UVA buffers (pinned host "
+                "memory: %s).",
+                "available" if pin_memory else "unavailable",
+            )
+        if not pin_memory:
+            logger.warning_once(
+                "Pinned host memory is not available on this platform; UVA "
+                "buffers fall back to pageable host memory with explicit "
+                "host-to-device copies."
+            )
+        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=pin_memory)
         self.np = self.cpu.numpy()
         self._uva = torch.zeros(size, dtype=dtype, device=current_platform.device_type)
+        # Pool slots are only rewritten once their GPU readers have retired
+        # (see UvaBufferPool), so the upload from the pinned host buffer may
+        # land in place under CC.
+        if pin_memory:
+            register_inplace_h2d_target(self._uva)
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         if n is None:

@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.cpu.input_batch import (

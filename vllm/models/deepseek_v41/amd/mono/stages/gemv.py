@@ -52,6 +52,13 @@ def ld_bf(ptr, i):
     )
 
 
+def ld_vec(ptr, i, n, f32=False, cm=0):
+    """`n` 32-bit elements (i32, or `f32`) of `ptr` from element `i`."""
+    dtype = T.f32 if f32 else T.i32
+    v = bo.buffer_load(rsrc(ptr), i, vec_width=n, dtype=dtype, cache_modifier=cm)
+    return fx.Vector(v) if n > 1 else v
+
+
 def token_tiles(s):
     """A step's tokens in GEMV passes: [(first token, tokens)]. A GEMV loads its
     weights once and runs every pass on them, an x tile in LDS at a time."""
@@ -73,18 +80,18 @@ def lds_row(words):
 
 
 def lds_at(u, row):
-    """Element u of a span of rows ``row`` wide, at the ``lds_row`` stride."""
+    """Element u of a span of rows `row` wide, at the `lds_row` stride."""
     return u + u // row * LDS_PAD
 
 
 def lds_tail(k):
-    """Words a K = ``k`` row's last K step reads past its ``lds_row`` (selected
+    """Words a K = `k` row's last K step reads past its `lds_row` (selected
     out): the last row's buffer must hold them."""
     return max(0, 32 * -(-k // 128) - lds_row(k // 4))
 
 
 def plus(t0, v):
-    """Token ``v`` of the tile from ``t0`` (a first tile adds nothing; ``t0``
+    """Token `v` of the tile from `t0` (a first tile adds nothing; `t0`
     traced: a tile a CTA picks at run time)."""
     return v if isinstance(t0, int) and t0 == 0 else v + t0
 
@@ -94,8 +101,8 @@ def _fp8_step_load(c, r_w, r_ws, k, rg, st, row_major=False):
     """K step st's global operands of rows 16 rg ..: the two 64-column weight
     chunks (the upper clamped into the row) and the raw scale word. The (16, 16)
     shuffle lays a row group out in 32-column blocks of 16 rows, a chunk two of
-    them (lanes 0-31, 32-63); ``k`` % 64 = 32 (a last quarter step): the lanes
-    of a block past the row read its last block. ``row_major`` (vLLM's dense
+    them (lanes 0-31, 32-63); `k` % 64 = 32 (a last quarter step): the lanes
+    of a block past the row read its last block. `row_major` (vLLM's dense
     layout, k % 32 == 0): the same registers from a row-major [N, K] weight --
     lane l row 16 rg + l % 16, K bytes 128 st + 16 (l // 16) .. and + 64; with
     k % 64 == 32 (TP8's shared expert, K = 288) the last step's upper lanes are
@@ -146,8 +153,8 @@ def _fp8_step_load(c, r_w, r_ws, k, rg, st, row_major=False):
 
 
 def _fp8_step_load_942(r_w, r_ws, k, rg, st, lane):
-    """gfx942: K step ``st`` of rows 16 ``rg`` .. of the runner's tile-major
-    FP8 copy (``weights942.dense_copy``): K padded to a multiple of 128, the
+    """gfx942: K step `st` of rows 16 `rg` .. of the runner's tile-major
+    FP8 copy (`weights942.dense_copy`): K padded to a multiple of 128, the
     step's four FNUZ scale codes in one dword. Lane 16 j + r takes row r's
     four 8-byte chunks of lane group j with two 16-byte loads, blocks 0 and 1
     of the step, then blocks 2 and 3. Each load of the wave reads 1 KB that
@@ -168,13 +175,13 @@ def _fp8_step_load_942(r_w, r_ws, k, rg, st, lane):
 
 
 def _fp8_step_mfma_942(c, k, xl, xsl, st, ops, acc, live, rows):
-    """gfx942: ``acc`` through K step st as four FP8 MFMAs, one a 32-wide
+    """gfx942: `acc` through K step st as four FP8 MFMAs, one a 32-wide
     scale block, each times its block's scale factor. Block b reads the
     activation bytes K 32 b + 8 j .. + 8 of the lane's token from LDS. A block
     past K (k % 128 != 0) reads past the LDS row, so its activation bytes are
     replaced by zeros (a stray 0x80 byte is the FNUZ NaN, and 0 x NaN is NaN)
     and its code sum by 127, whose factor is 0. A step past the end
-    (``live`` false) gets factor 0 too."""
+    (`live` false) gets factor 0 too."""
     s, lane = c["S"] if rows is None else rows, c["lane"]
     lo, hi, sw = ops
     kg = k // 32
@@ -220,9 +227,9 @@ def _fp8_step_mfma_942(c, k, xl, xsl, st, ops, acc, live, rows):
 
 
 def _fp8_step_mfma(c, k, xl, xsl, st, ops, acc, live=None, rows=None):
-    """``acc`` through K step st's scaled MFMA: ``_fp8_step_load``'s operands
-    against every token's MXFP8 row in LDS. ``live`` false: a step past the end
-    (its operands those of the last step), zero at unit scale. ``k`` % 64 = 32:
+    """`acc` through K step st's scaled MFMA: `_fp8_step_load`'s operands
+    against every token's MXFP8 row in LDS. `live` false: a step past the end
+    (its operands those of the last step), zero at unit scale. `k` % 64 = 32:
     a lane's lower block past the row is zero on both sides."""
     if const_expr(GFX942):
         return _fp8_step_mfma_942(c, k, xl, xsl, st, ops, acc, live, rows)
@@ -278,8 +285,8 @@ def _fp8_step_mfma(c, k, xl, xsl, st, ops, acc, live=None, rows=None):
 
 
 def _gemv_steps(c, k, split, tiled=False):
-    """This wave's K steps (a step past the end marked, ``split`` waves past
-    split repeat the last one's; ``tiled``: wave w takes part w % split of tile
+    """This wave's K steps (a step past the end marked, `split` waves past
+    split repeat the last one's; `tiled`: wave w takes part w % split of tile
     w / split): [(step, live)]."""
     wave = c["wave"]
     steps = (k + 127) // 128
@@ -297,10 +304,10 @@ def _gemv_steps(c, k, split, tiled=False):
 
 
 def gemv_fp8_loads(c, w, ws, k, rg, split=None, tiled=False, row_major=False):
-    """The weight operands of ``gemv_fp8``'s rows for this wave, every one in
+    """The weight operands of `gemv_fp8`'s rows for this wave, every one in
     flight at once (a step's latency each would put them in series): loads
-    only. A step past the end loads the last step. ``tiled`` (split x tiles =
-    WAVES): row groups rg .., one a group of ``split`` waves."""
+    only. A step past the end loads the last step. `tiled` (split x tiles =
+    WAVES): row groups rg .., one a group of `split` waves."""
     steps = (k + 127) // 128
     r_w, r_ws = rsrc(w), rsrc(ws)
     if const_expr(tiled):
@@ -321,17 +328,17 @@ def gemv_fp8_loads(c, w, ws, k, rg, split=None, tiled=False, row_major=False):
 
 
 def gemv_fp8_mfmas(c, k, xl, xsl, red, ops, split=None, tiled=False, rows=None):
-    """``gemv_fp8_loads``' operands against the rows in LDS (``rows``: a token
+    """`gemv_fp8_loads`' operands against the rows in LDS (`rows`: a token
     tile's, every token's by default) ->
-    ``red[wave][lane]``; the scaled 16x16x128 MFMA, chunk kc in dwords 0-3 and kc +
-    1 in 4-7. ``k`` a multiple of 32: a last half step has its upper chunk zeroed
+    `red[wave][lane]`; the scaled 16x16x128 MFMA, chunk kc in dwords 0-3 and kc +
+    1 in 4-7. `k` a multiple of 32: a last half step has its upper chunk zeroed
     on both sides at unit scale (a NaN byte past the row must not reach the
     MFMA), its loads clamped into the row: the last row group's would read past
     the tensor; a last quarter step its lower chunk's upper block too. A step
     past the end adds zero at unit scale.
 
-    The K order is the original kernel's, which ``row_sum`` completes:
-    wave w takes steps w, w + 8, ... (``split`` None: aiter's preshuffled group32
+    The K order is the original kernel's, which `row_sum` completes:
+    wave w takes steps w, w + 8, ... (`split` None: aiter's preshuffled group32
     GEMM, P0.5 microbenchmark 1), or waves 0 .. split - 1 one contiguous K range
     each, the other waves zero (aiter's split-K bmm, whose last split sums the
     partials in split order)."""
@@ -351,13 +358,13 @@ def gemv_fp8_mfmas(c, k, xl, xsl, red, ops, split=None, tiled=False, rows=None):
 @traced
 def poll_copy(c, idx, width, spans, live=None):
     """Mailbox spans [(region, pair_of, n, dst, row)] into LDS: element u (pair
-    ``pair_of(u)``) to dst + u, or ``lds_at(u, row)`` for a span of rows
-    ``row`` words wide. Thread ``idx`` of ``width`` takes u = idx, idx +
+    `pair_of(u)`) to dst + u, or `lds_at(u, row)` for a span of rows
+    `row` words wide. Thread `idx` of `width` takes u = idx, idx +
     width, ..., POLL_MAX a round trip, each batch stored before the next is
     polled (holding them all spills past S = 16); a thread past a span's end
     re-reads its last element and stores nothing.
 
-    ``live``: a span's elements the reader needs (traced, <= n), a span each;
+    `live`: a span's elements the reader needs (traced, <= n), a span each;
     a batch past them is not polled and an element past them neither polled
     nor written (one past a step's rows is never written)."""
     idx = fresh(idx)  # its elements' indices not hoisted out of a task loop
@@ -383,7 +390,7 @@ def poll_copy(c, idx, width, spans, live=None):
 
 @traced
 def _poll_store_batches(c, chunks):
-    """``poll_copy``'s chunks [(region, pair_of, n, (dst, row), u)], POLL_MAX a
+    """`poll_copy`'s chunks [(region, pair_of, n, (dst, row), u)], POLL_MAX a
     round trip, each batch stored before the next is polled."""
     for b0 in range_constexpr(0, len(chunks), POLL_MAX):
         batch = chunks[b0 : b0 + POLL_MAX]

@@ -227,10 +227,11 @@ mod tests {
         ]);
         let request = Value::Array(vec![
             Value::from("req-omit-defaults"),
+            // Prompt token ids as a uint32 ndarray tuple with raw-view data.
             Value::Array(vec![
-                Value::from(1u32),
-                Value::from(2u32),
-                Value::from(3u32),
+                Value::from("=u4"),
+                Value::Array(vec![Value::from(3)]),
+                Value::Ext(3, bytemuck::cast_slice::<u32, u8>(&[1, 2, 3]).to_vec()),
             ]),
             Value::Nil,
             sampling_params,

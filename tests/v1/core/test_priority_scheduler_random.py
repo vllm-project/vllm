@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 import uuid
+from collections import Counter
 
 import pytest
 
@@ -15,6 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request
 
@@ -103,7 +105,6 @@ def _mock_execute_model(
 
     return ModelRunnerOutput(
         req_ids=request_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(request_ids)},
         sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -119,8 +120,12 @@ def _mock_draft_token_ids(
     request_ids: list[str] = []
     sampled_token_ids: list[list[int]] = []
     for request in scheduler_output.scheduled_new_reqs:
-        assert request.req_id not in seen_request_prompt_length
-        seen_request_prompt_length[request.req_id] = len(request.prompt_token_ids or [])
+        # A preempted request is sent again in full, with the same prompt.
+        prompt_length = len(request.prompt_token_ids or [])
+        assert (
+            seen_request_prompt_length.setdefault(request.req_id, prompt_length)
+            == prompt_length
+        )
         if request.num_computed_tokens >= seen_request_prompt_length[request.req_id]:
             num_tokens = random.randint(*num_output_tokens_range)
             request_ids.append(request.req_id)
@@ -141,13 +146,16 @@ def _mock_draft_token_ids(
 
 
 def _check_valid_scheduler_output(
+    scheduler: Scheduler,
     scheduler_output: SchedulerOutput,
-    seen_request_ids: set[str],
+    seen_request_ids: Counter[str],
     seen_mm_hashes: set[str],
 ):
     for req in scheduler_output.scheduled_new_reqs:
-        assert req.req_id not in seen_request_ids
-        seen_request_ids.add(req.req_id)
+        # A request is only sent again in full after being preempted.
+        num_preemptions = scheduler.requests[req.req_id].num_preemptions
+        assert seen_request_ids[req.req_id] <= num_preemptions
+        seen_request_ids[req.req_id] += 1
     for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
         assert req_id in seen_request_ids
 
@@ -170,7 +178,7 @@ def _check_valid_scheduler_output(
     for mm_hash in scheduler_output.free_encoder_mm_hashes:
         assert mm_hash in seen_mm_hashes
 
-    assert scheduler_output.finished_req_ids <= seen_request_ids
+    assert scheduler_output.finished_req_ids <= seen_request_ids.keys()
 
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
@@ -195,7 +203,7 @@ def test_priority_scheduling_blast(
 ):
     random.seed(42)
     seen_request_prompt_length = dict[str, int]()
-    seen_request_ids = set[str]()
+    seen_request_ids = Counter[str]()
     seen_mm_hashes = set[str]()
 
     scheduler = create_scheduler_with_priority(
@@ -243,7 +251,7 @@ def test_priority_scheduling_blast(
                 scheduler.add_request(req)
         scheduler_output = scheduler.schedule()
         _check_valid_scheduler_output(
-            scheduler_output, seen_request_ids, seen_mm_hashes
+            scheduler, scheduler_output, seen_request_ids, seen_mm_hashes
         )
         model_output = _mock_execute_model(
             scheduler_output,

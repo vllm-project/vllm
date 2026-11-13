@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Image processor for Unlimited-OCR (baidu/Unlimited-OCR)."""
+"""Image processors for Unlimited-OCR and Unlimited-OCR-2."""
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor
@@ -19,11 +19,11 @@ class UnlimitedOCRProcessor(DeepseekOCRProcessor):
 
     Because the effective crop flag then depends on *how many* images are in the
     request, the per-item processing output is no longer invariant of sibling
-    images. ``UnlimitedOCRMultiModalProcessor`` accounts for this by bypassing
+    images. `UnlimitedOCRMultiModalProcessor` accounts for this by bypassing
     the multimodal processing cache for multi-image requests (see its
-    ``_cached_apply_hf_processor``), so the two paths stay consistent.
+    `_cached_apply_hf_processor`), so the two paths stay consistent.
 
-    DeepSeek-OCR does *not* have this restriction because its ``max_crops=6`` is
+    DeepSeek-OCR does *not* have this restriction because its `max_crops=6` is
     small enough to be safe for multi-image use.
     """
 
@@ -43,4 +43,15 @@ class UnlimitedOCRProcessor(DeepseekOCRProcessor):
             cropping = False
         return super().tokenize_with_images(
             conversation, images, bos=bos, eos=eos, cropping=cropping
+        )
+
+
+class UnlimitedOCR2Processor(DeepseekOCRProcessor):
+    """Preserve page aspect ratios and allow cropping for multi-image input."""
+
+    def _prepare_global_view(self, image: Image.Image, cropping: bool) -> Image.Image:
+        return ImageOps.pad(
+            image,
+            (self.base_size, self.base_size),
+            color=tuple(int(x * 255) for x in self.image_transform.mean),
         )
