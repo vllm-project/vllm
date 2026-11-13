@@ -1001,8 +1001,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
             return hook
 
-        for level in range(self.deepstack_num_levels):
-            layers[level].register_forward_hook(add_deepstack(level))
+        # Like native Qwen3-VL, ignore levels beyond the last decoder layer
+        for level, layer in zip(range(self.deepstack_num_levels), layers):
+            layer.register_forward_hook(add_deepstack(level))
 
     def _find_encoder_classes(
         self, model: "PreTrainedModel"
