@@ -667,6 +667,10 @@ class GraniteDoclingForConditionalGeneration(
             "model.vision_model.": "vision_model.",
             "model.text_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
+            # Not implemented here: the multi-token prediction heads and the
+            # density router
+            "mtp.": None,
+            "model.density_router.": None,
         }
     )
 
@@ -907,9 +911,5 @@ class GraniteDoclingForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Tensors of modules that are not implemented here (the multi-token
-        # prediction heads and the density router) are skipped.
-        loader = AutoWeightsLoader(
-            self, ignore_unexpected_prefixes=["mtp.", "model.density_router."]
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
