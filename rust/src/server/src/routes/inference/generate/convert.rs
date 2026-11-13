@@ -8,6 +8,7 @@ use super::types::GenerateRequest;
 use super::validate;
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
+use crate::routes::openai::utils::types::StringOrArray;
 use crate::utils::{ResolvedRequestContext, merge_ec_transfer_params, merge_kv_transfer_params};
 
 /// Lowered generate request plus the response request ID.
@@ -61,6 +62,21 @@ pub(super) fn prepare_generate_request(
     let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
     let return_token_ids = request.return_token_ids.unwrap_or(false);
+    let stop_strings = request.sampling_params.stop.map(StringOrArray::into_vec);
+    // Only token IDs are returned, so the output is decoded just to match stop
+    // strings. Python decodes it regardless, with the same response.
+    let detokenize = request.sampling_params.detokenize.unwrap_or(true)
+        && stop_strings.as_ref().is_some_and(|stops| !stops.is_empty());
+    let decode_options = TextDecodeOptions {
+        skip_special_tokens: request.sampling_params.skip_special_tokens.unwrap_or(true),
+        include_stop_str_in_output: request
+            .sampling_params
+            .include_stop_str_in_output
+            .unwrap_or(false),
+        stop_strings,
+        min_tokens: request.sampling_params.inner.min_tokens.unwrap_or(0),
+        detokenize,
+    };
     let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
@@ -76,8 +92,8 @@ pub(super) fn prepare_generate_request(
         prompt: Prompt::TokenIds(request.token_ids),
         mm_features,
         sampling_params,
-        decode_options: TextDecodeOptions::default(),
-        intermediate: false,
+        decode_options,
+        intermediate: stream,
         prompt_truncation: None,
         priority: request.priority,
         cache_salt: request.cache_salt,
@@ -109,7 +125,7 @@ pub(super) fn prepare_generate_request(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use vllm_text::Prompt;
+    use vllm_text::{Prompt, TextDecodeOptions};
 
     use super::prepare_generate_request;
     use crate::lora::LoraModelResolution;
@@ -176,6 +192,59 @@ mod tests {
                 .vllm_xargs
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
+        );
+    }
+
+    #[test]
+    fn prepare_generate_request_maps_stop_options_to_decode_options() {
+        let decode_options = |sampling_params: serde_json::Value| {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": sampling_params,
+            }))
+            .expect("parse request");
+            prepare_generate_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare request")
+            .text_request
+            .decode_options
+        };
+
+        // Without stop strings there is nothing to decode for.
+        assert_eq!(
+            decode_options(json!({})),
+            TextDecodeOptions {
+                detokenize: false,
+                ..TextDecodeOptions::default()
+            }
+        );
+        assert_eq!(
+            decode_options(json!({"stop": ["\n"]})),
+            TextDecodeOptions {
+                stop_strings: Some(vec!["\n".to_string()]),
+                ..TextDecodeOptions::default()
+            }
+        );
+        // `detokenize: false` is kept, so the stop strings fail validation.
+        assert_eq!(
+            decode_options(json!({
+                "stop": "\n",
+                "include_stop_str_in_output": true,
+                "skip_special_tokens": false,
+                "min_tokens": 2,
+                "detokenize": false,
+            })),
+            TextDecodeOptions {
+                skip_special_tokens: false,
+                include_stop_str_in_output: true,
+                stop_strings: Some(vec!["\n".to_string()]),
+                min_tokens: 2,
+                detokenize: false,
+            }
         );
     }
 
