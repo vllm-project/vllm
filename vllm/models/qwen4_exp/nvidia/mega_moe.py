@@ -97,7 +97,7 @@ def _requantize(
     deep_gemm = _import_deep_gemm()
     cast = (
         deep_gemm.per_token_cast_to_fp4
-        if weight_format is MEGA_MOE_MXFP4
+        if weight_format.name == MEGA_MOE_MXFP4.name
         else deep_gemm.per_token_cast_to_fp8
     )
     values, sf = cast(x, use_ue8m0=True, gran_k=32)
