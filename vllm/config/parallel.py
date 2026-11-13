@@ -203,11 +203,14 @@ class ParallelConfig:
     decoder layers whole on each TP rank and run the MoE on the rank's own HC SP
     rows, so the MoE input all-gather and output reduce-scatter go away; the
     attention ones stay (ROCm, TP=2). Each rank holds all expert weights instead
-    of a 1/TP slice. Every step, decode included, uses this layout. It needs
+    of a 1/TP slice. Without `--monokernel` every step, decode included, uses
+    this layout. With it the layers keep both layouts: the specialized decode
+    reads the TP-sharded experts in place and every other step runs the whole
+    ones, so each rank holds its TP shard besides the whole experts. It needs
     `--enable-hc-sp` and the AITER fused shared expert (`VLLM_ROCM_USE_AITER=1`,
     `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`). Not supported with expert
     parallelism (so neither with EPLB), DP>1, PP>1, PCP>1, DBO, speculative
-    decoding, routed-experts capture or `--monokernel`.
+    decoding or routed-experts capture.
     """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""

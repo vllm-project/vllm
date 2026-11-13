@@ -60,6 +60,11 @@ a layer, up to ~80 rows on one; uniform: ~470), so the schedule
   slot is the null block);
 - HC sequence parallelism (`--enable-hc-sp`): stock steps keep their sharded
   layout; specialized steps run every row, including the PLE, on every rank;
+- `--enable-hc-sp-replicated-moe` as a dual layout: `mlp.experts` stays the
+  TP2 shard the kernels read, and each layer also holds every expert whole
+  (`mlp.replicated.experts`, loaded from the same checkpoint tensors), which
+  vLLM's forward runs on the rank's own rows at every stock step; the dual
+  layout costs each rank the whole experts on top of its shard;
 - the checkpoint's shapes (`wide/layout.py`, `SHAPES`) and formats: online
   MXFP4 GDN projections (`--quantization-config.targets` for
   `linear_attn.in_proj_qkv`, `in_proj_z`, `out_proj`) on either AITER FP4
@@ -79,8 +84,9 @@ weight offload, weight updates, GDN prefix caching, other GDN cache dtypes,
 an unfused shared expert, `STOCK_TORCH_COMPILE`, other model shapes, no
 capture size in 1-192, a platform other than unpartitioned gfx950); the
 loaded model (every layer's modules, quantization methods,
-weight layouts and shapes); the GDN caches at every bind (dtypes, shapes,
-dense slots). The TP ranks agree on every stage.
+weight layouts and shapes, `mlp.experts` at a TP size other than 2); the GDN
+caches at every bind (dtypes, shapes, dense slots). The TP ranks agree on
+every stage.
 
 ## Numerics
 

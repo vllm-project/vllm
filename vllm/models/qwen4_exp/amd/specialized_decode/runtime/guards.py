@@ -106,6 +106,14 @@ def _layer_reasons(layer) -> list[str]:
         out.append("the shared expert not fused")
     else:
         ex = mlp.experts.routed_experts
+        tp = mlp.experts.moe_config.tp_size
+        if tp != L.TP:
+            # the kernels read this rank's share of every expert and sum the
+            # TP ranks' partial outputs: whole experts on each rank (as
+            # --enable-hc-sp-replicated-moe builds them) would be summed twice
+            out.append(
+                f"routed experts at TP size {tp} (the kernels read TP{L.TP} shards)"
+            )
         backend = getattr(ex.quant_method, "mxfp4_backend", None)
         rip = ex.w13_weight.shape[1] // 2
         if backend is not Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
