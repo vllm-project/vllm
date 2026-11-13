@@ -14,6 +14,7 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
+from vllm.triton_utils import triton  # noqa: E402
 from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAHelper,
@@ -1543,6 +1544,190 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
     assert metadata.has_persistent_metadata
     assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == mtp_qlen
     assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == mtp_qlen
+
+
+def _full_graph_builder(device, mtp_qlen, max_reqs, *, varlen, fused):
+    builder = _builder(
+        mtp_decode_qlen=mtp_qlen,
+        has_full_cudagraphs=True,
+        max_decode_rows=max_reqs,
+        num_heads=12,
+    )
+    builder.device = device
+    builder.paged_kv_last_page_len = builder.paged_kv_last_page_len.to(device)
+    builder.paged_kv_indices = builder.paged_kv_indices.to(device)
+    # What an earlier, larger batch would have left in the graph buffers.
+    builder.paged_kv_indptr = torch.full(
+        (max_reqs + 1,), 12345, dtype=torch.int32, device=device
+    )
+    builder.qo_indptr = builder.paged_kv_indptr.clone()
+    if fused:
+        builder._graph_seq_lens = builder.paged_kv_indptr[:max_reqs].clone()
+        builder._decode_indptr_block = triton.next_power_of_2(max_reqs + 1)
+    if varlen:
+        row_ids = torch.arange(max_reqs * mtp_qlen, device=device)
+        builder._varlen_decode_qlen = mtp_qlen
+        builder._varlen_right_align = AiterMLAMetadataBuilder.__dict__[
+            "_varlen_right_align"
+        ].__get__(builder)
+        builder._varlen_row_req = row_ids // mtp_qlen
+        builder._varlen_row_pos = row_ids % mtp_qlen
+        builder._varlen_row_ids = row_ids
+        builder._varlen_q_rows = torch.zeros_like(row_ids)
+        builder._varlen_o_rows = torch.zeros(
+            row_ids.numel() + 1, dtype=torch.int64, device=device
+        )
+        builder._fill_varlen_rows = AiterMLAMetadataBuilder._fill_varlen_rows.__get__(
+            builder
+        )
+    return builder
+
+
+def _full_graph_build_decode(builder, device, mtp_qlen, qo_lens, dcp_tot=False):
+    num_reqs = len(qo_lens)
+    qo_lens_t = torch.tensor(qo_lens, dtype=torch.int32)
+    query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32)
+    query_start_loc[1:] = qo_lens_t.cumsum(0)
+    seq_lens = torch.where(qo_lens_t > 0, 1000 + 37 * qo_lens_t.cumsum(0), 0)
+    seq_lens = seq_lens.to(dtype=torch.int32, device=device)
+    return AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.zeros(num_reqs, 64, dtype=torch.int32, device=device),
+        seq_lens_device=seq_lens,
+        max_seq_len=int(seq_lens.max()),
+        query_start_loc_cpu=query_start_loc,
+        query_start_loc_device=query_start_loc.to(device),
+        num_decode_tokens=num_reqs * mtp_qlen,
+        max_query_len=mtp_qlen,
+        dcp_tot_seq_lens_device=seq_lens.clone() if dcp_tot else None,
+    )
+
+
+@pytest.fixture
+def full_graph_decode_mocks(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=mock.MagicMock()),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
+
+
+def _large_batch_cases():
+    """Batches of 1, half and all of a large graph buffer: uniform with dummy
+    rows, mixed lengths, and mixed lengths under adaptive verification."""
+    gen = torch.Generator().manual_seed(0)
+    cases = []
+    for max_reqs in (64, 1024):
+        for num_reqs in (1, max_reqs // 2, max_reqs):
+            live = max(1, num_reqs // 2)
+            uniform = [4] * live + [0] * (num_reqs - live)
+            mixed = torch.randint(0, 5, (num_reqs,), generator=gen)
+            mixed[0] = 4
+            for qo_lens, varlen in ((uniform, False), (mixed.tolist(), False)):
+                cases.append((max_reqs, 4, qo_lens, varlen))
+            cases.append((max_reqs, 4, mixed.tolist(), True))
+    return cases
+
+
+def _mtp_len_cases():
+    """MTP widths 1, 3 (not a power of two) and 7: uniform with a dummy row,
+    mixed lengths, and mixed lengths under adaptive verification."""
+    cases = [(8, 1, [1, 1, 1], False), (8, 1, [1, 1, 0], False)]
+    for w in (3, 4, 7):
+        mixed = [w - 1, 1, w, 0]
+        cases += [
+            (8, w, [w, w, 0, 0], False),
+            (8, w, mixed, False),
+            (8, w, [w, w, 0, 0], True),
+            (8, w, mixed, True),
+        ]
+    return cases
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the fused indptr build is a Triton kernel"
+)
+@pytest.mark.parametrize(
+    "max_reqs,mtp_qlen,qo_lens,varlen",
+    [*_mtp_len_cases(), *_large_batch_cases()],
+)
+def test_full_cudagraph_fused_decode_indptr_matches_eager(
+    full_graph_decode_mocks, max_reqs, mtp_qlen, qo_lens, varlen
+):
+    """A builder with the persistent seq_lens buffer takes the fused indptr
+    build; one without it takes the eager ops. Both must hand out the same
+    metadata and leave the same graph buffers behind, tails included."""
+    device = torch.device("cuda:0")
+
+    def build(fused):
+        builder = _full_graph_builder(
+            device, mtp_qlen, max_reqs, varlen=varlen, fused=fused
+        )
+        return builder, _full_graph_build_decode(builder, device, mtp_qlen, qo_lens)
+
+    eager_builder, eager = build(fused=False)
+    fused_builder, fused = build(fused=True)
+
+    assert fused.seq_lens.data_ptr() == fused_builder._graph_seq_lens.data_ptr()
+    for field in ("seq_lens", "paged_kv_indptr", "qo_indptr"):
+        assert torch.equal(getattr(fused, field), getattr(eager, field)), field
+    for field in ("varlen_q_rows", "varlen_o_rows"):
+        got, want = getattr(fused, field), getattr(eager, field)
+        if field == "varlen_o_rows" and got is not None and want is not None:
+            # The last entry is the dump slot padding slots scatter into in an
+            # unspecified order; nothing reads it.
+            got, want = got[:-1], want[:-1]
+        assert (got is None and want is None) or torch.equal(got, want), field
+    assert fused.max_qo_len == eager.max_qo_len
+    assert fused.min_kv_seq_len == eager.min_kv_seq_len
+    assert torch.equal(fused_builder.paged_kv_indptr, eager_builder.paged_kv_indptr)
+    assert torch.equal(fused_builder.qo_indptr, eager_builder.qo_indptr)
+
+
+class _MustNotLaunch:
+    def __getitem__(self, grid):
+        raise AssertionError("the fused decode indptr kernel must not run here")
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the fused indptr build is a Triton kernel"
+)
+def test_full_cudagraph_dcp_lens_keep_eager_indptr(
+    full_graph_decode_mocks, monkeypatch
+):
+    """DCP global lengths are padded alongside the local ones by the eager ops,
+    which the fused kernel does not do, so a DCP batch must stay on them."""
+    device = torch.device("cuda:0")
+    qo_lens = [4, 4, 0, 0]
+    eager_builder = _full_graph_builder(device, 4, 8, varlen=False, fused=False)
+    eager = _full_graph_build_decode(eager_builder, device, 4, qo_lens, dcp_tot=True)
+    monkeypatch.setattr(rocm_aiter_mla, "_build_decode_indptr_kernel", _MustNotLaunch())
+    builder = _full_graph_builder(device, 4, 8, varlen=False, fused=True)
+    got = _full_graph_build_decode(builder, device, 4, qo_lens, dcp_tot=True)
+
+    assert got.seq_lens.data_ptr() == builder._graph_seq_lens.data_ptr()
+    for field in ("seq_lens", "paged_kv_indptr", "qo_indptr"):
+        assert torch.equal(getattr(got, field), getattr(eager, field)), field
+    assert torch.equal(builder.paged_kv_indptr, eager_builder.paged_kv_indptr)
+    assert torch.equal(builder.qo_indptr, eager_builder.qo_indptr)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="the fused indptr build is a Triton kernel"
+)
+def test_full_cudagraph_oversize_batch_rejected(full_graph_decode_mocks, monkeypatch):
+    """The fused kernel bounds its seq_lens store by num_reqs alone, so a batch
+    larger than the graph buffers must be rejected before it launches."""
+    device = torch.device("cuda:0")
+    monkeypatch.setattr(rocm_aiter_mla, "_build_decode_indptr_kernel", _MustNotLaunch())
+    builder = _full_graph_builder(device, 1, 2, varlen=False, fused=True)
+    with pytest.raises(AssertionError, match="exceed the 2-request graph buffers"):
+        _full_graph_build_decode(builder, device, 1, [1, 1, 1])
 
 
 def test_decode_expands_kernel_block_page_indices(monkeypatch):
