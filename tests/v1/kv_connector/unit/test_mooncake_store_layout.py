@@ -414,41 +414,64 @@ def test_rank_local_layer_ranges_store_one_object_per_range():
     assert sizes == [[block_bytes] * 3, [block_bytes] * 2]
 
 
-def test_rank_local_layer_ranges_split_a_block_outermost_buffer():
+@pytest.mark.parametrize(
+    ("slot_bytes", "slots", "segments"),
+    [
+        (40, (0, 1, 2, 3), 1),  # adjacent layers share one segment
+        (64, (0, 1, 2, 3), 2),  # padding between layers is not stored
+        (40, (0, 2, 1, 3), 2),  # layers out of order in the buffer
+    ],
+)
+def test_rank_local_layer_ranges_split_a_block_outermost_buffer(
+    slot_bytes: int, slots: tuple[int, ...], segments: int
+):
     """A block-outermost buffer holds every layer in each block. Each layer
-    range stores its own run of the block, so its object has the bytes a
-    layer-first buffer stores for that range."""
-    num_blocks, num_layers = 3, 4
-    block_outermost = (
-        (torch.arange(num_blocks * num_layers * BLOCK_SIZE * 8) % 251)
-        .to(torch.uint8)
-        .view(num_blocks, num_layers, BLOCK_SIZE, 8)
+    range stores its layers' bytes in layer order, merging only adjacent
+    layers, so its object has the bytes a layer-first buffer stores."""
+    num_blocks, num_layers, state_bytes = 3, len(slots), 40
+    block_outermost = torch.full(
+        (num_blocks * num_layers * slot_bytes,), 255, dtype=torch.uint8
     )
-    layer_first = [block_outermost[:, i : i + 1].clone() for i in range(num_layers)]
+    layer_first = torch.empty(num_layers * num_blocks * state_bytes, dtype=torch.uint8)
+    views = []
+    for layer, slot in enumerate(slots):
+        state = (
+            ((torch.arange(num_blocks * state_bytes) + 61 * layer) % 251)
+            .to(torch.uint8)
+            .view(num_blocks, 1, 1, state_bytes)
+        )
+        outer = block_outermost.as_strided(
+            state.shape,
+            (num_layers * slot_bytes, state_bytes, state_bytes, 1),
+            slot * slot_bytes,
+        )
+        inner = layer_first.as_strided(
+            state.shape,
+            (state_bytes, state_bytes, state_bytes, 1),
+            layer * num_blocks * state_bytes,
+        )
+        outer.copy_(state)
+        inner.copy_(state)
+        views.append((outer, inner))
 
     def objects(caches: list[torch.Tensor]) -> list[list[bytes]]:
         layout = RankLocalStoreLayout(
-            KeyMetadata("test-model", 0, 0, 0, 0),
-            BLOCK_SIZE,
-            BLOCK_SIZE,
-            layer_ranges=((0, 2), (2, 4)),
+            KeyMetadata("test-model", 0, 0, 0, 0), 16, 16, layer_ranges=((0, 2), (2, 4))
         )
         layout.register_kv_caches(
             caches, num_blocks, layer_names=_layer_names(range(num_layers))
         )
-        addrs, sizes, _ = layout.prepare_values(
-            [(0, BLOCK_SIZE), (0, BLOCK_SIZE)], [1], [0, 1]
-        )
+        addrs, sizes, _ = layout.prepare_values([(0, 16), (0, 16)], [1], [0, 1])
         return [
             [ctypes.string_at(a, s) for a, s in zip(row_addrs, row_sizes)]
             for row_addrs, row_sizes in zip(addrs, sizes)
         ]
 
-    runs = objects([block_outermost[:, i : i + 1] for i in range(num_layers)])
-    segments = objects(layer_first)
+    split = objects([outer for outer, _ in views])
+    expected = objects([inner for _, inner in views])
 
-    assert [len(segs) for segs in runs] == [1, 1]
-    assert [b"".join(segs) for segs in runs] == [b"".join(s) for s in segments]
+    assert [len(segs) for segs in split] == [segments, segments]
+    assert [b"".join(segs) for segs in split] == [b"".join(s) for s in expected]
 
 
 def test_rank_local_database_api_rejects_tp_shared_layout():

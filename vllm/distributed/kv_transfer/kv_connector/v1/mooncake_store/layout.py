@@ -6,7 +6,6 @@
 """Store keys and tensor layouts for MooncakeStoreConnector."""
 
 import hashlib
-import itertools
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -294,14 +293,15 @@ class RankLocalStoreLayout(StoreLayout):
         layer_names: Sequence[str] | None = None,
     ) -> None:
         """Build descriptors from the local KV cache tensors. With layer
-        ranges, every region must hold layers of a single range; in a
-        block-outermost buffer, each range takes the run of a block from its
-        first layer to its last."""
+        ranges, every region must hold layers of a single range, and a range's
+        object is its layers' bytes in layer order whatever the buffer layout;
+        in a block-outermost buffer, adjacent layers share one segment."""
         tensor_ranges = _tensor_ranges(self.layer_ranges, len(kv_caches), layer_names)
         # Map each region's base address to its entry in the parallel lists.
         region_index: dict[int, int] = {}
-        # Map (buffer address, layer range) to the region of that range's run.
-        range_runs: dict[tuple[int, int], int] = {}
+        # Last segment of each (buffer address, layer range) in a
+        # block-outermost buffer.
+        range_segments: dict[tuple[int, int], int] = {}
         base_addrs: list[int] = []
         block_strides: list[int] = []
         block_lens: list[int] = []
@@ -323,21 +323,20 @@ class RankLocalStoreLayout(StoreLayout):
                 block_lens[index] = max(block_lens[index], block_len)
                 region_ranges[index].add(range_index)
 
-        def add_range_run(
+        def add_layer_segment(
             storage_addr: int, block_stride: int, addr: int, length: int
         ) -> None:
-            index = range_runs.get((storage_addr, range_index))
-            if index is None:
-                range_runs[storage_addr, range_index] = len(base_addrs)
-                base_addrs.append(addr)
-                block_strides.append(block_stride)
-                block_lens.append(length)
-                region_ranges.append({range_index})
+            # Extend the range's previous segment only when this layer starts
+            # where it ends, so padding between layers is never stored.
+            index = range_segments.get((storage_addr, range_index))
+            if index is not None and base_addrs[index] + block_lens[index] == addr:
+                block_lens[index] += length
                 return
-            start = min(base_addrs[index], addr)
-            end = max(base_addrs[index] + block_lens[index], addr + length)
-            base_addrs[index] = start
-            block_lens[index] = end - start
+            range_segments[storage_addr, range_index] = len(base_addrs)
+            base_addrs.append(addr)
+            block_strides.append(block_stride)
+            block_lens.append(length)
+            region_ranges.append({range_index})
 
         for cache_index, cache in enumerate(kv_caches):
             if tensor_ranges is not None:
@@ -365,7 +364,7 @@ class RankLocalStoreLayout(StoreLayout):
                     )
             elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
                 if tensor_ranges is not None:
-                    add_range_run(
+                    add_layer_segment(
                         storage_addr,
                         storage_len // num_blocks,
                         cache.data_ptr(),
@@ -387,17 +386,6 @@ class RankLocalStoreLayout(StoreLayout):
                     cache.data_ptr(),
                     cache.stride(0) * cache.element_size(),
                     block_bytes,
-                )
-        runs = sorted(
-            (storage_addr, base_addrs[index], base_addrs[index] + block_lens[index])
-            for (storage_addr, _), index in range_runs.items()
-        )
-        for (storage, _, end), (next_storage, next_start, _) in itertools.pairwise(
-            runs
-        ):
-            if storage == next_storage and end > next_start:
-                raise ValueError(
-                    "Store layer ranges interleave in a block-outermost KV cache buffer"
                 )
         self.kv_caches_base_addr = base_addrs
         self.block_stride = block_strides
