@@ -1106,13 +1106,17 @@ class Worker(WorkerBase):
             # A workspace resize after capture frees what the graphs point at.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
         if self.cache_config.enable_extensible_kv_cache:
+            kv_cache = self.model_runner.extensible_kv_cache
+            assert kv_cache is not None
+            # The blocks warmup_kernels committed hold garbage and can take
+            # nearly all the memory warmup may commit: release them, so the
+            # sizing steps run beside only the blocks they address.
+            kv_cache.commit(kv_cache.min_committed_blocks, shrink=True)
             run_kv_cache_sizing_warmup(
                 self.model_runner, self.execute_model, self.sample_tokens
             )
             # Measure before capture, whose persistent allocations would
             # hide part of the peak from a later peak - current.
-            kv_cache = self.model_runner.extensible_kv_cache
-            assert kv_cache is not None
             kv_cache.record_transient_peak()
             if not self.model_config.enforce_eager:
                 # Warmup's blocks hold garbage and capture addresses only the
