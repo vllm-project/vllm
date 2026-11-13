@@ -524,6 +524,11 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    draft_decode_context_parallel_size: int | None = Field(default=None, ge=1)
+    """The degree of decode context parallelism for the draft model. Can only be
+    1 or the same as the target model's decode context parallel size. Defaults to
+    the target's, except for DFlash/DSpark drafts, which default to 1 unless they
+    are full-attention MLA."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""
@@ -1666,6 +1671,19 @@ class SpeculativeConfig:
             )
         return speculative_draft_tensor_parallel_size
 
+    @staticmethod
+    def _verify_and_get_draft_dcp(
+        target_parallel_config: ParallelConfig, draft_dcp: int | None
+    ) -> int:
+        """Default the draft's DCP to the target's; an explicit value must be 1
+        or the target's."""
+        target_dcp = target_parallel_config.decode_context_parallel_size
+        if draft_dcp is None:
+            return target_dcp
+        if draft_dcp not in (1, target_dcp):
+            raise ValueError(f"{draft_dcp=} must be 1 or {target_dcp}.")
+        return draft_dcp
+
     def update_arch_(self):
         """EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
         architectures-related fields in self.draft_model_config
@@ -1820,6 +1838,25 @@ class SpeculativeConfig:
             logger.warning_once(
                 "FLy verification is a lossy speculative decoding method and "
                 "may degrade model outputs."
+            )
+        elif (
+            self.rejection_sample_method == "synthetic"
+            and self.fly_window_size is not None
+        ):
+            # FLy cost overlay: pays FLy's per-step compute while acceptance
+            # stays exactly the synthetic one.
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires num_speculative_tokens >= 2."
+                )
+            if self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires fly_window_size < "
+                    "num_speculative_tokens."
+                )
+            logger.warning_once(
+                "FLy cost overlay enabled with synthetic acceptance: "
+                "entropy is computed but never used to defer rejections."
             )
 
         self.verify_equal_vocab_size_if_draft_model()

@@ -13,7 +13,7 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
@@ -171,8 +171,15 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         params: ChatParams,
     ) -> list[int]:
         tokenizer = self.get_tokenizer()
+        tokenizer_cls: type[PreTrainedTokenizerBase] = type(tokenizer)
+        if issubclass(tokenizer_cls, ThreadSafeHFTokenizerMixin):
+            # The pool overrides apply_chat_template to route calls to its
+            # copies; check the class it wraps.
+            tokenizer_cls = cast(
+                type[PreTrainedTokenizerBase], tokenizer_cls.__bases__[0]
+            )
         if (
-            type(tokenizer).apply_chat_template
+            tokenizer_cls.apply_chat_template
             is PreTrainedTokenizerBase.apply_chat_template
         ):
             raise VLLMValidationError(
