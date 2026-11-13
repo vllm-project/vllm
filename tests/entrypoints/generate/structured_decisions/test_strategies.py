@@ -1612,7 +1612,7 @@ def knowline_strategy(
 
     async def generate(prompt, params, request_id, **kwargs):
         engine.generated.append((prompt, params, request_id))
-        ids = params.allowed_token_ids or params.logprob_token_ids
+        ids = params.logprob_token_ids
         # Distinct logprobs, so a misread label order fails the assertions.
         logprobs = {i: Logprob(-j - 1.0) for j, i in enumerate(ids)}
         output = CompletionOutput(
@@ -2041,19 +2041,27 @@ async def test_knowline_read_scores_the_labels():
 
 
 @pytest.mark.asyncio
-async def test_knowline_read_masks_the_labels_over_128():
-    strategy, engine = knowline_strategy(KnowLineMockTok())
-    q = build_question(
-        "q",
-        "choice",
-        None,
-        {f"o{i}": None for i in range(130)},
-        strategy.limits().max_options,
-        labeled=True,
-        question_types=strategy.question_types,
+async def test_knowline_reads_all_255_labels_in_one_request():
+    # Neither processed logprobs nor a raised --max-logprobs is needed.
+    strategy, engine = knowline_strategy(
+        KnowLineMockTok(), logprobs_mode="raw_logprobs", max_logprobs=20
     )
+    assert len(strategy.labels) <= MAX_LOGPROB_TOKEN_IDS
+    wide, narrow = (
+        build_question(
+            qid,
+            "choice",
+            None,
+            {f"o{i}": None for i in range(n)},
+            strategy.limits().max_options,
+            labeled=True,
+            question_types=strategy.question_types,
+        )
+        for qid, n in (("wide", 255), ("narrow", 5))
+    )
+    assert strategy.num_requests([wide, narrow]) == 2
     reads = await strategy.read(
-        [q],
+        [wide, narrow],
         None,
         "state",
         request_id="r",
@@ -2061,16 +2069,22 @@ async def test_knowline_read_masks_the_labels_over_128():
         lora_request=None,
         priority=0,
     )
-    ((prompt, params, request_id),) = engine.generated
-    # Over 128 labels the read masks the vocabulary to them.
-    assert params.allowed_token_ids == [
-        strategy.label_token[label] for label in q.labels
+    (_, wide_params, _), (_, narrow_params, _) = engine.generated
+    # Every label is read over the whole vocabulary; nothing is masked.
+    assert wide_params.logprob_token_ids == [
+        strategy.label_token[label] for label in wide.labels
     ]
-    assert params.logprobs == 130
-    assert params.logprob_token_ids is None
-    (read,) = reads
-    assert sum(read.probs) == pytest.approx(1.0)
-    assert read.probs[0] == max(read.probs)
+    assert narrow_params.logprob_token_ids == [
+        strategy.label_token[label] for label in narrow.labels
+    ]
+    for params in (wide_params, narrow_params):
+        assert params.allowed_token_ids is None and params.logprobs is None
+    wide_read, narrow_read = reads
+    logprobs = [-j - 1.0 for j in range(255)]
+    assert wide_read.probs == pytest.approx(label_softmax(logprobs))
+    assert wide_read.label_mass == pytest.approx(sum(math.exp(x) for x in logprobs))
+    assert wide_read.output_tokens == 1
+    assert narrow_read.probs == pytest.approx(label_softmax(logprobs[:5]))
 
 
 @pytest.mark.asyncio
@@ -2087,79 +2101,6 @@ async def test_knowline_read_takes_no_instructions():
             lora_request=None,
             priority=0,
         )
-
-
-@pytest.mark.asyncio
-async def test_knowline_read_over_128_needs_processed_logprobs():
-    strategy, _ = knowline_strategy(KnowLineMockTok(), logprobs_mode="raw_logprobs")
-    q = build_question(
-        "q",
-        "choice",
-        None,
-        {f"o{i}": None for i in range(130)},
-        strategy.limits().max_options,
-        labeled=True,
-        question_types=strategy.question_types,
-    )
-    with pytest.raises(StructuredDecisionError, match="processed_logprobs"):
-        await strategy.read(
-            [q],
-            None,
-            "state",
-            request_id="r",
-            chat_template_kwargs=None,
-            lora_request=None,
-            priority=0,
-        )
-
-
-@pytest.mark.asyncio
-async def test_knowline_read_over_128_needs_max_logprobs():
-    strategy, _ = knowline_strategy(KnowLineMockTok(), max_logprobs=100)
-    q = build_question(
-        "q",
-        "choice",
-        None,
-        {f"o{i}": None for i in range(130)},
-        strategy.limits().max_options,
-        labeled=True,
-        question_types=strategy.question_types,
-    )
-    with pytest.raises(StructuredDecisionError, match="--max-logprobs 130 or higher"):
-        await strategy.read(
-            [q],
-            None,
-            "state",
-            request_id="r",
-            chat_template_kwargs=None,
-            lora_request=None,
-            priority=0,
-        )
-
-
-@pytest.mark.asyncio
-async def test_knowline_read_under_128_ignores_max_logprobs():
-    strategy, engine = knowline_strategy(KnowLineMockTok(), max_logprobs=10)
-    q = build_question(
-        "q",
-        "choice",
-        None,
-        {f"o{i}": None for i in range(5)},
-        strategy.limits().max_options,
-        labeled=True,
-        question_types=strategy.question_types,
-    )
-    reads = await strategy.read(
-        [q],
-        None,
-        "state",
-        request_id="r",
-        chat_template_kwargs=None,
-        lora_request=None,
-        priority=0,
-    )
-    assert len(reads) == 1
-    assert len(engine.generated[0][1].logprob_token_ids) == 5
 
 
 @pytest.mark.asyncio
