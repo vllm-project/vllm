@@ -1833,19 +1833,21 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         pixel_values_videos = video_input["pixel_values_videos"].type(
             self.vision_model.dtype
         )
-        video_features = self._vision_forward(
-            pixel_values=pixel_values_videos, grid_thw=grid_thw
-        )
-        video_embeds = self.resampler_model(video_features, grid_thw)
+        chunk_frames = self.config.temporal_conv_size
+        video_embeds = []
+        for pixel_values, (_, h, w) in zip(
+            pixel_values_videos.split(grid_thw.prod(-1).tolist()), grid_thw.tolist()
+        ):
+            chunk_embeds = []
+            for chunk in pixel_values.split(chunk_frames * h * w):
+                chunk_thw = grid_thw.new_tensor([[len(chunk) // (h * w), h, w]])
+                chunk_features = self._vision_forward(
+                    pixel_values=chunk, grid_thw=chunk_thw
+                )
+                chunk_embeds.append(self.resampler_model(chunk_features, chunk_thw))
+            video_embeds.append(torch.cat(chunk_embeds))
 
-        merge_size = self.vision_model.spatial_merge_size
-        sizes = (
-            (grid_thw.prod(-1) // self.config.temporal_conv_size)
-            // merge_size
-            // merge_size
-        )
-
-        return video_embeds.split(sizes.tolist())
+        return tuple(video_embeds)
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities: dict[

@@ -2,13 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
 import pytest
+import torch
 
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.models.ernie45_vl import (
+    Ernie4_5_VLMoeForConditionalGeneration,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import get_mm_max_toks_per_item
 from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.utils.torch_utils import set_default_torch_dtype
 
-from ...utils import build_model_context
+from ...registry import HF_EXAMPLE_MODELS
+from ...utils import build_model_context, dummy_hf_overrides
 
 
 @pytest.mark.parametrize(
@@ -124,3 +132,53 @@ def test_ernie45_vl_video_budget_ignores_image_pixel_limit():
     dummy = processor.get_dummy_mm_inputs({"video": 1})
 
     assert budget["video"] == _video_embeds(dummy)
+
+
+def _tiny_ernie45_vl(hf_config):
+    hf_config = dummy_hf_overrides(
+        hf_config, model_arch="Ernie4_5_VLMoeForConditionalGeneration"
+    )
+    if hasattr(hf_config, "vision_config"):
+        hf_config.vision_config.depth = 2
+    return hf_config
+
+
+@pytest.mark.usefixtures("dist_init")
+def test_ernie45_vl_encodes_videos_in_frame_pairs():
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(ERNIE)
+    model_config = ModelConfig(
+        ERNIE,
+        trust_remote_code=model_info.trust_remote_code,
+        revision=model_info.revision,
+        dtype="float32",
+        hf_overrides=_tiny_ernie45_vl,
+        max_model_len=4096,
+    )
+    vllm_config = VllmConfig(model_config=model_config)
+    with set_current_vllm_config(vllm_config), set_default_torch_dtype(torch.float32):
+        model = Ernie4_5_VLMoeForConditionalGeneration(vllm_config=vllm_config)
+    torch.manual_seed(0)
+    for module in (model.vision_model, model.resampler_model):
+        for param in module.parameters():
+            torch.nn.init.normal_(param, std=0.02)
+    process_weights_after_loading(model, model_config, torch.device("cpu"))
+
+    grid_thw = torch.tensor([[4, 8, 12], [2, 4, 8]])
+    pixel_values = torch.randn(int(grid_thw.prod(-1).sum()), 588)
+    vision_calls = []
+    hook = model.vision_model.register_forward_pre_hook(
+        lambda _, args: vision_calls.append(len(args[0]))
+    )
+    with torch.inference_mode():
+        embeds = model.embed_multimodal(
+            pixel_values_videos=pixel_values, video_grid_thw=grid_thw
+        )
+        hook.remove()
+        expected = model.resampler_model(
+            model._vision_forward(pixel_values, grid_thw), grid_thw
+        )
+
+    assert vision_calls == [2 * 8 * 12, 2 * 8 * 12, 2 * 4 * 8]
+    assert embeds is not None
+    assert [len(e) for e in embeds] == [4 * 8 * 12 // 8, 2 * 4 * 8 // 8]
+    torch.testing.assert_close(torch.cat(embeds), expected)
