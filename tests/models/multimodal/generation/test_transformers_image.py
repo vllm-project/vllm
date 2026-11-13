@@ -6,7 +6,7 @@ from transformers import AutoModelForImageTextToText
 
 from ....conftest import HfRunner, ImageTestAssets, VllmRunner
 
-MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
+MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
 IMAGE_PROMPT = (
     "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
     "Describe this image in detail.<|im_end|>\n<|im_start|>assistant\n"

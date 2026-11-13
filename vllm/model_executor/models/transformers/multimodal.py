@@ -965,7 +965,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         indexes = getattr(vision_config, "deepstack_visual_indexes", None) or []
         self.deepstack_num_levels = len(indexes)
         self.deepstack_num_tokens = 0
+        self.register_buffer("deepstack_input_embeds", None, persistent=False)
         if not self.deepstack_num_levels:
+            if "deepstack" in self.config.to_json_string():
+                logger.warning_once(
+                    "Only DeepStack configured by `vision_config."
+                    "deepstack_visual_indexes` is supported, so this model's "
+                    "DeepStack features will be ignored and outputs may be degraded."
+                )
             return
         if (
             not self.pp_group.is_first_rank
@@ -1321,10 +1328,15 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             get_modality_features = getattr(self.model, f"get_{modality}_features")
             features = get_modality_features(pixel_values, return_dict=True, **kwargs)
         embeddings = features.pooler_output
-        # Carried alongside the embeddings so the encoder cache keeps them together.
-        # Other layouts (e.g. Granite 4 Vision's layer map) aren't supported yet.
-        deepstack = getattr(features, "deepstack_features", None)
-        if not (self.deepstack_num_levels and deepstack):
+        if not self.deepstack_num_levels:
+            return embeddings
+        # Carried alongside the embeddings so the encoder cache keeps them together
+        if not (deepstack := getattr(features, "deepstack_features", None)):
+            logger.warning_once(
+                "`get_%s_features` returned no `deepstack_features`, so DeepStack "
+                "features will be ignored and outputs may be degraded.",
+                modality,
+            )
             return embeddings
         if isinstance(embeddings, torch.Tensor):
             return torch.cat([embeddings, *deepstack], dim=-1)
@@ -1368,7 +1380,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        has_deepstack = hasattr(self, "deepstack_input_embeds")
+        has_deepstack = self.deepstack_input_embeds is not None
         has_mm = multimodal_embeddings is not None and len(multimodal_embeddings) > 0
         deepstack_flat = None
         if has_deepstack and has_mm:
