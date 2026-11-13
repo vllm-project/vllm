@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 
@@ -85,6 +84,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         super().set_attn(
             model_state,
@@ -92,6 +92,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             block_tables,
             target_input_buffers,
             target_attn_groups,
+            kernel_block_sizes,
         )
         self.expanded_slot_mappings = torch.empty(
             block_tables.num_kv_cache_groups,
@@ -127,9 +128,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             return get_model(
                 vllm_config=draft_vllm_config,
                 prefix="draft_model",
-                load_config=get_pp_safe_draft_load_config(
-                    get_draft_load_config(draft_vllm_config)
-                ),
+                load_config=get_draft_load_config(draft_vllm_config),
             )
 
     @torch.inference_mode()
