@@ -258,54 +258,49 @@ def _make_xqa_ragged_draft_block_mask(
     return _pack_draft_block_bool_mask(bool_mask, num_packed)
 
 
-def _query_token_request_indices(
-    query_start_loc: torch.Tensor, num_tokens: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Map packed query tokens to requests without a host sync."""
+def _fill_mixed_causal_metadata(
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    causal: torch.Tensor,
+    num_tokens: int,
+    window_bounds: dict[int, torch.Tensor],
+    token_causal: torch.Tensor | None,
+) -> None:
+    """Fill per-token mixed-causal metadata in place without a host sync.
+
+    `window_bounds[w]` rows get KV starts and ends: `[pos - w, pos]` if causal,
+    else `[pos - w, pos + w]`. `token_causal` gets the causal flags. Padding
+    tokens get `[0, 0]` and False.
+    """
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     token_indices = torch.arange(
-        num_tokens,
-        dtype=query_start_loc.dtype,
-        device=query_start_loc.device,
+        num_tokens, dtype=query_start_loc.dtype, device=query_start_loc.device
     )
     request_indices = torch.searchsorted(
         query_start_loc[1:], token_indices, out_int32=True, right=True
     ).clamp_(max=query_lens.shape[0] - 1)
     is_query_token = token_indices < query_start_loc[-1]
-    return query_lens, request_indices, token_indices, is_query_token
-
-
-def _make_variable_window_bounds(
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    causal: torch.Tensor,
-    window_left: int,
-    num_tokens: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-token KV bounds: `[pos - w, pos]` if causal, else `[pos - w, pos + w]`."""
-    query_lens, request_indices, token_indices, is_query_token = (
-        _query_token_request_indices(query_start_loc, num_tokens)
-    )
+    is_causal = causal[request_indices] != 0
+    if token_causal is not None:
+        torch.logical_and(is_causal, is_query_token, out=token_causal)
+    if not window_bounds:
+        return
     token_seq_lens = seq_lens[request_indices]
-    query_positions = (
+    positions = (
         token_seq_lens
         - query_lens[request_indices]
         + token_indices
         - query_start_loc[request_indices]
     )
-
-    if window_left < 0:
-        starts = torch.zeros_like(query_positions)
-        bidirectional_ends = token_seq_lens - 1
-    else:
-        starts = torch.clamp(query_positions - window_left, min=0)
-        bidirectional_ends = torch.minimum(
-            query_positions + window_left, token_seq_lens - 1
+    for window_left, bounds in window_bounds.items():
+        starts = torch.clamp(positions - window_left, min=0)
+        ends = torch.where(
+            is_causal,
+            positions,
+            torch.minimum(positions + window_left, token_seq_lens - 1),
         )
-    ends = torch.where(
-        causal[request_indices] != 0, query_positions, bidirectional_ends
-    )
-    return torch.where(is_query_token, starts, 0), torch.where(is_query_token, ends, 0)
+        bounds[0].copy_(torch.where(is_query_token, starts, 0))
+        bounds[1].copy_(torch.where(is_query_token, ends, 0))
 
 
 @triton.jit
@@ -692,7 +687,7 @@ class FlashInferBackend(AttentionBackend):
                 # The fa2 mm-prefix wrapper cannot read these pages.
                 and not _native_mm_prefix(vllm_config)
             )
-        # TRTLLM-Gen has 128+ token page kernels only for head dims 64/128/256.
+        # Head dim 512 has no TRTLLM-Gen kernels for 128+ token pages.
         if isinstance(kv_cache_spec, AttentionSpec) and (
             kv_cache_spec.head_size not in (64, 128, 256)
         ):
@@ -1285,8 +1280,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
             for w in self.sliding_window_lefts
         }
-        self.token_causal_buf = torch.zeros(
-            self.max_num_batched_tokens, dtype=torch.bool, device=self.device
+        self.token_causal_buf = (
+            torch.zeros(
+                self.max_num_batched_tokens, dtype=torch.bool, device=self.device
+            )
+            if any(p.window_left < 0 for p in per_layer_parameters.values())
+            else None
         )
 
     def _resolve_cache_dtype(self) -> str:
@@ -2043,29 +2042,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 variable_window_bounds = None
                 token_causal = None
                 if isinstance(causal, torch.Tensor):
-                    prefill_causal = causal[prefill_start:]
-                    variable_window_bounds = {}
-                    for window_left, buf in self.variable_window_bounds_buf.items():
-                        bounds = buf[:, :num_prefill_tokens]
-                        starts, ends = _make_variable_window_bounds(
-                            qo_indptr_prefill_gpu,
-                            prefill_seq_lens,
-                            prefill_causal,
-                            window_left,
-                            num_prefill_tokens,
-                        )
-                        bounds[0].copy_(starts)
-                        bounds[1].copy_(ends)
-                        variable_window_bounds[window_left] = bounds
-                    _, request_indices, _, is_query_token = (
-                        _query_token_request_indices(
-                            qo_indptr_prefill_gpu, num_prefill_tokens
-                        )
-                    )
-                    token_causal = torch.logical_and(
-                        prefill_causal[request_indices] != 0,
-                        is_query_token,
-                        out=self.token_causal_buf[:num_prefill_tokens],
+                    variable_window_bounds = {
+                        w: buf[:, :num_prefill_tokens]
+                        for w, buf in self.variable_window_bounds_buf.items()
+                    }
+                    if self.token_causal_buf is not None:
+                        token_causal = self.token_causal_buf[:num_prefill_tokens]
+                    _fill_mixed_causal_metadata(
+                        qo_indptr_prefill_gpu,
+                        prefill_seq_lens,
+                        causal[prefill_start:],
+                        num_prefill_tokens,
+                        variable_window_bounds,
+                        token_causal,
                     )
                 attn_metadata.prefill = TRTLLMPrefill(
                     block_tables=prefill_block_tables,
