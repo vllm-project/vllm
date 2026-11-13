@@ -125,3 +125,28 @@ def test_vector_metric(test_registry, num_engines):
         assert m.labels["model"] == "llama"
         assert m.labels["engine_index"] in engine_labels
         engine_labels.remove(m.labels["engine_index"])
+
+
+def test_vector_metric_per_label_max_pos(test_registry):
+    c = prometheus_client.Counter(
+        "vllm:spec_decode_num_accepted_tokens_per_pos",
+        "Vector-like counter metric",
+        labelnames=["position", "model", "engine_index"],
+        registry=test_registry,
+    )
+    c.labels(position="0", model="llama-small", engine_index="0").inc(8)
+    c.labels(position="1", model="llama-small", engine_index="0").inc(4)
+
+    c.labels(position="0", model="llama-large", engine_index="1").inc(12)
+    c.labels(position="1", model="llama-large", engine_index="1").inc(9)
+    c.labels(position="2", model="llama-large", engine_index="1").inc(6)
+    c.labels(position="3", model="llama-large", engine_index="1").inc(2)
+
+    metrics = {
+        m.labels["engine_index"]: m
+        for m in get_metrics_snapshot()
+        if isinstance(m, Vector)
+    }
+    assert len(metrics) == 2
+    assert metrics["0"].values == [8, 4]
+    assert metrics["1"].values == [12, 9, 6, 2]
