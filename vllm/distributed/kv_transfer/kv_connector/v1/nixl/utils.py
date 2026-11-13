@@ -12,8 +12,10 @@ import zmq
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheGroup,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
 )
 
@@ -66,6 +68,14 @@ def get_dcp_replicated_group_ids(groups: Sequence[KVCacheGroup]) -> set[int]:
         if issubclass(get_representative_spec_type(group), MLAAttentionSpec)
         and not group.dcp_sharded
     }
+
+
+def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
+    return issubclass(spec_type, AttentionSpec)
+
+
+def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
+    return issubclass(spec_type, MambaSpec)
 
 
 # Trailing 8-hex randomization suffix appended by

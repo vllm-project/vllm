@@ -24,6 +24,7 @@ from vllm.config import (
 )
 from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import contiguous_byte_ranges
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -218,21 +219,50 @@ def set_mtp_config(
 
 def make_kv_cache_group(
     layer_names: list[str],
-    spec: KVCacheSpec,
+    layer: KVCacheSpec | KVCacheLayerConfig,
     manager_cls: type[SingleTypeKVCacheManager] | None = None,
     manager_config: ManagerConfig | None = None,
     **kwargs,
 ) -> KVCacheGroup:
-    """A group whose layers all share `spec`. Defaults to full attention,
-    or Mamba for a `MambaSpec`."""
+    """Group of layers sharing one spec (or layer config). Defaults to full
+    attention, or Mamba for a `MambaSpec`."""
+    if isinstance(layer, KVCacheLayerConfig):
+        assert manager_cls is None and manager_config is None
+        return KVCacheGroup.from_layers(dict.fromkeys(layer_names, layer), **kwargs)
     if manager_cls is None:
         manager_cls = (
-            MambaManager if isinstance(spec, MambaSpec) else FullAttentionManager
+            MambaManager if isinstance(layer, MambaSpec) else FullAttentionManager
         )
     if manager_config is None:
         manager_config = manager_cls.config()
-    layer = KVCacheLayerConfig(manager_config, spec)
-    return KVCacheGroup.from_layers({name: layer for name in layer_names}, **kwargs)
+    cfg = KVCacheLayerConfig(manager_config, layer)
+    return KVCacheGroup.from_layers({name: cfg for name in layer_names}, **kwargs)
+
+
+def make_kv_cache_group_from_specs(
+    specs: dict[str, KVCacheSpec],
+    manager_cls: type[SingleTypeKVCacheManager] | None = None,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroup:
+    first = next(iter(specs.values()))
+    if manager_cls is None:
+        manager_cls = (
+            MambaManager if isinstance(first, MambaSpec) else FullAttentionManager
+        )
+    if manager_config is None:
+        manager_config = manager_cls.config()
+    layers = {
+        name: KVCacheLayerConfig(manager_config, spec) for name, spec in specs.items()
+    }
+    return KVCacheGroup.from_layers(layers, **kwargs)
+
+
+def KVCacheGroupSpec(layer_names, spec, **kwargs):
+    """Compat for pre-#61452 tests."""
+    if isinstance(spec, dict):
+        return make_kv_cache_group_from_specs(spec, **kwargs)
+    return make_kv_cache_group(list(layer_names), spec, **kwargs)
 
 
 def create_scheduler(
@@ -799,3 +829,43 @@ def region_pairs_by_index(
         partner=regions,
         groups_match=groups_match,
     )
+
+
+def transfer_kv(
+    src_spec: AttentionSpec,
+    src_caches: list[tuple[torch.Tensor, torch.Tensor]],
+    src_tp: int,
+    dst_spec: AttentionSpec,
+    dst_cache: tuple[torch.Tensor, torch.Tensor],
+    dst_tp: int,
+    dst_rank: int,
+) -> None:
+    """Pull one destination rank's KV from the source ranks, as a connector
+    would, through (raw bytes, logical [B, H, N, C] view) cache pairs.
+
+    Asserts both sides agree on the sources and every destination byte is
+    written exactly once."""
+    dst_raw, dst_view = dst_cache
+    written = 0
+    for src_rank, (src_raw, src_view) in enumerate(src_caches):
+        dst_slices = dst_spec.slice_for_tp_transfer(
+            dst_view, dst_tp, dst_rank, src_spec, src_tp, src_rank, receiving=True
+        )
+        src_slices = src_spec.slice_for_tp_transfer(
+            src_view, src_tp, src_rank, dst_spec, dst_tp, dst_rank, receiving=False
+        )
+        assert len(src_slices) == len(dst_slices)
+        for src, dst in zip(src_slices, dst_slices):
+            for src_off, dst_off, size in contiguous_byte_ranges(src, dst):
+                dst_raw[dst_off : dst_off + size] = src_raw[src_off : src_off + size]
+                written += size
+    assert written == dst_raw.numel()
+
+
+def rank_kv_heads(tp_rank: int, tp_size: int, total_num_kv_heads: int) -> range:
+    """KV heads vLLM places on a TP rank; ranks beyond the head count replicate."""
+    if tp_size <= total_num_kv_heads:
+        per_rank = total_num_kv_heads // tp_size
+        return range(tp_rank * per_rank, (tp_rank + 1) * per_rank)
+    head = tp_rank * total_num_kv_heads // tp_size
+    return range(head, head + 1)

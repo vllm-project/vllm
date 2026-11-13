@@ -10,19 +10,19 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
-import msgspec
+import numpy as np
 import pytest
 import torch
 
 from tests.v1.attention.utils import MockMambaBuilder
 from tests.v1.core.utils import uniform_spec
-from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
+from tests.v1.kv_connector.unit.utils import (
+    KVCacheGroupSpec,
+)
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-    NixlAgentMetadata,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import _LocalDescs
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
@@ -40,24 +40,47 @@ from vllm.v1.kv_cache_interface import (
 from .utils import (
     create_request,
     create_vllm_config,
-    expand_strided_descs,
     make_kv_cache_config,
+    make_kv_cache_group,
     make_nixl_scheduler,
     maybe_update_block_size,
     region_pairs_by_index,
 )
 
 
+def _whole_block_descs(worker, ranks=(0,)) -> None:
+    """Move every paired block whole with `ranks`, region `i`'s blocks at
+    desc ids `100 * i` onward on both sides."""
+    pairs = worker._dst_pairs["P"]
+    block_len = worker.block_len_per_layer[0]
+    worker._byte_ranges = {
+        "P": [{r: [(0, 0, block_len)] for r in ranks}] * len(pairs.local)
+    }
+    worker._desc_starts = {
+        "P": {
+            r: np.array(
+                [
+                    (group, local, 100 * local, 100 * remote)
+                    for remote, local, group in zip(
+                        pairs.remote, pairs.local, pairs.group
+                    )
+                ]
+            )
+            for r in ranks
+        }
+    }
+
+
 @pytest.fixture
 def region_pull_worker():
     """Real page mapping and descriptors, with only the transport mocked."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
-
     worker = object.__new__(NixlConnectorWorker)
     worker.engine_id = "D"
     worker.tp_rank = 0
     worker.block_size = 64
     worker._physical_blocks_per_logical_kv_block = 1
+    worker._physical_blocks_per_group = [1, 1]
+    worker._remote_physical_blocks_per_group = {"P": [2]}
     worker.enable_permute_local_kv = False
     worker.enable_heterogeneous_attn_post_process = False
     worker._engine_last_active = {}
@@ -78,9 +101,9 @@ def region_pull_worker():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            make_kv_cache_group(["resident"], spec, enable_kv_transfer=False),
-            make_kv_cache_group(["host"], spec),
-            make_kv_cache_group(["indexer"], spec),
+            KVCacheGroupSpec(["resident"], spec, enable_kv_transfer=False),
+            KVCacheGroupSpec(["host"], spec),
+            KVCacheGroupSpec(["indexer"], spec),
         ],
     )
     worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
@@ -101,10 +124,11 @@ def region_pull_worker():
         remote_block_size=64,
         remote_physical_blocks_per_logical=2,
     )
-    worker.tp_mappings = {"P": TPMapping(((0,), (0,)), (0,), {0: 0}, 0)}
+    worker.source_ranks = {"P": [(0,), (0,)]}
+    # The MLA regions move whole blocks.
+    _whole_block_descs(worker)
     worker._mixed_mem_types = True
-    worker.src_xfer_handles_by_block_size = {64: 1}
-    worker._dram_src_handles_by_block_size = {64: 2}
+    worker._local_descs = {"P": _LocalDescs(1, {}, dram_handle=2)}
     worker.dst_xfer_side_handles = {"P": {0: 3}}
     worker.dst_num_blocks = {"P": 100, "D": 100}
     worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100]}
@@ -130,6 +154,8 @@ def test_region_pull_ignores_allocation_padding(
 
     worker = region_pull_worker
     worker._physical_blocks_per_logical_kv_block = local_ratio
+    worker._physical_blocks_per_group = [local_ratio] * 2
+    worker._remote_physical_blocks_per_group = {"P": [remote_ratio]}
     worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
         remote_tp_size=4,
         remote_dcp_size=1,
@@ -160,7 +186,7 @@ def test_region_pull_ignores_allocation_padding(
     )
     meta = metadata.reqs_to_recv["request"]
     meta.local_physical_block_ids = worker._logical_to_kernel_block_ids(
-        local, local_ratio
+        local, [local_ratio] * 2
     )
     worker._read_blocks_for_req("request", meta)
     read = worker._read_blocks_mixed.call_args.kwargs
@@ -191,7 +217,6 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
         RemoteMeta,
         ReqMeta,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
 
     worker = region_pull_worker
     worker.region_group_ids = list(region_groups)
@@ -210,8 +235,10 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
     remote = worker.transfer_topo.get_engine_info.return_value
     remote.remote_tp_size = remote.remote_dcp_size = 8
     remote.remote_physical_blocks_per_logical = 1
+    worker._remote_physical_blocks_per_group = {"P": [1]}
     ranks = tuple(range(8))
-    worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 8)
+    _whole_block_descs(worker, ranks)
+    worker.source_ranks["P"] = [ranks, ranks]
     worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
     # Two regions with different prefix hits, plus one padding page each.
@@ -301,7 +328,6 @@ def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
         RemoteMeta,
         ReqMeta,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
 
     worker = region_pull_worker
     worker.tp_rank = tp_rank
@@ -312,8 +338,10 @@ def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
     remote = worker.transfer_topo.get_engine_info.return_value
     remote.remote_tp_size = remote.remote_dcp_size = 4
     remote.remote_physical_blocks_per_logical = 1
+    worker._remote_physical_blocks_per_group = {"P": [1, 1]}
     ranks = tuple(range(4))
-    worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 0)
+    worker.source_ranks["P"] = [ranks, ranks]
+    _whole_block_descs(worker, ranks)
     worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
     # 8 pages: target pages are interleaved over the 4 remote DCP ranks (2 remote
@@ -398,9 +426,9 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
 @pytest.mark.parametrize(
     "swa_enabled,expected_sw_sizes",
     [
-        # SWA enabled: full attention (0) + sliding window (2048/16=128)
+        # SWA enabled: AttentionSpec (0) + AttentionSpec (2048/16=128)
         (True, [0, 128 + 1]),
-        # SWA disabled: only full attention (0)
+        # SWA disabled: only AttentionSpec (0)
         (False, [0]),
     ],
 )
@@ -431,35 +459,6 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     assert scheduler.blocks_per_sw == expected_sw_sizes, (
         f"Expected sw_sizes={expected_sw_sizes}, got {scheduler.blocks_per_sw}"
     )
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "use_mla,source_ranks,tp_ratio,expected",
-    [
-        pytest.param(True, (0,), -2, False, id="pure_mla_with_remote_dcp"),
-        pytest.param(True, (0, 1), -2, True, id="hybrid_mla_ssm"),
-        pytest.param(False, (0,), -2, True, id="full_attention"),
-        pytest.param(False, (0,), 2, False, id="local_tp_greater"),
-    ],
-)
-def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expected):
-    """Handle creation and selection must use the same TP-mapping predicate.
-
-    In pure MLA, DCP can target several physical remote workers even though
-    the TP mapping has one replicated attention source. Those workers own
-    disjoint blocks, so every read uses the whole local-region handle.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
-    worker = object.__new__(NixlConnectorWorker)
-    worker.use_mla = use_mla
-    plan = MagicMock()
-    plan.all_source_ranks = source_ranks
-
-    assert worker._needs_split_local_xfer_handles(tp_ratio, plan) is expected
 
 
 @pytest.mark.cpu_test
@@ -649,39 +648,6 @@ def test_apply_dcp_prefix_caching_matches_global_logical_positions(
 
 
 @pytest.mark.cpu_test
-def test_logical_to_kernel_block_ids_with_hma():
-    """Test _logical_to_kernel_block_ids expands blocks when HMA is enabled.
-
-    When HMA is enabled, the logical block size may differ from the kernel
-    block size. Each logical block maps to multiple kernel blocks.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
-    # Create a mock worker with just the required attributes
-    # (use __new__ to skip __init__)
-    worker = object.__new__(NixlConnectorWorker)
-
-    # Simulate HMA scenario: logical block size = 32, kernel block size = 16
-    # So each logical block maps to 2 kernel blocks eg [0]->[0,1]
-    worker._physical_blocks_per_logical_kv_block = 2
-    # FA + SW groups (neither is MambaSpec, so both get expanded)
-    worker.kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
-
-    # Test conversion: FA + SW group
-    logical_block_ids = [[0, 1, 2], [3, 4]]
-    kernel_block_ids = worker._logical_to_kernel_block_ids(
-        logical_block_ids, worker._physical_blocks_per_logical_kv_block
-    )
-
-    expected_kernel_block_ids = [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]]
-    assert kernel_block_ids == expected_kernel_block_ids, (
-        f"Expected {expected_kernel_block_ids}, got {kernel_block_ids}"
-    )
-
-
-@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "is_rocm,has_mamba,use_host_buffer,done_recving,expected_syncs",
     [
@@ -725,12 +691,12 @@ def test_sync_device_after_direct_recv_gates(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_kinds,remote_physical_per_logical,"
+    "group_spec_types,remote_physical_per_logical,"
     "local_physical_per_logical,tp_ratio,remote_block_ids,"
     "expected_remote_block_ids",
     [
         pytest.param(
-            ("full_attention", "sliding_window"),
+            ("AttentionSpec", "AttentionSpec"),
             2,
             2,
             1,
@@ -743,7 +709,7 @@ def test_sync_device_after_direct_recv_gates(
         # FA logical block 5 → kernel [170..203], block 6 → [204..237].
         # Mamba block unchanged.
         pytest.param(
-            ("full_attention", "mamba"),
+            ("AttentionSpec", "MambaSpec"),
             34,
             66,
             -4,
@@ -754,7 +720,7 @@ def test_sync_device_after_direct_recv_gates(
     ],
 )
 def test_read_blocks_for_req_expands_remote_ids(
-    group_kinds,
+    group_spec_types,
     remote_physical_per_logical,
     local_physical_per_logical,
     tp_ratio,
@@ -772,9 +738,6 @@ def test_read_blocks_for_req_expands_remote_ids(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-        TPMapping,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -783,16 +746,15 @@ def test_read_blocks_for_req_expands_remote_ids(
         MambaSpec,
     )
 
-    kind_to_spec_type = {
-        "full_attention": AttentionSpec,
-        "sliding_window": AttentionSpec,
-        "mamba": MambaSpec,
+    spec_name_to_type = {
+        "AttentionSpec": AttentionSpec,
+        "MambaSpec": MambaSpec,
     }
-    resolved_types = tuple(kind_to_spec_type[n] for n in group_kinds)
+    resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
-    worker.block_size = 16
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._physical_blocks_per_group = [local_physical_per_logical] * 2
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
     worker._remote_agents = {"remote-engine": {}}
@@ -805,14 +767,19 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._has_mamba = any(t is MambaSpec for t in resolved_types)
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
-    has_swa = "sliding_window" in group_kinds
+    has_swa = any(t is AttentionSpec for t in resolved_types)
     worker.kv_cache_config = make_kv_cache_config(
-        block_size=16 * local_physical_per_logical,
-        swa_enabled=has_swa,
-        mamba_enabled=has_mamba,
+        block_size=16, swa_enabled=has_swa, mamba_enabled=has_mamba
     )
 
     remote_engine_id = "remote-engine"
+    # The remote advertises the physical blocks per logical block of each of
+    # its cache groups; a Mamba state is one block per logical block.
+    worker._remote_physical_blocks_per_group = {
+        remote_engine_id: [
+            1 if t is MambaSpec else remote_physical_per_logical for t in resolved_types
+        ]
+    }
     worker.region_group_ids = list(range(len(resolved_types)))
     worker.dst_region_group_ids = {remote_engine_id: list(worker.region_group_ids)}
     worker._dst_pairs = {
@@ -822,21 +789,16 @@ def test_read_blocks_for_req_expands_remote_ids(
     }
 
     worker.transfer_topo = MagicMock()
-    # tp_ratio not exercised (all_source_ranks is empty so no reads run),
+    # tp_ratio not exercised (no source ranks, so no reads run),
     # but set for realism.
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
-    worker.transfer_topo.block_size_ratio.return_value = 1
     remote_info = MagicMock()
-    remote_info.remote_block_size = 16
     remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
     remote_info.remote_dcp_size = 1
     worker.transfer_topo.get_engine_info.return_value = remote_info
     worker.use_mla = False
 
-    mock_plan = MagicMock(spec=TPMapping)
-    mock_plan.all_source_ranks = ()
-    mock_plan.source_ranks_per_group = ()
-    worker.tp_mappings = {remote_engine_id: mock_plan}
+    worker.source_ranks = {remote_engine_id: []}
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -849,7 +811,6 @@ def test_read_blocks_for_req_expands_remote_ids(
             "remote_host": "localhost",
             "remote_port": 1234,
             "tp_size": 1,
-            "remote_num_tokens": 1000,
         },
     )
 
@@ -910,7 +871,7 @@ def test_apply_prefix_caching_mamba_hybrid(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import MambaSpec
 
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = True
@@ -990,7 +951,7 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import MambaSpec
 
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = True
@@ -1021,7 +982,7 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import MambaSpec
 
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = True
@@ -1251,70 +1212,6 @@ def test_nixl_metadata_hma_block_ids_structure():
     assert list(req_meta.remote.block_ids[1]) == [18, 19, 20, 21]
 
 
-def _make_mock_worker_for_desc_ids(
-    num_regions: int,
-    has_mamba: bool,
-    group_spec_types: tuple,
-    block_len_per_layer: list[int] | None = None,
-):
-    """Build a mock NixlConnectorWorker with attrs needed by _compute_desc_ids."""
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
-    worker = MagicMock(spec=NixlConnectorWorker)
-    worker.num_regions = num_regions
-    worker._has_mamba = has_mamba
-    worker._group_spec_types = group_spec_types
-    worker.block_len_per_layer = block_len_per_layer or [100]
-    worker._conv_decomp = None
-    worker._is_csa_linear = False
-    worker._ssm_region_indices = [0] if has_mamba else []
-    worker._group_region_indices = []
-    worker._ple_group_index = None
-    worker._ple_region_index = None
-    if has_mamba:
-        from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
-            MambaConvSplitInfo,
-        )
-
-        # Mamba2/GDN layout: 3 conv sub-projections -> 4 NIXL regions per layer.
-        worker._conv_decomp = MambaConvSplitInfo(
-            conv_rows=3,
-            local_proj_dims=(1, 1, 1),
-            conv_dtype_size=2,
-            ssm_sizes=(0, 0),
-        )
-    worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
-        worker, NixlConnectorWorker
-    )
-    return worker
-
-
-@pytest.mark.cpu_test
-def test_shared_nixl_region_reads_once_per_paired_group():
-    """A region shared by three groups is read once at each group's blocks."""
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=3,
-        has_mamba=False,
-        group_spec_types=(AttentionSpec,) * 3,
-        block_len_per_layer=[100] * 3,
-    )
-
-    result = worker._compute_desc_ids(
-        block_ids=([1], [2], [3]),
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        region_num_blocks=[10, 10, 10],
-        pairs=([0, 1, 1, 1, 2], [0, 0, 1, 2, 2]),
-    )
-
-    assert result.tolist() == [1, 11, 12, 13, 23]
-
-
 @pytest.mark.cpu_test
 def test_nixl_region_sort_preserves_pipeline_layer_order():
     """Numeric layer order prevents PP peers from pairing different regions."""
@@ -1329,153 +1226,6 @@ def test_nixl_region_sort_preserves_pipeline_layer_order():
         "model.layers.2.self_attn",
         "model.layers.10.self_attn",
     ]
-
-
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_hybrid_ssm():
-    """Test _compute_desc_ids uses per-group strides for hybrid
-    FA+SSM when ratio=1 (no kernel block size mismatch)."""
-    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=2,
-        has_mamba=True,
-        group_spec_types=(AttentionSpec, MambaSpec),
-        block_len_per_layer=[100],
-    )
-
-    fa_blocks = [3, 5]
-    ssm_blocks = [1, 2]
-    result = worker._compute_desc_ids(
-        block_ids=(fa_blocks, ssm_blocks),
-        dst_num_blocks=100,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        # FA group in both regions, SSM group in SSM region 0.
-        pairs=([0, 1, 0], [0, 0, 1]),
-    )
-
-    expected = [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
-    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
-
-
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_selects_attention_regions_by_group():
-    """Each attention group's blocks address only that group's regions."""
-    from vllm.v1.kv_cache_interface import AttentionSpec
-
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=3,
-        has_mamba=False,
-        group_spec_types=(AttentionSpec, AttentionSpec),
-        block_len_per_layer=[100, 100, 100],
-    )
-    result = worker._compute_desc_ids(
-        block_ids=([1, 2], [7]),
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        pairs=([0, 1, 2], [0, 0, 1]),
-    )
-
-    assert result.tolist() == [1, 2, 11, 12, 27]
-
-    remapped = worker._compute_desc_ids(
-        block_ids=([1, 2], [7]),
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        pairs=([0, 1, 2], [1, 1, 0]),
-    )
-    assert remapped.tolist() == [21, 22, 7, 17]
-
-
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_uses_per_region_pool_capacity():
-    """Independent host and device pools use cumulative descriptor offsets."""
-    from vllm.v1.kv_cache_interface import AttentionSpec
-
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=2,
-        has_mamba=False,
-        group_spec_types=(AttentionSpec, AttentionSpec),
-        block_len_per_layer=[100, 100],
-    )
-    result = worker._compute_desc_ids(
-        block_ids=([4], [8]),
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        region_num_blocks=[5, 10],
-        pairs=([0, 1], [0, 1]),
-    )
-
-    assert result.tolist() == [4, 13]
-
-
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_kernel_block_mismatch():
-    """Test _compute_desc_ids uses different strides for FA
-    (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
-    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-
-    ratio = 4
-    logical_blocks = 100
-    num_blocks = logical_blocks * ratio  # 400 kernel blocks
-
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=2,
-        has_mamba=True,
-        group_spec_types=(AttentionSpec, MambaSpec),
-        block_len_per_layer=[100],
-    )
-
-    fa_blocks = [3, 7]
-    ssm_blocks = [1, 2]
-    result = worker._compute_desc_ids(
-        block_ids=(fa_blocks, ssm_blocks),
-        dst_num_blocks=num_blocks,
-        block_size_ratio=None,
-        physical_blocks_per_logical=ratio,
-        # FA group in both regions, SSM group in SSM region 0.
-        pairs=([0, 1, 0], [0, 0, 1]),
-    )
-
-    expected = [3, 7, 403, 407, 801, 802, 901, 902, 1001, 1002, 1101, 1102]
-    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
-
-
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_hetero_block_size_hybrid():
-    """With a block-size ratio, FA desc ids are ratio-expanded while SSM
-    desc ids keep the unexpanded logical stride (state blocks are never
-    sub-split)."""
-    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=2,
-        has_mamba=True,
-        group_spec_types=(AttentionSpec, MambaSpec),
-        block_len_per_layer=[100],
-    )
-
-    ratio = 4
-    # FA ids are already remote-granularity (expanded) sub-block ids.
-    fa_sub_blocks = [3, 5]
-    ssm_blocks = [1]
-    result = worker._compute_desc_ids(
-        block_ids=(fa_sub_blocks, ssm_blocks),
-        dst_num_blocks=100,
-        block_size_ratio=ratio,
-        physical_blocks_per_logical=1,
-        # FA group in both regions, SSM group in SSM region 0.
-        pairs=([0, 1, 0], [0, 0, 1]),
-    )
-
-    # FA regions have 100*4 entries each; SSM regions (4 per layer) start at
-    # 2*400 and stride by the unexpanded 100 logical blocks.
-    expected = [3, 5, 403, 405, 801, 901, 1001, 1101]
-    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
 
 
 def _bind_worker_method(worker, name):
@@ -1496,7 +1246,7 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+    from vllm.v1.kv_cache_interface import MambaSpec
 
     worker = MagicMock(spec=NixlConnectorWorker)
     worker._group_spec_types = (AttentionSpec, MambaSpec)
@@ -1571,7 +1321,7 @@ def test_post_process_zeroes_untransferred_tail(
     _bind_worker_method(worker, "post_process_device_kv_on_receive")
 
     # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], range(6))])
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
     assert torch.equal(attn_cache[2], expected[2])
@@ -1845,306 +1595,6 @@ def test_has_mamba_init(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "ssm_sizes,block_len,expected_ratio",
-    [
-        # Nemotron 30B TP=1: ceil((36864 + 2097152) / 8192) = 261
-        ((36864, 2097152), 8192, 261),
-        # Nemotron 30B TP=2: ceil((18432 + 1048576) / 4096) = 261
-        ((18432, 1048576), 4096, 261),
-        # Nemotron 30B TP=4: ceil((9216 + 524288) / 4096) = 131
-        ((9216, 524288), 4096, 131),
-    ],
-)
-def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_ratio):
-    """Verify that compute_physical_blocks_per_logical is TP-dependent.
-
-    With dimension-sharded Mamba state, the ratio differs across TP sizes
-    (e.g. TP=1 → 261, TP=4 → 131 for Nemotron 30B). This is why
-    _physical_blocks_per_logical must be stored per-engine.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        compute_physical_blocks_per_logical,
-    )
-
-    assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "mamba_type,local_tp,conv_dim_local,conv_rows,temporal_shape,expected_proj_dims",
-    [
-        # nvidia/Nemotron-H-8B-Base-8K (Mamba2)
-        # mamba_num_heads=128, head_dim=64, n_groups=8, ssm_state_size=128
-        pytest.param(
-            "mamba2",
-            1,
-            10240,
-            3,
-            (128, 64, 128),
-            (8192, 1024, 1024),
-            id="nemotron_h_8b_tp1",
-        ),
-        pytest.param(
-            "mamba2",
-            4,
-            2560,
-            3,
-            (32, 64, 128),
-            (2048, 256, 256),
-            id="nemotron_h_8b_tp4",
-        ),
-        # nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B (Mamba2)
-        # mamba_num_heads=64, head_dim=64, n_groups=8, ssm_state_size=128
-        pytest.param(
-            "mamba2",
-            1,
-            6144,
-            3,
-            (64, 64, 128),
-            (4096, 1024, 1024),
-            id="nemotron_nano_30b_tp1",
-        ),
-        # Qwen/Qwen3.5-0.8B (GDN, symmetric: num_v=num_k=16)
-        # key_dim=2048, value_dim=2048, conv_dim=6144
-        pytest.param(
-            "gdn_attention",
-            1,
-            6144,
-            3,
-            (16, 128, 128),
-            (2048, 2048, 2048),
-            id="qwen35_08b_tp1",
-        ),
-        pytest.param(
-            "gdn_attention",
-            4,
-            1536,
-            3,
-            (4, 128, 128),
-            (512, 512, 512),
-            id="qwen35_08b_tp4",
-        ),
-        # Qwen/Qwen3.5-4B (GDN, asymmetric: num_v=32, num_k=16, K:V=1:2)
-        # key_dim=2048, value_dim=4096, conv_dim=8192
-        pytest.param(
-            "gdn_attention",
-            1,
-            8192,
-            3,
-            (32, 128, 128),
-            (2048, 2048, 4096),
-            id="qwen35_4b_tp1",
-        ),
-        # Qwen/Qwen3.5-27B (GDN, asymmetric: num_v=48, num_k=16, K:V=1:3)
-        # key_dim=2048, value_dim=6144, conv_dim=10240
-        pytest.param(
-            "gdn_attention",
-            1,
-            10240,
-            3,
-            (48, 128, 128),
-            (2048, 2048, 6144),
-            id="qwen35_27b_tp1",
-        ),
-        pytest.param(
-            "gdn_attention",
-            8,
-            1280,
-            3,
-            (6, 128, 128),
-            (256, 256, 768),
-            id="qwen35_27b_tp8",
-        ),
-        # ai21labs/AI21-Jamba2-Mini (Mamba1)
-        # mamba d_inner = mamba_expand(2) * hidden_size(4096) = 8192
-        # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
-        # Conv state holds only x: a single contiguous sub-projection.
-        pytest.param(
-            "mamba1",
-            1,
-            8192,
-            3,
-            (8192, 16),
-            (8192,),
-            id="jamba_mini_tp1",
-        ),
-        pytest.param(
-            "mamba1",
-            4,
-            2048,
-            3,
-            (2048, 16),
-            (2048,),
-            id="jamba_mini_tp4",
-        ),
-        pytest.param(
-            "mamba1",
-            8,
-            1024,
-            3,
-            (1024, 16),
-            (1024,),
-            id="jamba_mini_tp8",
-        ),
-    ],
-)
-def test_derive_mamba_conv_split(
-    monkeypatch,
-    mamba_type,
-    local_tp,
-    conv_dim_local,
-    conv_rows,
-    temporal_shape,
-    expected_proj_dims,
-):
-    """Parametrized test for derive_mamba_conv_split with real model configs.
-
-    Values generated by verify_conv_split.py which loads HuggingFace configs
-    and calls vLLM's derive_mamba_conv_split directly.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        derive_mamba_conv_split,
-    )
-    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import MambaSpec
-
-    _TYPE_MAP = {
-        "mamba1": MambaAttentionBackendEnum.MAMBA1,
-        "mamba2": MambaAttentionBackendEnum.MAMBA2,
-        "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN,
-    }
-    mamba_type_enum = _TYPE_MAP[mamba_type]
-
-    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
-    spec = MambaSpec(
-        block_size=64,
-        shapes=((conv_dim_local, conv_rows), temporal_shape),
-        dtypes=(torch.bfloat16, torch.bfloat16),
-        mamba_type=mamba_type_enum,
-    )
-    out = derive_mamba_conv_split(spec, local_tp=local_tp)
-    assert out.local_proj_dims == expected_proj_dims
-    assert out.conv_rows == conv_rows
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "mamba_enabled,swa_enabled,"
-    "local_physical_per_logical,remote_physical_per_logical,"
-    "logical_block_ids,expected_kernel_block_ids",
-    [
-        # Qwen3.5-0.8B 4P2D (kernel_block_size=64):
-        #   prefill TP=4: logical_block_size=384 → physical_per_logical=6
-        #   decode  TP=2: logical_block_size=640 → physical_per_logical=10
-        # FA logical [0] → remote kernel [0..9] (1 * 10)
-        # SSM logical [10] → unchanged [10]
-        pytest.param(
-            True,
-            False,
-            6,
-            10,
-            ([0], [10]),
-            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [10]],
-            id="qwen35_4p2d",
-        ),
-        # Qwen3.5-0.8B 2P4D (kernel_block_size=64):
-        #   prefill TP=2: logical_block_size=640 → physical_per_logical=10
-        #   decode  TP=4: logical_block_size=384 → physical_per_logical=6
-        # FA logical [0, 1] → remote kernel [0..5, 6..11] (2 * 6)
-        # SSM logical [10] → unchanged [10]
-        pytest.param(
-            True,
-            False,
-            10,
-            6,
-            ([0, 1], [10]),
-            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [10]],
-            id="qwen35_2p4d",
-        ),
-        # Homogeneous TP (kernel_block_size=64):
-        #   both sides: logical_block_size=640 → physical_per_logical=10
-        # FA logical [0] → kernel [0..9], SSM unchanged
-        pytest.param(
-            True,
-            False,
-            10,
-            10,
-            ([0], [10]),
-            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [10]],
-            id="homo_tp",
-        ),
-        # remote physical_per_logical=1: early return, no expansion
-        pytest.param(
-            True,
-            False,
-            10,
-            1,
-            ([0, 1, 2], [5]),
-            [[0, 1, 2], [5]],
-            id="mamba_remote_physical_per_logical_1",
-        ),
-        # Pure FA (no mamba): single group expanded with remote stride
-        pytest.param(
-            False,
-            False,
-            2,
-            4,
-            ([0, 1],),
-            [[0, 1, 2, 3, 4, 5, 6, 7]],
-            id="pure_fa",
-        ),
-        # FA + SWA (no mamba): both groups expanded
-        pytest.param(
-            False,
-            True,
-            2,
-            3,
-            ([0, 1], [2, 3]),
-            [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11]],
-            id="fa_swa",
-        ),
-    ],
-)
-def test_logical_to_kernel_block_ids_with_remote_ratio(
-    mamba_enabled,
-    swa_enabled,
-    local_physical_per_logical,
-    remote_physical_per_logical,
-    logical_block_ids,
-    expected_kernel_block_ids,
-):
-    """Verify _logical_to_kernel_block_ids uses the remote
-    physical_per_logical for FA expansion, not the local one.
-
-    This was the root cause of silent accuracy corruption in Qwen3.5
-    heterogeneous TP (e.g. 4P2D): the old code used local physical_per_logical
-    for the expansion arange, producing wrong kernel block indices.
-
-    Qwen3.5-0.8B values verified by verify_conv_split.py (issue #13).
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
-    worker = object.__new__(NixlConnectorWorker)
-    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
-    worker.kv_cache_config = make_kv_cache_config(
-        block_size=16,
-        mamba_enabled=mamba_enabled,
-        swa_enabled=swa_enabled,
-    )
-
-    result = worker._logical_to_kernel_block_ids(
-        logical_block_ids,
-        remote_physical_per_logical,
-    )
-    assert list(result) == expected_kernel_block_ids, (
-        f"Expected {expected_kernel_block_ids}, got {result}"
-    )
-
-
-@pytest.mark.cpu_test
 def test_exchange_clipped_blocks_ssm_single_state():
     """SSM lists are reduced to the running state slot: speculative scratch
     slots, null placeholders and the previous step's state carry nothing.
@@ -2183,55 +1633,6 @@ def test_exchange_clipped_blocks_ssm_single_state():
 # ── Hybrid MLA+SSM (KimiLinear-shaped KDA+MLA) tests ─────────────────────
 
 
-def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
-    """KimiLinear-shaped config: one MLA group and two KDA (GDN-typed
-    MambaSpec) groups whose layers share the same HMA tensors, with a
-    mamba-aligned unified page and an MLA kernel block smaller than the
-    logical block."""
-    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import (
-        KVCacheConfig,
-        KVCacheTensor,
-        MambaSpec,
-        MLAAttentionSpec,
-    )
-
-    # 12-token logical blocks over a 4-token MLA kernel block.
-    mla_spec = MLAAttentionSpec(
-        block_size=12, num_kv_heads=1, head_size=6, dtype=torch.float16
-    )
-    unified_page = mla_spec.page_size_bytes
-    kda_spec = MambaSpec(
-        block_size=12,
-        # GDN-decomposable conv (Q|K|V = 2|2|4 cols x 3 rows) + fp32 temporal.
-        shapes=((8, 3), (1, 4, 4)),
-        dtypes=(torch.float16, torch.float32),
-        page_size_padded=unified_page,
-        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-    )
-    assert kda_spec.page_size_bytes == unified_page
-    # The three groups overlay each other, so layer i of every group aliases the same
-    # region: mla.i, kda_a.i and kda_b.i all live at i * layer_stride.
-    layer_stride = num_blocks * unified_page
-    return KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=2 * layer_stride,
-                layers=[f"{prefix}.0", f"{prefix}.1"],
-                layer_stride=layer_stride,
-                block_stride=unified_page,
-            )
-            for prefix in ("mla", "kda_a", "kda_b")
-        ],
-        kv_cache_groups=[
-            make_kv_cache_group(["mla.0", "mla.1"], mla_spec),
-            make_kv_cache_group(["kda_a.0", "kda_a.1"], kda_spec),
-            make_kv_cache_group(["kda_b.0", "kda_b.1"], kda_spec),
-        ],
-    )
-
-
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("kernel_block_size", [16, 8])
 def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size):
@@ -2262,12 +1663,12 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
             ),
         ],
         kv_cache_groups=[
-            make_kv_cache_group(
+            KVCacheGroupSpec(
                 ["mla.host"],
                 spec,
                 host_resident=True,
             ),
-            make_kv_cache_group(["mla.device"], spec),
+            KVCacheGroupSpec(["mla.device"], spec),
         ],
     )
     vllm_config = create_vllm_config(block_size=16)
@@ -2309,196 +1710,10 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         1: gpu_num_blocks * physical_per_logical,
     }
     caches = {"mla.host": host_cache, "mla.device": device_cache}
-    expected_addrs = [
-        caches[name].data_ptr() + block * stride
-        for name, stride, count in zip(
-            worker.region_names,
-            worker.block_stride_per_layer,
-            worker.region_num_blocks,
-            strict=True,
-        )
-        for block in range(count)
+    assert worker.kv_caches_base_addr[worker.engine_id][0] == [
+        caches[name].data_ptr() for name in worker.region_names
     ]
-    local_descs = expand_strided_descs(worker.src_blocks_data)
-    assert local_descs[:, 0].tolist() == expected_addrs
-
-
-@pytest.mark.cpu_test
-def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
-    """Hybrid MLA+KDA registration: HMA tensors shared by both layer types
-    must be flagged as MLA regions even when a KDA layer registers them
-    first, expose TP-independent kernel-granularity block lens, and build
-    FA + mamba descriptors for every region."""
-    from unittest.mock import MagicMock
-
-    from vllm.config import set_current_vllm_config
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
-    kv_cache_config = _make_hybrid_mla_kv_cache_config()
-    unified_page = uniform_spec(kv_cache_config.kv_cache_groups[0]).page_size_bytes
-    vllm_config = create_vllm_config(block_size=12)
-    # The engine rewrites this global value to the smallest scheduler-group
-    # block size. NIXL must retain the transferable groups' 12-token geometry.
-    vllm_config.cache_config.block_size = 4
-    # kv_buffer_device defaults to the *real* platform's device type, which on
-    # a CPU-only test host would make this a host-buffer worker: host xfer
-    # buffers are per-layer, so the HMA shared tensors would not be
-    # deduplicated. Pin it to the faked device type.
-    assert vllm_config.kv_transfer_config is not None
-    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
-
-    fake_backend = MagicMock()
-    fake_backend.get_supported_kernel_block_sizes.return_value = [4]
-    fake_backend.get_name.return_value = "FLASHMLA"
-    fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
-    fake_platform = MagicMock()
-    fake_platform.device_type = "cuda"
-    fake_platform.get_nixl_memory_type.return_value = "VRAM"
-
-    with (
-        patch.object(bw, "NixlWrapper"),
-        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
-        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
-        patch.object(bw, "current_platform", fake_platform),
-        patch(
-            "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
-            return_value="DS",
-        ),
-        set_current_vllm_config(vllm_config),
-    ):
-        worker = NixlConnectorWorker(vllm_config, "test-engine", kv_cache_config)
-        worker.use_mla = True  # opt-125m test config is not MLA; force the flag
-        worker.nixl_wrapper.get_agent_metadata.return_value = b"fake-agent-metadata"
-
-        kernel_page = unified_page // 3
-        block_stride = 2 * kernel_page
-        backing = torch.zeros(12, block_stride, dtype=torch.uint8)
-        tensors = [
-            backing[:, :kernel_page],
-            backing[:, kernel_page:],
-        ]
-        # KDA layer first per tensor: exercises the dual-purpose flag merge.
-        worker.register_kv_caches(
-            {
-                "kda_a.0": tensors[0],
-                "mla.0": tensors[0],
-                "kda_b.0": tensors[0],
-                "kda_a.1": tensors[1],
-                "mla.1": tensors[1],
-                "kda_b.1": tensors[1],
-            }
-        )
-
-    # 12-token logical blocks over the 4-token MLA kernel block.
-    assert worker._physical_blocks_per_logical_kv_block == 3
-    assert worker.block_size == 4 and worker.num_blocks == 12
-    assert worker.region_group_ids == [bw._SHARED_REGION_GROUP_ID] * 2
-    assert worker.block_stride_per_layer == [block_stride, block_stride]
-    # Both shared tensors are dual-purpose: their FA view is MLA even though
-    # a KDA layer registered them first.
-    assert worker._region_is_mla == [True, True]
-    assert worker.num_regions == 2 and worker.num_descs == 24
-    # Kernel-granularity block lens; TP-independent for MLA hybrids.
-    assert worker.block_len_per_layer == [unified_page // 3] * 2
-    # FA runs: one per region x 12 kernel blocks, page stride = block_stride.
-    # Mamba runs: 2 regions x (3 conv sub-projections + 1 ssm), 4 blocks each.
-    assert worker.src_blocks_data.shape == (2 + 8, 5)
-    fa_runs = worker.src_blocks_data[:2]
-    assert fa_runs[:, 1].tolist() == [unified_page // 3] * 2
-    assert fa_runs[:, 3].tolist() == [block_stride] * 2
-    assert fa_runs[:, 4].tolist() == [12] * 2
-    assert worker.src_blocks_data[2:, 4].tolist() == [4] * 8
-    expected_addrs = [
-        tensor.data_ptr() + block * block_stride
-        for tensor in tensors
-        for block in range(12)
-    ]
-    fa_descs = expand_strided_descs(fa_runs)
-    assert fa_descs[:, 0].tolist() == expected_addrs
-    worker.nixl_wrapper.register_memory.assert_called_once()
-    assert worker.xfer_handshake_metadata is not None
-    metadata = msgspec.msgpack.decode(
-        worker.xfer_handshake_metadata.agent_metadata_bytes,
-        type=NixlAgentMetadata,
-    )
-    assert metadata.block_strides == [block_stride, block_stride]
-    assert metadata.region_num_blocks == [12, 12]
-
-
-@pytest.mark.cpu_test
-def test_push_write_hybrid_mla_replicates_attention():
-    """Hybrid MLA+SSM push with P_TP < D_TP: attention blocks must be
-    written to every covered D rank (replicated MLA latent) while SSM state
-    is written per-rank through the split handles."""
-    import threading
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
-        NixlPushConnectorWorker,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-        TPMapping,
-    )
-    from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec
-
-    worker = object.__new__(NixlPushConnectorWorker)
-    worker.shutdown = lambda: None  # type: ignore[method-assign]  # silence __del__
-    worker.use_mla = True
-    worker._has_mamba = True
-    worker._is_csa_linear = False
-    worker._group_spec_types = (MLAAttentionSpec, MambaSpec)
-    worker.transfer_topo = MagicMock()
-    worker.transfer_topo.tp_ratio.return_value = -2
-    remote_info = MagicMock()
-    remote_info.remote_physical_blocks_per_logical = 1
-    remote_info.remote_block_size = 4
-    worker.transfer_topo.get_engine_info.return_value = remote_info
-
-    engine_id = "remote-engine"
-    # Read-oriented mapping collapses the replicated attention group to one
-    # source rank; the SSM state is sharded across both covered D ranks.
-    worker.tp_mappings = {
-        engine_id: TPMapping(
-            source_ranks_per_group=((0,), (0, 1)),
-            all_source_ranks=(0, 1),
-            rank_to_attention_slot={0: 0, 1: 0},
-            rank_offset_factor=0,
-        )
-    }
-    worker.dst_xfer_side_handles = defaultdict(dict, {engine_id: {0: 100, 1: 101}})
-    worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
-    worker.src_xfer_handles_by_block_size = {4: 300}
-    worker.region_group_ids = [0, 1]
-    worker.dst_region_group_ids = {engine_id: [0, 1]}
-    worker._dst_pairs = {engine_id: region_pairs_by_index(2, groups=[0, 1])}
-    worker._sending_transfers = defaultdict(list)
-    worker._sending_transfers_lock = threading.Lock()
-    worker.kv_cache_config = _make_hybrid_mla_kv_cache_config()
-    worker._xfer_blocks = MagicMock(return_value=1)  # type: ignore[method-assign]
-
-    meta = MagicMock()
-    meta.remote.engine_id = engine_id
-    meta.remote.block_ids = [[7, 8], [3]]
-    meta.local_physical_block_ids = [[1, 2], [5]]
-
-    worker._xfer_blocks_for_req("req-1", meta)
-
-    calls = worker._xfer_blocks.call_args_list
-    assert len(calls) == 2
-    for call, rank, local_handle, remote_handle in zip(
-        calls, (0, 1), (200, 201), (100, 101)
-    ):
-        spec = call.kwargs["read_spec"]
-        assert spec.remote_rank == rank
-        # Attention group replicated to every rank, SSM by membership.
-        assert spec.local_block_ids == [[1, 2], [5]]
-        assert spec.remote_block_ids == [[7, 8], [3]]
-        assert call.kwargs["local_xfer_side_handle"] == local_handle
-        assert call.kwargs["remote_xfer_side_handle"] == remote_handle
+    assert worker.block_stride_per_layer == [physical_page_bytes] * 2
 
 
 def _make_host_buffer_worker(copy_op):
@@ -2515,32 +1730,28 @@ def _make_host_buffer_worker(copy_op):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_block_ids",
+    "group_block_ids,expected_ids",
     [
-        # Single group (non-hybrid model).
-        [[1, 2, 3]],
-        # Hybrid model: each group copies only its own layers.
-        [[1, 2], [3, 4], [5]],
+        # Single group (non-hybrid model): one copy, as before.
+        ([[1, 2, 3]], [1, 2, 3]),
+        # Hybrid model: three groups collapse into a single copy.
+        ([[1, 2], [3, 4], [5]], [1, 2, 3, 4, 5]),
         # An empty group contributes no ids.
-        [[1, 2], []],
+        ([[1, 2], []], [1, 2]),
     ],
 )
-def test_sync_recved_kv_copies_each_group_own_layers(group_block_ids):
+def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_ids):
+    """h2d copies are issued once per request, not once per KV cache group."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
 
     calls = []
     worker = _make_host_buffer_worker(
         lambda src, dst, src_ids, dst_ids, direction: calls.append(
-            (list(src), list(dst), src_ids, dst_ids, direction)
+            (src_ids, dst_ids, direction)
         )
     )
-    names = [f"layer.{g}" for g in range(len(group_block_ids))]
-    # "shared" reuses another layer's KV cache: a host buffer, no transfer group.
-    worker.host_xfer_buffers = dict.fromkeys([*names, "shared"])
-    worker.device_kv_caches = dict.fromkeys([*names, "shared"])
-    worker.kv_cache_config = SimpleNamespace(
-        transfer_groups=[SimpleNamespace(layer_names=[name]) for name in names]
-    )
+    worker.host_xfer_buffers = {"layer": None}
+    worker.device_kv_caches = {"layer": None}
 
     meta = ReqMeta(
         local_block_ids=group_block_ids,
@@ -2549,6 +1760,14 @@ def test_sync_recved_kv_copies_each_group_own_layers(group_block_ids):
     )
     worker.sync_recved_kv_to_device("req", meta)
 
-    assert calls == [
-        ([name], [name], ids, ids, "h2d") for name, ids in zip(names, group_block_ids)
+    assert calls == [(expected_ids, expected_ids, "h2d")]
+
+
+@pytest.mark.cpu_test
+def test_logical_to_kernel_block_ids_expands_each_group_by_its_pages():
+    """Each group's block ids expand to the blocks its own views split a
+    block into; a group of whole-block state blocks is left as is."""
+    assert NixlConnectorWorker._logical_to_kernel_block_ids([[0, 2], [3]], [3, 1]) == [
+        [0, 1, 2, 6, 7, 8],
+        [3],
     ]

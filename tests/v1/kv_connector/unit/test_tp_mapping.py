@@ -1,111 +1,223 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for TP mapping and transfer plan utilities.
+"""Tests for NIXL source-rank selection and descriptor lists.
 
-These tests verify that TP mapping produces correct outputs
-(source ranks, split handles, desc IDs).
-No GPU or NIXL required.
+These tests verify that the NIXL worker derives source ranks, byte ranges and
+descriptor lists from the KV cache specs. No GPU or NIXL required.
 """
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import torch
 
-from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-    TPMapping,
-    compute_tp_mapping,
+from tests.v1.kv_connector.unit.utils import region_pairs_by_index
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    TransferTopology,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    NixlAgentMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+)
 
 # ======================================================================
 # Test fixtures / helpers
 # ======================================================================
 
+_ENGINE = "remote-engine"
+_HEAD_SIZE = 8
 
-def _compute_mapping(
-    tp_rank: int = 0,
-    tp_size: int = 1,
-    remote_tp_size: int = 1,
-    is_mla: bool = False,
-    num_kv_heads: int = 8,
-    group_spec_types: tuple[type, ...] = (AttentionSpec,),
-    dcp_size: int = 1,
-    remote_dcp_size: int = 1,
-    head_sharded_kv_heads: int | None = None,
-) -> TPMapping:
-    transfer_topology = object.__new__(TransferTopology)
-    transfer_topology.tp_rank = tp_rank
-    transfer_topology.tp_size = tp_size
-    transfer_topology.is_mla = is_mla
-    transfer_topology.total_num_kv_heads = num_kv_heads
-    transfer_topology.dcp_size = dcp_size
-    return compute_tp_mapping(
-        transfer_topology=transfer_topology,
-        remote_tp_size=remote_tp_size,
-        group_spec_types=group_spec_types,
-        remote_dcp_size=remote_dcp_size,
-        head_sharded_kv_heads=head_sharded_kv_heads,
+
+@dataclass(frozen=True)
+class _ShardedStateSpec(MambaSpec):
+    """One state sharded across TP along its leading dim."""
+
+    def _tp_segments(self) -> tuple[tuple[int, ...], ...]:
+        return ((self.shapes[0][0],),)
+
+
+def _spec(total_kv_heads: int | None, tp_size: int) -> AttentionSpec:
+    """GQA spec of a rank at `tp_size`, or MLA's replicated latent (None)."""
+    if total_kv_heads is None:
+        return MLAAttentionSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=_HEAD_SIZE,
+            dtype=torch.float16,
+            max_tp_shards=1,
+        )
+    return AttentionSpec(
+        block_size=4,
+        num_kv_heads=max(1, total_kv_heads // tp_size),
+        head_size=_HEAD_SIZE,
+        dtype=torch.float16,
     )
 
+
+def _worker(
+    tp_rank: int,
+    tp_size: int,
+    layers: dict[str, KVCacheSpec | int | None],
+    dcp_size: int = 1,
+) -> NixlConnectorWorker:
+    """Worker with one region and cache group per layer: a spec, or the total
+    KV heads of a GQA layer (None: MLA)."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_tp_rank = tp_rank
+    worker.transfer_tp_size = tp_size
+    worker.transfer_topo = TransferTopology(
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        block_size=4,
+        engine_id="local-engine",
+        is_mla=False,
+        is_mamba=False,
+        total_num_kv_heads=1,
+        attn_backends=[],
+        dcp_size=dcp_size,
+    )
+    worker._layer_specs = {
+        name: layer if isinstance(layer, KVCacheSpec) else _spec(layer, tp_size)
+        for name, layer in layers.items()
+    }
+    worker.kv_cache_config = SimpleNamespace(
+        transfer_group_index_by_layer={name: i for i, name in enumerate(layers)}
+    )
+    worker.region_members = [[name] for name in layers]
+    worker._regions_by_layer = {name: [i] for i, name in enumerate(layers)}
+    worker.block_len_per_layer = [
+        spec.page_size_bytes for spec in worker._layer_specs.values()
+    ]
+    worker.block_stride_per_layer = list(worker.block_len_per_layer)
+    worker.region_num_blocks = [8] * len(layers)
+    worker._physical_blocks_per_group = [1] * len(layers)
+    worker._group_spec_types = tuple(
+        type(spec) for spec in worker._layer_specs.values()
+    )
+    worker._dst_pairs = {}
+    worker._byte_ranges = {}
+    worker.source_ranks = {}
+    worker._remote_block_splits = {}
+    worker._test_layers = layers
+    return worker
+
+
+def _remote_meta(worker: NixlConnectorWorker, remote_tp_size: int) -> NixlAgentMetadata:
+    """Metadata of a remote at `remote_tp_size` holding the worker's layers."""
+    remote_specs = [
+        replace(
+            layer,
+            shapes=tuple(
+                (shape[0] * worker.transfer_tp_size // remote_tp_size, *shape[1:])
+                for shape in layer.shapes
+            ),
+            page_size_padded=None,
+        )
+        if isinstance(layer, MambaSpec)
+        else _spec(layer, remote_tp_size)
+        for layer in worker._test_layers.values()
+    ]
+    return NixlAgentMetadata(
+        engine_id=_ENGINE,
+        agent_metadata=b"",
+        kv_caches_base_addr=[0x10_000 * (i + 1) for i in range(len(remote_specs))],
+        device_id=0,
+        num_blocks=8,
+        block_lens=[spec.page_size_bytes for spec in remote_specs],
+        block_strides=[spec.page_size_bytes for spec in remote_specs],
+        kv_cache_layout="LBHNC",
+        block_size=4,
+        attn_backend_name="",
+        physical_blocks_per_group=[1] * len(remote_specs),
+        region_members=worker.region_members,
+        layer_num_kv_heads={
+            name: spec.num_kv_heads
+            for name, spec in zip(worker._layer_specs, remote_specs, strict=True)
+            if isinstance(spec, AttentionSpec)
+        },
+    )
+
+
+def _map(
+    worker: NixlConnectorWorker,
+    remote_tp_size: int,
+    remote_dcp_size: int = 1,
+    block_size_ratio: int = 1,
+) -> tuple[int, ...]:
+    """Map `worker` to a remote at `remote_tp_size` holding the same
+    layers, as the handshake does, and return the ranks it reads from."""
+    num_layers = len(worker.region_members)
+    pairs = region_pairs_by_index(num_layers, range(num_layers))
+    worker._dst_pairs[_ENGINE] = pairs
+    ranges = worker._tp_byte_ranges(
+        _remote_meta(worker, remote_tp_size),
+        list(zip(pairs.local, pairs.group, pairs.remote)),
+        remote_tp_size,
+        remote_dcp_size,
+        block_size_ratio,
+        receiving=worker._TRANSFER_MODE == "pull",
+    )
+    worker._byte_ranges[_ENGINE] = ranges
+    # One cache group per layer.
+    worker.source_ranks[_ENGINE] = [tuple(sorted(r)) for r in ranges]
+    return tuple(sorted(set().union(*ranges)))
+
+
+_GQA = {"model.layers.0.self_attn": 8}
+_MLA = {"model.layers.0.self_attn": None}
 
 # ======================================================================
 # TP mapping structure tests
 # ======================================================================
 
 
-class TestTPMappingStructure:
-    def test_source_ranks_homogeneous(self):
-        m = _compute_mapping(tp_size=2, tp_rank=1, remote_tp_size=2)
-        assert m.all_source_ranks == (1,)
-
-    def test_source_ranks_d_gt_p(self):
-        m = _compute_mapping(tp_size=4, tp_rank=2, remote_tp_size=2)
-        assert m.all_source_ranks == (1,)
-
-    def test_source_ranks_p_gt_d(self):
-        m = _compute_mapping(tp_size=1, tp_rank=0, remote_tp_size=2)
-        assert m.all_source_ranks == (0, 1)
+@pytest.mark.parametrize(
+    "tp_rank,tp_size,remote_tp_size,expected_ranks",
+    [(1, 2, 2, (1,)), (2, 4, 2, (1,)), (0, 1, 2, (0, 1))],
+)
+def test_gqa_source_ranks(tp_rank, tp_size, remote_tp_size, expected_ranks):
+    worker = _worker(tp_rank, tp_size, _GQA)
+    assert _map(worker, remote_tp_size) == expected_ranks
 
 
 @pytest.mark.parametrize(
-    "tp_rank,tp_size,remote_tp_size,draft_kv_heads,expected_offset",
+    "tp_rank,tp_size,remote_tp_size,draft_kv_heads,expected_head",
     [
         (3, 8, 1, 8, 3),  # one draft head per decode rank
         (5, 8, 2, 8, 1),  # rank 5 reads P rank 1, second head slot
         (5, 16, 1, 8, 2),  # D_TP > heads: two ranks share each head
     ],
 )
-def test_head_sharded_draft_under_mla_target_gets_gqa_offset(
-    tp_rank, tp_size, remote_tp_size, draft_kv_heads, expected_offset
+def test_gqa_draft_under_mla_target_reads_its_heads(
+    tp_rank, tp_size, remote_tp_size, draft_kv_heads, expected_head
 ):
-    """An MLA target's mapping reads every head at offset 0, which is wrong
-    for a GQA draft's head-sharded KV. Mapping the draft as GQA with its own
-    head count recovers each rank's slice from the same source rank."""
-    mla = _compute_mapping(
-        tp_rank=tp_rank,
-        tp_size=tp_size,
-        remote_tp_size=remote_tp_size,
-        is_mla=True,
-        num_kv_heads=1,
+    """Each region is sliced by its own spec: the MLA target's latent moves
+    whole, while a GQA draft's rank reads its heads where the source holds
+    them."""
+    layers = {"model.layers.0.self_attn": None, "draft_model.layers.0": draft_kv_heads}
+    worker = _worker(tp_rank, tp_size, layers)
+    (source,) = _map(worker, remote_tp_size)
+    mla_ranges, draft_ranges = (
+        ranges[source] for ranges in worker._byte_ranges[_ENGINE]
     )
-    draft = _compute_mapping(
-        tp_rank=tp_rank,
-        tp_size=tp_size,
-        remote_tp_size=remote_tp_size,
-        is_mla=True,
-        num_kv_heads=1,
-        head_sharded_kv_heads=draft_kv_heads,
-    )
-    assert mla.rank_offset_factor == 0
-    assert draft.rank_offset_factor == expected_offset
-    assert draft.all_source_ranks == mla.all_source_ranks
+
+    head_bytes = worker.block_len_per_layer[1]
+    assert mla_ranges == [(0, 0, worker.block_len_per_layer[0])]
+    assert draft_ranges == [(0, expected_head * head_bytes, head_bytes)]
 
 
 @pytest.mark.parametrize(
@@ -126,17 +238,8 @@ def test_mla_dcp_source_ranks(
     remote_dcp_size,
     expected_ranks,
 ):
-    mapping = _compute_mapping(
-        tp_rank=tp_rank,
-        tp_size=tp_size,
-        remote_tp_size=remote_tp_size,
-        is_mla=True,
-        num_kv_heads=1,
-        dcp_size=dcp_size,
-        remote_dcp_size=remote_dcp_size,
-    )
-
-    assert mapping.all_source_ranks == expected_ranks
+    worker = _worker(tp_rank, tp_size, _MLA, dcp_size=dcp_size)
+    assert _map(worker, remote_tp_size, remote_dcp_size) == expected_ranks
 
 
 @pytest.mark.parametrize(
@@ -153,175 +256,142 @@ def test_dcp_consumer_count_matches_readers(
     tp_size, remote_tp_size, dcp_size, remote_dcp_size
 ):
     """Each producer waits for exactly the local ranks that read from it."""
-    mappings = [
-        _compute_mapping(
-            tp_rank=tp_rank,
-            tp_size=tp_size,
-            remote_tp_size=remote_tp_size,
-            is_mla=True,
-            num_kv_heads=1,
-            dcp_size=dcp_size,
-            remote_dcp_size=remote_dcp_size,
-        )
-        for tp_rank in range(tp_size)
+    workers = [
+        _worker(tp_rank, tp_size, _MLA, dcp_size=dcp_size) for tp_rank in range(tp_size)
     ]
+    sources = [_map(w, remote_tp_size, remote_dcp_size) for w in workers]
 
     for remote_rank in range(remote_tp_size):
-        readers = [m for m in mappings if remote_rank in m.all_source_ranks]
-        for mapping in readers:
-            assert mapping.local_consumers == len(readers)
-
-
-# ======================================================================
-# Split handle tests
-# ======================================================================
-
-
-def _make_mock_worker_for_splits(group_spec_types):
-    """Build a mock NixlConnectorWorker with _group_spec_types for split tests.
-
-    No per-region replicate flags are configured (`block_len_per_layer` empty
-    and `num_regions == 0`), so `_build_local_splits_from_plan` treats every
-    FA descriptor as SPLIT, matching the legacy behavior these tests assert.
-    """
-    worker = object.__new__(NixlConnectorWorker)
-    worker._group_spec_types = group_spec_types
-    worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=False)
-    worker.block_len_per_layer = []
-    worker.num_regions = 0
-    worker._region_is_mla = []
-    worker._conv_decomp = SimpleNamespace(local_conv_offsets=())
-    worker._ssm_region_indices = [0] if MambaSpec in group_spec_types else []
-    worker._ple_region_index = None
-    return worker
-
-
-class TestBuildSrcSplitHandles:
-    @pytest.mark.parametrize("remote_tp_size", [2, 4])
-    def test_build_src_split_handles(self, remote_tp_size):
-        tp_rank = 0
-        tp_size = 1
-
-        plan = _compute_mapping(
-            tp_rank=tp_rank,
-            tp_size=tp_size,
-            remote_tp_size=remote_tp_size,
-        )
-
-        worker = _make_mock_worker_for_splits((AttentionSpec,))
-        # One region of 8 dense 1024-byte blocks as a single strided run.
-        src_blocks_data = np.array([(0x2000, 1024, 0, 1024, 8)], dtype=np.uint64)
-        num_descs = 8
-        splits = list(
-            worker._build_local_splits_from_plan(
-                plan,
-                src_blocks_data,
-                num_descs,
+        readers = [w for w, ranks in zip(workers, sources) if remote_rank in ranks]
+        for worker in readers:
+            consumers = worker.transfer_topo.dcp_consumer_count(
+                remote_tp_size, remote_dcp_size
             )
-        )
-
-        assert len(splits) == remote_tp_size
-        for handle in splits:
-            assert handle.shape == src_blocks_data.shape
-            # The head slice shrinks the length; block stride and count are kept.
-            assert handle[:, 1].tolist() == [1024 // remote_tp_size]
-            assert handle[:, 3:].tolist() == [[1024, 8]]
+            assert consumers == len(readers)
 
 
-class TestMambaPlanSplitHandles:
-    """Verify split handles for Mamba with FA/SSM distinction."""
+# ======================================================================
+# Descriptor list tests
+# ======================================================================
 
-    def test_fa_and_ssm_different_split_factors(self):
-        """Section 0 split by num_attn_reads, section 1 by abs_tp."""
-        fa_readers = (0,)
-        ssm_readers = (0, 1)
-        plan = TPMapping(
-            source_ranks_per_group=(fa_readers, ssm_readers),
-            all_source_ranks=(0, 1),
-            rank_to_attention_slot={0: 0, 1: 0},
-            rank_offset_factor=0,
-        )
 
-        worker = _make_mock_worker_for_splits((AttentionSpec, MambaSpec))
-        # 2 FA runs + 1 SSM run of one block each: (addr, len, dev, stride, count)
-        src_blocks_data = np.array(
-            [
-                (1000, 200, 0, 200, 1),  # FA desc 0
-                (2000, 200, 0, 200, 1),  # FA desc 1
-                (3000, 400, 0, 400, 1),  # SSM desc 0
-            ],
-            dtype=np.uint64,
-        )
+class _DescLists:
+    """Records the desc lists a worker prepares."""
 
-        splits = list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2))
+    def __init__(self):
+        self.lists: list[list[list[int]]] = []
 
-        assert len(splits) == 2  # 2 source ranks
+    def prep_xfer_dlist(self, agent, descs, mem_type=None):
+        self.lists.append(np.asarray(descs).tolist())
+        return len(self.lists) - 1
 
-        # Rank 0 (FA source, p_idx=0):
-        # FA: chunk=200//1=200, slot=0 → (1000, 200), (2000, 200)
-        # SSM: chunk=400//2=200, idx=0 → (3000, 200); block stride stays 400
-        assert splits[0].tolist() == [
-            [1000, 200, 0, 200, 1],
-            [2000, 200, 0, 200, 1],
-            [3000, 200, 0, 400, 1],
-        ]
 
-        # Rank 1 (not FA source, p_idx=1):
-        # FA: chunk=200//1=200, slot=0 (skip_fa) → (1000, 200), (2000, 200)
-        # SSM: chunk=400//2=200, idx=1 → (3200, 200); block stride stays 400
-        assert splits[1].tolist() == [
-            [1000, 200, 0, 200, 1],
-            [2000, 200, 0, 200, 1],
-            [3200, 200, 0, 400, 1],
-        ]
+def _prep(worker: NixlConnectorWorker, remote_tp_size: int) -> _DescLists:
+    """Prepare the worker's desc lists for every rank of the remote."""
+    num_layers = len(worker.region_members)
+    worker.engine_id, worker.tp_rank, worker.device_id = "local-engine", 0, 0
+    worker.nixl_wrapper = _DescLists()
+    worker.kv_caches_base_addr = {
+        worker.engine_id: {0: [0x1000 * (i + 1) for i in range(num_layers)]}
+    }
+    worker._mixed_mem_types = False
+    worker.region_mem_types = ["VRAM"] * num_layers
+    worker._local_desc_lists, worker._local_descs = {}, {}
+    worker._desc_starts = defaultdict(dict)
+    worker.dst_xfer_side_handles = defaultdict(dict)
+    worker.dst_region_num_blocks = {_ENGINE: [8] * num_layers}
+    worker.dst_region_mem_types = {_ENGINE: ["VRAM"] * num_layers}
+    meta = _remote_meta(worker, remote_tp_size)
+    for rank in range(remote_tp_size):
+        worker._prep_descs(meta, rank, "remote-agent", 1)
+    return worker.nixl_wrapper
 
-    def test_hetero_block_size_splits(self):
-        """With a block-size ratio, single-source FA sub-block descs pass
-        through whole; SSM descs are unexpanded and split per source."""
-        plan = TPMapping(
-            source_ranks_per_group=((0,), (0, 1)),
-            all_source_ranks=(0, 1),
-            rank_to_attention_slot={0: 0, 1: 0},
-            rank_offset_factor=0,
-        )
 
-        worker = _make_mock_worker_for_splits((AttentionSpec, MambaSpec))
-        # 2 FA blocks x ratio 2 sub-blocks (one run of 2 per block) + 1 SSM desc
-        # (never expanded).
-        src_blocks_data = np.array(
-            [
-                (1000, 100, 0, 100, 2),
-                (2000, 100, 0, 100, 2),
-                (3000, 400, 0, 400, 1),
-            ],
-            dtype=np.uint64,
-        )
+def test_head_slices_are_strided_descs_of_one_local_list():
+    """D at TP1 reads half its heads from each of two P ranks: one local list
+    holds a strided desc per (rank, range), each moving every block."""
+    worker = _worker(0, 1, _GQA)
+    assert _map(worker, 2) == (0, 1)
+    block = worker.block_len_per_layer[0]
+    half = block // 2
 
-        splits = list(worker._build_local_splits_from_plan(plan, src_blocks_data, 4, 2))
+    lists = _prep(worker, 2).lists
+    local, remote_0, remote_1 = lists
+    assert local == [[0x1000, half, 0, block, 8], [0x1000 + half, half, 0, block, 8]]
+    assert remote_0 == remote_1 == [[0x10_000, half, 0, half, 8]]
+    local_ids, remote_ids = worker._compute_desc_ids(_ENGINE, 1, [[3, 5]], [[2, 4]])
+    assert local_ids.tolist() == [8 + 3, 8 + 5]
+    assert remote_ids.tolist() == [2, 4]
 
-        assert len(splits) == 2
-        fa_passthrough = [[1000, 100, 0, 100, 2], [2000, 100, 0, 100, 2]]
-        assert splits[0].tolist() == fa_passthrough + [[3000, 200, 0, 400, 1]]
-        assert splits[1].tolist() == fa_passthrough + [[3200, 200, 0, 400, 1]]
 
-    def test_hetero_block_size_head_sharded_asserts(self):
-        """Head-sharded FA reads (multiple FA sources) are incompatible with
-        a block-size mismatch and must fail loudly."""
-        plan = TPMapping(
-            source_ranks_per_group=((0, 1), (0, 1)),
-            all_source_ranks=(0, 1),
-            rank_to_attention_slot={0: 0, 1: 1},
-            rank_offset_factor=0,
-        )
+def test_mamba_state_is_one_more_region_of_chunked_pages():
+    """MLA's replicated latent and a Mamba state sharded across P's ranks move
+    through the same desc list: the latent whole from one rank, the state as
+    one range per rank holding part of it."""
+    mamba = _ShardedStateSpec(block_size=4, shapes=((400,),), dtypes=(torch.int8,))
+    worker = _worker(0, 1, {"attn": None, "mamba": mamba})
+    assert _map(worker, 2) == (0, 1)
+    assert worker.source_ranks[_ENGINE] == [(0,), (0, 1)]
 
-        worker = _make_mock_worker_for_splits((AttentionSpec, MambaSpec))
-        src_blocks_data = np.array(
-            [(1000, 100, 0, 100, 2), (3000, 400, 0, 400, 1)],
-            dtype=np.uint64,
-        )
+    latent = worker.block_len_per_layer[0]
+    local, *_ = _prep(worker, 2).lists
+    assert local == [
+        [0x1000, latent, 0, latent, 8],
+        [0x2000, 200, 0, 400, 8],
+        [0x2000 + 200, 200, 0, 400, 8],
+    ]
+    local_ids, remote_ids = worker._compute_desc_ids(_ENGINE, 1, [[], [6]], [[], [3]])
+    assert local_ids.tolist() == [16 + 6]
+    assert remote_ids.tolist() == [3]
 
-        with pytest.raises(AssertionError, match="Head-sharded"):
-            list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2, 2))
+
+def test_push_writes_replicated_latent_to_every_rank_holding_it():
+    """Pushing from P at TP1 to D at TP2, the specs' sending-side slices write
+    MLA's replicated latent whole to both D ranks and each its Mamba shard."""
+    mamba = _ShardedStateSpec(block_size=4, shapes=((400,),), dtypes=(torch.int8,))
+    worker = _worker(0, 1, {"attn": None, "mamba": mamba})
+    worker._TRANSFER_MODE = "push"
+
+    assert _map(worker, 2) == (0, 1)
+    assert worker.source_ranks[_ENGINE] == [(0, 1), (0, 1)]
+    latent_ranges, state_ranges = worker._byte_ranges[_ENGINE]
+    latent = worker.block_len_per_layer[0]
+    assert latent_ranges == {0: [(0, 0, latent)], 1: [(0, 0, latent)]}
+    assert state_ranges == {0: [(0, 0, 200)], 1: [(200, 0, 200)]}
+
+
+@pytest.mark.parametrize(
+    ("layers", "p_tp", "d_tp"),
+    [
+        (_MLA, 4, 2),
+        (_MLA, 2, 4),
+        (_GQA, 4, 2),
+        ({"model.layers.0.self_attn": 2}, 4, 2),
+    ],
+)
+def test_push_decode_waits_for_the_ranks_writing_it(layers, p_tp, d_tp):
+    """D counts a push done after one notif per P rank writing to it: the
+    specs' receiving side must count exactly the P ranks whose sending side
+    writes it, one per replicated head."""
+    writes: Counter[int] = Counter()
+    for p_rank in range(p_tp):
+        worker = _worker(p_rank, p_tp, layers)
+        worker._TRANSFER_MODE = "push"
+        writes.update(_map(worker, d_tp))
+    for d_rank in range(d_tp):
+        worker = _worker(d_rank, d_tp, layers)
+        worker.nixl_wrapper = MagicMock()
+        worker._push_senders = defaultdict(dict)
+        worker._add_notif_only_remote_agent(_remote_meta(worker, p_tp), 0, p_tp)
+        assert worker._push_senders[_ENGINE] == {0: writes[d_rank]}
+
+
+def test_smaller_remote_blocks_cannot_be_read_by_head():
+    """Remote blocks smaller than ours move as whole sub-blocks, so blocks
+    split across TP ranks cannot also split by block size."""
+    worker = _worker(0, 1, _GQA)
+    with pytest.raises(NotImplementedError, match="remote blocks are smaller"):
+        _map(worker, 2, block_size_ratio=2)
 
 
 @pytest.mark.parametrize(
