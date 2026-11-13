@@ -384,7 +384,9 @@ def test_write_lands_every_shard_byte_exact(
         mapping = producer.worker._write_tp_mapping(consumer_tp)
         for target in mapping.targets:
             writers[target.tp_rank].add(producer.tp_rank)
-        info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS[g] for g in groups])
+        info = RemoteAllocInfo(
+            block_ids=[DECODE_BLOCKS[g] for g in groups], num_prompt_tokens=8
+        )
         producer.wrapper.done_remote_allocate_req_dict["t"] = info
         writer = make_moriio_writer(producer.worker)
         for layer in layers:
@@ -401,6 +403,7 @@ def test_write_lands_every_shard_byte_exact(
                     remote_ip="decode",
                     remote_tp_size=consumer_tp,
                     tp_mapping=mapping,
+                    num_prompt_tokens=8,
                 )
             )
         info.writes_expected = len(layers)
@@ -451,7 +454,7 @@ def test_write_refuses_peer_with_different_block_size(monkeypatch):
         consumers[0].worker.attention_block_sizes[layer.name] = 2 * BLOCK_SIZE
     producer = _build_rank("mla", 0, 2, KVCacheLayout.LBNHC, True, state, True)
     _connect(producer, consumers, "decode")
-    info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS["full"]])
+    info = RemoteAllocInfo(block_ids=[DECODE_BLOCKS["full"]], num_prompt_tokens=8)
     producer.wrapper.done_remote_allocate_req_dict["t"] = info
     writer = make_moriio_writer(producer.worker)
     with pytest.raises(MoRIIOError, match="same --block-size"):
@@ -468,5 +471,216 @@ def test_write_refuses_peer_with_different_block_size(monkeypatch):
                 remote_ip="decode",
                 remote_tp_size=1,
                 tp_mapping=producer.worker._write_tp_mapping(1),
+                num_prompt_tokens=8,
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("prefill_tokens", "decode_tokens", "local", "remote"),
+    [
+        (4, 16, [1], [2, 3, 4, 5]),
+        (3, 4, [1], [2]),  # Same block count, unwritten tokens in the last page.
+        (8, 8, [1], [2, 3]),  # Inconsistent allocation despite matching tokens.
+        (8, None, [1, 4], [2, 3]),  # Older peer omits token coverage.
+    ],
+)
+def test_write_rejects_incomplete_prompt_before_touching_decode(
+    monkeypatch, prefill_tokens, decode_tokens, local, remote
+):
+    """A destination containing recycled KV must never be partially filled."""
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    heads, layers = MODELS["gqa"]
+    state = _global_state(layers, heads)
+    consumer = _build_rank("gqa", 0, 1, KVCacheLayout.LBNHC, True, state, False)
+    consumer.wrapper = _consumer_wrapper()
+    for region in consumer.regions:
+        region.fill_(0xAB)
+    before = [region.clone() for region in consumer.regions]
+    producer = _build_rank("gqa", 0, 1, KVCacheLayout.LBNHC, True, state, True)
+    _connect(producer, [consumer], "decode")
+    info = RemoteAllocInfo(block_ids=[remote])
+    info.num_prompt_tokens = decode_tokens
+    producer.wrapper.done_remote_allocate_req_dict["t"] = info
+    writer = make_moriio_writer(producer.worker)
+    task = WriteTask(
+        request_id="req",
+        transfer_id="t",
+        dst_engine_id="decode",
+        local_block_ids=[local],
+        remote_block_ids_hint=None,
+        layer_name=layers[0].name,
+        event=_CompletedEvent(),
+        remote_notify_port=NOTIFY_PORT,
+        remote_ip="decode",
+    )
+    task.num_prompt_tokens = prefill_tokens
+    with pytest.raises(MoRIIOError, match="WRITE"):
+        writer._execute_write_task(task)
+    assert all(torch.equal(got, ref) for got, ref in zip(consumer.regions, before))
+    assert info.writes_done == 0
+    assert producer.sent == []
+    assert consumer.wrapper.pop_finished_write_req_ids() == set()
+
+    # Both the queued and deferred paths use this error handler. Decode must
+    # fail the load rather than wait forever, and prefill may release its KV.
+    writer._try_execute_write_task(task)
+    assert consumer.wrapper.pop_failed_write_req_ids() == {"t"}
+    assert consumer.wrapper.pop_finished_write_req_ids() == set()
+    assert producer.wrapper.done_req_ids == [("t", 1)]
+    assert "t" not in producer.wrapper.done_remote_allocate_req_dict
+    assert all(torch.equal(got, ref) for got, ref in zip(consumer.regions, before))
+
+
+class _CompletedEvent:
+    """External GPU event is already complete in the CPU transport harness."""
+
+    def synchronize(self):
+        pass
+
+
+@pytest.mark.parametrize("has_mamba", [False, True])
+@pytest.mark.parametrize(
+    ("local", "remote", "accepted"),
+    [
+        ([[1]], [[2]], True),
+        ([[1]], [[2, 3]], "hybrid"),
+        ([[1]], [[2, 3, 4]], False),
+        ([[1, 2]], [[3]], False),
+        ([[1]], [[2], [3]], False),
+        ([[1], [2]], [[3], [4, 5, 6]], False),
+    ],
+)
+def test_write_requires_coverage_in_every_cache_group(
+    has_mamba, local, remote, accepted
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+        validate_write_allocation,
+    )
+
+    task = WriteTask(
+        request_id="req",
+        transfer_id="t",
+        dst_engine_id="decode",
+        local_block_ids=local,
+        remote_block_ids_hint=None,
+        layer_name="layer",
+        event=None,
+        remote_notify_port=NOTIFY_PORT,
+        remote_ip="decode",
+        num_prompt_tokens=8,
+    )
+    info = RemoteAllocInfo(block_ids=remote, num_prompt_tokens=8)
+    if accepted is True or (accepted == "hybrid" and has_mamba):
+        validate_write_allocation(task, info, has_mamba)
+    else:
+        with pytest.raises(MoRIIOError, match="WRITE"):
+            validate_write_allocation(task, info, has_mamba)
+
+
+@pytest.mark.parametrize("different_content", [False, True])
+def test_write_checks_prompt_content(different_content):
+    from vllm import SamplingParams
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+        fingerprint_prompt,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+        validate_write_allocation,
+    )
+    from vllm.v1.request import Request
+
+    producer = Request(
+        request_id="p",
+        prompt_token_ids=[1] * 16,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    consumer = Request(
+        request_id="d",
+        prompt_token_ids=[2 if different_content else 1] * 16,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    task = WriteTask(
+        request_id="p",
+        transfer_id="t",
+        dst_engine_id="d",
+        local_block_ids=[[1]],
+        remote_block_ids_hint=None,
+        layer_name="a",
+        event=None,
+        remote_notify_port=1,
+        remote_ip="d",
+        num_prompt_tokens=16,
+        prompt_fingerprint=fingerprint_prompt(producer, 16),
+    )
+    info = RemoteAllocInfo(
+        block_ids=[[2]],
+        num_prompt_tokens=16,
+        prompt_fingerprint=fingerprint_prompt(consumer, 16),
+    )
+    if different_content:
+        with pytest.raises(MoRIIOError, match="prompt content"):
+            validate_write_allocation(task, info, False)
+    else:
+        validate_write_allocation(task, info, False)
+
+
+@pytest.mark.parametrize("slots", [[], [2, 3]])
+def test_write_rejects_invalid_mamba_slots_before_layer_transfer(slots):
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+        WriteCoverageError,
+        validate_write_allocation,
+    )
+
+    task = WriteTask(
+        request_id="p",
+        transfer_id="t",
+        dst_engine_id="d",
+        local_block_ids=[[1], [1]],
+        remote_block_ids_hint=None,
+        layer_name="a",
+        event=None,
+        remote_notify_port=1,
+        remote_ip="d",
+        num_prompt_tokens=16,
+    )
+    info = RemoteAllocInfo(block_ids=[[2, 3], slots], num_prompt_tokens=16)
+    with pytest.raises(WriteCoverageError, match="Mamba state slot"):
+        validate_write_allocation(task, info, True, frozenset({1}))
+
+
+def test_invalid_mamba_allocation_notifies_decode_without_writing(monkeypatch):
+    monkeypatch.setattr(
+        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
+    )
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
+    heads, layers = MODELS["mla_hybrid"]
+    state = _global_state(layers, heads)
+    consumer = _build_rank("mla_hybrid", 0, 1, KVCacheLayout.LBNHC, True, state, False)
+    consumer.wrapper = _consumer_wrapper()
+    producer = _build_rank("mla_hybrid", 0, 1, KVCacheLayout.LBNHC, True, state, True)
+    _connect(producer, [consumer], "decode")
+    for region in consumer.regions:
+        region.fill_(0xAB)
+    before = [region.clone() for region in consumer.regions]
+    producer.wrapper.done_remote_allocate_req_dict["t"] = RemoteAllocInfo(
+        block_ids=[[5, 2], [3, 4]], num_prompt_tokens=8
+    )
+    task = WriteTask(
+        request_id="p",
+        transfer_id="t",
+        dst_engine_id="decode",
+        local_block_ids=[[1, 4], [2]],
+        remote_block_ids_hint=None,
+        layer_name="mla0",
+        event=_CompletedEvent(),
+        remote_notify_port=NOTIFY_PORT,
+        remote_ip="decode",
+        num_prompt_tokens=8,
+    )
+    writer = make_moriio_writer(producer.worker)
+    writer._try_execute_write_task(task)
+    assert consumer.wrapper.pop_failed_write_req_ids() == {"t"}
+    assert consumer.wrapper.pop_finished_write_req_ids() == set()
+    assert all(torch.equal(got, ref) for got, ref in zip(consumer.regions, before))

@@ -198,7 +198,9 @@ def test_decode_addresses_only_the_first_stage(shape, pp_size, tp_size):
     scheduler = _decode_scheduler()
 
     scheduler.update_state_after_alloc(
-        SimpleNamespace(request_id="req", kv_transfer_params=params),
+        SimpleNamespace(
+            request_id="req", kv_transfer_params=params, num_prompt_tokens=40
+        ),
         SimpleNamespace(
             get_block_ids=lambda: ([5, 6, 7],),
             get_unhashed_block_ids_all_groups=lambda: [[5, 6, 7]],
@@ -209,6 +211,7 @@ def test_decode_addresses_only_the_first_stage(shape, pp_size, tp_size):
 
     assert sorted(n["port"] for n in scheduler.notified) == first_stage
     assert all(n["block_notify_list"] == [5, 6, 7] for n in scheduler.notified)
+    assert all(n["num_prompt_tokens"] == 40 for n in scheduler.notified)
     assert sorted(scheduler.released) == first_stage
 
 
@@ -257,7 +260,9 @@ def test_every_stage_gets_the_allocation_and_release(shape, monkeypatch):
     scheduler = _decode_scheduler(send=True)
 
     scheduler.update_state_after_alloc(
-        SimpleNamespace(request_id="req", kv_transfer_params=params),
+        SimpleNamespace(
+            request_id="req", kv_transfer_params=params, num_prompt_tokens=40
+        ),
         SimpleNamespace(
             get_block_ids=lambda: ([5, 6, 7],),
             get_unhashed_block_ids_all_groups=lambda: [[5, 6, 7]],
@@ -271,6 +276,9 @@ def test_every_stage_gets_the_allocation_and_release(shape, monkeypatch):
         w.done_remote_allocate_req_dict["tA"].block_ids == [[5, 6, 7]] for w in stages
     )
 
+    assert all(
+        w.done_remote_allocate_req_dict["tA"].num_prompt_tokens == 40 for w in stages
+    )
     scheduler._release_write_prefill_blocks("req", {**params, "remote_dp_rank": 0})
     assert _wait_for(lambda: all(len(w.done_req_ids) == 1 for w in stages))
     assert all(w.done_req_ids[0].transfer_id == "tA" for w in stages)
