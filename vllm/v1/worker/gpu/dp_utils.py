@@ -16,7 +16,11 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.ubatch_utils import (
+    check_ubatch_thresholds,
+    get_num_ubatches,
+    is_last_ubatch_empty,
+)
 
 
 @dataclass(frozen=True)
@@ -132,11 +136,12 @@ def sync_cudagraph_and_dp_padding(
         uniform_decode_across_dp = uniform_decode and torch.all(
             uniform_token_counts_across_dp == (uniform_token_count or 0)
         )
+        min_num_tokens = int(num_tokens_across_dp.min())
         if check_ubatch_thresholds(
             parallel_config,
             # Thresholds only grow with the token count, so holding the smallest
             # rank to them holds every rank to them.
-            int(num_tokens_across_dp.min()),
+            min_num_tokens,
             uniform_decode=uniform_decode_across_dp,
         ):
             # Expert all-to-all requires every rank to split and pad equally.
@@ -154,9 +159,11 @@ def sync_cudagraph_and_dp_padding(
                     num_active_loras=num_active_loras,
                     num_ubatches=num_ubatches,
                 )
-                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
-                    # If one rank has an empty second microbatch, run without
-                    # CUDA graphs.
+                if is_last_ubatch_empty(
+                    min_num_tokens, ubatch_desc.num_tokens, num_ubatches
+                ):
+                    # A graph captured with every microbatch holding real tokens
+                    # cannot replay one that is pure padding; run eager instead.
                     ubatch_desc = None
             if ubatch_desc is None:
                 ubatch_desc = BatchExecutionDescriptor(

@@ -1069,6 +1069,16 @@ def _mori_epv2_arena_bytes(cfg) -> int:
     cross_device_barrier (8); and tok_off (4). MORI allocates the arena inside
     the window itself, so an underestimate fails there rather than overlapping.
     """
+    if getattr(cfg, "async_ll", False):
+        # AsyncLL has its own arena layout; take MORI's region table.
+        from mori.ops.dispatch_combine_v2.internode_regions import asyncll_regions
+
+        if getattr(cfg, "async_ll_recv_layout", "compact") == "auto":
+            # The op resolves "auto" when it is built; size for the larger
+            # segmented layout it may pick.
+            cfg = replace(cfg, async_ll_recv_layout="segmented")
+        regions = asyncll_regions(cfg)
+        return sum(nbytes for _, nbytes in regions) + len(regions) * 256
     # The hip backend pads scale rows to 128 B; FlyDSL uses the unpadded row.
     scale_row = -(-cfg.scale_dim * cfg.scale_type_size // 128) * 128
     topk = cfg.num_experts_per_token
@@ -1107,6 +1117,10 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         try:
             device_comm = comm.create_dev_comm(requirements)
             lsa_size = device_comm.lsa_size
+            # Under MORI_ENABLE_SDMA the ranks trade SDMA queue handles while
+            # creating the device comm; closing it while a peer still receives
+            # leaves that peer blocked.
+            comm.barrier()
             device_comm.close()
             if lsa_size != self.world_size:
                 raise ValueError(
@@ -1137,7 +1151,9 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         self._windows.append(window)
         return window
 
-    def _make_handle(self, **kwargs):
+    def _make_handle(self, ubatch_id: int = 0, **kwargs):
+        # ubatch_id is only part of the handle cache key, so each DBO microbatch
+        # gets its own op; MoRI's config does not take it.
         from mori.ops.dispatch_combine_v2 import (
             EpDispatchCombineConfig,
             EpDispatchCombineOp,
@@ -1163,11 +1179,12 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         window.comm.barrier()
         logger.debug(
             "MORI EPv2 op initialized: dispatch=%s combine=%s recv_cap=%d "
-            "schedule=%s arena_gb=%d cco_windows=%d",
+            "schedule=%s async_ll=%s arena_gb=%d cco_windows=%d",
             config.dispatch_dtype,
             config.combine_dtype,
             config.effective_max_recv,
             config.schedule,
+            getattr(config, "async_ll", False),
             arena >> 30,
             len(self._windows),
         )

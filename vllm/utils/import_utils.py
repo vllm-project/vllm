@@ -660,6 +660,49 @@ def mori_epv2_unavailable_reason() -> str | None:
     return None
 
 
+@cache
+def mori_epv2_has_async_ll() -> bool:
+    """Whether the installed MoRI runs EPv2 on AsyncLL kernels (ROCm/mori#768)."""
+    if mori_epv2_unavailable_reason() is not None:
+        return False
+    from mori.ops.dispatch_combine_v2 import (  # type: ignore[import-not-found]
+        EpDispatchCombineConfig,
+    )
+
+    fields = getattr(EpDispatchCombineConfig, "__dataclass_fields__", {})
+    # The arena sizing takes AsyncLL's region table from this module.
+    return "async_ll" in fields and _has_module(
+        "mori.ops.dispatch_combine_v2.internode_regions"
+    )
+
+
+@cache
+def mori_epv2_has_own_sdma_queue() -> bool:
+    """Whether MoRI can give each AsyncLL op its own SDMA queue (ROCm/mori#892)."""
+    if not mori_epv2_has_async_ll():
+        return False
+    from mori.ops.dispatch_combine_v2 import (  # type: ignore[import-not-found]
+        EpDispatchCombineConfig,
+    )
+
+    fields = getattr(EpDispatchCombineConfig, "__dataclass_fields__", {})
+    return "async_ll_own_sdma_queue" in fields
+
+
+@cache
+def mori_epv2_has_segmented_recv() -> bool:
+    """Whether MoRI can land AsyncLL dispatches in a per-source segmented layout
+    the experts read in place (ROCm/mori#918)."""
+    if not mori_epv2_has_async_ll():
+        return False
+    from mori.ops.dispatch_combine_v2 import (  # type: ignore[import-not-found]
+        EpDispatchCombineConfig,
+    )
+
+    fields = getattr(EpDispatchCombineConfig, "__dataclass_fields__", {})
+    return "async_ll_recv_layout" in fields
+
+
 def has_fbgemm_gpu() -> bool:
     """Whether the optional `fbgemm_gpu` package is available."""
     return _has_module("fbgemm_gpu")
