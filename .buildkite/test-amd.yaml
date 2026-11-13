@@ -5012,7 +5012,8 @@ steps:
   - tests/models/glm5next/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s models/glm5next
+  # amd_specialized_decode/ is left to the mi355_8 step, which runs it at TP2-TP8.
+  - pytest -v -s models/glm5next --ignore=models/glm5next/amd_specialized_decode
 
 - label: ":amd: (MI355 DPX) Basic Models (Extra Initialization) Shard %N" # TBD
   timeout_in_minutes: 60
