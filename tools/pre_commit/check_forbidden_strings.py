@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -163,7 +164,6 @@ CHECK_STRINGS = {
             "normalised by `patch_rope_parameters` in "
             "vllm/transformers_utils/config.py."
         ),
-        allowed_files={"tools/pre_commit/check_forbidden_strings.py"},
     ),
 }
 
@@ -203,6 +203,9 @@ def check_file(path: str) -> int:
 def main():
     returncode = 0
     for path in sys.argv[1:]:
+        # The rules necessarily contain the strings they forbid
+        if os.path.samefile(path, __file__):
+            continue
         returncode |= check_file(path)
     return returncode
 
