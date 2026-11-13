@@ -39,6 +39,7 @@ from vllm.models.glm5next.nvidia.specialized_decode.runtime import (
 )
 from vllm.models.glm5next.nvidia.specialized_decode.runtime import draft as draft_mod
 from vllm.platforms import current_platform
+from vllm.utils import import_utils
 
 PACKAGE = "vllm.models.glm5next.nvidia.specialized_decode.hopper"
 STAGE_MODULES = ("kda", "dsa", "moe", "dense", "boundary", "logits")
@@ -67,6 +68,7 @@ def _vllm_config(**over):
         ),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
+            quantization="fp8",
             enable_sleep_mode=False,
             max_model_len=16384,
             hf_text_config=SimpleNamespace(**runtime.GEOMETRY, mhc=True),
@@ -77,6 +79,13 @@ def _vllm_config(**over):
             mamba_ssm_cache_dtype="auto",
             use_replayssm=False,
             use_kda_recoverssm=False,
+            kv_cache_dtype_skip_layers=[],
+        ),
+        quant_config=SimpleNamespace(
+            is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
+        ),
+        attention_config=SimpleNamespace(
+            backend=None, backend_per_kind={}, hisparse_config=None
         ),
         lora_config=None,
         speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=5),
@@ -105,6 +114,7 @@ def gpu(monkeypatch):
             "is_device_capability_family",
             lambda c, device_id=0: c // 10 == capability // 10,
         )
+        monkeypatch.setattr(import_utils, "has_cutedsl", lambda: True)
 
     return select
 
@@ -190,7 +200,7 @@ def test_gb300_refusals_unchanged(gpu):
     assert unsupported(_vllm_config(**seven)) == []
     eight = {**fp8, "speculative_config.num_speculative_tokens": 8}
     assert unsupported(_vllm_config(**eight)) == ["more than 7 speculative tokens"]
-    assert unsupported(_vllm_config()) == ["KV cache dtypes other than FP8"]
+    assert unsupported(_vllm_config()) == ["KV cache dtypes other than FP8 E4M3"]
 
 
 @pytest.mark.parametrize("capability", [80, 89, 120])

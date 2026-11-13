@@ -165,8 +165,11 @@ class HopperLayerStages(LayerStages):
         out = stage.kernel.run(x, step.positions, step.metadata, step.q)
         return tensor_model_parallel_all_reduce(out) if reduce else out
 
-    def mlp(self, layer, x):
-        """The FFN output and whether it is still TP-partial."""
+    def mlp(self, layer, x, moe_policy_tokens: int | None = None):
+        """The FFN output and whether it is still TP-partial. The Hopper stages
+        pick by the rows they get, so the draft's pruned MTP rows need no
+        `moe_policy_tokens` (the GB300 policy key)."""
+        del moe_policy_tokens
         tokens = x.shape[0]
         partial = self.partial(tokens)
         stage = self.ffn_stages.get(layer.layer_idx)
