@@ -69,9 +69,10 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        # The draft hf_config reports deepseek_mtp; the target keeps glm_moe_dsa.
         self._eh_plan = (
             build_glm52_plan(self.eh_proj.weight, vllm_config.model_config.dtype)
-            if config.model_type == "glm_moe_dsa"
+            if vllm_config.model_config.hf_config.model_type == "glm_moe_dsa"
             else None
         )
 
@@ -199,7 +200,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
                 self_attn.skip_topk = skip
 
     def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        """Gather the top-k index rows at `slot_ids` to the front of the buffer."""
         num_slots = slot_ids.numel()
         for layer in self.layers.values():
             self_attn = getattr(layer.mtp_block, "self_attn", None)
@@ -255,9 +256,9 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         """Greedy draft token ids via per-rank argmax over the vocab shard.
 
-        Saves the full-vocab all-gather ``compute_logits`` does; same tokens.
+        Saves the full-vocab all-gather `compute_logits` does; same tokens.
         Name is fixed by the protocol the proposer probes for
-        (``use_local_argmax_reduction``).
+        (`use_local_argmax_reduction`).
         """
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
@@ -323,7 +324,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        """See ``DeepseekV32MultiTokenPredictor.get_top_tokens``."""
+        """See `DeepseekV32MultiTokenPredictor.get_top_tokens`."""
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:

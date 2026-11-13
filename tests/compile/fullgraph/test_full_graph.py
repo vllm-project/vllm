@@ -163,7 +163,7 @@ def test_compile_range_warmup_stays_within_max_model_len():
 def test_depyf_integration(disable_vllm_compile_cache):
     """Compile with depyf's debugging hooks installed.
 
-    ``disable_vllm_compile_cache`` is what makes this a test rather than a
+    `disable_vllm_compile_cache` is what makes this a test rather than a
     formality: depyf only ever sees a compilation that actually runs, so served
     from a warm cache this exercises none of its hooks.
     """

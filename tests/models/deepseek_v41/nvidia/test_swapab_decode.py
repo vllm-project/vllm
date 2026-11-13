@@ -4,7 +4,7 @@
 
 The swap-AB kernel keeps the mega kernel's contract: it reads Q in the
 chunk-interleaved, head-padded layout and writes MXFP8 in the o-fused layout
-``wo_a`` reads, for the live heads' groups only. The caches are written by
+`wo_a` reads, for the live heads' groups only. The caches are written by
 V4.1's own insert kernels, and both kernels are held to an fp64 reference over
 the dequantized records.
 """
@@ -109,10 +109,10 @@ def swapab_kernel() -> Any:
 def _paged_cache(
     num_slots: int, block_size: int, record_bytes: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Zeroed ``[num_blocks, block_bytes]`` blocks and the view of their pages.
+    """Zeroed `[num_blocks, block_bytes]` blocks and the view of their pages.
 
-    The view is ``[num_blocks, block_size, record_bytes]``; every block ends in
-    ``PAD_RECORDS`` records' worth of bytes that no page covers.
+    The view is `[num_blocks, block_size, record_bytes]`; every block ends in
+    `PAD_RECORDS` records' worth of bytes that no page covers.
     """
     num_blocks = num_slots // block_size + 1
     blocks = torch.zeros(
@@ -201,7 +201,7 @@ def _make_case(
 
 
 def _dequant_records(cache: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
-    """The fp32 ``[n, 512]`` rows of V4.1 records ``slots`` of a paged cache.
+    """The fp32 `[n, 512]` rows of V4.1 records `slots` of a paged cache.
 
     Records are interleaved: each holds a token's data, then its own scales.
     """
@@ -225,7 +225,7 @@ def _dequant_records(cache: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
 def _rope(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, inverse: bool = False
 ) -> torch.Tensor:
-    """GPT-J RoPE of the last ``ROPE_DIM`` dims of ``x``."""
+    """GPT-J RoPE of the last `ROPE_DIM` dims of `x`."""
     if inverse:
         sin = -sin
     x = x.clone()
@@ -238,7 +238,7 @@ def _rope(
 
 
 def _reference(case: Case) -> torch.Tensor:
-    """fp64 attention over the dequantized records, ``[s_q, heads, 512]``.
+    """fp64 attention over the dequantized records, `[s_q, heads, 512]`.
 
     As both kernels do it: Q is RoPEd in fp32 and rounded to bf16, the sink
     only enters the softmax denominator, and the output gets the inverse RoPE.
@@ -266,7 +266,7 @@ def _reference(case: Case) -> torch.Tensor:
 
 
 def _alloc_output(num_tokens: int) -> QuantizedActivation:
-    """A mega-attention output pair with every byte set to ``SENTINEL``."""
+    """A mega-attention output pair with every byte set to `SENTINEL`."""
     out = alloc_mega_attn_output(
         num_tokens, PADDED_HEADS // WV_GROUP_SIZE, torch.device("cuda")
     )
@@ -276,10 +276,10 @@ def _alloc_output(num_tokens: int) -> QuantizedActivation:
 
 
 def _dequant_output(out: QuantizedActivation, heads: int) -> torch.Tensor:
-    """The live heads of a mega-attention output, ``[s_q, heads, 512]`` fp32.
+    """The live heads of a mega-attention output, `[s_q, heads, 512]` fp32.
 
-    Group ``g`` holds heads ``8g + h``, their 32-dim chunk ``c`` at chunk
-    ``8c + h``; chunk ``k``'s ue8m0 exponent is byte ``k`` of the group's
+    Group `g` holds heads `8g + h`, their 32-dim chunk `c` at chunk
+    `8c + h`; chunk `k`'s ue8m0 exponent is byte `k` of the group's
     scale words.
     """
     num_tokens, groups = out.data.shape[0], heads // WV_GROUP_SIZE
@@ -291,7 +291,7 @@ def _dequant_output(out: QuantizedActivation, heads: int) -> torch.Tensor:
 
 
 def _run_mega(case: Case, out: QuantizedActivation) -> None:
-    """The mega kernel, called as ``_forward_decode_mega`` calls it."""
+    """The mega kernel, called as `_forward_decode_mega` calls it."""
     torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
         case.q_fused,
         case.swa.unsqueeze(-2),
@@ -388,7 +388,7 @@ def test_matches_reference(
 @requires_mega_attn
 @pytest.mark.parametrize("heads", [16, 32])
 def test_untouched_padding(heads: int, cos_sin_cache: torch.Tensor, swapab_kernel: Any):
-    """Only the live heads' groups are written: ``wo_a`` reads no others."""
+    """Only the live heads' groups are written: `wo_a` reads no others."""
     case = _make_case(3, heads, "fp4", cos_sin_cache, seed=heads, full=False)
     out = _alloc_output(3)
     _run_swapab(swapab_kernel, case, out)
@@ -460,7 +460,7 @@ def _cpu_layer(
 def _decode_step(
     layer: DeepseekV4MegaAttnAttention, num_tokens: int, swa_width: int = SWA_WIDTH
 ) -> None:
-    """``_forward_decode_mega`` on a step of ``num_tokens`` zero tokens."""
+    """`_forward_decode_mega` on a step of `num_tokens` zero tokens."""
     swa_metadata = SimpleNamespace(
         decode_swa_indices=torch.zeros(num_tokens, 1, swa_width, dtype=torch.int32),
         decode_swa_lens=torch.zeros(num_tokens, dtype=torch.int32),

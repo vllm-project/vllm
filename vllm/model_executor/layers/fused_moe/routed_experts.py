@@ -505,7 +505,7 @@ class RoutedExperts(PluggableLayer):
         dimension and tensor rank.
 
         For 2D weight tensors the two data dims are (0, 1). For 3D tensors
-        with an expert dimension at dim 0, they are (1, 2). ``shard_dim``
+        with an expert dimension at dim 0, they are (1, 2). `shard_dim`
         occupies one of these; the hidden dimension is the other.
         For 1D tensors (e.g. per-channel scales) returns 0.
         """
@@ -830,6 +830,10 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight,
                     hidden_dim=0,
                 )
+                # w2 is row-parallel: its bias is added before the TP
+                # all-reduce, so only one rank may hold it.
+                if self.moe_config.tp_rank != 0:
+                    loaded_weight = torch.zeros_like(loaded_weight)
                 copy_weight_(expert_data, loaded_weight)
             else:
                 self._load_w13(
@@ -1212,14 +1216,14 @@ class RoutedExperts(PluggableLayer):
             ckpt_up_proj_name: Name of up projection in checkpoint
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
-            lora_base_layer_prefix: LoRA ``base_layer.`` prefix for the
-                ``weight_name`` (checkpoint) side
-            lora_base_layer_prefix_on_param_name: same, for the ``param_name``
-                side. Independent because ``get_expert_mapping`` resolves
-                ``param_name`` via ``getattr`` against this layer's bare
-                ``w13_weight``/``w2_weight`` (no prefix), while
-                ``make_expert_params_mapping`` indexes the model-wide
-                ``params_dict`` (prefix included).
+            lora_base_layer_prefix: LoRA `base_layer.` prefix for the
+                `weight_name` (checkpoint) side
+            lora_base_layer_prefix_on_param_name: same, for the `param_name`
+                side. Independent because `get_expert_mapping` resolves
+                `param_name` via `getattr` against this layer's bare
+                `w13_weight`/`w2_weight` (no prefix), while
+                `make_expert_params_mapping` indexes the model-wide
+                `params_dict` (prefix included).
             include_fused: Prepend the fused pre-fused-checkpoint entries
             is_gated: Whether w13 holds gate and up (gated activation) or a
                 single up projection. Selects the fused checkpoint layout.
@@ -1477,6 +1481,33 @@ class RoutedExperts(PluggableLayer):
             x=x,
             router_logits=router_logits,
             input_ids=input_ids,
+        )
+
+    @property
+    def supports_precomputed_routing(self) -> bool:
+        """Whether a monolithic kernel can take vLLM's routing instead."""
+        moe_kernel = getattr(self.quant_method, "moe_kernel", None)
+        return moe_kernel is not None and moe_kernel.supports_precomputed_routing()
+
+    def forward_monolithic_routed(
+        self,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Run a monolithic kernel on vLLM's routing, where padding rows are -1
+        and activate no expert, which the kernel's own routing cannot do."""
+        moe_kernel = self.quant_method.moe_kernel
+        assert moe_kernel is not None and moe_kernel.supports_precomputed_routing()
+        return moe_kernel.apply_monolithic_routed(
+            x,
+            self.w13_weight,
+            self.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=self.activation,
+            global_num_experts=self.global_num_experts,
+            routing_sink=self.routing_sink,
         )
 
     def forward(

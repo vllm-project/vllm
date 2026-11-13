@@ -296,18 +296,23 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
 )
 from vllm.v1.attention.ops.shardq import allocate_shardq_buffers, shard_q, unshard_out
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
+    DS_MLA_STATE_CONTENT_BYTES,
     AttentionSpec,
-    KVCacheSpec,
+    KVCacheLayerConfig,
     KVQuantMode,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -415,7 +420,7 @@ def split_kv_b_proj(
     qk_nope_head_dim: int,
     v_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Dequantize ``kv_b_proj`` and return ``W_UK [L,N,P]``, ``W_UV [L,N,V]``."""
+    """Dequantize `kv_b_proj` and return `W_UK [L,N,P]`, `W_UV [L,N,V]`."""
     weight = get_and_maybe_dequant_weights(kv_b_proj, out_dtype=out_dtype).T
     assert weight.shape == (
         kv_lora_rank,
@@ -637,6 +642,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if isinstance(index_group, HiSparseMLAIndexGroup)
             else None
         )
+        # A dense impl would silently ignore the top-k indices.
+        if use_sparse and not self.impl.is_sparse:
+            raise RuntimeError(
+                f"{prefix}: sparse (DSA) attention layer requires a sparse "
+                f"attention backend, but got {self.attn_backend.get_name()}. "
+                "Serving with it would silently run full attention."
+            )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
         # AMX reads kv_b_proj's weight directly and never calls it live; the
@@ -774,6 +786,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
+        # Replaces the bf16 W_UK bmm, the q concat + fp8 quant and the head
+        # padding, so only the torch.bmm path qualifies.
+        self.is_aiter_fused_decode_query_enabled = (
+            rocm_aiter_ops.is_mla_enabled()
+            and not self.is_aiter_triton_fp8_bmm_enabled
+            and not self.is_aiter_triton_fp4_bmm_enabled
+            and not self.is_amx_bmm_enabled
+            and self.q_pad_num_heads is None
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and getattr(self.impl, "supports_quant_query_input", False)
+            and self.impl.dcp_world_size == 1
+            and rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+                self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim
+            )
+        )
 
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
@@ -796,6 +823,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        if (
+            self._vllm_config.kernel_config.enable_jit_warmup
+            and self.kv_cache.numel() > 0
+        ):
+            from vllm.v1.attention.backends.mla.triton_mla import TritonMLAImpl
+
+            if isinstance(self.impl, TritonMLAImpl):
+                self.impl.register_decode_warmup(self.kv_cache, self.kv_cache_dtype)
         if (
             self._vllm_config.kernel_config.enable_jit_warmup
             and self._uses_flat_kv_cache()
@@ -1101,7 +1136,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_pe_padded.copy_(mqa_q_pe)
                 mqa_q_pe = mqa_pe_padded
 
-            if self.is_aiter_triton_fp4_bmm_enabled:
+            # The impl picks the decode path per batch, so this stays per step.
+            fused_q_heads = (
+                self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
+                if self.is_aiter_fused_decode_query_enabled
+                else None
+            )
+            if fused_q_heads is not None:
+                mqa_q = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
+                    mqa_q_nope, self.W_UK_T, mqa_q_pe, self._q_scale, fused_q_heads
+                )
+            elif self.is_aiter_triton_fp4_bmm_enabled:
                 mqa_ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                     mqa_q_nope,
                     self.W_K,
@@ -1147,6 +1192,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
                     # Convert from (N, B, L) to (B, N, L)
                     mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+                elif (
+                    fp8_attention
+                    and self.impl.supports_quant_query_input
+                    and mqa_q_pe.shape[-1] > 0
+                ):
+                    # Concatenate in place: the bmm writes the NoPE columns of
+                    # the token-major (B, N, L + R) query and the RoPE part is
+                    # copied beside it, so the FP8 query op quantizes one
+                    # contiguous tensor instead of concatenating first (that
+                    # concat is ~1 ms per layer of a 32k-token prefill).
+                    R = mqa_q_pe.shape[-1]
+                    mqa_q_cat = mqa_q_nope.new_empty((B, N, L + R))
+                    torch.bmm(
+                        mqa_q_nope, W_UK_T, out=mqa_q_cat[..., :L].transpose(0, 1)
+                    )
+                    mqa_q_cat[..., L:].copy_(mqa_q_pe)
+                    mqa_ql_nope, mqa_q_pe = mqa_q_cat, mqa_q_pe[..., :0]
                 else:
                     # Write the (N, B, L) bmm result straight into a
                     # token-major (B, N, L) buffer so the MQA query is already
@@ -1155,14 +1217,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
-            if fp8_attention and self.impl.supports_quant_query_input:
-                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
-                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
-                mqa_q = self._decode_concat_quant_fp8_op(
-                    mqa_ql_nope, mqa_q_pe, self._q_scale
-                )
-            else:
-                mqa_q = (mqa_ql_nope, mqa_q_pe)
+            if fused_q_heads is None:
+                if fp8_attention and self.impl.supports_quant_query_input:
+                    assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                    assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                    mqa_q = self._decode_concat_quant_fp8_op(
+                        mqa_ql_nope, mqa_q_pe, self._q_scale
+                    )
+                else:
+                    mqa_q = (mqa_ql_nope, mqa_q_pe)
             # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
             shardq = getattr(attn_metadata, "shardq", None)
             mqa_metadata = attn_metadata
@@ -1467,7 +1530,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
@@ -1482,24 +1545,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
             # blob, so the size is not derivable from head_size.
             state_content_bytes=(
-                cast(MLAAttentionImpl, self.impl).get_fp8_ds_mla_row_bytes()
+                mxfp4_row_bytes(self.head_size)
+                if self.kv_cache_dtype == "mxfp4_mla"
+                else cast(MLAAttentionImpl, self.impl).get_fp8_ds_mla_row_bytes()
                 if self.kv_cache_dtype == "fp8_ds_mla"
-                else {"nvfp4_ds_mla": 352}.get(self.kv_cache_dtype)
+                else DS_MLA_STATE_CONTENT_BYTES.get(self.kv_cache_dtype)
             ),
         )
         if self.sliding_window is not None:
-            return SlidingWindowMLASpec(
-                **common_kwargs,
-                sliding_window=self.sliding_window,
-                non_causal_multi_token_decode=self.non_causal_multi_token_decode,
+            return SlidingWindowManager.layer_config(
+                MLAAttentionSpec(**common_kwargs), sliding_window=self.sliding_window
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
             topk_buffer_width=self.topk_buffer_width,
             is_index_group_leader=self.indexer is not None,
-            non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
-        return spec
+        return FullAttentionManager.layer_config(spec)
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
@@ -1700,7 +1762,7 @@ class MLACommonBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack an inline fp32 scale pair after the
-        latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        latent data (single-sided: `head_size_v == 0` for MLA)."""
         spec = super().customize_spec(spec)
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
@@ -2154,11 +2216,11 @@ def build_mla_chunked_context_metadata(
         chunked_prefill_workspace: Scratch buffer the context gather writes to.
         chunked_prefill_workspace_size: Row capacity of the workspace.
         block_size: KV cache page size for chunk-start alignment.
-        align_chunk_to_block: Round the chunk size down to ``block_size``.
+        align_chunk_to_block: Round the chunk size down to `block_size`.
         device: Target device for the returned tensors.
         dcp_world_size: Decode-context-parallel world size (1 if disabled).
         dcp_local_block_size: Per-rank interleave block size for DCP.
-        dcp_virtual_block_size: ``dcp_local_block_size * dcp_world_size``.
+        dcp_virtual_block_size: `dcp_local_block_size * dcp_world_size`.
         dcp_manager: Shared MLA DCP collective manager.
         align_indptr: Align packed int32 indptr slices to 16 bytes for CuTe DSL.
 
@@ -2408,6 +2470,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             speculative_config is None
             or getattr(speculative_config, "method", None) != "dspark"
             or parallel_config.decode_context_parallel_size <= 1
+            or not self.kv_cache_spec.dcp_sharded
         ):
             return
 
@@ -2515,8 +2578,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        # merge() unions this flag across the KV group, so a shared target/draft
-        # group would mark the target builder as non-causal.
+        # Per builder: a KV group can mix target and draft layers.
         ctx = self.compilation_config.static_forward_context
         self.non_causal_multi_token_decode = any(
             getattr(ctx[name], "non_causal_multi_token_decode", False)
@@ -2546,7 +2608,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         attention_layer = self.compilation_config.static_forward_context[layer_names[0]]
 
         try:
-            self.dcp_world_size = get_dcp_group().world_size
+            # A replicated cache (e.g. a DCP=1 draft under a DCP target) sees no DCP.
+            self.dcp_world_size = (
+                get_dcp_group().world_size if kv_cache_spec.dcp_sharded else 1
+            )
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
@@ -2911,7 +2976,7 @@ def neutralize_empty_context_partials(
     """Neutralize the partial of every prefill that no chunk covers.
 
     A prefill without context is never gathered, so nothing would write its rows;
-    a zero output with an ``-inf`` lse carries no weight into the final merge
+    a zero output with an `-inf` lse carries no weight into the final merge
     against the suffix partial.
     """
     for token_slice in chunked_context.empty_token_slices:
@@ -2929,8 +2994,8 @@ def init_mla_context_partial(
 
     Laid out like the chunk partials so the final whole-batch merge against the
     suffix partial sees matching head strides. Callers whose backend honors an
-    ``out`` tensor already know that layout and can allocate directly, pairing it
-    with ``neutralize_empty_context_partials``.
+    `out` tensor already know that layout and can allocate directly, pairing it
+    with `neutralize_empty_context_partials`.
     """
     output = torch.empty(
         (num_tokens, *attn_output.shape[1:]),
@@ -2966,8 +3031,8 @@ def accumulate_mla_context_chunk(
         output: Running context partial, updated in place.
         output_lse: Running log-sum-exp, updated in place.
         output_written: The chunk's attention output already landed in
-            ``output[chunk.token_slice]`` because the backend was handed it as
-            ``out``, leaving only the lse to fold. Invalid for a continuation
+            `output[chunk.token_slice]` because the backend was handed it as
+            `out`, leaving only the lse to fold. Invalid for a continuation
             chunk, whose leading tokens must be merged rather than overwritten.
 
     """
@@ -2998,7 +3063,7 @@ def accumulate_mla_context_chunk(
 class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     """Shared MLA base providing dense-MHA prefill (via the selected
     MLAPrefillBackend) for both dense and sparse impls; subclasses add decode
-    (``forward_mqa``).
+    (`forward_mqa`).
     """
 
     _use_flashinfer_concat_mla_k: bool

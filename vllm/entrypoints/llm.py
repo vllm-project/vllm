@@ -110,6 +110,10 @@ class LLM(
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors. Defaults to 1.0 with the extensible KV cache
             (which sizes the cache from measured memory) and to 0.92 otherwise.
+            With the extensible KV cache (the default on CUDA and ROCm), leave
+            it unset unless the GPU is shared with other processes or
+            something else needs memory that vLLM does not measure; see the
+            "GPU Memory Utilization" section of the optimization guide.
         kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
             this is set to None and vllm can automatically infer the kv cache
             size based on gpu_memory_utilization. However, users may want to
@@ -867,8 +871,8 @@ class LLM(
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
             reset_connector: Also reset the KV connector's cache, such as
-                blocks offloaded to CPU. Set ``False`` only if the weights do
-                not change before ``wake_up``. Ignored at level 0.
+                blocks offloaded to CPU. Set `False` only if the weights do
+                not change before `wake_up`. Ignored at level 0.
 
         """
         self.llm_engine.sleep(level=level, mode=mode, reset_connector=reset_connector)
@@ -876,8 +880,8 @@ class LLM(
     def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Release the GPU physical memory backing the KV cache.
 
-        Requires a completed ``sleep(level=0)`` and resident executor memory.
-        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
+        Requires a completed `sleep(level=0)` and resident executor memory.
+        Restore with `wake_up(tags=["kv_cache"])`; kept requests are recomputed.
 
         Args:
             reset_connector: Also reset the KV connector's cache; see

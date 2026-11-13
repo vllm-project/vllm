@@ -210,7 +210,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
-        """Yield ``(experts, w13, w2)`` dequantized NVFP4 experts."""
+        """Yield `(experts, w13, w2)` dequantized NVFP4 experts."""
         return dequantize_nvfp4_moe_weights(
             layer.w13_weight_packed,
             layer.w13_weight_scale,

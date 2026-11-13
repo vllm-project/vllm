@@ -1211,10 +1211,10 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def _get_image_max_pixels(self) -> int:
         """Read max_pixels from the HF image processor config.
 
-        Despite the name, ``longest_edge`` is a pixel **area** (total pixel
+        Despite the name, `longest_edge` is a pixel **area** (total pixel
         count), not an edge length.  The HF processor passes it directly to
-        ``smart_resize`` as the ``max_pixels`` argument, which constrains
-        ``t_bar * h_bar * w_bar <= max_pixels``.
+        `smart_resize` as the `max_pixels` argument, which constrains
+        `t_bar * h_bar * w_bar <= max_pixels`.
         """
         mm_kwargs = self.ctx.get_merged_mm_kwargs({})
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
@@ -1311,12 +1311,9 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        return self._get_max_video_frames(seq_len - max_image_tokens)
+        return self._get_max_video_frames(seq_len)
 
     def _get_video_second_idx_glm4v(
         self, metadata: dict[str, Any], total_frames: int
@@ -1602,7 +1599,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
 
         return {
@@ -1706,15 +1703,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
     def _sampled_frame_metadata_overrides(mm_items, video_metadata):
         """Build timestamp-helper metadata from HF-sampled frame indices.
 
-        Input ``frames_indices`` can be the pre-sample range. The processor
-        returns a ``VideoMetadata`` with the sample it kept. GLM-5.3's direct
+        Input `frames_indices` can be the pre-sample range. The processor
+        returns a `VideoMetadata` with the sample it kept. GLM-5.3's direct
         path must feed those indices into the timestamp helper and clear
-        ``do_sample_frames`` so the helper keeps them instead of sampling again.
+        `do_sample_frames` so the helper keeps them instead of sampling again.
 
-        Overrides are returned and never written back onto ``mm_items``. The
-        same items are reused by ``test_processing_correctness`` (baseline then
-        cache); persisting ``do_sample_frames=False`` while the video tensor
-        stays full-length made pass-2 HF emit ``grid_t != len(timestamps)`` for
+        Overrides are returned and never written back onto `mm_items`. The
+        same items are reused by `test_processing_correctness` (baseline then
+        cache); persisting `do_sample_frames=False` while the video tensor
+        stays full-length made pass-2 HF emit `grid_t != len(timestamps)` for
         odd-length videos.
         """
         if not video_metadata:

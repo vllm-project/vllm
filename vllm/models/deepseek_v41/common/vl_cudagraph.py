@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Encoder CUDA graph support for the DeepSeek-V4.1 vision tower.
 
-Mixin implementing the ``SupportsEncoderCudaGraph`` protocol
-(``vllm/model_executor/models/interfaces.py``) on top of the shared
-``DeepseekV4ViT``/``DeepseekV4Aligner``. The captured graph packs a whole
+Mixin implementing the `SupportsEncoderCudaGraph` protocol
+(`vllm/model_executor/models/interfaces.py`) on top of the shared
+`DeepseekV4ViT`/`DeepseekV4Aligner`. The captured graph packs a whole
 batch of images into one varlen run: ViT blocks attend per image via
-``cu_seqlens``, and the aligner's spatial merge becomes a gather+mask
+`cu_seqlens`, and the aligner's spatial merge becomes a gather+mask
 against precomputed indices. Span assembly (IMAGE_START/IMAGE_NEW_LINE/
-IMAGE_END delimiters) stays eager in ``postprocess_encoder_output`` but is
+IMAGE_END delimiters) stays eager in `postprocess_encoder_output` but is
 batched over all items of the packed batch.
 
-Enabled via ``--compilation-config '{"cudagraph_mm_encoder": true}'``; the
-manager (``vllm/v1/worker/encoder_cudagraph.py``) handles budget packing, DP
+Enabled via `--compilation-config '{"cudagraph_mm_encoder": true}'`; the
+manager (`vllm/v1/worker/encoder_cudagraph.py`) handles budget packing, DP
 sharding and eager fallback.
 """
 
@@ -46,11 +46,11 @@ if TYPE_CHECKING:
 
 
 class DeepseekV4VLEncoderCudaGraphMixin:
-    """``SupportsEncoderCudaGraph`` for ``DeepseekV41ForCausalLM``.
+    """`SupportsEncoderCudaGraph` for `DeepseekV41ForCausalLM`.
 
-    Expects ``self.vision``/``self.aligner``/``self.config``/
-    ``self.multimodal_config`` and the ``image_start``/``image_newline``/
-    ``image_end`` parameters from the host model.
+    Expects `self.vision`/`self.aligner`/`self.config`/
+    `self.multimodal_config` and the `image_start`/`image_newline`/
+    `image_end` parameters from the host model.
     """
 
     # Provided by the host model; declared here so mixin methods type-check.
@@ -298,18 +298,18 @@ class DeepseekV4VLEncoderCudaGraphMixin:
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         vit_out = self.vision.forward_packed(
-            inputs["patches"],
-            inputs["vit_cos"],
-            inputs["vit_sin"],
-            inputs["cu_seqlens"],
-            inputs["max_seqlen"],
+            values["patches"],
+            values["vit_cos"],
+            values["vit_sin"],
+            values["cu_seqlens"],
+            values["max_seqlen"],
         )
         return self.aligner.forward_packed(
-            vit_out, inputs["merge_idx"], inputs["merge_mask"]
+            vit_out, values["merge_idx"], values["merge_mask"]
         )
 
     def encoder_eager_forward(

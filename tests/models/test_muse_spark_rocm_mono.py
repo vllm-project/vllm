@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Host side of the Muse Spark monokernel (``--monokernel``).
+"""Host side of the Muse Spark monokernel (`--monokernel`).
 
 The guards run on real vLLM configs and on a tiny real Muse Spark model
 (Quark MXFP4 experts, ROCm AITER FA, a bf16 LBHNC KV cache). The FlyDSL
@@ -385,7 +385,7 @@ def tiny_model(checkpoints):
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.muse_spark.amd.multimodal import MuseSparkForConditionalGeneration
     from vllm.utils.torch_utils import set_default_torch_dtype
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
     from vllm.v1.worker.workspace import init_workspace_manager
 
     with pytest.MonkeyPatch.context() as env:
@@ -428,8 +428,8 @@ def tiny_model(checkpoints):
                 dtype=torch.bfloat16,
             )
             specs = {
-                "full": FullAttentionSpec(**kv),
-                "swa": SlidingWindowSpec(**kv, sliding_window=2048),
+                "full": AttentionSpec(**kv),
+                "swa": AttentionSpec(**kv),
             }
             yield TinyModel(lm, vllm_config, dims, before, specs)
         cleanup_dist_env_and_memory()
@@ -528,7 +528,7 @@ def _params(head: str, world_size: int, tail: str) -> list[str]:
 
 
 def _device_view(ptr: int, shape, dtype: torch.dtype, strides=None) -> torch.Tensor:
-    """The device memory at ``ptr`` as a tensor, as a launch reads it."""
+    """The device memory at `ptr` as a tensor, as a launch reads it."""
     strides = strides or torch.empty(shape, device="meta").stride()
     extent = 1 + sum((n - 1) * s for n, s in zip(shape, strides))
     nbytes = extent * torch.empty((), dtype=dtype).element_size()
@@ -573,8 +573,8 @@ class StockLaunches:
     def _attention(
         self, i: int, attn_o: int, rows: int, nreq: int, fused: bool
     ) -> torch.Tensor:
-        """Layer i's attention output: at ``attn_o``, or, for a fused build,
-        run here from the descriptor row at ``attn_o``."""
+        """Layer i's attention output: at `attn_o`, or, for a fused build,
+        run here from the descriptor row at `attn_o`."""
         layer = self.model.layers[i]
         d = self.dims
         if not fused:
@@ -594,8 +594,8 @@ class StockLaunches:
         return out
 
     def run_layer(self, rows: int, a: dict, b: dict) -> None:
-        """Layer i from its attention output (launch ``a``) to layer i+1's q,
-        o-gate and stream (launch ``b``)."""
+        """Layer i from its attention output (launch `a`) to layer i+1's q,
+        o-gate and stream (launch `b`)."""
         i, nreq = a["layer"], rows // ROWS_PER_REQUEST
         d, layer, nxt = self.dims, self.model.layers[i], self.model.layers[i + 1]
         o = self._attention(i, a["attn_o"], rows, nreq, a["fused"])

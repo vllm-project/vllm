@@ -308,7 +308,7 @@ def _stream_required_tool_calls(
     tool_call_id_type: str = "random",
     tool_call_idx: int | None = None,
 ) -> list[dict]:
-    """Feed ``deltas`` (which concatenate to ``output_json``) through the
+    """Feed `deltas` (which concatenate to `output_json`) through the
     required-tool streaming helper and rebuild the calls per array index,
     checking that every index gets exactly one id/name chunk first."""
     assert "".join(deltas) == output_json
@@ -497,7 +497,7 @@ class TestNonFunctionToolsSkipped:
 
 
 class TestCustomToolShim:
-    """``custom`` tools are shown to the model as a single-string function."""
+    """`custom` tools are shown to the model as a single-string function."""
 
     def test_rendered_as_single_string_function(self):
         tool = CustomTool(

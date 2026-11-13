@@ -18,6 +18,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsW4A8Fp8,
 )
@@ -404,6 +405,57 @@ def test_explicit_moe_backend(oracle, unknown, monkeypatch):
     else:
         assert selected_backend is expected_backend
         assert selected_experts_class is not None
+
+
+@pytest.mark.parametrize(
+    ("use_aiter", "use_aiter_moe", "aiter_supported", "expected"),
+    [
+        pytest.param("1", None, False, Fp8MoeBackend.TRITON, id="global-falls-back"),
+        pytest.param("1", None, True, Fp8MoeBackend.AITER, id="global-prefers-aiter"),
+        pytest.param("1", "1", False, None, id="explicit-moe-raises"),
+        pytest.param("1", "0", True, Fp8MoeBackend.TRITON, id="moe-disabled"),
+        pytest.param("0", None, True, Fp8MoeBackend.TRITON, id="global-disabled"),
+    ],
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_aiter_env_selection(
+    use_aiter, use_aiter_moe, aiter_supported, expected, monkeypatch
+):
+    """`VLLM_ROCM_USE_AITER=1` alone only prefers AITER FP8 MoE and falls back
+    when it cannot serve the layer; an explicit `VLLM_ROCM_USE_AITER_MOE=1`
+    still raises, and either flag set to 0 removes AITER."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_aiter)
+    if use_aiter_moe is None:
+        monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", use_aiter_moe)
+    monkeypatch.setattr(rocm_aiter_ops, "is_rdna_aiter_enabled", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.fp8._get_priority_backends",
+        lambda *_: [Fp8MoeBackend.AITER, Fp8MoeBackend.TRITON],
+    )
+    oracle = Fp8MoEKernelOracle(make_dummy_moe_config())
+    for backend, supported in [
+        (Fp8MoeBackend.AITER, aiter_supported),
+        (Fp8MoeBackend.TRITON, True),
+    ]:
+        for kernel_class in oracle.backend_to_kernel_cls(backend):
+            monkeypatch.setattr(
+                kernel_class,
+                "is_supported_config",
+                staticmethod(lambda *_, ok=supported: (ok, None if ok else "no")),
+            )
+
+    def select():
+        return select_fp8_moe_backend(
+            make_dummy_moe_config(), None, None, allow_vllm_cutlass=True
+        )
+
+    if expected is None:
+        with pytest.raises(ValueError, match="AITER"):
+            select()
+        return
+    assert select()[0] is expected
 
 
 _FORMAT = mk.FusedMoEActivationFormat

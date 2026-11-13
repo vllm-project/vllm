@@ -24,7 +24,7 @@ requires_cutedsl_finalize = pytest.mark.skipif(
 
 
 def _ref_finalize(rows, norm_weight, weights, eps, weight_first, gain_center=1.0):
-    """``sum_k weights * norm(rows[:, k])`` in fp32."""
+    """`sum_k weights * norm(rows[:, k])` in fp32."""
     x = rows.float()
     gain = 1 if norm_weight is None else norm_weight.float() + gain_center
     if weight_first:
@@ -45,7 +45,7 @@ def test_masked_slots_never_produce_nan(
 ) -> None:
     """An EP rank that owns no expert in the batch must contribute exactly zero.
 
-    Its unwritten workspace holds arbitrary bits and ``NaN * 0`` is NaN, so
+    Its unwritten workspace holds arbitrary bits and `NaN * 0` is NaN, so
     zero-weighting the rows is not enough.
     """
     dtype = torch.bfloat16

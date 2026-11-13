@@ -3,15 +3,15 @@
 """Cross-API HF render-input parity tests.
 
 Drives the real Chat Completions and Responses prep paths and captures the
-arguments each passes to ``BaseRenderer.render_chat_async`` (via shared
-``OnlineRenderer.preprocess_chat``):
+arguments each passes to `BaseRenderer.render_chat_async` (via shared
+`OnlineRenderer.preprocess_chat`):
 
   - conversation messages
   - ChatParams fields that affect the HF template / media path
     (template, content format, template kwargs including tools,
      media_io_kwargs, mm_processor_kwargs)
 
-``TokenizeParams``, ``prompt_extras``, Harmony / GPT-OSS, prefill / continue,
+`TokenizeParams`, `prompt_extras`, Harmony / GPT-OSS, prefill / continue,
 prompt cache salt, and truncation are out of scope for this file.
 """
 
@@ -100,14 +100,14 @@ class MockModelConfig:
 
 @dataclass(frozen=True)
 class CapturedRenderInputs:
-    """Args observed at ``render_chat_async`` (HF render boundary)."""
+    """Args observed at `render_chat_async` (HF render boundary)."""
 
     messages: list[Any]
     chat_params: ChatParams
 
 
 class RenderCapture:
-    """Install a ``render_chat_async`` stub and record its HF-bound inputs."""
+    """Install a `render_chat_async` stub and record its HF-bound inputs."""
 
     def __init__(
         self, online_renderer: OnlineRenderer, monkeypatch: pytest.MonkeyPatch

@@ -449,8 +449,8 @@ VIDEO_PROCESSOR_MAPPING_NAMES.setdefault("muse_spark", "MuseSparkVideoProcessor"
 class MuseSparkOmniVideoBackend(VideoBackend):
     """Video loader that applies the model's frame sampling at load time.
 
-    The connector's default ``num_frames=32`` is indistinguishable from an
-    explicit request, so ``num_frames`` is always replaced by the model's cap.
+    The connector's default `num_frames=32` is indistinguishable from an
+    explicit request, so `num_frames` is always replaced by the model's cap.
     """
 
     @classmethod

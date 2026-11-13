@@ -206,7 +206,7 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_weights,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -441,7 +441,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             index_weights,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -562,7 +562,7 @@ def fused_indexer_q_rope_quant(
 ]:
     """Fused RoPE + quantize Q for the sparse indexer.
 
-    ``weights_out_dtype`` is the dtype the downstream scoring kernel takes:
+    `weights_out_dtype` is the dtype the downstream scoring kernel takes:
     fp32 for the dense MQA-logits kernels, bf16 for DeepGEMM's sparse
     MQA-logits kernels (CUDA MXFP4 path only).
 

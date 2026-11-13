@@ -220,7 +220,7 @@ class AsyncLookupManager(ABC):
                 state.phase = LookupPhase.RESOLVED
 
     def mark_miss(self, keys: Collection[OffloadKey]) -> None:
-        """Force the cached verdict for ``keys`` to False after a failed load, so
+        """Force the cached verdict for `keys` to False after a failed load, so
         the scheduler stops re-issuing the doomed promotion (livelock, #49176).
         Keys with no cached entry are skipped, and so are keys whose entry is
         a newer probe still PENDING or IN_FLIGHT: its own result will land,

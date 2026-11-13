@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Lazy facade for the optional ``humming`` package.
+"""Lazy facade for the optional `humming` package.
 
-vLLM code should import humming symbols from here so that ``import humming``
+vLLM code should import humming symbols from here so that `import humming`
 (which has import-time side effects) is deferred until first use. Add new
-symbols to both the ``TYPE_CHECKING`` imports and ``_EXPORTS``, using
-``"module.path:attr"`` or ``"module.path"`` for a whole-module re-export.
+symbols to both the `TYPE_CHECKING` imports and `_EXPORTS`, using
+`"module.path:attr"` or `"module.path"` for a whole-module re-export.
 """
 
 import importlib

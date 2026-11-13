@@ -20,8 +20,8 @@ logger = init_logger(__name__)
 class INCMxfp4Scheme(INCScheme):
     """MXFP4 (W4A4) scheme for AutoRound checkpoints.
 
-    Dispatches to :class:`INCMxfp4LinearMethod` for linear layers and
-    :class:`INCMxfp4MoEMethod` for fused MoE layers; see those classes for the
+    Dispatches to `INCMxfp4LinearMethod` for linear layers and
+    `INCMxfp4MoEMethod` for fused MoE layers; see those classes for the
     per-module weight layout and kernel-selection details.
     """
 

@@ -4,7 +4,7 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/models/deepseek_v41/mono/kernels/dims.py
 """A TP rank's share of V4.1's MoE widths: every constant the MoE stages derive
-from the TP size, in one place (a build key's ``tp`` picks it)."""
+from the TP size, in one place (a build key's `tp` picks it)."""
 
 from dataclasses import dataclass
 
@@ -56,5 +56,5 @@ class Dims:
     @property
     def down_scale_cols(self) -> int:
         """w2_s's e8m0 columns: inter / 32, padded to a multiple of 8
-        (aiter ``shuffle_scale``)."""
+        (aiter `shuffle_scale`)."""
         return padded(self.inter // 32, 8)

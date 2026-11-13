@@ -51,7 +51,10 @@ repos:
         -c, requirements/cuda.txt,
         -o, requirements/test/cuda.txt,
         --index-strategy, unsafe-best-match,
-        --torch-backend, cu130,
+        # Emit the cu132 index into the lock so installs resolve torch, torchvision,
+        # torchaudio and torchcodec to their +cu132 builds.
+        --extra-index-url, "https://download.pytorch.org/whl/cu132",
+        --emit-index-url,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
@@ -71,7 +74,7 @@ repos:
         # The image pins NCCL itself (NCCL_VERSION + UV_OVERRIDE).
         --no-emit-package, nvidia-nccl-cu13,
         --index-strategy, unsafe-best-match,
-        --torch-backend, cu130,
+        --torch-backend, cu132,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
@@ -329,6 +332,14 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-docstring-style
+    name: Check docstring Markdown style
+    entry: python tools/pre_commit/check_docstring_style.py
+    language: python
+    types: [python]
+    # Its own docstrings show the forms it rewrites
+    exclude: ^tools/pre_commit/check_docstring_style\.py$
+    additional_dependencies: [regex]
   - id: check-trust-remote-code
     name: Check for hardcoded trust_remote_code=True
     entry: python tools/pre_commit/check_trust_remote_code.py
