@@ -9,6 +9,7 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
@@ -336,11 +337,15 @@ pub fn to_prompt_info(
 }
 
 /// Convert a `DecodedTextEvent::TextDelta` into a gRPC `SequenceOutput`.
+///
+/// `sampling_mask` holds the whole request's rows, which only the terminal
+/// output carries.
 pub fn to_sequence_output(
     delta: &str,
     token_ids: &[u32],
     logprobs: Option<&DecodedLogprobs>,
     finished: Option<&Finished>,
+    sampling_mask: Option<&SamplingMask>,
     opts: &ResponseOpts,
 ) -> Result<pb::SequenceOutput, Status> {
     let finish_info = finished.map(|f| to_finish_info(f, token_ids)).transpose()?;
@@ -349,8 +354,7 @@ pub fn to_sequence_output(
         _ => (vec![], vec![], vec![]),
     };
 
-    let sampling_mask = finished
-        .and_then(|finished| finished.sampling_mask.as_ref())
+    let sampling_mask = sampling_mask
         .map(|mask| mask.rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
         .unwrap_or_default();
 
@@ -940,7 +944,6 @@ mod tests {
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
-            sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
             routed_experts: None,
@@ -1053,7 +1056,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts)
+        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), None, &opts)
             .expect("sequence output");
         let out = pb::SequenceOutput::decode(out.encode_to_vec().as_slice()).unwrap();
 
@@ -1065,15 +1068,21 @@ mod tests {
 
     #[test]
     fn sequence_output_only_carries_sampling_mask_on_terminal_output() {
-        let mut fin = finished(FinishReason::Length);
-        fin.sampling_mask = Some(SamplingMask {
+        let fin = finished(FinishReason::Length);
+        let mask = SamplingMask {
             rows: vec![vec![1, 10], vec![2, 20]],
-        });
+        };
 
-        let terminal =
-            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())
-                .expect("terminal output");
-        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+        let terminal = to_sequence_output(
+            "",
+            &[10, 20],
+            None,
+            Some(&fin),
+            Some(&mask),
+            &ResponseOpts::default(),
+        )
+        .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, None, &ResponseOpts::default())
             .expect("intermediate output");
 
         assert_eq!(

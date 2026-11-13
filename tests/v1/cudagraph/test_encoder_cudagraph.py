@@ -7,6 +7,7 @@ Test organization:
     - TestFindBudgetGraph      — greedy budget selection logic
     - TestGetCumulativeStats   — hit/miss rate statistics
     - TestGetInputModality     — modality routing from mm_kwargs keys
+    - TestSupportsBatch        — precomputed embeddings skip the graph
     - TestDefaultBudgetTable   — subdivided default budgets, user overrides
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters
@@ -258,6 +259,43 @@ def test_item_multiple_budgets_fit_fixed_size_items():
     assert all(b % 81 == 0 for b in budgets)
     assert budgets[:16] == [81 * n for n in range(1, 17)]
     assert budgets[-1] == 81 * (2560 // 81)
+
+
+# ---------------------------------------------------------------------------
+# _replay_exceeds_capture
+# ---------------------------------------------------------------------------
+
+
+class TestReplayExceedsCapture:
+    """Replay tensors must fit the fixed capture-buffer leading dimension."""
+
+    def test_fits_when_src_shorter_or_equal(self):
+        input_buffers = {"cu_seqlens": torch.zeros(33, dtype=torch.int32)}
+        replay_values = {"cu_seqlens": torch.arange(33, dtype=torch.int32)}
+        assert not EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+    def test_exceeds_when_src_longer(self):
+        input_buffers = {"cu_seqlens": torch.zeros(33, dtype=torch.int32)}
+        replay_values = {"cu_seqlens": torch.arange(67, dtype=torch.int32)}
+        assert EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+    def test_ignores_missing_and_scalar_buffers(self):
+        input_buffers = {
+            "cu_seqlens": torch.zeros(33, dtype=torch.int32),
+            "max_seqlen": torch.tensor(16),
+        }
+        replay_values = {
+            "cu_seqlens": None,
+            "max_seqlen": torch.tensor(8),
+            "other": torch.arange(100, dtype=torch.int32),
+        }
+        assert not EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +796,40 @@ class TestEncoderCudaGraphCaptureReplay:
         assert result[0].shape == (81, _HIDDEN)
         assert self.mgr.graph_misses == 1
 
+    def test_eager_fallback_when_replay_buffer_exceeds_capture(self):
+        # Capture-sized inputs replay normally; force an oversized leading
+        # dimension on a captured buffer so replay must fall back to eager
+        # instead of raising in the padded copy.
+        grid_thw = [[1, 4, 4]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        real_prepare = self.model.prepare_encoder_cudagraph_replay_buffers
+
+        def oversized_prepare(*args, **kwargs):
+            replay = real_prepare(*args, **kwargs)
+            captured = next(iter(self.mgr.budget_graphs["default"].values()))
+            key = "pixel_values"
+            overflow = captured.input_buffers[key].shape[0] + 8
+            replay.values[key] = torch.randn(
+                overflow,
+                _FLAT,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            return replay
+
+        with patch.object(
+            self.model,
+            "prepare_encoder_cudagraph_replay_buffers",
+            side_effect=oversized_prepare,
+        ):
+            result = self.mgr.execute(mm_kwargs)
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].shape == (4, _HIDDEN)
+        assert self.mgr.graph_hits == 0
+        assert self.mgr.graph_misses == 1
+
     # --- counters ---
 
     def test_hit_counter_increments_by_num_images(self):
@@ -1067,6 +1139,38 @@ class TestGetInputModality:
             "video_grid_thw": [[2, 4, 4]],
         }
         assert model.get_input_modality(mm_kwargs) == "video"
+
+
+# ---------------------------------------------------------------------------
+# No-GPU tests — precomputed embeddings never take the graph path
+# ---------------------------------------------------------------------------
+
+
+class TestSupportsBatch:
+    """supports_batch keeps graph replay to batches that run the encoder."""
+
+    @pytest.mark.parametrize(
+        "modality,keys,expected",
+        [
+            ("image", ["pixel_values", "image_grid_thw"], True),
+            ("image", ["pixel_values_flat", "image_num_patches"], True),
+            ("video", ["pixel_values_videos", "video_grid_thw"], True),
+            # Phi-4MM's pixel input: match the exact key, not a suffix.
+            ("image", ["input_image_embeds", "image_sizes"], True),
+            ("image", ["image_embeds"], False),
+            ("video", ["video_embeds"], False),
+            ("image", ["image_embeds", "image_grid_thw"], False),
+            ("video", ["video_embeds", "video_grid_thw"], False),
+            ("audio", ["input_features"], False),
+        ],
+    )
+    def test_supports_batch(self, modality, keys, expected):
+        mgr = _make_manager_with_budgets([16])
+        mgr.config = EncoderCudaGraphConfig(
+            modalities=["image", "video"], buffer_keys=[], out_hidden_size=32
+        )
+        mm_kwargs = {key: torch.zeros(1) for key in keys}
+        assert mgr.supports_batch(modality, mm_kwargs) is expected
 
 
 # ---------------------------------------------------------------------------

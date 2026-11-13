@@ -761,8 +761,9 @@ def test_sparse_mla_backend_pcp_dcp_requires_fp8_kv(kv_cache_dtype):
     )
 
 
-def test_sparse_mla_backend_rejects_dcp_with_fp8_ds_mla():
-    """The DCP path reads plain 576-wide KV rows, not packed fp8_ds_mla."""
+@pytest.mark.parametrize("use_pcp", [False, True])
+def test_sparse_mla_backend_fp8_ds_mla_dcp_support(use_pcp):
+    """fp8_ds_mla DCP runs the packed-row path, which has no PCP+DCP KV gather."""
     from vllm.platforms.rocm import RocmPlatform
 
     selector_config = AttentionSelectorConfig(
@@ -772,12 +773,17 @@ def test_sparse_mla_backend_rejects_dcp_with_fp8_ds_mla():
         block_size=64,
         use_mla=True,
         use_sparse=True,
+        use_pcp=use_pcp,
         use_dcp=True,
     )
-    with pytest.raises(ValueError, match="fp8_ds_mla"):
-        RocmPlatform.get_attn_backend_cls(
-            AttentionBackendEnum.ROCM_AITER_MLA_SPARSE, selector_config
-        )
+    backend = AttentionBackendEnum.ROCM_AITER_MLA_SPARSE
+    if use_pcp:
+        with pytest.raises(ValueError, match="fp8_ds_mla"):
+            RocmPlatform.get_attn_backend_cls(backend, selector_config)
+        return
+    assert RocmPlatform.get_attn_backend_cls(backend, selector_config) == (
+        backend.get_path()
+    )
 
 
 @pytest.mark.parametrize("use_dcp", [False, True])

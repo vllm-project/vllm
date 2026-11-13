@@ -321,7 +321,8 @@ def test_sparse_mla_backend_reports_sink_support_for_current_hardware() -> None:
     assert ROCMAiterMLASparseBackend.supports_sink() == (get_cdna_version() in (3, 4))
 
 
-def test_sparse_mla_backend_rejects_dcp() -> None:
+def test_sparse_mla_backend_rejects_dcp_with_sinks() -> None:
+    """Each DCP rank would add the sink mass before the LSE merge."""
     from vllm.platforms.rocm import RocmPlatform
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -494,7 +495,7 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
     kv = torch.randn(2, 2, block_size, Q_HEAD_DIM, device="cuda").to(dtype)[:, 1]
     selected = torch.tensor([[1, 7, 18], [0, 3, 20]], dtype=torch.int32, device="cuda")
     sinks = torch.linspace(-3.0, 5.0, num_heads, device="cuda")
-    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl = ROCMAiterMLASparseImpl.__new__(ROCMAiterMLASparseImpl)
     impl.num_heads = num_heads
     impl.kv_lora_rank = V_HEAD_DIM
     impl.kv_cache_dtype = "auto"

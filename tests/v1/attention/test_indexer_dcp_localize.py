@@ -1133,31 +1133,38 @@ def _stable_topk_ids(scores: torch.Tensor, topk: int) -> torch.Tensor:
     return key.argsort()[: min(topk, n)]
 
 
-def _merge_rocm_dcp_topk(monkeypatch, local_logits, local_topks, row_starts, world, il):
+def _merge_rocm_dcp_topk(
+    monkeypatch, local_logits, local_topks, row_starts, world, il, topk
+):
     """Run every rank's ROCm `_merge_dcp_topk_global` against one all-gather.
     A first pass records what each rank sends."""
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as rocm_ops
+    import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 
     sent: list[torch.Tensor] = []
+    gathered: list[torch.Tensor] = []
 
-    class _RecordingGroup(_FakeDCPGroup):
+    class _Group:
         def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+            assert dim == 1
+            if gathered:
+                return gathered[0].clone()
             sent.append(input_.clone())
-            return input_.repeat(world, 1)
+            return input_.repeat(1, world)
 
-    def run(group: _FakeDCPGroup) -> list[torch.Tensor]:
-        monkeypatch.setattr(rocm_ops, "get_dcp_group", lambda: group)
+    def run() -> list[torch.Tensor]:
+        monkeypatch.setattr(sparse_indexer, "get_dcp_group", _Group)
         merged = []
         for rank in range(world):
             indices = local_topks[rank].clone()
-            rocm_ops._merge_dcp_topk_global(
-                local_logits[rank], indices, rank, world, il, row_starts[rank]
+            sparse_indexer._merge_dcp_topk_global(
+                local_logits[rank], indices, topk, rank, world, il, row_starts[rank]
             )
             merged.append(indices)
         return merged
 
-    run(_RecordingGroup(torch.empty(0)))
-    return run(_FakeDCPGroup(torch.cat(sent)))
+    run()
+    gathered.append(torch.cat(sent, dim=1))
+    return run()
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm indexer merge")
@@ -1203,7 +1210,7 @@ def test_rocm_dcp_topk_merge_matches_global_topk(
         )
 
     merged = _merge_rocm_dcp_topk(
-        monkeypatch, local_logits, local_topks, row_starts, world, interleave
+        monkeypatch, local_logits, local_topks, row_starts, world, interleave, topk
     )
     for row, n in enumerate(seq_lens):
         expected = set(_stable_topk_ids(logits[row, :n], topk).tolist())
