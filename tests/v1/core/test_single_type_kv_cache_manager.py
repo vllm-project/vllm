@@ -6,6 +6,7 @@ import random
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
@@ -26,12 +27,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     MambaSpec,
-    RSWASpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 
@@ -40,7 +37,7 @@ pytestmark = pytest.mark.cpu_test
 
 def test_external_computed_blocks_do_not_corrupt_free_pool():
     block_size = 4
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
@@ -52,7 +49,7 @@ def test_external_computed_blocks_do_not_corrupt_free_pool():
         hash_block_size=block_size,
     )
     manager = FullAttentionManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=block_pool,
         enable_caching=False,
         kv_cache_group_id=0,
@@ -80,16 +77,14 @@ def test_external_computed_blocks_do_not_corrupt_free_pool():
 
 
 def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
-    spec = MambaSpec(
-        block_size=4,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
+    spec = MambaManager.layer_config(
+        MambaSpec(block_size=4, shapes=((1, 1),), dtypes=(torch.float32,)),
         mamba_cache_mode="align",
         num_speculative_blocks=1,
     )
     block_pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=4)
     manager = MambaManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -110,15 +105,13 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
 
 
 def test_mamba_retirement_crosses_null_gaps():
-    spec = MambaSpec(
-        block_size=4,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
+    spec = MambaManager.layer_config(
+        MambaSpec(block_size=4, shapes=((1, 1),), dtypes=(torch.float32,)),
         mamba_cache_mode="align",
     )
     pool = BlockPool(num_gpu_blocks=8, enable_caching=False, hash_block_size=4)
     manager = MambaManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=pool,
         enable_caching=False,
         kv_cache_group_id=0,
@@ -150,16 +143,14 @@ def test_mamba_retirement_crosses_null_gaps():
 @pytest.mark.parametrize("block_size", [3584, 4608])
 @pytest.mark.parametrize("in_flight_chunks", [0, 1, 2])
 def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
-    spec = MambaSpec(
-        block_size=block_size,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
+    spec = MambaManager.layer_config(
+        MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
         mamba_cache_mode="align",
         num_speculative_blocks=5,
     )
     pool = BlockPool(num_gpu_blocks=1000, enable_caching=True, hash_block_size=256)
     manager = MambaManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -192,10 +183,8 @@ def test_mamba_checkpoint_admission_matches_allocation(
     block_size, num_speculative_blocks, prompt_tokens
 ):
     """Checkpoint admission must match the subsequent physical allocation."""
-    spec = MambaSpec(
-        block_size=block_size,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
+    spec = MambaManager.layer_config(
+        MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
         mamba_cache_mode="align",
         num_speculative_blocks=num_speculative_blocks,
         num_prefill_checkpoint_blocks=1,
@@ -207,7 +196,7 @@ def test_mamba_checkpoint_admission_matches_allocation(
         hash_block_size=128,
     )
     manager = MambaManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -251,10 +240,8 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
     """A checkpoint step must not leave a never-written speculative block
     cached."""
     block_size = 128
-    spec = MambaSpec(
-        block_size=block_size,
-        shapes=((1, 1),),
-        dtypes=(torch.float32,),
+    spec = MambaManager.layer_config(
+        MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
         mamba_cache_mode="align",
         num_speculative_blocks=num_speculative_blocks,
         num_prefill_checkpoint_blocks=1,
@@ -262,7 +249,7 @@ def test_mamba_checkpoint_hash_maps_only_to_checkpoint_block(
     )
     pool = BlockPool(num_gpu_blocks=64, enable_caching=True, hash_block_size=128)
     manager = MambaManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -315,11 +302,11 @@ def get_sliding_window_manager(
 ):
     # Tests don't exercise admission gating; pass a large cap that is a no-op.
     return SlidingWindowManager(
-        sliding_window_spec,
+        new_kv_cache_group(["layer"], sliding_window_spec),
         block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
-        scheduler_block_size=sliding_window_spec.block_size,
+        scheduler_block_size=sliding_window_spec.spec.block_size,
         needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
@@ -332,11 +319,11 @@ def get_chunked_local_attention_manager(
     needs_kv_cache_zeroing=False,
 ):
     return ChunkedLocalAttentionManager(
-        chunked_local_attention_spec,
+        new_kv_cache_group(["layer"], chunked_local_attention_spec),
         block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
-        scheduler_block_size=chunked_local_attention_spec.block_size,
+        scheduler_block_size=chunked_local_attention_spec.spec.block_size,
         needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
@@ -344,17 +331,16 @@ def get_chunked_local_attention_manager(
 
 def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
     block_size = 4
-    spec = CircularBufferSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.bfloat16,
+    spec = CircularBufferManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+        )
     )
     block_pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
     )
     manager = CircularBufferManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -406,14 +392,11 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
 def test_external_kpool_tail_zeroing(record_for_zeroing):
     """The kpool tail ring is never zeroed, transferred or not: a pool only
     reads ring slots its own request wrote."""
-    spec = CircularBufferSpec(
-        block_size=4,
-        num_kv_heads=2,
-        head_size=8,
-        dtype=torch.bfloat16,
+    spec = CircularBufferManager.layer_config(
+        AttentionSpec(block_size=4, num_kv_heads=2, head_size=8, dtype=torch.bfloat16)
     )
     manager = CircularBufferManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=BlockPool(10, enable_caching=True, hash_block_size=4),
         enable_caching=True,
         kv_cache_group_id=0,
@@ -433,11 +416,10 @@ def test_external_kpool_tail_zeroing(record_for_zeroing):
 
 def test_sliding_window_records_new_blocks_for_zeroing():
     block_size = 2
-    spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    spec = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         sliding_window=4,
     )
     block_pool = BlockPool(
@@ -461,11 +443,10 @@ def test_sliding_window_records_new_blocks_for_zeroing():
 
 def test_chunked_local_attention_records_new_blocks_for_zeroing():
     block_size = 2
-    spec = ChunkedLocalAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    spec = ChunkedLocalAttentionManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         attention_chunk_size=4,
     )
     block_pool = BlockPool(
@@ -489,11 +470,10 @@ def test_chunked_local_attention_records_new_blocks_for_zeroing():
 
 def test_chunked_local_attention_possible_cached_prefix():
     block_size = 2
-    chunked_local_attention_spec = ChunkedLocalAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    chunked_local_attention_spec = ChunkedLocalAttentionManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         attention_chunk_size=4,
     )
 
@@ -526,7 +506,8 @@ def test_chunked_local_attention_possible_cached_prefix():
             max_length=len(block_hash_list) * block_size + tail_token,
             kv_cache_group_ids=[0],
             block_pool=block_pool,
-            kv_cache_spec=chunked_local_attention_spec,
+            block_size=chunked_local_attention_spec.spec.block_size,
+            manager_config=chunked_local_attention_spec.manager_config,
             drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0][0]
@@ -562,11 +543,10 @@ def test_chunked_local_attention_possible_cached_prefix():
 
 def test_sliding_window_possible_cached_prefix():
     block_size = 2
-    sliding_window_spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    sliding_window_spec = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         sliding_window=4,
     )
 
@@ -597,7 +577,8 @@ def test_sliding_window_possible_cached_prefix():
             max_length=len(block_hash_list) * block_size,
             kv_cache_group_ids=[0],
             block_pool=block_pool,
-            kv_cache_spec=sliding_window_spec,
+            block_size=sliding_window_spec.spec.block_size,
+            manager_config=sliding_window_spec.manager_config,
             drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0][0]
@@ -635,11 +616,10 @@ def test_sliding_window_cache_hit_with_finer_hash_alignment():
     """Sliding-window lookup uses full blocks with finer hybrid-cache hashes."""
     hash_block_size = 2
     block_size = 4
-    sliding_window_spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    sliding_window_spec = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         sliding_window=8,
     )
     block_pool = BlockPool(
@@ -663,7 +643,8 @@ def test_sliding_window_cache_hit_with_finer_hash_alignment():
         max_length=8,
         kv_cache_group_ids=[0],
         block_pool=block_pool,
-        kv_cache_spec=sliding_window_spec,
+        block_size=sliding_window_spec.spec.block_size,
+        manager_config=sliding_window_spec.manager_config,
         drop_eagle_block=False,
         alignment_tokens=hash_block_size,
     )
@@ -673,11 +654,8 @@ def test_sliding_window_cache_hit_with_finer_hash_alignment():
 
 
 def test_chunked_local_attention_remove_skipped_blocks():
-    attention_spec = ChunkedLocalAttentionSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    attention_spec = ChunkedLocalAttentionManager.layer_config(
+        AttentionSpec(block_size=2, num_kv_heads=1, head_size=1, dtype=torch.float32),
         attention_chunk_size=4,
     )
 
@@ -734,11 +712,8 @@ def test_chunked_local_attention_remove_skipped_blocks():
 
 
 def test_sliding_window_remove_skipped_blocks():
-    sliding_window_spec = SlidingWindowSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    sliding_window_spec = SlidingWindowManager.layer_config(
+        AttentionSpec(block_size=2, num_kv_heads=1, head_size=1, dtype=torch.float32),
         sliding_window=4,
     )
 
@@ -811,16 +786,15 @@ def test_sliding_window_remove_skipped_blocks():
 
 def test_rswa_remove_skipped_blocks_gap_range():
     block_size = 4
-    rswa_spec = RSWASpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    rswa_spec = RSWAManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         rswa_window=8,
     )
     block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True, hash_block_size=4)
     manager = RSWAManager(
-        rswa_spec,
+        new_kv_cache_group(["layer"], rswa_spec),
         block_pool=block_pool,
         enable_caching=True,
         kv_cache_group_id=0,
@@ -856,11 +830,10 @@ def test_rswa_remove_skipped_blocks_gap_range():
 
 def test_get_num_blocks_to_allocate():
     block_size = 2
-    sliding_window_spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    sliding_window_spec = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         sliding_window=4,  # Placeholder value, not related to test result
     )
 
@@ -890,11 +863,10 @@ def test_get_num_blocks_to_allocate():
 def test_evictable_cached_blocks_not_double_allocated():
     block_size = 2
     sliding_window_length = 2 * block_size
-    sliding_window_spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    sliding_window_spec = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         sliding_window=sliding_window_length,
     )
 
@@ -933,11 +905,10 @@ def test_evictable_cached_blocks_not_double_allocated():
 
 def test_chunked_local_attention_get_num_blocks_to_allocate():
     block_size = 2
-    attention_spec = ChunkedLocalAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    attention_spec = ChunkedLocalAttentionManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         attention_chunk_size=4,  # Placeholder value, not related to test result
     )
 
@@ -973,22 +944,21 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
     sliding_window = 8  # 4-block live window
     cap = sliding_window // block_size
 
-    spec = SlidingWindowSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
+    spec = SlidingWindowManager.layer_config(
+        AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+        ),
         sliding_window=sliding_window,
     )
     block_pool = BlockPool(
         num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
     )
     manager = SlidingWindowManager(
-        spec,
+        new_kv_cache_group(["layer"], spec),
         block_pool=block_pool,
         enable_caching=False,
         kv_cache_group_id=0,
-        scheduler_block_size=spec.block_size,
+        scheduler_block_size=spec.spec.block_size,
         max_admission_blocks_per_request=cap,
     )
 
@@ -1096,17 +1066,18 @@ def test_admission_cap_counts_recyclable_held_blocks(chunked_local, shared):
 
 def test_pop_blocks_for_free_trims_null_head():
     block_size = 2
-    spec = SlidingWindowSpec(
+    spec = AttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        sliding_window=4,
     )
     block_pool = BlockPool(
         num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
     )
-    manager = get_sliding_window_manager(spec, block_pool)
+    manager = get_sliding_window_manager(
+        SlidingWindowManager.layer_config(spec, sliding_window=4), block_pool
+    )
     null = block_pool.null_block
     real = block_pool.get_new_blocks(2)
     manager.req_to_blocks["swa"] = [null] * 3 + real

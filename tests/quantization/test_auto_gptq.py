@@ -17,7 +17,16 @@ from tests.quantization.utils import (
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQConfig,
     AutoGPTQLinearMethod,
@@ -25,6 +34,7 @@ from vllm.model_executor.layers.quantization.auto_gptq import (
 )
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     is_layer_gptq_quantized,
+    is_moe_layer_gptq_quantized,
     override_config,
 )
 from vllm.platforms import current_platform
@@ -133,6 +143,145 @@ def test_auto_gptq_normalizes_channelwise_activation_order():
             {r"+:model\.layers\.0\..*": {"group_size": 128}},
             {},
         )
+
+
+def test_moe_layer_quantized_only_when_its_experts_are_in_the_checkpoint():
+    """Experts left unquantized in the checkpoint must not get a GPTQ method.
+
+    `modules_in_block_to_quantize` is derived from the checkpoint dtypes, so a
+    partially quantized model (e.g. one whose MTP layer is stored unquantized)
+    only lists the quantized layers' experts. Giving the remaining layer a
+    quantized method makes it allocate `w2_qweight` while the checkpoint
+    provides `w2_weight`.
+    """
+    quantized_layers = [
+        f"language_model.model.layers.{layer}.mlp.experts.{expert}.{proj}"
+        for layer in range(2)
+        for expert in range(2)
+        for proj in ("gate_proj", "down_proj", "up_proj")
+    ]
+
+    assert is_moe_layer_gptq_quantized(
+        "language_model.model.layers.0.mlp.experts", quantized_layers
+    )
+    assert not is_moe_layer_gptq_quantized("mtp.layers.0.mlp.experts", quantized_layers)
+    # Block-relative names (as written by optimum) cannot distinguish layers.
+    assert is_moe_layer_gptq_quantized(
+        "mtp.layers.0.mlp.experts", ["mlp.experts.0.down_proj"]
+    )
+    # Configs that never mention experts carry no information about them.
+    assert is_moe_layer_gptq_quantized(
+        "mtp.layers.0.mlp.experts", ["mtp.layers.0.self_attn.q_proj"]
+    )
+    # The runtime prefix may be the experts' parent (DBRX's `...ffn`).
+    assert is_moe_layer_gptq_quantized(
+        "transformer.blocks.0.ffn", ["transformer.blocks.0.ffn.experts.mlp.w1"]
+    )
+    assert not is_moe_layer_gptq_quantized(
+        "transformer.blocks.1.ffn", ["transformer.blocks.0.ffn.experts.mlp.w1"]
+    )
+
+
+def _gptq_moe_layer() -> RoutedExperts:
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = FusedMoEConfig(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=128,
+        intermediate_size=128,
+        num_local_experts=4,
+        num_logical_experts=4,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cpu",
+        routing_method=RoutingMethodType.Default,
+        intermediate_size_per_partition_unpadded=128,
+    )
+    return layer
+
+
+def _gptq_config(dynamic=None, modules_in_block_to_quantize=None):
+    full_config = {
+        "quant_method": "gptq",
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+    }
+    return AutoGPTQConfig(
+        4,
+        128,
+        False,
+        True,
+        False,
+        dynamic or {},
+        full_config,
+        modules_in_block_to_quantize,
+    )
+
+
+@pytest.mark.parametrize("marlin_supported", [True, False])
+def test_auto_gptq_moe_quant_method_follows_checkpoint(
+    marlin_supported, monkeypatch, default_vllm_config
+):
+    """MTP experts stored in BF16 get the unquantized method, quantized ones
+    keep a GPTQ method, on both the Marlin path and the WNA16 fallback."""
+    from vllm.model_executor.layers.quantization import auto_gptq, moe_wna16
+
+    # Kernel availability is not what is under test here.
+    for module in (auto_gptq, moe_wna16):
+        monkeypatch.setattr(
+            module, "select_wna16_moe_backend", lambda *args, **kwargs: (None, None)
+        )
+    monkeypatch.setattr(
+        auto_gptq,
+        "check_moe_marlin_supports_layer",
+        lambda *args, **kwargs: marlin_supported,
+    )
+    quantized_method = (
+        AutoGPTQMoEMethod if marlin_supported else moe_wna16.MoeWNA16Method
+    )
+    layer = _gptq_moe_layer()
+
+    config = _gptq_config(
+        modules_in_block_to_quantize=[
+            f"model.layers.0.mlp.experts.{expert}.{proj}"
+            for expert in range(4)
+            for proj in ("gate_proj", "up_proj", "down_proj")
+        ]
+    )
+    assert isinstance(
+        config.get_quant_method(layer, "model.layers.0.mlp.experts"),
+        quantized_method,
+    )
+    assert isinstance(
+        config.get_quant_method(layer, "mtp.layers.0.mlp.experts"),
+        UnquantizedFusedMoEMethod,
+    )
+
+    # MTP experts the checkpoint did quantize keep the quantized method.
+    config = _gptq_config(
+        modules_in_block_to_quantize=[
+            f"{layer_prefix}.mlp.experts.{expert}.{proj}"
+            for layer_prefix in ("model.layers.0", "mtp.layers.0")
+            for expert in range(4)
+            for proj in ("gate_proj", "up_proj", "down_proj")
+        ]
+    )
+    for prefix in ("model.layers.0.mlp.experts", "mtp.layers.0.mlp.experts"):
+        assert isinstance(config.get_quant_method(layer, prefix), quantized_method)
+
+    # Negative dynamic rules exclude the layer on either path.
+    config = _gptq_config(dynamic={r"-:.*mtp.*": {}})
+    assert isinstance(
+        config.get_quant_method(layer, "model.layers.0.mlp.experts"),
+        quantized_method,
+    )
+    assert isinstance(
+        config.get_quant_method(layer, "mtp.layers.0.mlp.experts"),
+        UnquantizedFusedMoEMethod,
+    )
 
 
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
