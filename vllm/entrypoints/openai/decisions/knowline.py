@@ -338,9 +338,10 @@ def _scaffold(
         except Exception:  # roles the template rejects: one user message
             msgs = [{"role": "user", "content": render_value(state)}]
             text = tokenizer.apply_chat_template(_conv(msgs, m1, m2), **template_kwargs)
-    # tokenize=False asks for the rendered text; the protocol's return type
-    # still covers the token list.
-    assert isinstance(text, str)
+    # tokenize=False asks for the rendered text; a request's
+    # chat_template_kwargs can still make the template return token ids.
+    if not isinstance(text, str):
+        raise StructuredDecisionError("the chat template must render text")
     if text.count(m1) != 1 or (m2 is not None and text.count(m2) != 1):
         raise ValueError("chat template dropped or duplicated the question slot")
     prefix, rest = text.split(m1)

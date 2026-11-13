@@ -26,6 +26,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -1810,6 +1811,9 @@ class KnowLineStrategy(ReadStrategy):
     ) -> QuestionRead:
         """The read's answer from the labels' logprobs over the whole
         vocabulary."""
+        if not any(math.isfinite(lp) for lp in logprobs):
+            # The label softmax would be NaN.
+            raise GenerationError("no finite label logprob")
         token_ids = result.outputs[0].token_ids
         read = QuestionRead(
             probs=label_softmax(logprobs),
@@ -1841,6 +1845,10 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
 # label_mass sums the labels' full-vocabulary probabilities. The logprobs modes
 # return those probabilities. The logits modes return raw logits instead.
 LOGPROBS_MODES = frozenset({"raw_logprobs", "processed_logprobs"})
+#: The architectures the KnowLine checkpoints are built on.
+KNOWLINE_ARCHITECTURES = frozenset(
+    {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}
+)
 
 
 def select_read_strategy(
@@ -1852,6 +1860,11 @@ def select_read_strategy(
     if getattr(hf_config, "knowline_config", None) is not None:
         # A KnowLine checkpoint opts in by its marker: the architecture is
         # the stock model's, so the stock mapping stays for base models.
+        if model_config.architecture not in KNOWLINE_ARCHITECTURES:
+            raise ValueError(
+                "knowline_config is set, but the KnowLine format serves only "
+                f"{sorted(KNOWLINE_ARCHITECTURES)}, not {model_config.architecture}"
+            )
         strategy = KnowLineStrategy
     else:
         strategy = READ_STRATEGIES.get(model_config.architecture)
