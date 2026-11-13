@@ -3132,6 +3132,7 @@ def source_construction(monkeypatch, default_vllm_config):
         ],
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_moe_oracles_skip_dispatch_for_requantization_source(
     kind: str,
     source_format: str | None,
@@ -3253,6 +3254,7 @@ def test_moe_oracles_skip_dispatch_for_requantization_source(
         ],
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_linear_dispatch_skipped_for_requantization_source(
     kind: str,
     source_format: str | None,
@@ -3376,6 +3378,7 @@ def _register_online_config(name: str):
         pytest.param("fp8_per_block", None, id="shorthand"),
     ],
 )
+@pytest.mark.skip_global_cleanup
 def test_registered_online_config_is_instantiated(
     tmp_path, quantization, quant_args
 ) -> None:
