@@ -35,10 +35,8 @@ from vllm.distributed.parallel_state import (
     graph_capture,
     is_global_first_rank,
 )
-from vllm.distributed.pp_transport.schema import (
-    PPTransportSchema,
-    copy_intermediate_tensors,
-)
+from vllm.distributed.pp_transport.ops import copy_intermediate_tensors
+from vllm.distributed.pp_transport.schema import PPTransportSchema
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens

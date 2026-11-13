@@ -12,11 +12,11 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.pp_transport.ops import copy_intermediate_tensors
 from vllm.distributed.pp_transport.schema import (
     PPTransportDataType,
     PPTransportSchema,
     PPTransportTensor,
-    copy_intermediate_tensors,
     make_empty_intermediate_tensors_factory,
 )
 from vllm.sequence import IntermediateTensors
@@ -54,6 +54,8 @@ def _run_pp2_tp2_transport(rank: int, init_method: str):
             transport.register_tensor(
                 "downstream.route_state",
                 PPTransportTensor((4,), sequence_parallel=True),
+                receive=not pp_group.is_first_rank,
+                send=pp_group.is_first_rank,
             )
             buffers = transport.make_empty_intermediate_tensors(
                 8, torch.float32, torch.device("cpu")
@@ -78,14 +80,14 @@ def _run_pp2_tp2_transport(rank: int, init_method: str):
                     handles = pp_group.isend_tensor_dict(
                         output.tensors,
                         all_gather_group=tp_group,
-                        all_gather_tensors=transport.all_gather_policy,
+                        all_gather_tensors=transport.send_all_gather_policy,
                     )
                     for handle in handles:
                         handle.wait()
                 else:
                     tensors, handles, postprocess = pp_group.irecv_tensor_dict(
                         all_gather_group=tp_group,
-                        all_gather_tensors=transport.all_gather_policy,
+                        all_gather_tensors=transport.receive_all_gather_policy,
                     )
                     for handle in handles:
                         handle.wait()
@@ -315,3 +317,57 @@ def test_full_downstream_field_copies_descriptor_padding():
         buffers, 4, IntermediateTensors({"custom": source}), num_received_tokens=3
     )
     torch.testing.assert_close(inputs["custom"], source, rtol=0, atol=0)
+
+
+@dataclass(frozen=True)
+class BoundTensor(PPTransportTensor):
+    buffer: torch.Tensor | None = None
+
+    def allocate(self, num_tokens, dtype, device, tp_size):
+        assert self.buffer is not None
+        rows = self.num_rows(num_tokens, tp_size)
+        if rows > self.buffer.shape[0]:
+            raise ValueError("Model buffer capacity exceeded")
+        return self.buffer[:rows]
+
+
+def test_directional_cache_manifests_and_bound_model_state():
+    transport = PPTransportSchema({"hidden_states": PPTransportTensor((4,))}, tp_size=2)
+    state = torch.zeros(8, 3, dtype=torch.int32)
+    transport.register_tensor(
+        "topk", BoundTensor((3,), dtype=torch.int32, buffer=state), send=False
+    )
+    transport.register_tensor(
+        "cache.layer2", PPTransportTensor((2, 4), dtype=torch.uint8), send=False
+    )
+    transport.register_tensor(
+        "cache.layer8", PPTransportTensor((2, 4), dtype=torch.uint8), receive=False
+    )
+    # The same name can also change SP layout at this stage's boundary.
+    transport.register_tensor(
+        "mix", PPTransportTensor((4,), sequence_parallel=True), send=False
+    )
+    transport.register_tensor("mix", PPTransportTensor((4,)), receive=False)
+    buffers = transport.make_empty_intermediate_tensors(
+        8, torch.float32, torch.device("cpu")
+    )
+    assert set(buffers.tensors) == {"hidden_states", "topk", "cache.layer2", "mix"}
+    assert buffers["topk"].data_ptr() == state.data_ptr()
+    assert transport.receive_all_gather_policy == {"mix": False}
+    assert transport.send_all_gather_policy == {}
+    with pytest.raises(ValueError, match="directional"):
+        _ = transport.all_gather_policy
+    output = transport.make_intermediate_tensors(
+        5,
+        hidden_states=torch.ones(5, 4),
+        mix=torch.ones(5, 4),
+        **{"cache.layer8": torch.ones(5, 2, 4, dtype=torch.uint8)},
+    )
+    assert set(output.tensors) == {"hidden_states", "mix", "cache.layer8"}
+    with pytest.raises(ValueError, match="output dtype"):
+        transport.make_intermediate_tensors(
+            5,
+            hidden_states=torch.ones(5, 4),
+            mix=torch.ones(5, 4),
+            **{"cache.layer8": torch.ones(5, 2, 4)},
+        )
