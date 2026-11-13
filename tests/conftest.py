@@ -240,7 +240,7 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="gloo" if current_platform.is_cpu() else "nccl",
+                backend=current_platform.dist_backend,
             )
             initialize_model_parallel(1, 1)
             yield
@@ -1034,7 +1034,7 @@ class VllmRunner:
             # CCL context in the engine subprocess. The default utilization of
             # 0.92 leaves too little headroom for both, so lower it on XPU when
             # the caller did not request an explicit value.
-            if "gpu_memory_utilization" not in kwargs:
+            if kwargs.get("gpu_memory_utilization") is None:
                 kwargs["gpu_memory_utilization"] = 0.9
             gpu_memory_utilization = kwargs["gpu_memory_utilization"]
             # XPU (Level Zero) can also release device memory lazily after a
