@@ -25,7 +25,9 @@ static SPECS: &[&dyn ModelProcessorSpec] = &[
 /// `(model_type, target model_type)` pairs for checkpoints that reuse another
 /// family's `llm-multimodal` spec unchanged. The target spec still sees this
 /// model's own metadata.
-const MODEL_TYPE_ALIASES: &[(&str, &str)] = &[];
+const MODEL_TYPE_ALIASES: &[(&str, &str)] = &[
+    ("kimi_k31", "kimi_k3"), // Kimi K3.1 ships K3's vision tower and preprocessing unchanged.
+];
 
 /// Resolve the model processor spec for one loaded model: a local spec first,
 /// then the `llm-multimodal` registry, through a model type alias if any.
@@ -91,7 +93,7 @@ pub(crate) mod test_helpers {
     ) -> PreprocessedEncoderInputs {
         let sizes: Vec<(u32, u32)> = item_sizes.iter().map(|s| (s.height, s.width)).collect();
         PreprocessedEncoderInputs {
-            encoder_input: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
+            encoder_input: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]).into(),
             feature_token_counts: feature_token_counts.to_vec(),
             item_sizes: sizes,
             model_specific: HashMap::new(),

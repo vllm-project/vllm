@@ -64,6 +64,10 @@ message GenerateRequest {
   // output after reasoning. Prefer a constraint that covers the full output
   // from the first generated token.
   EngineReasoningGate engine_reasoning_gate = 18;
+
+  // Media loading options keyed by modality, as in the HTTP `media_io_kwargs`
+  // request field. Only `video.fps` (frames sampled per second) is supported.
+  google.protobuf.Struct media_io_kwargs = 19;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output
@@ -108,15 +112,12 @@ message DecodingParameters {
   map<uint32, float> logit_bias = 4;
   repeated uint32 allowed_token_ids = 5;
 
-  message StringChoices {
-    repeated string choices = 1;
-  }
-
-  // Control structured outputs
-  oneof structured_output {
+  // To be deprecated: the structured-output constraint as inline fields, kept
+  // for clients built before `structured_output`. Setting both is rejected.
+  oneof legacy_structured_output {
     string json = 6;
     string regex = 7;
-    StringChoices choice = 8;
+    StructuredOutput.StringChoices choice = 8;
     string grammar = 9;
     bool json_object = 10;
     string structural_tag = 11;
@@ -124,6 +125,25 @@ message DecodingParameters {
 
   // Token sequences that must not be generated. Each sequence must be nonempty.
   repeated TokenIds bad_words_token_ids = 12;
+
+  // Structured-output constraint. Omitted means unconstrained.
+  StructuredOutput structured_output = 13;
+}
+
+// One structured-output constraint.
+message StructuredOutput {
+  message StringChoices {
+    repeated string choices = 1;
+  }
+
+  oneof kind {
+    string json = 1;
+    string regex = 2;
+    StringChoices choice = 3;
+    string grammar = 4;
+    bool json_object = 5;
+    string structural_tag = 6;
+  }
 }
 
 message StoppingCriteria {
@@ -148,7 +168,8 @@ message ResponseOptions {
   bool prompt_logprobs = 2;
   optional CandidateTokens prompt_candidates = 3;
 
-  // Output options; output_text defaults to true
+  // Output options; output_text defaults to true. When false, the server does
+  // not detokenize, and stop_strings must be empty.
   optional bool output_text = 4;
   bool output_token_ids = 5;
   bool output_logprobs = 6;

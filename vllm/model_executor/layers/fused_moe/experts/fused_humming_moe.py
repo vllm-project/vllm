@@ -69,7 +69,6 @@ from vllm.scalar_type import ScalarType
 from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 from vllm.utils.platform_utils import num_compute_units
-from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.humming import (
@@ -301,7 +300,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @classmethod
     def is_batched(cls) -> bool:
-        return cls.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
+        return cls.activation_format().is_batched
 
     @staticmethod
     def _supports_quant_scheme(
@@ -596,17 +595,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         return self._workspace_shapes(M, topk, activation)
 
-    def make_workspaces(self, M: int, topk: int, activation: MoEActivation):
-        shapes = self._workspace_shapes(M, topk, activation)
-        workspace1_shape, workspace2_shape, output_shape = shapes
-        torch_dtype = self.moe_config.in_dtype
-        workspace1, workspace2 = current_workspace_manager().get_simultaneous(
-            (workspace1_shape, torch_dtype),
-            (workspace2_shape, torch_dtype),
-        )
-        output = _resize_cache(workspace1, output_shape)
-        return workspace1, workspace2, output
-
     def prepare_buffers(
         self,
         workspace1: torch.Tensor,
@@ -680,7 +668,7 @@ class HummingIndexedExperts(HummingExpertsBase):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
@@ -892,7 +880,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
@@ -947,7 +935,10 @@ class HummingGroupedExperts(HummingExpertsBase):
             scatter_metadata = moe_prepare_scatter(topk_ids, expert_map, scratch)
             expert_offsets, scatter_idx = scatter_metadata
             inv_perm = scatter_idx.flatten()
-            num_valid_tokens = expert_offsets[-1:] if expert_map is not None else None
+            # Bound the dynamic input quantization to the valid routes. Rows
+            # past expert_offsets[-1] belong to non-local experts or to invalid
+            # routes (e.g. -1 for padding tokens), with or without expert_map.
+            num_valid_tokens = expert_offsets[-1:]
         else:
             # Prequantized inputs skip w13 quantization, so its buffer is free
             # to hold the permuted hidden states.

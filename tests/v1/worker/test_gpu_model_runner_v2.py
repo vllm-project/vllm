@@ -2,30 +2,75 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 
+import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
-from vllm.config import CacheConfig, LoRAConfig, ParallelConfig
+from tests.v1.core.utils import new_kv_cache_group
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    KernelConfig,
+    LoadConfig,
+    LoRAConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
+
+
+@pytest.mark.parametrize("eligible,expected_bound", [(True, 8), (False, None)])
+def test_prompt_tail_keeps_decode_graph_bound(monkeypatch, eligible, expected_bound):
+    """A decode-eligible prompt tail must not lose its varlen graph bound."""
+    runner = Mock(
+        lora_config=None,
+        aux_output_connector=None,
+        encoder_cache=None,
+        pcp_manager=None,
+        is_encoder_decoder=False,
+    )
+    runner.gather_batch_req_state.return_value = (
+        SimpleNamespace(num_tokens=8, has_prefill=True, decode_graph_eligible=eligible),
+        None,
+    )
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.num_scheduled_tokens = {"request": 8}
+    scheduler_output.total_num_scheduled_tokens = 8
+    dispatch = Mock(side_effect=RuntimeError("stop before forward"))
+    monkeypatch.setattr(model_runner_module, "dispatch_cg_and_sync_dp", dispatch)
+
+    with pytest.raises(RuntimeError, match="stop before forward"):
+        GPUModelRunner.execute_model(runner, scheduler_output)
+
+    assert dispatch.call_args.kwargs["max_query_len"] == expected_bound
 
 
 def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
@@ -65,10 +110,67 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
 
     runner.sample_tokens(None)
 
-    pp_receive.assert_called_once_with(global_batch)
+    pp_receive.assert_called_once_with(global_batch, recv_drafts=False)
     postprocess_num_computed_tokens.assert_called_once_with(global_batch)
     postprocess_state.assert_called_once_with(global_batch.idx_mapping, 0)
     restore_for_sampling.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "enabled,expected_events",
+    [
+        (True, ["allocate", "bind", "dummy_run"]),
+        (False, ["dummy_run"]),
+    ],
+    ids=["aux-output-enabled", "aux-output-disabled"],
+)
+def test_profile_run_creates_aux_output_connector_before_forward(
+    monkeypatch, enabled, expected_events
+):
+    events = []
+    capturer = object()
+    model = torch.nn.Module()
+    vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(enabled=enabled),
+        max_concurrent_batches=1,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+
+    def allocate(**kwargs):
+        assert kwargs == {"max_num_batched_tokens": 8, "vllm_config": vllm_config}
+        events.append("allocate")
+        return capturer
+
+    def bind(bind_model, bind_capturer):
+        assert bind_model is model and bind_capturer is capturer
+        events.append("bind")
+
+    def dummy_run(*args, **kwargs):
+        events.append("dummy_run")
+        return None, None
+
+    monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", allocate)
+    monkeypatch.setattr(aux_output_worker, "bind_routed_experts_capturer", bind)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = vllm_config
+    runner.model = model
+    runner.aux_output_connector = None
+    runner.supports_mm_inputs = False
+    runner.is_last_pp_rank = False
+    runner.max_num_tokens = 8
+    runner.encoder_cache = None
+    runner.pooling_runner = None
+    monkeypatch.setattr(runner, "_dummy_run", dummy_run)
+
+    runner.profile_run()
+
+    assert events == expected_events
+    connector = runner.aux_output_connector
+    if enabled:
+        assert connector is not None and connector._capturer is capturer
+    else:
+        assert connector is None
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
@@ -94,6 +196,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         num_new_sampled_tokens_per_step=1,
     )
     runner.speculator = None
+    runner.batch_sharder = None
     runner.req_states = []
     runner.input_buffers = SimpleNamespace(query_start_loc=None)
     runner.vocab_size = 1
@@ -101,13 +204,10 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.max_num_tokens = 2
     runner.device = torch.device("cuda")
 
-    raw_spec = CircularBufferSpec(
-        block_size=8,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
+    raw_layer = CircularBufferManager.layer_config(
+        AttentionSpec(block_size=8, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     )
-    compressed_spec = FullAttentionSpec(
+    compressed_spec = AttentionSpec(
         block_size=262144,
         num_kv_heads=1,
         head_size=128,
@@ -117,14 +217,8 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         num_blocks=1,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=["raw"],
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=8,
-                    kv_cache_specs={"raw": raw_spec},
-                ),
-            ),
-            KVCacheGroupSpec(layer_names=["compressed"], kv_cache_spec=compressed_spec),
+            new_kv_cache_group(["raw"], raw_layer),
+            new_kv_cache_group(["compressed"], compressed_spec),
         ],
     )
 
@@ -180,7 +274,7 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     attention_block_size = 1_536
     mamba_block_size = 16
     dcp_size = 8
-    full_attention_spec = FullAttentionSpec(
+    full_attention_spec = AttentionSpec(
         block_size=attention_block_size,
         num_kv_heads=1,
         head_size=1,
@@ -190,6 +284,8 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         shapes=((1,),),
         dtypes=(torch.bfloat16,),
         block_size=mamba_block_size,
+    )
+    mamba_config = MambaManager.config(
         mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
     )
@@ -197,8 +293,8 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         num_blocks=1,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["attention"], full_attention_spec),
-            KVCacheGroupSpec(["kda"], mamba_spec),
+            new_kv_cache_group(["attention"], full_attention_spec),
+            new_kv_cache_group(["kda"], mamba_spec, mamba_config),
         ],
     )
     parallel_config = SimpleNamespace(
@@ -227,7 +323,9 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
             raise _CapturedWidths
         return max_num_blocks
 
-    monkeypatch.setattr(model_runner_module, "get_block_table_width", capture_width)
+    monkeypatch.setattr(
+        "vllm.v1.kv_cache_interface.get_block_table_width", capture_width
+    )
 
     with pytest.raises(_CapturedWidths):
         GPUModelRunner.initialize_kv_cache(runner, kv_cache_config)
@@ -270,7 +368,7 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 @contextlib.contextmanager
 def _no_dummy_loras(
     lora_config: LoRAConfig | None, remove_lora: bool = True
-) -> Iterator[None]:
+) -> Generator[None]:
     """No-op stand-in for LoRAModelRunnerMixin.maybe_setup_dummy_loras."""
     yield
 
@@ -282,23 +380,24 @@ def _make_capture_runner(
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.model_state = SimpleNamespace(
-        supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
+        supports_mm_inputs=False, capture_inner_cudagraphs=Mock()
     )
     runner.cudagraph_manager = SimpleNamespace(
         needs_capture=lambda: captured,
         capture=lambda *args, **kwargs: None,
+        capture_stream=object(),
     )
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
     runner.adaptive_verification = None
     runner.model = None
-    runner.input_buffers = None
+    runner.input_buffers = object()
     runner.pcp_manager = None
     runner.intermediate_tensors = None
-    runner.block_tables = None
-    runner.attn_groups = None
-    runner.kv_cache_config = None
+    runner.block_tables = object()
+    runner.attn_groups = object()
+    runner.kv_cache_config = object()
     runner.use_aux_hidden_state_outputs = False
     runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
     return runner
@@ -324,6 +423,16 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     runner.capture_model()
 
     assert lock_calls == ["lock"]
+    assert runner.cudagraph_manager is not None
+    capture_inner_cudagraphs = runner.model_state.capture_inner_cudagraphs
+    assert isinstance(capture_inner_cudagraphs, Mock)
+    capture_inner_cudagraphs.assert_called_once_with(
+        runner.input_buffers,
+        runner.block_tables,
+        runner.attn_groups,
+        runner.kv_cache_config,
+        runner.cudagraph_manager.capture_stream,
+    )
 
 
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
@@ -361,6 +470,46 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     assert lock_calls == []
 
 
+@pytest.mark.parametrize("profile_only", [False, True])
+def test_capture_model_excludes_adaptive_verification_profiling_cache(
+    monkeypatch, profile_only
+):
+    """Adaptive verification's cost-profiling dummy runs execute inside
+    capture_model's free-memory window. The activations they leave in the
+    allocator cache must not be counted as CUDA graph memory, which is taken
+    from the KV cache. The memory-profiling pass skips them entirely: it runs
+    on a throwaway KV cache and the real capture recalibrates."""
+    runner = _make_capture_runner(monkeypatch, captured=True)
+    monkeypatch.setattr(
+        runner.cudagraph_manager, "captured_token_counts", lambda: [1, 2], raising=False
+    )
+    runner.step_timing = SimpleNamespace(collect=lambda: contextlib.nullcontext([]))
+    curves: list[list] = []
+    runner.adaptive_verification = SimpleNamespace(
+        batches_to_profile=lambda sizes: [{"num_tokens": n} for n in sizes],
+        set_initial_cost_curves=curves.append,
+    )
+    total, cached = 16 << 30, [0]
+
+    def _dummy_run(num_tokens, **kwargs):
+        cached[0] = 2 << 30
+
+    monkeypatch.setattr(runner, "_dummy_run", _dummy_run)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(
+        torch.accelerator, "empty_cache", lambda: cached.__setitem__(0, 0)
+    )
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (total - cached[0], total)
+    )
+    monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
+
+    assert runner.capture_model(profile_only=profile_only) == 0
+    assert curves == ([] if profile_only else [[]])
+
+
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
 def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer):
     """Targets allocate the MTP hidden buffer only for hidden-state drafters."""
@@ -393,24 +542,46 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
     ("draft_dtype", "expected_dtype"),
     [("auto", "auto"), ("bfloat16", "bfloat16"), (None, "fp8_e4m3")],
 )
-def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_dtype):
+@pytest.mark.parametrize("data_parallel_index", [0, 3])
+@pytest.mark.parametrize(
+    ("draft_moe", "draft_attn"),
+    [(None, None), ("triton", AttentionBackendEnum.TRITON_ATTN)],
+)
+def test_standalone_draft_kv_dtype_override(
+    monkeypatch, draft_dtype, expected_dtype, data_parallel_index, draft_moe, draft_attn
+):
     @dataclass
     class Config:
         cache_config: CacheConfig
         parallel_config: ParallelConfig
         model_config: object
+        kernel_config: KernelConfig
+        attention_config: AttentionConfig
         quant_config: object | None = None
 
-    target = Config(CacheConfig(cache_dtype="fp8_e4m3"), ParallelConfig(), object())
+    target = Config(
+        CacheConfig(cache_dtype="fp8_e4m3"),
+        ParallelConfig(),
+        object(),
+        KernelConfig(moe_backend="flashinfer_cutlass"),
+        AttentionConfig(backend=AttentionBackendEnum.FLASHINFER),
+    )
+    target.parallel_config.data_parallel_index = data_parallel_index
     speculator = object.__new__(ar_module.StandaloneARSpeculator)
     speculator.vllm_config = target
     speculator.draft_model_config = object()
-    speculator.speculative_config = SimpleNamespace(
-        kv_cache_dtype=draft_dtype, draft_parallel_config=ParallelConfig()
+    spec = SimpleNamespace(
+        kv_cache_dtype=draft_dtype,
+        moe_backend=draft_moe,
+        attention_backend=draft_attn,
+        draft_parallel_config=ParallelConfig(),
     )
+    spec.apply_draft_overrides = partial(SpeculativeConfig.apply_draft_overrides, spec)
+    speculator.speculative_config = spec
     get_model = Mock(return_value=object())
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
+    monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
 
     speculator.load_draft_model(object(), set())
 
@@ -418,3 +589,49 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     assert draft_config.cache_config.cache_dtype == expected_dtype
     assert speculator.attn_vllm_config.cache_config.cache_dtype == expected_dtype
     assert target.cache_config.cache_dtype == "fp8_e4m3"
+    assert draft_config.parallel_config.data_parallel_index == data_parallel_index
+    assert target.parallel_config.data_parallel_index == data_parallel_index
+    assert draft_config.kernel_config.moe_backend == (draft_moe or "flashinfer_cutlass")
+    assert draft_config.attention_config.backend == (
+        draft_attn or AttentionBackendEnum.FLASHINFER
+    )
+    assert target.kernel_config.moe_backend == "flashinfer_cutlass"
+    assert target.attention_config.backend == AttentionBackendEnum.FLASHINFER
+
+
+class _EmbeddingModel(torch.nn.Module):
+    def __init__(self, vocab_size: int, hidden_size: int):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(vocab_size, hidden_size)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
+
+@pytest.mark.parametrize("multimodal", [True, False])
+def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
+    """Models fed inputs_embeds must see the randomized dummy ids, not zeros."""
+    model_config = ModelConfig(
+        model="facebook/opt-125m", dtype="float32", enable_prompt_embeds=True
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=16,
+            max_model_len=64,
+            is_encoder_decoder=False,
+        ),
+    )
+    model = _EmbeddingModel(32, model_config.get_inputs_embeds_size())
+    encoder_cache = EncoderCache() if multimodal else None
+    state = DefaultModelState(vllm_config, model, encoder_cache, torch.device("cpu"))
+    input_ids = torch.tensor([3, 7, 7, 1, 30])
+
+    with torch.inference_mode():
+        inputs_embeds = state.dummy_inputs_embeds(6, input_ids)
+        expected = model.embed_input_ids(input_ids)
+
+    assert inputs_embeds.shape == (6, model_config.get_inputs_embeds_size())
+    torch.testing.assert_close(inputs_embeds[:5], expected)
+    torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)

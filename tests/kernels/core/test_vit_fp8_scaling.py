@@ -43,9 +43,9 @@ def _build_attention(mm_config, attn_backend=None):
     """Yield an MMEncoderAttention with the given multimodal config.
 
     The VllmConfig context stays active while the test runs so that
-    ``get_multimodal_config()`` calls during the forward path resolve. Also
-    invokes ``process_weights_after_loading`` to simulate the model loader's
-    auto-scan. Yields ``None`` if FlashInfer cuDNN is not available.
+    `get_multimodal_config()` calls during the forward path resolve. Also
+    invokes `process_weights_after_loading` to simulate the model loader's
+    auto-scan. Yields `None` if FlashInfer cuDNN is not available.
     """
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -79,7 +79,7 @@ def _build_attention(mm_config, attn_backend=None):
             head_size=HEAD_DIM,
             prefix=LAYER_0,
         )
-        attn.process_weights_after_loading(torch.bfloat16)
+        attn.process_weights_after_loading()
         yield attn
 
 
@@ -247,7 +247,7 @@ def test_static_scales_missing_layer(tmp_path) -> None:
             prefix=LAYER_0,
         )
         with pytest.raises(ValueError, match="scales not found for layer"):
-            attn.process_weights_after_loading(torch.bfloat16)
+            attn.process_weights_after_loading()
 
 
 def test_dynamic_scales_auto_save(tmp_path) -> None:

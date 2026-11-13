@@ -6,7 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-import vllm._custom_ops as ops
+import vllm._cpu_ops as ops
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
@@ -399,7 +399,7 @@ def _unpacked_conv_weight(layer) -> torch.Tensor:
 
     On AMX and aarch64+bf16 the conv1d weight is packed in place at load time,
     so the torch spec-decode path relies on the un-packed copy stashed by
-    ``dispatch_cpu_unquantized_gemm``.
+    `dispatch_cpu_unquantized_gemm`.
     """
     w = getattr(layer.conv1d, "_cpu_unpacked_conv_weight", None)
     if w is not None:
@@ -505,7 +505,7 @@ def _spec_forward(
     """Run the GDN core for the multi-query (speculative) tokens.
 
     Returns the core attention output for the spec tokens, in the same token
-    order as ``mixed_qkv_spec`` (i.e. ordered by ``spec_query_start_loc``).
+    order as `mixed_qkv_spec` (i.e. ordered by `spec_query_start_loc`).
     """
     num_spec_decodes = attn_metadata_i.num_spec_decodes
     spec_state_indices = attn_metadata_i.spec_state_indices_tensor
@@ -526,12 +526,14 @@ def _spec_forward(
     bias = layer.conv1d.bias
     silu = layer.activation == "silu"
 
+    # The native kernel appends the new tokens at the end of the buffer, which
+    # is where the next step expects them only when every row is full-length.
     can_use_native_conv = (
         (is_amx or is_arm_bf16())
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
-        and int(seq_lens[0].item()) > 0
+        and int(seq_lens[0].item()) == state_len - (width - 2)
     )
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
@@ -567,11 +569,9 @@ def _spec_forward(
             if silu:
                 out = F.silu(out)
             conv_out[start : start + q_i] = out.transpose(0, 1).to(conv_out.dtype)
-            # Roll the buffer: drop the accepted history from the front, append
-            # the new draft tokens, keep total length == state_len.
-            keep = B[:, offset + 1 : offset + 1 + (state_len - q_i)]
-            new_B = torch.cat([keep, x_seq], dim=-1)
-            B.copy_(new_B)
+            # Same layout as causal_conv1d_update: the next step reads its
+            # history at column ``num_accepted - 1``.
+            B[:, : width - 2 + q_i] = conv_in[0, :, 1:]
 
     # ---- 2. Recurrent (multi-slot SSM state) ----
     # Single fused kernel call: it runs the recurrence over each sequence's
@@ -754,7 +754,7 @@ def _spec_aware_nonspec_subset(
 ) -> torch.Tensor:
     """Process non-spec (prefill) tokens that coexist with spec sequences.
 
-    Returns outputs ordered like ``non_spec_token_indx``.
+    Returns outputs ordered like `non_spec_token_indx`.
     """
     has_initial_state = attn_metadata_i.has_initial_state
     prefill_state_indices = attn_metadata_i.prefill_state_indices
