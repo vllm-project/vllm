@@ -28,14 +28,15 @@ Beyond the optimization levels, three mechanisms reduce time-to-first-token on r
 
 For block-outermost packed KV caches (`BLHNC` and `BLNHC`), vLLM automatically
 sizes balanced groups around replicated draft attention when DCP is enabled. No tuning
-parameter is required. Each replicated draft bucket stays whole while the planner
-compares repeat counts for the other buckets using the actual stride-aligned
-shared block and per-group block reservations for a max-length request.
+parameter is required. Alternative layouts keep each replicated draft bucket whole
+while the planner compares repeat counts for the other buckets using the actual
+stride-aligned shared block and per-group block reservations for a max-length request.
 
 The existing plan remains a candidate. Lower reservation wins, with fewer groups
-preferred on ties; an exact tie keeps the original plan. DCP1 and configurations
-without a separate replicated draft attention bucket, or with unbalanced layer
-patterns, keep the existing heuristic.
+preferred on ties; an exact tie keeps the original plan. The original plan can win
+even if it splits a draft bucket. DCP1, pipeline parallelism, fixed
+`--num-gpu-blocks-override`, configurations without a separate replicated draft
+attention bucket, and unbalanced layer patterns keep the existing heuristic.
 This is a startup capacity choice, not a throughput autotuner.
 
 Inspect startup logs for the chosen repeat count, group count and per-request

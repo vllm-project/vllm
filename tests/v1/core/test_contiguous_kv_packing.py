@@ -32,6 +32,7 @@ from vllm.v1.core.kv_cache_planning import (
     _get_packed_kv_cache_groups,
     _pool_bytes_per_block,
     get_kv_cache_config_from_groups,
+    get_kv_cache_configs,
     get_kv_cache_groups,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -136,14 +137,17 @@ def packed_draft_specs():
     }
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     ("head_size", "group_count", "block_bytes"),
     [(64, 13, 40960), (128, 7, 81920), (256, 4, 163840)],
 )
+@pytest.mark.parametrize("layout", ["BLHNC", "BLNHC"])
 def test_packed_draft_auto_fits_pages_and_preserves_writes(
-    packed_draft_config, packed_draft_specs, head_size, group_count, block_bytes
+    packed_draft_config, packed_draft_specs, head_size, group_count, block_bytes, layout
 ):
     """Different draft pages choose different splits and keep each layer isolated."""
+    packed_draft_config.cache_config.kv_cache_layout = layout
     specs = {
         name: replace(spec, head_size=head_size, head_size_v=head_size)
         if spec.is_draft
@@ -152,7 +156,7 @@ def test_packed_draft_auto_fits_pages_and_preserves_writes(
     }
     groups = get_kv_cache_groups(packed_draft_config, specs)
     assert len(groups) == group_count
-    assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == block_bytes
+    assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout[layout]) == block_bytes
     draft_groups = [g for g in groups if any(specs[n].is_draft for n in g.layer_names)]
     assert len(draft_groups) == 1
     assert draft_groups[0].layer_names == [f"draft.{i}" for i in range(5)]
@@ -162,7 +166,7 @@ def test_packed_draft_auto_fits_pages_and_preserves_writes(
         packed_draft_config, groups, block_bytes * len(groups)
     )
     assert allocation.num_blocks == len(groups)
-    views = _bind(allocation, "BLHNC")
+    views = _bind(allocation, layout)
     markers = {name: i + 1 for i, name in enumerate(specs)}
     for block, group in enumerate(groups):
         for name in group.layer_names:
@@ -172,6 +176,7 @@ def test_packed_draft_auto_fits_pages_and_preserves_writes(
             assert (views[name][block] == markers[name]).all(), name
 
 
+@pytest.mark.cpu_test
 def test_packed_draft_auto_keeps_dcp1_plan(packed_draft_config, packed_draft_specs):
     packed_draft_config.parallel_config.decode_context_parallel_size = 1
     groups = get_kv_cache_groups(packed_draft_config, packed_draft_specs)
@@ -179,6 +184,7 @@ def test_packed_draft_auto_keeps_dcp1_plan(packed_draft_config, packed_draft_spe
     assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == 491520
 
 
+@pytest.mark.cpu_test
 def test_packed_draft_auto_keeps_non_draft_plan(
     packed_draft_config, packed_draft_specs
 ):
@@ -188,18 +194,64 @@ def test_packed_draft_auto_keeps_non_draft_plan(
     assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == 491520
 
 
-def test_packed_alignment_preserves_hot_pages_and_generic_stride():
-    """One shared stride must satisfy both constraints, regardless of rounding order."""
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("constraint", ["fixed_blocks", "pipeline"])
+def test_packed_draft_capacity_constraints(
+    packed_draft_config, packed_draft_specs, constraint
+):
+    """Keep requests admissible under fixed block and per-PP-rank budgets."""
+    config, specs = packed_draft_config, packed_draft_specs
+    if constraint == "fixed_blocks":
+        config.cache_config.num_gpu_blocks_override = 5000
+        workers, budgets, expected_blocks = [specs], [3 * 1024**3], [5000]
+    else:
+        config.parallel_config = ParallelConfig(
+            tensor_parallel_size=8,
+            decode_context_parallel_size=8,
+            pipeline_parallel_size=2,
+        )
+        # An 11/1 target-layer partition, with the draft on the last PP rank.
+        first = {
+            name: spec
+            for name, spec in specs.items()
+            if not spec.is_draft and not name.endswith(".11")
+        }
+        workers = [first, {n: s for n, s in specs.items() if n not in first}]
+        budgets, expected_blocks = [3 * 1024**3, 200 * 1024**2], [5120, 5120]
+    groups = get_kv_cache_groups(config, specs)
+    configs = get_kv_cache_configs(config, workers, budgets, groups)
+    assert [cache.num_blocks for cache in configs] == expected_blocks
+    assert len(groups) == 2
+
+
+@pytest.mark.cpu_test
+def test_packed_draft_auto_keeps_cheaper_original_plan(
+    packed_draft_config, packed_draft_specs
+):
+    """The original may win even when it splits the draft into several groups."""
+    specs = {
+        name: replace(spec, head_size=512, head_size_v=512) if spec.is_draft else spec
+        for name, spec in packed_draft_specs.items()
+        if spec.is_draft or name.endswith(".0")
+    }
+    groups = get_kv_cache_groups(packed_draft_config, specs)
+    assert len(groups) == 6
+    assert sum(any(specs[n].is_draft for n in g.layer_names) for g in groups) == 5
+
+
+def test_packed_alignment_preserves_hot_rows_and_generic_stride():
+    """One shared stride must satisfy both constraints, regardless of rounding
+    order. Hot blocks need only be whole rows apart."""
     spec = replace(_mla(128), block_stride_alignment=1152)
     hot = HiSparseHotSpec(block_size=16, page_size=5120, blocks_per_request=2)
     groups = [KVCacheGroupSpec(["attention"], spec), KVCacheGroupSpec(["hot"], hot)]
-    alignment = lcm(1152, hot.page_size_bytes)
+    alignment = lcm(1152, hot.page_size_bytes // hot.block_size)
     stride = _pool_bytes_per_block(_mock_vllm_config("BLHNC"), groups)
-    assert stride == alignment
+    assert stride == 2 * alignment
     layout = KVCacheLayout.BLHNC
     tensors = _build_hisparse_kv_cache_tensors(groups, 3, 3 * stride, layout, stride)
-    assert {tensor.block_stride for tensor in tensors} == {alignment}
-    assert {tensor.size for tensor in tensors} == {3 * alignment}
+    assert {tensor.block_stride for tensor in tensors} == {stride}
+    assert {tensor.size for tensor in tensors} == {3 * stride}
 
 
 @pytest.mark.parametrize("spec", [_full(), _mla(128)])

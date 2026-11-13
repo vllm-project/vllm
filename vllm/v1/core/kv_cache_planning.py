@@ -1000,9 +1000,8 @@ def _get_packed_kv_cache_groups(
         balanced = len(set(map(len, page_size_layers.values()))) == 1
         bucketed.append((uniform_spec, page_size_layers, balanced))
 
-    # Balanced buckets that mix page sizes must stay whole, so the largest one
-    # sets a floor on the repeats per group; larger single-size buckets are
-    # split down toward it. No such bucket means nothing needs packing.
+    # The original heuristic keeps balanced mixed-page buckets whole and splits
+    # larger single-size buckets toward that repeat count.
     min_repeats_per_group = max(
         (
             spec.get_max_layers_per_page_size()
@@ -1105,6 +1104,8 @@ def _get_packed_kv_cache_groups(
         vllm_config.parallel_config.decode_context_parallel_size == 1
         or not any(is_replicated_draft(spec) for spec, _, _ in bucketed)
         or not all(balanced for _, _, balanced in bucketed)
+        or vllm_config.parallel_config.pipeline_parallel_size > 1
+        or vllm_config.cache_config.num_gpu_blocks_override is not None
     ):
         return original
 
@@ -1118,19 +1119,11 @@ def _get_packed_kv_cache_groups(
             len(groups),
         )
 
-    best, best_cost = original, cost(original)
+    original_cost = cost(original)
+    best, best_cost = original, original_cost
     best_repeats = repeats_per_group
     for repeats in range(
-        1,
-        max(
-            (
-                spec.get_max_layers_per_page_size()
-                for spec, _, balanced in bucketed
-                if balanced
-            ),
-            default=0,
-        )
-        + 1,
+        1, max(spec.get_max_layers_per_page_size() for spec, _, _ in bucketed) + 1
     ):
         candidate = build_groups(repeats, keep_draft=True)
         candidate_cost = cost(candidate)
@@ -1143,7 +1136,7 @@ def _get_packed_kv_cache_groups(
             best_repeats,
             len(original),
             len(best),
-            cost(original)[0],
+            original_cost[0],
             best_cost[0],
         )
     return best
