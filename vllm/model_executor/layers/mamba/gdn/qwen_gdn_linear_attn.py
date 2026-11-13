@@ -1329,7 +1329,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
         if use_fused_gdn_spec_decode:
-            core_attn_out = torch.zeros(
+            # The fused spec-decode kernels write every row of core_attn_out
+            # that a sampled token can come from (the generic branch below
+            # makes the same allocation); zero-filling it costs one Inductor
+            # fill node per GDN layer per captured graph.
+            core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
