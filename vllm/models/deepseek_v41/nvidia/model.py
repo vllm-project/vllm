@@ -1677,6 +1677,16 @@ class DeepseekV41LLMForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        if (
+            current_platform.is_cuda()
+            and get_pp_group().is_last_rank
+            and self.specialized_decode_config is None
+        ):
+            from .specialized_decode.logits.logits import (
+                SpecializedDecodeLogitsProcessor,
+            )
+
+            self.logits_processor = SpecializedDecodeLogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
@@ -1785,6 +1795,15 @@ class DeepseekV41LLMForCausalLM(
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()
+        if (
+            current_platform.is_cuda()
+            and get_pp_group().is_last_rank
+            and self.specialized_decode_config is None
+        ):
+            from .specialized_decode.logits.lm_head import warmup_low_batch_lm_head
+
+            # DSpark aliases this same head after its own weights are loaded.
+            warmup_low_batch_lm_head(self)
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.

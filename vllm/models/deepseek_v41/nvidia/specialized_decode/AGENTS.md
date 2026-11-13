@@ -2,9 +2,10 @@
 
 A decode executor for small decode batches of DeepSeek-V4.1 on GB300, enabled
 with `--additional-config '{"decode_backend": "latency_specialized"}'` (the
-default, `auto`, keeps the stock decode). With it off, the model runs exactly as
-without this package. One executor runs the target model and another the
-DSpark draft model, on the target's kernels and streams.
+default, `auto`, keeps the stock decode layers). The low-batch LM head also
+runs on the default path, with the stock NCCL gather. One executor runs the
+target model and another the DSpark draft model, on the target's kernels and
+streams.
 
 ## Scope
 
@@ -123,7 +124,7 @@ graph.
 | Otherwise the TRTLLM-gen sparse-MLA decode, launched on a KV-counter buffer zeroed once | all other executor steps |
 | Engram WKV chain on a side stream right after each layer's lookup | all executor steps, with host-offloaded TP-only tables and a CuTe DSL MXFP8 `wkv` |
 | Attention metadata builds recorded at CUDA graph capture, one per batch shape the FULL decode graphs serve, and replayed | FULL-graph uniform decode |
-| LM head on FlashInfer's CuTe DSL BF16 GEMM | 1-16 rows |
+| LM head on FlashInfer's CuTe DSL BF16 GEMM | 1-16 rows, including the default target and DSpark paths; unquantized BF16 heads on SM100-family GPUs |
 | Logits gathered with the executor's Lamport all-gather | up to 4 MiB a rank (at TP4, 32 FP32 or 64 BF16 rows) |
 
 ## Dispatch

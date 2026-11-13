@@ -700,10 +700,12 @@ def test_pinned_mxfp8_mm_rows():
     assert mxfp8_linear.pinned_mm(_Mxfp8Linear(1024, k), _quantized(48, k)) is None
 
 
-@pytest.mark.parametrize("rows", [1, 5, 6, 8, 16, 17])
-def test_low_batch_lm_head(dist_init, default_vllm_config, rows):
+@pytest.mark.parametrize("rows", range(1, 18))
+@pytest.mark.parametrize("skip_gather", [False, True])
+def test_low_batch_lm_head(dist_init, default_vllm_config, rows, skip_gather):
     """The logits processor's LM head on CuTe DSL `mm_bf16` for 1-16 rows,
     within BF16 rounding of the FP32 product; 17 rows keep the default GEMM."""
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.models.deepseek_v41.nvidia.specialized_decode.logits.lm_head import (
         low_batch_lm_head_applies,
@@ -712,13 +714,21 @@ def test_low_batch_lm_head(dist_init, default_vllm_config, rows):
         SpecializedDecodeLogitsProcessor,
     )
 
+    torch.manual_seed(0)
     vocab = 129280 // 4
     with torch.device(DEVICE):
         head = ParallelLMHead(vocab, HIDDEN, params_dtype=torch.bfloat16)
     head.weight.data.normal_(std=0.02)
     x = torch.randn(rows, HIDDEN, device=DEVICE).to(torch.bfloat16)
     assert low_batch_lm_head_applies(head, x) == (rows <= 16)
-    logits = SpecializedDecodeLogitsProcessor(vocab)._apply_head(head, x, None)
+    processor = SpecializedDecodeLogitsProcessor(vocab)
+    assert processor.all_gather is None
+    logits = processor(head, x, skip_gather=skip_gather)
+    stock = LogitsProcessor(vocab)(head, x, skip_gather=skip_gather)
+    if rows == 17:
+        assert torch.equal(logits, stock)
+    else:
+        torch.testing.assert_close(logits, stock, rtol=2**-7, atol=2**-7)
     expected = x.float() @ head.weight[:vocab].float().T
     torch.testing.assert_close(
         logits[:, :vocab].float(), expected, rtol=2**-7, atol=2**-7

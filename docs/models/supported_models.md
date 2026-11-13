@@ -368,6 +368,13 @@ See [this page](generative_models.md) for more information on how to use generat
 
 These models primarily accept the [`LLM.generate`](./generative_models.md#llmgenerate) API. Chat/Instruct models additionally support the [`LLM.chat`](./generative_models.md#llmchat) API.
 
+DeepSeek-V4.1 on NVIDIA SM100-family GPUs uses FlashInfer's CuTe DSL BF16
+LM head GEMM by default for 1-16 logits rows, including DSpark drafts that share
+the target's head. It requires FlashInfer CuTe DSL and an unquantized BF16
+head without bias, with a matching head dtype. Other heads and larger batches
+keep the stock GEMM. The default path keeps NCCL gathering; this does not enable
+`decode_backend=latency_specialized`. AMD behavior is unchanged.
+
 <style>
 th {
   white-space: nowrap;

@@ -19,6 +19,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -51,6 +52,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.deepseek_v4.nvidia.dspark import _duplicate_context_wkv_weights
+from vllm.platforms import current_platform
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
@@ -335,6 +337,18 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             decode_backend(vllm_config) == "latency_specialized"
         )
         self.specialized_decode: DraftDecode | None = None
+        if (
+            current_platform.is_cuda()
+            and get_pp_group().is_last_rank
+            and not specialized_decode_requested
+        ):
+            from .specialized_decode.logits.logits import (
+                SpecializedDecodeLogitsProcessor,
+            )
+
+            self.logits_processor = SpecializedDecodeLogitsProcessor(
+                self.config.vocab_size
+            )
         if specialized_decode_requested:
             register_draft(self)
         # additional_config={"dspark_fused_markov": true}, implied by the

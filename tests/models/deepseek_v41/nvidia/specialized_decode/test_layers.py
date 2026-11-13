@@ -301,6 +301,9 @@ class StepRecorder:
                 plan.moe.gemm is not None for plan in getattr(decode, "plans", ())
             ],
             "logits": [type(m).__name__ for m in logits],
+            "logits_all_gather": type(
+                getattr(language_model.logits_processor, "all_gather", None)
+            ).__name__,
             "metadata_graphs": 0 if graphs is None else len(graphs._graphs),
             "fused_mhc_max_rows": (
                 None if decode is None else decode.all_reduce.capacity
@@ -311,6 +314,11 @@ class StepRecorder:
                 plan.moe.gemm is not None for plan in getattr(draft_decode, "plans", ())
             ],
             "draft_logits": type(draft.logits_processor).__name__,
+            "draft_logits_all_gather": type(
+                getattr(draft.logits_processor, "all_gather", None)
+            ).__name__,
+            "shared_lm_head": draft.lm_head is language_model.lm_head,
+            "markov_bias_weight": draft.markov_bias_weight() is not None,
             "markov_sampling": type(getattr(draft, "sample_sequential", None)).__name__,
             "embedding": type(getattr(decode, "embedding", None)).__name__,
         }
@@ -388,7 +396,14 @@ class StepRecorder:
             torch.save(self._steps, path)
 
 
-def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str):
+def _serve(
+    vllm_runner,
+    specialized_decode: bool,
+    prompts,
+    max_tokens,
+    path: str,
+    enforce_eager: bool = False,
+):
     """Greedy decode of `prompts`: each prompt's output tokens and the
     paths each rank took; the steps' rows saved under `path`."""
     from vllm import SamplingParams
@@ -419,6 +434,7 @@ def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str
         # Autotuning times each run apart and may pick other tactics for the
         # stock paths; FlashInfer's defaults are the same in both.
         enable_flashinfer_autotune=False,
+        enforce_eager=enforce_eager,
         # Decode graphs of 1, 2, 4, 8 and 16 requests of 6 rows.
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -493,6 +509,35 @@ def _check_close(got: dict, want: dict, keys: list, layers, output: bool) -> Non
 
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="needs SM100-family GPUs",
+)
+def test_default_decode_low_batch_lm_head(vllm_runner, tmp_path):
+    """The default target and shared-head draft use low-batch logits with NCCL."""
+    outputs, paths = _serve(
+        vllm_runner,
+        False,
+        [list(range(1, 33))],
+        [1],
+        f"{tmp_path}/default",
+        enforce_eager=True,
+    )
+    assert len(outputs) == 1 and len(outputs[0]) == 1
+    for rank in paths:
+        assert rank["logits"] == ["SpecializedDecodeLogitsProcessor"], rank
+        assert rank["draft_logits"] == "SpecializedDecodeLogitsProcessor", rank
+        assert rank["logits_all_gather"] == "NoneType", rank
+        assert rank["draft_logits_all_gather"] == "NoneType", rank
+        assert rank["shared_lm_head"], rank
+        assert rank["markov_bias_weight"], rank
+        assert rank["decode"] == "NoneType", rank
+        assert rank["draft_decode"] == "NoneType", rank
+
+
+@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.skipif(
     not current_platform.is_device_capability(103),
     reason="decode_backend=latency_specialized runs on GB300 (SM103)",
 )
@@ -534,8 +579,10 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["draft_sublayers"] == 0, rank
         assert rank["draft_decode"] == "NoneType", rank
         assert rank["model_state"] == "DeepseekV41ModelState", rank
-        assert rank["logits"] == ["LogitsProcessor"], rank
-        assert rank["draft_logits"] == "LogitsProcessor", rank
+        assert rank["logits"] == ["SpecializedDecodeLogitsProcessor"], rank
+        assert rank["draft_logits"] == "SpecializedDecodeLogitsProcessor", rank
+        assert rank["logits_all_gather"] == "NoneType", rank
+        assert rank["draft_logits_all_gather"] == "NoneType", rank
         assert rank["markov_sampling"] == "NoneType", rank
         assert rank["metadata_graphs"] == 0, rank
     stock = ("attention", "ffn", "stock_fused_mhc_max_rows", "draft_attention")
