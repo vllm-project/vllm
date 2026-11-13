@@ -735,8 +735,11 @@ def _rejection_kernel(
                     else:
                         rejected_argmax = target_argmax
                         entropy = tl.load(fly_entropy_ptr + logit_idx)
+                        # Synthetic acceptance never defers, so the pinned
+                        # acceptance length is unchanged by the FLy overlay.
                         verifying = (
-                            can_defer
+                            (not SYNTHETIC_MODE)
+                            and can_defer
                             and i + FLY_WINDOW_SIZE < num_draft_tokens
                             and entropy >= fly_entropy_threshold
                         )
@@ -1212,7 +1215,7 @@ def rejection_sample(
 
     fly_entropy = None
     if fly_window_size > 0:
-        assert synthetic_conditional_rates is None and not use_block_verification
+        assert not use_block_verification
         fly_entropy = compute_fly_entropy(
             target_logits[:, :vocab_size], fly_entropy_top_k, from_logits=True
         )
