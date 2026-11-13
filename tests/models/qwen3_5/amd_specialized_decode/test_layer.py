@@ -22,7 +22,7 @@ import torch
 from vllm.platforms import current_platform
 
 TP = 8
-WIDTHS = [1, 2, 8, 16, 17, 32, 64, 128]
+WIDTHS = [1, 2, 8, 16, 17, 32, 64]
 # GDN projection formats: "mxfp4t" the MXFP4 weights unshuffled (AITER's
 # Triton GEMM layout)
 VARIANTS = ["bf16", "mxfp4", "mxfp4t", "h32"]

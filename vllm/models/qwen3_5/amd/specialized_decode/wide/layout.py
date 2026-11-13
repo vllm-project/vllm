@@ -67,6 +67,7 @@ THREADS = 256
 WAVES = THREADS // 64
 LDS_BYTES = 160 * 1024
 
-# rows a step: the CUDA graph capture sizes in this range get a build
+# rows a step: the CUDA graph capture sizes in this range get a build; wider
+# steps run vLLM's decode, whose MoE is at the HBM floor there
 MIN_TOKENS = 1
-MAX_TOKENS = 128
+MAX_TOKENS = 64

@@ -5,4 +5,5 @@
 `hooks` holds the model's entry points, `model_state` the model runner
 state that builds the executor, `runtime` the refusals, the plan of each
 step and the executor, `wide` the persistent kernels for decode steps of 1
-to 128 rows (one launch per decoder layer). See `README.md`."""
+to 64 rows, `mono` #60833's layer and GDN blocks for steps of up to 16. See
+`README.md`."""
