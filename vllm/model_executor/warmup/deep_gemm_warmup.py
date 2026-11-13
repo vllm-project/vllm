@@ -37,7 +37,6 @@ from vllm.utils.deep_gemm import (
     get_tma_aligned_size,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
-    tf32_hc_prenorm_gemm,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
@@ -388,59 +387,6 @@ def _deepgemm_fp8_einsum_warmup(
     FP8_EINSUM_WARMUP_CACHE.add(key)
 
 
-HC_PRENORM_WARMUP_CACHE: set[tuple] = set()
-
-
-def _hc_prenorm_warmup_weights(module: torch.nn.Module) -> list[torch.Tensor]:
-    """The mHC prenorm GEMM weights on a DeepSeek-V4 decoder layer.
-
-    `_hc_prenorm_gemm_outputs` runs DeepGEMM's `tf32_hc_prenorm_gemm`
-    whenever DeepGEMM is available, but the JIT warmup registry only covers the
-    TileLang kernel it replaces, so the DeepGEMM one has to be warmed here.
-    """
-    weights = []
-    for name in ("hc_attn_fn", "hc_ffn_fn", "hc_attn_fn_broadcast"):
-        fn = getattr(module, name, None)
-        if isinstance(fn, torch.Tensor) and fn.dim() == 2 and fn.dtype == torch.float32:
-            weights.append(fn)
-    return weights
-
-
-def _get_hc_prenorm_splits(k: int, max_tokens: int) -> list[tuple[int, int]]:
-    """`(num_splits, a num_tokens that selects it)` for every reachable split.
-
-    The kernel compiles on the split count but not on M, so one M per distinct
-    split count covers 1..`max_tokens`.
-    """
-    from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
-
-    seen: dict[int, int] = {}
-    for grid_size in range(1, cdiv(max_tokens, 64) + 1):
-        splits = compute_num_split(64, k, grid_size)
-        seen.setdefault(splits, min(grid_size * 64, max_tokens))
-    return sorted(seen.items())
-
-
-def _deepgemm_hc_prenorm_warmup(
-    fn: torch.Tensor, max_tokens: int, pbar: tqdm | None = None
-):
-    key = (fn.size(), fn.dtype)
-    if key in HC_PRENORM_WARMUP_CACHE:
-        return
-
-    n, k = fn.size()
-    device = fn.device
-    for splits, num_tokens in _get_hc_prenorm_splits(k, max_tokens):
-        x = torch.zeros((num_tokens, k), device=device, dtype=torch.bfloat16)
-        out = torch.empty((splits, num_tokens, n), device=device, dtype=torch.float32)
-        sqr_sum = torch.empty((splits, num_tokens), device=device, dtype=torch.float32)
-        tf32_hc_prenorm_gemm(x, fn, out, sqr_sum, splits)
-        if pbar is not None:
-            pbar.update(1)
-
-    HC_PRENORM_WARMUP_CACHE.add(key)
-
-
 GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
 
 
@@ -688,14 +634,6 @@ def deepgemm_fp8_einsum_warmup(
             _deepgemm_fp8_einsum_warmup(*data, max_tokens=max_tokens, pbar=pbar)
 
 
-def deepgemm_hc_prenorm_warmup(
-    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
-):
-    for m in model.modules():
-        for fn in _hc_prenorm_warmup_weights(m):
-            _deepgemm_hc_prenorm_warmup(fn, max_tokens, pbar)
-
-
 @torch.inference_mode()
 def deepgemm_fp8_fp4_mega_moe_warmup(
     model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
@@ -712,15 +650,9 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     )
     seen_mega_moe_keys: set[tuple] = set(FP8_FP4_MEGA_MOE_WARMUP_CACHE)
     seen_einsum_keys: set[tuple] = set(FP8_EINSUM_WARMUP_CACHE)
-    seen_prenorm_keys: set[tuple] = set(HC_PRENORM_WARMUP_CACHE)
 
     total = 0
     for m in model.modules():
-        for fn in _hc_prenorm_warmup_weights(m):
-            prenorm_key = (fn.size(), fn.dtype)
-            if prenorm_key not in seen_prenorm_keys:
-                total += len(_get_hc_prenorm_splits(fn.size(1), max_tokens))
-                seen_prenorm_keys.add(prenorm_key)
         if (einsum_data := _fp8_einsum_warmup_data(m)) is not None:
             einsum_key = _get_fp8_einsum_warmup_key(*einsum_data)
             if einsum_key not in seen_einsum_keys:
@@ -763,12 +695,10 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
         with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
             deepgemm_fp8_einsum_warmup(model, max_tokens, pbar)
-            deepgemm_hc_prenorm_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
             deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, pbar)
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
         deepgemm_fp8_einsum_warmup(model, max_tokens, None)
-        deepgemm_hc_prenorm_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
         deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, None)
