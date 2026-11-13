@@ -17,6 +17,7 @@ from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.ops import shardq
 from vllm.v1.attention.ops.shardq import (
@@ -95,6 +96,7 @@ def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
 
 def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
     torch.accelerator.set_device_index(rank)
+    device = torch.device(current_platform.device_type, rank)
     vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
         init_distributed_environment(
@@ -102,6 +104,7 @@ def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
             rank=rank,
             distributed_init_method=f"tcp://127.0.0.1:{port}",
             local_rank=rank,
+            backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(world, 1)
         torch.manual_seed(0)
@@ -114,15 +117,15 @@ def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
                 vllm_config, heads, dim, 512, q_dtype, torch.bfloat16
             )
         all_heads = world * heads
-        full = torch.randn(num_tokens, all_heads, dim, device="cuda").to(q_dtype)
+        full = torch.randn(num_tokens, all_heads, dim, device=device).to(q_dtype)
         token_ids, num_tokens_per_rank = zigzag_split(np.array(lens), world)
         shardq = ShardQMetadata(
             num_decode_tokens=num_decode_tokens,
             num_tokens_per_rank=num_tokens_per_rank.tolist(),
-            token_ids=torch.from_numpy(token_ids).cuda(),
-            rank_offsets=torch.from_numpy(
-                np.r_[0, np.cumsum(num_tokens_per_rank)]
-            ).cuda(),
+            token_ids=torch.from_numpy(token_ids).to(device),
+            rank_offsets=torch.from_numpy(np.r_[0, np.cumsum(num_tokens_per_rank)]).to(
+                device
+            ),
         )
         local_heads = full[:, rank * heads : (rank + 1) * heads].contiguous()
         for _ in range(2):  # The second pass reuses the symmetric buffers.
@@ -137,7 +140,7 @@ def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
             assert torch.equal(sharded.view(torch.uint8), expected.view(torch.uint8))
             # Attention outputs are a head-padded slice; unshard reads its
             # strides.
-            padded = torch.zeros(sharded.shape[0], all_heads + 8, 512, device="cuda")
+            padded = torch.zeros(sharded.shape[0], all_heads + 8, 512, device=device)
             padded[:, :all_heads] = sharded[..., :512].float()
             out = padded.bfloat16()[:, :all_heads]
             restored = unshard_out(out, shardq, decode_q[..., :512].bfloat16())
