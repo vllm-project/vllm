@@ -52,7 +52,7 @@ class ToyKernel(VllmJitKernel["ToyKernel.CompileKey"]):
         descriptor: tuple[object, ...]
         enabled: bool
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         tokens: int,
@@ -290,7 +290,7 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
         class CompileKey:
             value: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -309,7 +309,7 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
         class CompileKey:
             value: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -339,7 +339,7 @@ def test_dispatch_helper_calls_resolve_python_builtins() -> None:
         class CompileKey:
             value: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -364,7 +364,7 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
         class CompileKey:
             value: int
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             if value > 0:
                 value = 1
             return self.CompileKey(value=value)
@@ -380,7 +380,7 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
         class CompileKey:
             value: int
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(**{"value": value})
 
         def get_warmup_keys(self) -> list[CompileKey]:
@@ -405,7 +405,7 @@ def test_dispatch_can_forward_compile_key_fields() -> None:
             mode: int
             block_size: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -451,7 +451,7 @@ def test_forwarded_compile_key_fields_exclude_predicate_only_inputs() -> None:
             mode: int
             block_size: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             tokens: int,
@@ -485,7 +485,7 @@ def test_dispatch_supports_tuple_and_mapping_subscriptions() -> None:
             first: int
             named: int
 
-        def dispatch(  # type: ignore[override]
+        def dispatch(
             self,
             *,
             values: tuple[int, ...],
@@ -510,7 +510,7 @@ def test_dispatch_reports_unsupported_expression_with_context() -> None:
         class CompileKey:
             value: object
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(value={value})
 
         def get_warmup_keys(self) -> list[CompileKey]:
@@ -551,7 +551,7 @@ def test_runtime_cache_miss_compiles_and_caches_executor() -> None:
             self.compiled: list[CachedKernel.CompileKey] = []
             super().__init__()
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(value=value)
 
         def get_warmup_keys(self) -> list[CompileKey]:
@@ -637,7 +637,7 @@ def test_registry_passes_vllm_config_to_default_requests() -> None:
             self.compiled: list[ConfigKernel.CompileKey] = []
             super().__init__()
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(value=value)
 
         def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -668,7 +668,7 @@ def test_registry_default_request_supports_config_free_kernel() -> None:
             self.compiled: list[ConfigFreeKernel.CompileKey] = []
             super().__init__()
 
-        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+        def dispatch(self, *, value: int) -> CompileKey:
             return self.CompileKey(value=value)
 
         def get_warmup_keys(self) -> list[CompileKey]:

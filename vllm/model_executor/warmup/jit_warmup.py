@@ -11,12 +11,12 @@ import itertools
 import operator
 import textwrap
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
 from functools import wraps
-from typing import Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 __all__ = [
     "JitWarmupRegistry",
@@ -651,7 +651,11 @@ def _trace_warmup_predicate(
 class VllmJitKernel(Generic[CompileKeyT], ABC):
     """Kernel wrapper that owns dispatch, warmup keys, and compilation."""
 
-    CompileKey: type[CompileKeyT]
+    if TYPE_CHECKING:
+
+        @property
+        def CompileKey(self) -> type[CompileKeyT]: ...
+
     bind_launch_inputs = True
 
     def __init__(self) -> None:
@@ -949,7 +953,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 raise TypeError("Warmup domains must be direct expressions")
             yield case
 
-    def dispatch(self, **kwargs: Any) -> CompileKeyT:
+    def dispatch(self, *args: Any, **kwargs: Any) -> CompileKeyT:
         """Build one compile key from one concrete dispatch point."""
         raise NotImplementedError
 
@@ -1034,7 +1038,7 @@ class JitWarmupRegistry:
         return wrapped
 
     @contextmanager
-    def activate(self) -> Iterator[None]:
+    def activate(self) -> Generator[None]:
         """Collect registrations made in this context."""
         token = self._active.set(self)
         try:

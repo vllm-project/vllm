@@ -205,7 +205,7 @@ class InklingFA4RelAttentionKernel(
             return ret[0]
         return ret
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         is_local: bool,

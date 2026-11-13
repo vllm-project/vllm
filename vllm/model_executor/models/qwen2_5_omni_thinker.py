@@ -491,7 +491,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
         max_frames_per_video: int | None = None,
     ) -> int:
         video_processor = self.get_hf_processor().video_processor
@@ -504,7 +504,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
             image_processor=video_processor,
             mm_kwargs={},
         )
-        num_videos = max(mm_counts.get("video", 0), 1)
+        num_videos = max(num_videos, 1)
         num_steps = max(seq_len // num_videos // tokens_per_step, 1)
         num_frames = num_steps * temporal_patch_size
         if max_frames_per_video is not None:
@@ -622,7 +622,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
                 width=video_size.width,
                 height=video_size.height,
                 num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts
+                    seq_len, mm_counts.get("video", 0)
                 ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=video_overrides,
@@ -992,8 +992,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
         input_features = processed_data.pop("input_features", None)
@@ -1014,7 +1014,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if video_second_per_grid is not None:
             processed_data["second_per_grid_ts"] = video_second_per_grid
 
-        use_audio_in_video = hf_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         processed_data["use_audio_in_video"] = torch.tensor(use_audio_in_video)
         processed_data.pop("input_ids", None)
 

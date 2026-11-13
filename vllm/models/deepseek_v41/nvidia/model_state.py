@@ -430,18 +430,18 @@ class DeepseekV41ModelState(DefaultModelState):
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         if self._replay is None:
-            specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
+            groups = kv_cache_config.kv_cache_groups
             self._replay = (
-                max(spec.prefix_replay_tokens for spec in specs),
+                max(group.prefix_replay_tokens for group in groups),
                 torch.tensor(
-                    [i for i, spec in enumerate(specs) if spec.prefix_cacheable],
+                    [i for i, group in enumerate(groups) if group.prefix_cacheable],
                     dtype=torch.int32,
                     device=self.device,
                 ),
             )
             if self.decoder_replay_layers is not None:
                 self._kept_slot_mappings = torch.zeros(
-                    len(specs),
+                    len(groups),
                     self.max_num_tokens,
                     dtype=torch.int64,
                     device=self.device,
@@ -451,7 +451,7 @@ class DeepseekV41ModelState(DefaultModelState):
             self._warm_up_replay_kernels(input_batch, slot_mappings)
         if self.decoder_replay_layers is not None and self._replay_attn_groups is None:
             # Builder init uploads to the device: build on the first (warmup) batch.
-            self._init_replay_attn_groups(attn_groups)
+            self._init_replay_attn_groups(attn_groups, kv_cache_config)
         window, cacheable_groups = self._replay
         replay_start: torch.Tensor | None = None
         if window or self.decoder_replay_layers is not None:
@@ -840,7 +840,7 @@ class DeepseekV41ModelState(DefaultModelState):
 
         if self.decoder_replay_layers is not None:
             # profile_only captures use pre-KV-cache groups: rebuild the copies.
-            self._init_replay_attn_groups(attn_groups)
+            self._init_replay_attn_groups(attn_groups, kv_cache_config)
         if self.replay_cudagraphs is not None:
             self.replay_cudagraphs.capture_replay_graphs(prepare, stream)
 
@@ -987,30 +987,40 @@ class DeepseekV41ModelState(DefaultModelState):
             return False, None
         return True, agreed[1:]
 
-    def _init_replay_attn_groups(self, attn_groups: list[list[AttentionGroup]]) -> None:
+    def _init_replay_attn_groups(
+        self,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
         layers = self.decoder_replay_layers
         assert layers is not None
         self._replay_attn_groups = (
             self._copy_attn_groups(
                 attn_groups,
+                kv_cache_config,
                 layers.stage_metadata_prefixes[0]
                 if len(layers.stage_rows) > 1
                 else layers.metadata_prefixes,
             ),
-            self._copy_attn_groups(attn_groups, {layers.first_swa_prefix}),
+            self._copy_attn_groups(
+                attn_groups, kv_cache_config, {layers.first_swa_prefix}
+            ),
         )
         for i, stage in enumerate(self._replay_stages, start=1):
             stage.attn_groups = self._copy_attn_groups(
-                attn_groups, layers.stage_metadata_prefixes[i]
+                attn_groups, kv_cache_config, layers.stage_metadata_prefixes[i]
             )
 
     def _copy_attn_groups(
-        self, attn_groups: list[list[AttentionGroup]], prefixes: set[str]
+        self,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        prefixes: set[str],
     ) -> list[list[AttentionGroup]]:
         """Copies of the groups holding any of `prefixes`, with builders of their
         own like a microbatch's: a builder keeps the metadata it built."""
         own_groups = []
-        for groups in attn_groups:
+        for groups, kv_cache_group in zip(attn_groups, kv_cache_config.kv_cache_groups):
             copies = []
             for group in groups:
                 if prefixes.isdisjoint(group.layer_names):
@@ -1020,6 +1030,7 @@ class DeepseekV41ModelState(DefaultModelState):
                     self.vllm_config,
                     self.device,
                     group.kernel_block_size,
+                    kv_cache_group=kv_cache_group,
                 )
                 copies.append(copy)
             own_groups.append(copies)

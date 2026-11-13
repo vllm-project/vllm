@@ -203,7 +203,7 @@ class PackDCPTopkCandidatesKernel(
         tl.store(packed_base, score, mask=mask)
         tl.store(packed_base + packed_stride2, global_id.to(tl.float32), mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         has_row_starts: bool,
@@ -605,7 +605,7 @@ class StableTopKFromGatheredCandidatesKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:

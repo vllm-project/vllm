@@ -222,5 +222,6 @@ def test_mega_moe_m_values_reach_mega_gate(monkeypatch) -> None:
             weight_format=MEGA_MOE_MXFP4,
         ),
         use_sequence_parallel=False,
+        use_mega_gate=True,
     )
     assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 40) == [16, 32, 40]
