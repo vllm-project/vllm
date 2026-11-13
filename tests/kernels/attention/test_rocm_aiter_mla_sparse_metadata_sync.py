@@ -144,6 +144,9 @@ def _make_builder(max_num_batched_tokens: int = 8):
     topk_tokens = 4
 
     builder.device = torch.device("cpu")
+    builder.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+    )
     builder.kv_cache_spec = SimpleNamespace(block_size=1)
     builder.model_dtype = torch.bfloat16
     builder.kv_cache_dtype = "fp8"
@@ -513,7 +516,8 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
     """
     builder = _make_builder()
     builder.vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(sparse_mla_force_mqa=False)
+        attention_config=SimpleNamespace(sparse_mla_force_mqa=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
     query_start_loc = torch.tensor([0, 1, 5], dtype=torch.int32)
@@ -597,7 +601,8 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
     """
     builder = _make_builder()
     builder.vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(sparse_mla_force_mqa=False)
+        attention_config=SimpleNamespace(sparse_mla_force_mqa=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
     # One decode token followed by a five-token prefill.  topk_tokens is four,
@@ -686,7 +691,7 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
     guards the slicing that prevents the index conversion from writing beyond
     the decode-sized output.
     """
-    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl = sparse_mod.ROCMAiterMLASparseImpl.__new__(sparse_mod.ROCMAiterMLASparseImpl)
     impl.kv_cache_dtype = "auto"
     impl.num_heads = 4
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
@@ -735,7 +740,7 @@ def test_forward_mqa_slices_full_batch_metadata_to_query_tokens(monkeypatch):
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_forward_mqa_slices_decode_subset_for_bf16_and_fp8(monkeypatch, kv_cache_dtype):
     """Both cache dtypes must slice mixed-batch metadata to decode queries."""
-    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl = sparse_mod.ROCMAiterMLASparseImpl.__new__(sparse_mod.ROCMAiterMLASparseImpl)
     impl.kv_cache_dtype = kv_cache_dtype
     impl.num_heads = 4
     impl.topk_indices_buffer = torch.arange(48, dtype=torch.int32).view(12, 4)
@@ -807,7 +812,8 @@ def test_sparse_metadata_workload_length_dtype_matrix(
     builder = _make_builder()
     builder._num_attention_heads = num_heads
     builder.vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(sparse_mla_force_mqa=False)
+        attention_config=SimpleNamespace(sparse_mla_force_mqa=False),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
     if kv_cache_dtype == "fp8":
         builder._mla_q_dtype = current_platform.fp8_dtype()

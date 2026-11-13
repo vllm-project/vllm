@@ -21,6 +21,7 @@ from transformers import (
     PreTrainedConfig,
 )
 
+from vllm.compilation.counter import compilation_counter
 from vllm.config import (
     ModelConfig,
     ParallelConfig,
@@ -28,16 +29,18 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
+from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer
 
 from ...conftest import HfRunner, VllmRunner
-from ...utils import multi_gpu_test, prep_prompts
+from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
 from ..registry import HF_EXAMPLE_MODELS
 from ..utils import check_embeddings_close, check_logprobs_close
 
@@ -145,6 +148,51 @@ def test_models(
         num_fused=num_fused,
         model_impl=model_impl,
     )
+
+
+@create_new_process_for_each_test("spawn")
+def test_compile_mm_encoder(
+    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Idefics3's encoder has an unannotated and a `torch.BoolTensor` input."""
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # One graph for the language model and one for the encoder
+    with (
+        compilation_counter.expect(num_models_seen=2),
+        vllm_runner(
+            "HuggingFaceTB/SmolVLM-256M-Instruct",
+            model_impl="transformers",
+            max_model_len=2048,
+            limit_mm_per_prompt={"image": 1},
+            gpu_memory_utilization=0.5,
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "compile_mm_encoder": True,
+            },
+        ),
+    ):
+        pass
+
+
+def test_infer_dynamic_arg_dims():
+    """Only unannotated and (legacy) tensor arguments are dynamic."""
+
+    class Encoder(nn.Module):
+        def forward(
+            self,
+            pixel_values,
+            position_ids: torch.Tensor,
+            mask: torch.BoolTensor | None = None,
+            grid: tuple[int, int] = (1, 1),
+            tiles: list[torch.Tensor] | None = None,
+            **kwargs,
+        ):
+            pass
+
+    expected = {"pixel_values": 0, "position_ids": 0, "mask": 0}
+    assert infer_dynamic_arg_dims(Encoder) == expected
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
@@ -658,6 +706,16 @@ def test_marking_skipped_without_tokenizer():
     assert not isinstance(vision_tower, StageMissingLayer)
 
 
+def test_missing_encoders_are_skipped():
+    """Gemma 4 31B has no audio tower, so `get_encoder` returns `None` for audio."""
+
+    class Model(nn.Module):
+        def get_encoder(self, modality: str) -> nn.Module | None:
+            return nn.Identity() if modality == "image" else None
+
+    assert MarkingStub()._find_encoder_classes(Model()) == {"image": nn.Identity}
+
+
 NUM_LAYERS = 4
 
 
@@ -908,3 +966,26 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
                 layer.get_parameter(param_name).cpu(),
                 weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
             )
+
+
+def test_init_parameters_keeps_declared_dtype_and_requires_grad():
+    """Meta parameters materialize in their own dtype, as with `from_pretrained`,
+    and an integer parameter, which cannot require grad, does not fail."""
+    with torch.device("meta"):
+        module = nn.Module()
+        module.fp32 = nn.Parameter(torch.empty(2))
+        module.fp8 = nn.Parameter(
+            torch.empty(2, dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        module.int8 = nn.Parameter(
+            torch.empty(2, dtype=torch.int8), requires_grad=False
+        )
+    stub = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        device_config=SimpleNamespace(device=torch.device("cpu")),
+    )
+    Base.init_parameters(stub, module)
+
+    assert module.fp32.dtype == torch.float32 and module.fp32.requires_grad
+    assert module.fp8.dtype == torch.float8_e4m3fn and not module.fp8.requires_grad
+    assert module.int8.dtype == torch.int8 and not module.int8.requires_grad

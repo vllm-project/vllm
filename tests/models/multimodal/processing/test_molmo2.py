@@ -79,7 +79,7 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
         get_hf_processor=lambda: SimpleNamespace(
             video_processor=SimpleNamespace(size={"width": 64, "height": 64})
         ),
-        get_num_frames_with_most_features=lambda seq_len, mm_counts: 16,
+        get_num_frames_with_most_features=lambda seq_len, num_videos: 16,
         get_image_size_with_most_features=lambda: (64, 64),
     )
 

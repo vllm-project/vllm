@@ -871,6 +871,15 @@ class SpeculativeConfig:
                 }
             )
             return hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        if getattr(text_config, "model_type", None) == "mistral_large_4" and getattr(
+            text_config, "mtp_config", None
+        ):
+            from vllm.transformers_utils.configs.mistral import (
+                get_mistral_large_4_dspark_config,
+            )
+
+            return get_mistral_large_4_dspark_config(text_config)
         use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -1841,6 +1850,25 @@ class SpeculativeConfig:
             logger.warning_once(
                 "FLy verification is a lossy speculative decoding method and "
                 "may degrade model outputs."
+            )
+        elif (
+            self.rejection_sample_method == "synthetic"
+            and self.fly_window_size is not None
+        ):
+            # FLy cost overlay: pays FLy's per-step compute while acceptance
+            # stays exactly the synthetic one.
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires num_speculative_tokens >= 2."
+                )
+            if self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires fly_window_size < "
+                    "num_speculative_tokens."
+                )
+            logger.warning_once(
+                "FLy cost overlay enabled with synthetic acceptance: "
+                "entropy is computed but never used to defer rejections."
             )
 
         self.verify_equal_vocab_size_if_draft_model()
