@@ -88,6 +88,9 @@ def _speculator(vocab: int, device: torch.device) -> DSparkSpeculator:
     spc.acceptance_estimator = None
     spc.use_confidence_head = False
     spc.use_fp64_gumbel = False
+    # As load_model sets it here: the replicated loop adds the Markov bias in
+    # the Gumbel kernel.
+    spc._fuse_markov_bias = True
     spc._tp_markov_sampler = None
     spc._draft_vocab_shard = None
     return spc
