@@ -36,6 +36,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role
 from pydantic import ValidationError
 from starlette.requests import Request
+from transformers import AutoTokenizer
 
 import vllm.envs as envs
 from tests.entrypoints.openai.chat_completion.test_serving_chat import MockModelConfig
@@ -2446,6 +2447,54 @@ async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
     _, message, function_call = streamed
     assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
     assert function_call.call_id == "chatcmpl-tool-parser-id"
+
+
+_THINK_THEN_ANSWER = "<think>\nThe user says hi.\n</think>\n\nHi there"
+
+
+@pytest.mark.parametrize(
+    ("reasoning_parser", "text", "enable_thinking", "trimmed"),
+    [
+        ("qwen3", _THINK_THEN_ANSWER, True, True),
+        ("qwen3", "Hi there", False, True),
+        ("deepseek_r1", _THINK_THEN_ANSWER, True, True),
+        # Its extract_content_ids always returns [], so the logprobs are kept.
+        ("olmo3", _THINK_THEN_ANSWER, True, False),
+    ],
+)
+def test_output_text_logprobs_cover_only_content(
+    reasoning_parser, text, enable_thinking, trimmed
+):
+    """Non-streaming output_text logprobs must match the message text, not
+    include the reasoning tokens before it."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    serving = _make_serving_instance(reasoning_parser=reasoning_parser)
+    request = ResponsesRequest(input="hi", include=["message.output_text.logprobs"])
+    parser = serving._make_response_parser(
+        request, tokenizer, chat_template_kwargs={"enable_thinking": enable_thinking}
+    )
+    token_ids = tokenizer.encode(text)
+    final_output = CompletionOutput(
+        index=0,
+        text=text,
+        token_ids=token_ids,
+        cumulative_logprob=0.0,
+        logprobs=[
+            {t: SampleLogprob(logprob=-0.5, decoded_token=tokenizer.decode([t]))}
+            for t in token_ids
+        ],
+        finish_reason="stop",
+        stop_reason=None,
+    )
+
+    items = serving._make_response_output_items(
+        request, final_output, tokenizer, parser
+    )
+
+    message = next(item for item in items if item.type == "message")
+    part = message.content[0]
+    tokens = "".join(lp.token for lp in part.logprobs)
+    assert tokens == (part.text if trimmed else text)
 
 
 def _harmony_msg(channel: str, text: str, recipient: str | None = None):

@@ -79,6 +79,20 @@ async def test_logprobs(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_logprobs_exclude_reasoning(client: openai.AsyncOpenAI):
+    """Non-streaming output_text logprobs cover the answer, not the reasoning."""
+    response = await client.responses.create(
+        include=["message.output_text.logprobs"],
+        input="Say hello in one word.",
+        temperature=0,
+    )
+    assert response.output[0].type == "reasoning"
+    part = response.output[-1].content[0]
+    tokens = "".join(lp.token for lp in part.logprobs)
+    assert tokens.removesuffix("<|im_end|>") == part.text
+
+
+@pytest.mark.asyncio
 async def test_streaming(client: openai.AsyncOpenAI):
     stream = await client.responses.create(
         input="What is 13 * 24?",

@@ -84,6 +84,7 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
+from vllm.reasoning import ReasoningParser
 from vllm.renderers import TokenizeParams
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -99,6 +100,25 @@ from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+
+def _content_logprobs(
+    logprobs: list[Logprob],
+    token_ids: Sequence[int],
+    reasoning_parser: ReasoningParser,
+) -> list[Logprob]:
+    """Keep the logprobs of the tokens after the reasoning, as streaming does.
+
+    Some parsers can't locate the content by token ids (they return `[]` or
+    every id), so the logprobs are only trimmed when the content ids are a
+    proper suffix of the output.
+    """
+    token_ids = list(token_ids)
+    content_ids = reasoning_parser.extract_content_ids(token_ids)
+    num_content = len(content_ids or [])
+    if 0 < num_content < len(token_ids) and token_ids[-num_content:] == content_ids:
+        return logprobs[-num_content:]
+    return logprobs
 
 
 class OpenAIServingResponses(GenerateBaseServing):
@@ -1056,6 +1076,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             if not request.include_reasoning:
                 reasoning = None
                 logprobs = None
+            elif logprobs and reasoning is not None and parser.reasoning_parser:
+                logprobs = _content_logprobs(
+                    logprobs, final_output.token_ids, parser.reasoning_parser
+                )
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
