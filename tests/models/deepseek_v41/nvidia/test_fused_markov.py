@@ -87,3 +87,128 @@ def test_sampled_tokens_follow_softmax():
     p = expected[top] / n
     z = (counts[top] / n - p) / (p * (1 - p) / n).sqrt()
     assert z.abs().max() < 5, z
+
+
+@pytest.mark.parametrize("rows", [1, 4, 17])
+@pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("mixed_temperature", [False, True])
+@torch.inference_mode()
+def test_confidence_uses_proposal_input_after_request_reorder(
+    rows, use_graph, mixed_temperature, dist_init
+):
+    """AV saves the previous embedding, not the sampled token or final scratch.
+
+    Replaying after slot/anchor changes must update request-major confidence
+    inputs while preserving unmapped cache slots and AV-off CDF proposals.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead
+    from vllm.models.deepseek_v41.nvidia.ops.fused_markov import FusedMarkovSampler
+
+    vocab, rank, steps, hidden_size = 4097, 32, 5, 16
+    capacity = rows + 3
+    torch.manual_seed(117)
+    with torch.device("cuda"), set_current_vllm_config(VllmConfig()):
+        embedding = torch.nn.Embedding(vocab, rank, dtype=torch.bfloat16)
+        bias = torch.nn.Linear(rank, vocab, bias=False, dtype=torch.bfloat16)
+        confidence_head = DSparkConfidenceHead(hidden_size + rank, "confidence_head")
+        confidence_head.proj.weight.normal_(0, 0.03)
+        samplers = [
+            FusedMarkovSampler(
+                capacity,
+                vocab,
+                rank,
+                torch.bfloat16,
+                confidence_steps=steps if av else 0,
+            )
+            for av in [False, True]
+        ]
+        base = torch.randn(rows * steps, vocab, dtype=torch.bfloat16)
+        hidden = torch.randn(rows * steps, hidden_size, dtype=torch.bfloat16)
+        anchors = torch.randint(vocab, (rows,))
+        anchor_embeds = embedding(anchors)
+        slots = torch.randperm(capacity)[:rows].clone()
+        if rows > 1:
+            slots[-1] = -1
+        mapping = slots.repeat_interleave(steps)
+        positions = torch.arange(rows * steps, dtype=torch.int64) + 37
+        temps = torch.zeros(capacity)
+        if mixed_temperature:
+            temps[::2] = 0.6
+            temps[1::2] = 1.0
+        seeds = torch.arange(capacity, dtype=torch.int64) * 19 + 73
+        caches = [
+            torch.full((capacity, steps, vocab), 123, dtype=base.dtype)
+            for _ in samplers
+        ]
+        outputs = [
+            torch.full((capacity, steps), -99, dtype=torch.int64) for _ in samplers
+        ]
+        confidence = torch.empty(rows * steps, dtype=torch.float32)
+
+    def run(i):
+        embeds = samplers[i].sample(
+            base,
+            anchor_embeds,
+            bias,
+            embedding.weight,
+            mapping,
+            positions,
+            temps,
+            seeds,
+            caches[i],
+            outputs[i][:rows],
+        )
+        if embeds is not None:
+            confidence.copy_(
+                torch.sigmoid(confidence_head(hidden, embeds.flatten(0, 1)))
+            )
+
+    graphs = []
+    for i in range(2):
+        for _ in range(3):
+            run(i)
+        if use_graph:
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                run(i)
+            graphs.append(graph)
+    history = samplers[1].confidence_embeds
+    assert history is not None and samplers[0].confidence_embeds is None
+    address = history.data_ptr()
+    for replay in range(3):
+        anchors.copy_((anchors + 13 + replay) % vocab)
+        anchor_embeds.copy_(embedding(anchors))
+        slots.copy_(torch.where(slots >= 0, (slots + 1) % capacity, slots))
+        mapping.copy_(slots.repeat_interleave(steps))
+        positions.add_(1)
+        for cache, output in zip(caches, outputs):
+            cache.fill_(123)
+            output.fill_(-99)
+        history.fill_(float("nan"))
+        confidence.fill_(float("nan"))
+        for i in range(2):
+            if use_graph:
+                graphs[i].replay()
+            else:
+                run(i)
+        assert torch.equal(outputs[0], outputs[1])
+        assert torch.equal(caches[0], caches[1])
+        prior_tokens = torch.cat((anchors[:, None], outputs[1][:rows, :-1]), dim=1)
+        expected_embeds = embedding(prior_tokens)
+        assert torch.equal(history[:rows], expected_embeds)
+        assert history.data_ptr() == address
+        assert history[rows:].isnan().all()
+        expected = torch.sigmoid(confidence_head(hidden, expected_embeds.flatten(0, 1)))
+        assert torch.equal(confidence, expected)
+        valid = slots >= 0
+        for step in range(steps):
+            expected_logits = base.view(rows, steps, vocab)[:, step] + bias(
+                expected_embeds[:, step]
+            )
+            assert torch.equal(caches[1][slots[valid], step], expected_logits[valid])
+        untouched = torch.ones(capacity, dtype=torch.bool, device="cuda")
+        untouched[slots[valid]] = False
+        assert (caches[1][untouched] == 123).all()
+        assert (outputs[1][rows:] == -99).all()
