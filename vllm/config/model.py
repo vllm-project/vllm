@@ -274,6 +274,11 @@ class ModelConfig:
     - -1 or 'auto' -> Automatically choose the maximum model length that fits in
       GPU memory. This will use the model's maximum context length if it fits,
       otherwise it will find the largest length that can be accommodated."""
+    max_tokenize_tokens: int | None = None
+    """Maximum number of tokens allowed in `/tokenize`, `/detokenize`, and
+    `/v1/messages/count_tokens` requests. Defaults to `VLLM_MAX_TOKENIZE_TOKENS`
+    if set, otherwise `max(max_model_len * 2, 131072)`. Set to `<= 0` to
+    disable the limit."""
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
     quantization: QuantizationMethods | str | None = None
@@ -492,6 +497,7 @@ class ModelConfig:
             "allowed_local_media_path",
             "allowed_media_domains",
             "tokenizer_revision",
+            "max_tokenize_tokens",
             "spec_target_max_model_len",
             "enforce_eager",
             "return_sampling_mask",
@@ -845,6 +851,8 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+        self.max_tokenize_tokens = self._resolve_max_tokenize_tokens()
+        self._max_tokenize_tokens_resolved = True
 
         if self.is_encoder_decoder:
             mm_processor_cache_gb = 0
@@ -2202,6 +2210,15 @@ class ModelConfig:
         )
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
+
+    def _resolve_max_tokenize_tokens(self) -> int | None:
+        limit = self.max_tokenize_tokens
+        if limit is not None:
+            return None if limit <= 0 else limit
+        env_limit = envs.VLLM_MAX_TOKENIZE_TOKENS
+        if env_limit is not None:
+            return None if env_limit <= 0 else env_limit
+        return max(self.max_model_len * 2, 131072)
 
     @property
     def attn_type(self) -> AttnTypeStr:

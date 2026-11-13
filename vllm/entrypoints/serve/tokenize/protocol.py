@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.params import resolve_max_tokenize_tokens
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -41,7 +42,7 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
-            max_total_tokens=None,
+            max_total_tokens=resolve_max_tokenize_tokens(model_config),
             max_output_tokens=0,
             add_special_tokens=self.add_special_tokens,
         )
@@ -154,7 +155,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
-            max_total_tokens=None,
+            max_total_tokens=resolve_max_tokenize_tokens(model_config),
             max_output_tokens=0,
             add_special_tokens=self.add_special_tokens,
         )
@@ -199,7 +200,7 @@ class DetokenizeRequest(OpenAIBaseModel):
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
-            max_total_tokens=None,
+            max_total_tokens=resolve_max_tokenize_tokens(model_config),
             max_output_tokens=0,
             needs_detokenization=True,
         )
