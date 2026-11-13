@@ -56,7 +56,6 @@ logger = init_logger(__name__)
 # get it via ``_maybe_override_draft_max_position_embeddings`` (#63909).
 _ROPE_HF_OVERRIDE_KEYS = frozenset(
     {
-        "rope_scaling",
         "rope_parameters",
         "original_max_position_embeddings",
         "rope_theta",
@@ -461,14 +460,10 @@ def _validate_qwen3_omni_dspark(
             f"draft input vocabulary [0, {draft_input_vocab_size - 1}]."
         )
 
-    rope_configs = (
-        getattr(draft_hf_config, "rope_parameters", None),
-        getattr(draft_hf_config, "rope_scaling", None),
-    )
+    rope_parameters = getattr(draft_hf_config, "rope_parameters", None)
     has_mrope = getattr(draft_hf_config, "mrope_section", None) is not None
-    has_mrope = has_mrope or any(
-        isinstance(rope_config, Mapping) and "mrope_section" in rope_config
-        for rope_config in rope_configs
+    has_mrope = has_mrope or (
+        isinstance(rope_parameters, Mapping) and "mrope_section" in rope_parameters
     )
     if has_mrope:
         raise ValueError(
@@ -1418,11 +1413,11 @@ class SpeculativeConfig:
         target is instantiated at full size even when the target is shrunk.
 
         Dict overrides are mostly target-specific key patches, but
-        rope-relevant keys (`rope_parameters` / `rope_scaling` /
-        `rope_theta`, including nested `text_config`) must reach the
-        draft or a YaRN-style target override leaves the draft on native
-        rope (#58080). `max_position_embeddings` stays target-only so the
-        draft max-model-len clamp keeps holding (#63909).
+        rope-relevant keys (`rope_parameters` / `rope_theta`, including nested
+        `text_config`) must reach the draft or a YaRN-style target override
+        leaves the draft on native rope (#58080). `max_position_embeddings`
+        stays target-only so the draft max-model-len clamp keeps holding
+        (#63909).
 
         The composed override must stay picklable: the draft `ModelConfig`
         is sent to spawned engine-core processes, so a local closure would
