@@ -235,7 +235,7 @@ class ConvertReqIndexToGlobalIndexKernel(
     # Keep the warmup wrapper interface while exposing a descriptive CUDA symbol.
     kernel = sparse_mla_index_remap_kernel
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         BLOCK_SIZE: int,
