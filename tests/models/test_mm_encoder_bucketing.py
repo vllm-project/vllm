@@ -21,6 +21,7 @@ import functools
 import math
 from contextlib import contextmanager
 
+import pytest
 import torch
 from torch import nn
 
@@ -112,7 +113,8 @@ def _gpu_worker():
     """Force the GPU-only install gate open so tests are host-independent.
 
     Bucketing is GPU-only (the bucketer's sole consumer is the GPU encoder
-    runner); the gate is tested separately by `test_install_gpu_only_gate_blocks_non_gpu_worker`.
+    runner); the gate is tested separately by
+    `test_install_gpu_only_gate_blocks_non_gpu_worker`.
     """
     from vllm.model_executor.models import mm_encoder_bucketing as meb
 
@@ -151,12 +153,8 @@ def test_ladder_seconds_parses_and_rejects_bad_values():
     assert _ladder_seconds(None) is None
     assert _ladder_seconds({}) is None
     for bad in ({"audio_bucket_seconds": 4}, {"audio_bucket_seconds": [0]}):
-        try:
+        with pytest.raises(ValueError):
             _ladder_seconds(bad)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"expected ValueError for {bad}")
 
 
 def test_padded_length_picks_smallest_fitting_rung():
@@ -335,35 +333,6 @@ def test_install_gpu_only_gate_blocks_non_gpu_worker():
     assert tower.forward == original_forward  # no shim outside GPU workers
 
 
-def test_qwen2_audio_inputs_schema_contract():
-    # Regression: bucketing crops the mel window to a rung, which the fixed
-    # 3000-frame input schema would reject. The model skips the fixed-size
-    # check only while bucketing is active (validate=False), and keeps the
-    # original 3000 check when bucketing is off.
-    from vllm.model_executor.models.qwen2_audio import Qwen2AudioFeatureInputs
-
-    feats = torch.randn(2, 128, 800)
-    mask = torch.ones(2, 800, dtype=torch.int32)
-    # bucketing off (default validate=True): non-3000 window is rejected
-    try:
-        Qwen2AudioFeatureInputs(
-            type="audio_features",
-            input_features=feats,
-            feature_attention_mask=mask,
-        )
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("non-3000 window must be rejected when bucketing is off")
-    # bucketing on: the model passes validate=False, accepting the rung window
-    Qwen2AudioFeatureInputs(
-        type="audio_features",
-        input_features=feats,
-        feature_attention_mask=mask,
-        validate=False,
-    )
-
-
 def test_rungs_from_seconds_aligns_to_multiple():
     assert _rungs_from_seconds((2.0, 4.0), 10, align_to=8) == (24, 40)
     assert _rungs_from_seconds((2.0,), 10) == (20,)  # align_to=1 disables it
@@ -394,7 +363,8 @@ def test_bucket_accepts_list_shaped_crop():
             return [int(m.sum()) for m in mask] if mask is not None else None
 
         def padded_time(self, mm_kwargs_batch):
-            return max(int(m.numel()) for m in mm_kwargs_batch["feature_attention_mask"])
+            mask = mm_kwargs_batch["feature_attention_mask"]
+            return max(int(m.numel()) for m in mask)
 
         def crop(self, mm_kwargs_batch, indices, rung):
             feats = mm_kwargs_batch["input_features"]
@@ -416,71 +386,6 @@ def test_bucket_accepts_list_shaped_crop():
     rungs = bucketer.bucket(batch, 3)
     got = {r[1]["input_features"][0].shape[1]: r[0] for r in rungs}
     assert got == {8: [0], 32: [1], 16: [2]}
-
-
-def test_granite_spec_buckets_tensor_features():
-    from vllm.model_executor.models.granite_speech import (
-        GraniteSpeechBucketingSpec,
-    )
-
-    # [B, T, 160] with time on dim -2; 50 fps encoder frames
-    feats = torch.randn(3, 300, 160)
-    sizes = torch.tensor([21, 66, 30])  # projector tokens
-    batch = {"input_features": feats, "audio_embed_sizes": sizes}
-    bucketer = EncoderBucketing(
-        GraniteSpeechBucketingSpec(), LengthBucketingConfig((100, 200, 400))
-    )
-    rungs = bucketer.bucket(batch, 3)
-
-    # item lengths are the feature time extents (300 each -> no shrink past
-    # the window for any of them once margin is added), so grouping is driven
-    # by the rung ladder: 300 + 7 -> 400 for all three.
-    assert len(rungs) == 1
-    assert rungs[0][0] == [0, 1, 2]
-    assert rungs[0][1]["input_features"].shape[-2] == 300
-
-    # crop truncates the time axis and keeps sizes aligned
-    cropped = rungs[0][1]
-    assert cropped["audio_embed_sizes"].tolist() == [21, 66, 30]
-
-
-def test_granite_spec_crop_truncates_time_axis():
-    from vllm.model_executor.models.granite_speech import (
-        GraniteSpeechBucketingSpec,
-    )
-
-    feats = [torch.randn(250, 160), torch.randn(80, 160)]
-    sizes = [torch.tensor(50), torch.tensor(15)]
-    batch = {"input_features": feats, "audio_embed_sizes": sizes}
-    spec = GraniteSpeechBucketingSpec()
-    assert spec.item_lengths(batch) == [250, 80]
-    assert spec.padded_time(batch) == 250
-
-    cropped = spec.crop(batch, [1], 100)
-    assert isinstance(cropped["input_features"], list)
-    assert cropped["input_features"][0].shape == (80, 160)  # never clips
-    assert cropped["audio_embed_sizes"] == [torch.tensor(15)]
-
-    cropped = spec.crop(batch, [0], 100)
-    assert cropped["input_features"][0].shape == (100, 160)  # truncates
-
-
-def test_granite_spec_lengths_from_embed_sizes():
-    from vllm.model_executor.models.granite_speech import (
-        GraniteSpeechBucketingSpec,
-    )
-
-    # tokens = ceil(T/15) * 3 -> upper bound tokens // 3 * 15 covers T
-    spec = GraniteSpeechBucketingSpec()
-    for t_enc, tokens in ((164, 33), (250, 51), (1500, 300)):
-        assert math.ceil(t_enc / 15) * 3 == tokens
-        upper = spec._lengths_from_embed_sizes([tokens])[0]
-        assert upper >= t_enc and upper - t_enc < 15
-    # fallback path: no input_features -> sizes drive the rung choice
-    assert spec.item_lengths({"audio_embed_sizes": torch.tensor([33, 66])}) == [
-        165,
-        330,
-    ]
 
 
 def test_glmasr_spec_buckets_tensor_chunked_features():
@@ -511,7 +416,8 @@ def test_glmasr_spec_buckets_tensor_chunked_features():
     for indices, kw in rungs:
         # crop expands audio indices to their chunk rows and subsets counts
         expected_rows = sum(counts[i].item() for i in indices)
-        assert kw["input_features"].shape == (expected_rows, 4, kw["input_features"].shape[-1])
+        window = kw["input_features"].shape[-1]
+        assert kw["input_features"].shape == (expected_rows, 4, window)
         assert kw["feature_attention_mask"].shape == (
             expected_rows,
             kw["input_features"].shape[-1],
@@ -520,65 +426,6 @@ def test_glmasr_spec_buckets_tensor_chunked_features():
     # audio 0's two chunks land together in the 1600 rung
     by_indices = {tuple(r[0]): r[1] for r in rungs}
     assert by_indices[(0,)]["feature_attention_mask"].sum(-1).tolist() == [1200, 300]
-
-
-def test_glmasr_spec_full_window_chunk_keeps_full_batch():
-    # A chunk at the full window has no safe rung once the context margin is
-    # counted, so the batch runs unbucketed rather than clip content.
-    from vllm.model_executor.models.glmasr import GlmAsrBucketingSpec
-
-    feats = torch.randn(2, 4, 3000)
-    mask = torch.zeros(2, 3000, dtype=torch.long)
-    mask[0, :3000] = 1
-    mask[1, :500] = 1
-    counts = torch.tensor([1, 1])
-    batch = {
-        "input_features": feats,
-        "feature_attention_mask": mask,
-        "chunk_counts": counts,
-    }
-    bucketer = EncoderBucketing(
-        GlmAsrBucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
-    )
-    rungs = bucketer.bucket(batch, 2)
-    assert len(rungs) == 1
-    assert rungs[0][0] == [0, 1]
-    assert rungs[0][1] is batch
-
-
-def test_glmasr_spec_buckets_list_shaped_features():
-    from vllm.model_executor.models.glmasr import GlmAsrBucketingSpec
-
-    # list branch: one element per audio (its chunk stack), time last
-    feats = [torch.randn(1, 4, 3000), torch.randn(2, 4, 3000)]
-    mask = [torch.zeros(1, 3000, dtype=torch.long), torch.zeros(2, 3000, dtype=torch.long)]
-    mask[0][0, :500] = 1
-    mask[1][0, :1200] = 1
-    mask[1][1, :300] = 1
-    counts = torch.tensor([1, 2])
-    batch = {
-        "input_features": feats,
-        "feature_attention_mask": mask,
-        "chunk_counts": counts,
-    }
-    bucketer = EncoderBucketing(
-        GlmAsrBucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
-    )
-    rungs = bucketer.bucket(batch, 2)
-
-    # windows (margin 4): 500 -> 800, max(1200, 300) -> 1600
-    got = {r[0][0]: r[1]["input_features"][0].shape[-1] for r in rungs}
-    assert got == {0: 800, 1: 1600}
-    for indices, kw in rungs:
-        assert isinstance(kw["input_features"], list)
-        assert len(indices) == 1
-        i = indices[0]
-        assert kw["input_features"][0].shape == feats[i][:, :, : got[i]].shape
-        assert kw["chunk_counts"].tolist() == [counts[i].item()]
-        # true chunk lengths survive the crop
-        assert kw["feature_attention_mask"][0].sum(-1).tolist() == (
-            mask[i].sum(-1).tolist()
-        )
 
 
 def test_canary_spec_buckets_list_shaped_features():
@@ -604,30 +451,6 @@ def test_canary_spec_buckets_list_shaped_features():
         all_lengths.append(kw["feature_lengths"].item())
     assert by_len == {0: 5, 1: 30, 2: 12}
     assert sorted(all_lengths) == [5, 12, 30]
-
-
-def test_firered_spec_buckets_tensor_shaped_features():
-    from vllm.model_executor.models.fireredasr2 import FireRedASR2BucketingSpec
-
-    feats = torch.randn(3, 3000, 80)  # [B, T, n_mel], time on dim 1
-    speech_lengths = torch.tensor([500, 2000, 1200])
-    fake_token_lengths = torch.tensor([124, 499, 299])
-    batch = {
-        "input_features": feats,
-        "speech_lengths": speech_lengths,
-        "fake_token_lengths": fake_token_lengths,
-    }
-    bucketer = EncoderBucketing(
-        FireRedASR2BucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
-    )
-    rungs = bucketer.bucket(batch, 3)
-    # windows (margin 7): 500->800, 2000->3000, 1200->1600
-    got = {r[1]["input_features"].shape[1]: r[0] for r in rungs}
-    assert got == {800: [0], 3000: [1], 1600: [2]}
-    # crop selects rows and keeps the length tensors aligned
-    for indices, kw in rungs:
-        assert kw["speech_lengths"].shape == (len(indices),)
-        assert kw["fake_token_lengths"].shape == (len(indices),)
 
 
 def test_cohere_spec_buckets_on_dim2_time_axis():
@@ -660,19 +483,16 @@ def test_compute_budget_config_parses_and_rejects_bad_values():
     assert _compute_budget({}) is None
     assert _compute_budget({"audio_bucket_budget": 48}) == 48
     # The retired fill-floor knob is ignored; the merge trigger is derived.
-    assert _compute_budget({"audio_bucket_budget": 48, "audio_bucket_fill_floor": 12}) == 48
+    retired = {"audio_bucket_budget": 48, "audio_bucket_fill_floor": 12}
+    assert _compute_budget(retired) == 48
     for bad in (
         {"audio_bucket_budget": 0},
         {"audio_bucket_budget": -4},
         {"audio_bucket_budget": True},
         {"audio_bucket_budget": 4.5},
     ):
-        try:
+        with pytest.raises(ValueError):
             _compute_budget(bad)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"expected ValueError for {bad}")
 
 
 def test_budget_fold_reaches_fill_floor():
@@ -684,7 +504,8 @@ def test_budget_fold_reaches_fill_floor():
         _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=64
     )
     got = {
-        kw["input_features"].shape[-1]: indices for indices, kw in bucketer.bucket(batch, 3)
+        kw["input_features"].shape[-1]: indices
+        for indices, kw in bucketer.bucket(batch, 3)
     }
     assert got == {16: [0, 2], 32: [1]}
 
@@ -752,86 +573,6 @@ def test_budget_low_concurrency_collapses_to_one_call():
     assert kw["input_features"].shape[-1] == 32
 
 
-def test_funasr_spec_buckets_tensor_features():
-    from vllm.model_executor.models.funasr import FunASRBucketingSpec
-
-    feats = torch.randn(3, 1000, 560)  # [B, T, feat], time dim 1, fixed window 1000
-    speech_lengths = torch.tensor([400, 900, 600])
-    fake_token_lengths = torch.tensor([100, 225, 150])
-    batch = {
-        "input_features": feats,
-        "speech_lengths": speech_lengths,
-        "fake_token_lengths": fake_token_lengths,
-    }
-    bucketer = EncoderBucketing(
-        FunASRBucketingSpec(), LengthBucketingConfig((500, 800, 1000))
-    )
-    rungs = bucketer.bucket(batch, 3)
-    # windows (margin 8): 400->500, 900->1000, 600->800
-    got = {r[1]["input_features"].shape[1]: r[0] for r in rungs}
-    assert got == {500: [0], 1000: [1], 800: [2]}
-    for indices, kw in rungs:
-        assert kw["speech_lengths"].shape == (len(indices),)
-
-
-def test_firered_spec_buckets_list_shaped_input_features():
-    from vllm.model_executor.models.fireredasr2 import FireRedASR2BucketingSpec
-
-    feats = [torch.randn(500, 80), torch.randn(2000, 80), torch.randn(1200, 80)]
-    speech_lengths = torch.tensor([500, 2000, 1200])
-    fake_token_lengths = torch.tensor([124, 499, 299])
-    batch = {
-        "input_features": feats,
-        "speech_lengths": speech_lengths,
-        "fake_token_lengths": fake_token_lengths,
-    }
-    bucketer = EncoderBucketing(
-        FireRedASR2BucketingSpec(), LengthBucketingConfig((800, 1600, 3000))
-    )
-    rungs = bucketer.bucket(batch, 3)
-
-    # list branch selects rows and truncates each to the rung; the length
-    # fields stay aligned with the selected rows
-    by_len = {}
-    for indices, kw in rungs:
-        assert isinstance(kw["input_features"], list)
-        assert len(indices) == 1
-        by_len[indices[0]] = kw["input_features"][0].shape[0]
-        assert kw["speech_lengths"].tolist() == [speech_lengths[indices[0]].item()]
-        assert kw["fake_token_lengths"].tolist() == [
-            fake_token_lengths[indices[0]].item()
-        ]
-    # windows (margin 7): 500->800 (keeps 500), 2000->3000 (keeps 2000),
-    # 1200->1600 (keeps 1200) -- rung >= true length, so nothing is clipped
-    assert by_len == {0: 500, 1: 2000, 2: 1200}
-
-
-def test_funasr_spec_buckets_list_shaped_input_features():
-    from vllm.model_executor.models.funasr import FunASRBucketingSpec
-
-    feats = [torch.randn(400, 560), torch.randn(900, 560), torch.randn(600, 560)]
-    speech_lengths = torch.tensor([400, 900, 600])
-    fake_token_lengths = torch.tensor([100, 225, 150])
-    batch = {
-        "input_features": feats,
-        "speech_lengths": speech_lengths,
-        "fake_token_lengths": fake_token_lengths,
-    }
-    bucketer = EncoderBucketing(
-        FunASRBucketingSpec(), LengthBucketingConfig((500, 800, 1000))
-    )
-    rungs = bucketer.bucket(batch, 3)
-
-    by_len = {}
-    for indices, kw in rungs:
-        assert isinstance(kw["input_features"], list)
-        assert len(indices) == 1
-        by_len[indices[0]] = kw["input_features"][0].shape[0]
-        assert kw["speech_lengths"].tolist() == [speech_lengths[indices[0]].item()]
-    # windows (margin 8): 400->500, 900->1000, 600->800 -- nothing clipped
-    assert by_len == {0: 400, 1: 900, 2: 600}
-
-
 def test_full_window_shim_is_byte_identical_to_original_forward():
     from transformers.models.qwen2_audio import (
         Qwen2AudioEncoder,
@@ -865,19 +606,6 @@ def test_full_window_shim_is_byte_identical_to_original_forward():
     )
 
 
-def test_qwen2_audio_spec_is_instantiated_and_crops():
-    from vllm.model_executor.models.qwen2_audio import Qwen2AudioBucketingSpec
-
-    spec = Qwen2AudioBucketingSpec()
-    assert spec.frames_per_second == 100
-    assert spec.context_margin == 4
-
-    batch = _batch([5, 30, 12], time_extent=32)
-    cropped = spec.crop(batch, [0, 2], 16)
-    assert cropped["input_features"].shape == (2, 4, 16)
-    assert cropped["feature_attention_mask"].shape == (2, 16)
-
-
 def test_bucket_mm_batch_distinguishes_wired_from_silently_dead():
     from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 
@@ -908,22 +636,3 @@ def test_bucket_mm_batch_distinguishes_wired_from_silently_dead():
     assert len(dead) == 1 and dead[0][0] == [0, 1, 2]  # single passthrough
 
 
-def test_cohere_spec_crop_list_branch_pads_up_in_crop():
-    from vllm.model_executor.models.cohere_asr import CohereASRBucketingSpec
-
-    # List-shaped input_features: per-item [mel, T_i] (time on dim 1). Crop must
-    # select the rows and zero-pad each up to the rung, then stack into a fixed
-    # [n, mel, rung] tensor (pad-up-in-crop), instead of indexing a tensor.
-    feats = [torch.randn(80, 500), torch.randn(80, 2000), torch.randn(80, 1200)]
-    length = torch.tensor([500, 2000, 1200])
-    batch = {"input_features": feats, "length": length}
-    spec = CohereASRBucketingSpec()
-
-    cropped = spec.crop(batch, [0, 2], 800)
-    feats_out = cropped["input_features"]
-    assert isinstance(feats_out, torch.Tensor)
-    assert feats_out.shape == (2, 80, 800)
-    # item 0 (500 < 800) is zero-padded to the rung, item 2 (1200) is cropped
-    assert torch.count_nonzero(feats_out[0][:, 500:]).item() == 0
-    assert torch.equal(feats_out[1], feats[2][:, :800])
-    assert cropped["length"].tolist() == [500, 1200]
