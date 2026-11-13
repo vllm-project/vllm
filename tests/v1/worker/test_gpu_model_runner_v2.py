@@ -13,29 +13,36 @@ import torch
 
 import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
     KernelConfig,
     LoadConfig,
     LoRAConfig,
+    ModelConfig,
     ParallelConfig,
+    SchedulerConfig,
     SpeculativeConfig,
+    VllmConfig,
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
 
@@ -197,13 +204,10 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.max_num_tokens = 2
     runner.device = torch.device("cuda")
 
-    raw_spec = CircularBufferSpec(
-        block_size=8,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
+    raw_layer = CircularBufferManager.layer_config(
+        AttentionSpec(block_size=8, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     )
-    compressed_spec = FullAttentionSpec(
+    compressed_spec = AttentionSpec(
         block_size=262144,
         num_kv_heads=1,
         head_size=128,
@@ -213,14 +217,8 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         num_blocks=1,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=["raw"],
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=8,
-                    kv_cache_specs={"raw": raw_spec},
-                ),
-            ),
-            KVCacheGroupSpec(layer_names=["compressed"], kv_cache_spec=compressed_spec),
+            new_kv_cache_group(["raw"], raw_layer),
+            new_kv_cache_group(["compressed"], compressed_spec),
         ],
     )
 
@@ -276,7 +274,7 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     attention_block_size = 1_536
     mamba_block_size = 16
     dcp_size = 8
-    full_attention_spec = FullAttentionSpec(
+    full_attention_spec = AttentionSpec(
         block_size=attention_block_size,
         num_kv_heads=1,
         head_size=1,
@@ -286,6 +284,8 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         shapes=((1,),),
         dtypes=(torch.bfloat16,),
         block_size=mamba_block_size,
+    )
+    mamba_config = MambaManager.config(
         mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
     )
@@ -293,8 +293,8 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         num_blocks=1,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["attention"], full_attention_spec),
-            KVCacheGroupSpec(["kda"], mamba_spec),
+            new_kv_cache_group(["attention"], full_attention_spec),
+            new_kv_cache_group(["kda"], mamba_spec, mamba_config),
         ],
     )
     parallel_config = SimpleNamespace(
@@ -323,7 +323,9 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
             raise _CapturedWidths
         return max_num_blocks
 
-    monkeypatch.setattr(model_runner_module, "get_block_table_width", capture_width)
+    monkeypatch.setattr(
+        "vllm.v1.kv_cache_interface.get_block_table_width", capture_width
+    )
 
     with pytest.raises(_CapturedWidths):
         GPUModelRunner.initialize_kv_cache(runner, kv_cache_config)
@@ -580,9 +582,6 @@ def test_standalone_draft_kv_dtype_override(
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
     monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
-    monkeypatch.setattr(
-        ar_module, "get_pp_safe_draft_load_config", lambda load_config: load_config
-    )
 
     speculator.load_draft_model(object(), set())
 
@@ -598,3 +597,41 @@ def test_standalone_draft_kv_dtype_override(
     )
     assert target.kernel_config.moe_backend == "flashinfer_cutlass"
     assert target.attention_config.backend == AttentionBackendEnum.FLASHINFER
+
+
+class _EmbeddingModel(torch.nn.Module):
+    def __init__(self, vocab_size: int, hidden_size: int):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(vocab_size, hidden_size)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
+
+@pytest.mark.parametrize("multimodal", [True, False])
+def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
+    """Models fed inputs_embeds must see the randomized dummy ids, not zeros."""
+    model_config = ModelConfig(
+        model="facebook/opt-125m", dtype="float32", enable_prompt_embeds=True
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=4,
+            max_num_batched_tokens=16,
+            max_model_len=64,
+            is_encoder_decoder=False,
+        ),
+    )
+    model = _EmbeddingModel(32, model_config.get_inputs_embeds_size())
+    encoder_cache = EncoderCache() if multimodal else None
+    state = DefaultModelState(vllm_config, model, encoder_cache, torch.device("cpu"))
+    input_ids = torch.tensor([3, 7, 7, 1, 30])
+
+    with torch.inference_mode():
+        inputs_embeds = state.dummy_inputs_embeds(6, input_ids)
+        expected = model.embed_input_ids(input_ids)
+
+    assert inputs_embeds.shape == (6, model_config.get_inputs_embeds_size())
+    torch.testing.assert_close(inputs_embeds[:5], expected)
+    torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)
