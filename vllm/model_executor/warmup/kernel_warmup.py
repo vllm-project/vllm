@@ -9,7 +9,7 @@ import gc
 import json
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -63,7 +63,7 @@ _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
 
 @contextmanager
-def _outside_kv_cache_transient_window(worker: "Worker") -> Iterator[None]:
+def _outside_kv_cache_transient_window(worker: "Worker") -> Generator[None]:
     """Keep a one-off tuning step out of the extensible KV cache's reserve.
 
     An extensible KV cache keeps free the allocator peak its warmup steps reach
