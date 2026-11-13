@@ -26,7 +26,7 @@ OutOfResources = triton.runtime.errors.OutOfResources
 def patched_autotuner(monkeypatch: pytest.MonkeyPatch):
     """Install the first-valid-config patch and restore after.
 
-    The env-var gate lives in vllm.env_override; install() itself does not
+    The env-var gate lives in vllm.triton_utils; install() itself does not
     read the environment, so the test calls it directly.
     """
     Autotuner = triton.runtime.autotuner.Autotuner

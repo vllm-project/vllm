@@ -5,13 +5,14 @@ import json
 
 import pytest
 
+from tests.tool_parsers.utils import get_function_delta
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
-CONFIGS = {
+CONFIGS: dict[str, dict[str, type[ToolParser]]] = {
     "llama": {
         "tool_parser": Hermes2ProToolParser,
     },
@@ -67,12 +68,15 @@ def test_hermes_parser_streaming_just_forward_text(
         previous_text = current_text
         delta_messages.append(delta)
 
+    contents: list[str] = []
     for delta in delta_messages:
         assert delta is not None
         assert not delta.tool_calls
+        assert delta.content is not None
+        contents.append(delta.content)
 
     print(delta_messages)
-    assert "".join([delta.content for delta in delta_messages]) == text
+    assert "".join(contents) == text
 
 
 def test_hermes_parser_streaming_failure_case_bug_19056(
@@ -102,9 +106,11 @@ def test_hermes_parser_streaming_failure_case_bug_19056(
         if delta is not None:
             delta_messages.append(delta)
 
+    assert delta_messages[0].tool_calls[0].function is not None
     assert delta_messages[0].tool_calls[0].function.name == "final_answer"
     tool_call_args = "".join(
-        delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+        get_function_delta(delta.tool_calls[0]).arguments or ""
+        for delta in delta_messages
     )
     assert tool_call_args == '{"trigger": true}'
 
@@ -139,11 +145,13 @@ def test_hermes_parser_streaming(
         if delta is not None:
             delta_messages.append(delta)
     print(delta_messages)
+    assert delta_messages[0].tool_calls[0].function is not None
     assert delta_messages[0].tool_calls[0].function.name == "get_current_temperature"
     # load to normalize whitespace
     tool_call_args = json.loads(
         "".join(
-            delta.tool_calls[0].function.arguments or "" for delta in delta_messages
+            get_function_delta(delta.tool_calls[0]).arguments or ""
+            for delta in delta_messages
         )
     )
     assert tool_call_args == {

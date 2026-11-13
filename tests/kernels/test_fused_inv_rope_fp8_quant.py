@@ -355,8 +355,9 @@ def test_packed_quantization_preserves_rotary_dimensions(num_tokens, quant_group
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 128])
 @pytest.mark.parametrize(
     "num_heads,n_groups",
-    [(64, 8), (32, 4), (128, 8)],
-    ids=["H64_G8", "H32_G4", "H128_G8"],
+    # H24_G4: 6 heads per group, so each program takes 2 heads instead of 4.
+    [(64, 8), (32, 4), (128, 8), (24, 4)],
+    ids=["H64_G8", "H32_G4", "H128_G8", "H24_G4"],
 )
 @pytest.mark.parametrize("seed", [0, 42])
 @pytest.mark.parametrize("quantize", [True, False], ids=["fp8", "bf16"])

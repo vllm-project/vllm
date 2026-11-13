@@ -2,13 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side wiring of HiSparse caches to attention layers."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import copy
+from dataclasses import replace
+from math import gcd, lcm
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.abstract import (
+    get_mamba_prefill_checkpoint_alignment,
+)
+from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
@@ -28,7 +34,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayout,
     KVCacheSpec,
+    KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -36,6 +45,7 @@ from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
@@ -45,7 +55,8 @@ def resolve_hisparse_specs(
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheSpec]:
     """Resolve a common kernel block size for HiSparse MLA specs, and add the
-    resident/hot specs HiSparse derives from them."""
+    resident/hot specs HiSparse derives from them, then fit align-mode Mamba
+    blocks to the resized attention blocks."""
     mla_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
@@ -65,18 +76,107 @@ def resolve_hisparse_specs(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec = kv_cache_spec | {
+    indexer_names = [
+        name
+        for name, spec in mla_specs.items()
+        if spec.cache_role is SparseCacheRole.INDEXER
+    ]
+    indexer_block_size = _largest_exact_kernel_block_size(
+        block_size,
+        [attn_layers[name].get_attn_backend() for name in indexer_names],
+        [mla_specs[name] for name in indexer_names],
+    )
+    resized_specs: dict[str, KVCacheSpec] = {
         name: spec.copy_with_new_block_size(block_size)
         for name, spec in mla_specs.items()
     }
-    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    for name in indexer_names:
+        resized_specs[name] = mla_specs[name].copy_with_new_block_size(
+            indexer_block_size
+        )
+    groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
     assert groups is not None
-    return kv_cache_spec | {
-        layer_name: group.kv_cache_spec
-        for group in groups
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
-        for layer_name in group.layer_names
-    }
+    return fit_mamba_blocks_to_attention(
+        vllm_config,
+        kv_cache_spec
+        | resized_specs
+        | {
+            layer_name: group.kv_cache_spec
+            for group in groups
+            if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+            for layer_name in group.layer_names
+        },
+        attn_layers,
+    )
+
+
+def _largest_exact_kernel_block_size(
+    block_size: int,
+    backends: list[type["AttentionBackend"]],
+    specs: list[MLAAttentionSpec],
+) -> int:
+    """Largest exact kernel page all backends accept, as a multiple of block_size."""
+    sizes: set[int] | None = None
+    for backend, spec in zip(backends, specs, strict=True):
+        exact = {
+            size
+            for size in backend.get_supported_kernel_block_sizes(spec)
+            if isinstance(size, int)
+        }
+        sizes = exact if sizes is None else sizes & exact
+    return max(
+        (size for size in sizes or () if size % block_size == 0), default=block_size
+    )
+
+
+def fit_mamba_blocks_to_attention(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    layers: Mapping[str, "AttentionLayerBase"],
+) -> dict[str, KVCacheSpec]:
+    """Shrink align-mode Mamba blocks that would grow the scheduler block.
+
+    Mamba blocks start at `cache_config.block_size`, which resized attention
+    specs may no longer use. Rebuilds the Mamba specs at the largest size up to
+    it that divides the attention blocks' lcm.
+    """
+    if not any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values()):
+        return kv_cache_spec
+    cache_config = vllm_config.cache_config
+    if cache_config.mamba_cache_mode != "align":
+        return kv_cache_spec
+    attn_block_sizes = [
+        spec.block_size
+        for spec in kv_cache_spec.values()
+        if not isinstance(spec, MambaSpec) and spec.prefix_cacheable
+    ]
+    if not attn_block_sizes:
+        return kv_cache_spec
+    scheduler_block_size = lcm(*attn_block_sizes)
+    step = lcm(
+        gcd(*attn_block_sizes),
+        get_mamba_prefill_checkpoint_alignment(vllm_config) or 1,
+    )
+    block_size = max(
+        (
+            size
+            for size in range(
+                step, min(cache_config.block_size, scheduler_block_size) + 1, step
+            )
+            if scheduler_block_size % size == 0
+        ),
+        default=cache_config.mamba_block_size,
+    )
+    if block_size == cache_config.mamba_block_size:
+        return kv_cache_spec
+    cache_config.mamba_block_size = block_size
+    resized = dict(kv_cache_spec)
+    for name, spec in kv_cache_spec.items():
+        if isinstance(spec, MambaSpec):
+            new_spec = layers[name].get_kv_cache_spec(vllm_config)
+            assert isinstance(new_spec, MambaSpec)
+            resized[name] = replace(new_spec, is_draft=spec.is_draft)
+    return resized
 
 
 def allocate_hisparse_kv_caches(
@@ -85,6 +185,7 @@ def allocate_hisparse_kv_caches(
     layout: KVCacheLayout,
     kernel_block_sizes: list[int],
     host_pool: HiSparseHostPool,
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the host pool separately from the shared device backing."""
     device_config = copy(kv_cache_config)
@@ -93,7 +194,9 @@ def allocate_hisparse_kv_caches(
         for tensor in kv_cache_config.kv_cache_tensors
         if not tensor.host_resident
     ]
-    kv_caches = allocate_kv_cache(device_config, device, layout, kernel_block_sizes)
+    kv_caches = allocate_kv_cache(
+        device_config, device, layout, kernel_block_sizes, allocate=allocate
+    )
     host_tensors = [
         tensor for tensor in kv_cache_config.kv_cache_tensors if tensor.host_resident
     ]
@@ -126,8 +229,11 @@ def init_hisparse_kv_cache(
     vllm_config: VllmConfig,
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
-) -> dict[str, torch.Tensor]:
+    allocate: Callable[[int], torch.Tensor] | None = None,
+) -> dict[str, Any]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
+    backend = get_hisparse_backend()
+    backend.validate_kv_cache_config(kv_cache_config)
     host_pool = get_hisparse_host_pool(vllm_config, kv_cache_config)
     try:
         kv_caches = allocate_hisparse_kv_caches(
@@ -136,7 +242,9 @@ def init_hisparse_kv_cache(
             vllm_config.cache_config.get_resolved_kv_cache_layout(),
             kernel_block_sizes,
             host_pool,
+            allocate=allocate,
         )
+        backend.prepare_kv_cache_views(kv_cache_config, kv_caches, forward_context)
         cache_handles = bind_hisparse_kv_caches(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,
@@ -150,10 +258,8 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        if host_pool.shared_region is not None:
-            host_pool.shared_region.cleanup()
-        elif host_pool.registered is not None:
-            release_pinned_state([], [host_pool.registered])
+        release_pinned_state(host_pool.pinned, host_pool.shared_region)
+        unbind_hisparse_caches(forward_context)
         drop_hisparse_host_pool(vllm_config)
         raise
 
@@ -167,15 +273,25 @@ def _get_hisparse_cache(
     return hisparse_cache
 
 
-def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
-    """Detach the profiling caches but keep the host pool for the real KV cache."""
-    runtimes = {
-        id(cache.runtime): cache.runtime
-        for layer in forward_context.values()
-        if (cache := getattr(layer, "hisparse_cache", None)) is not None
-        and hasattr(cache.runtime, "_host_cache")
+def unbind_hisparse_caches(forward_context: dict[str, Any]) -> None:
+    """Detach HiSparse cache bindings without unregistering the host pool."""
+    for layer in forward_context.values():
+        if (cache := getattr(layer, "hisparse_cache", None)) is not None:
+            cache.unbind_cache()
+
+
+def _tensor_placements(
+    kv_cache_config: KVCacheConfig,
+) -> dict[str, tuple[KVCacheTensor, int]]:
+    """Each cache's tensor placement and byte offset."""
+    return {
+        name: (
+            tensor_config,
+            tensor_config.offset + layer_index * tensor_config.layer_stride,
+        )
+        for tensor_config in kv_cache_config.kv_cache_tensors
+        for layer_index, name in enumerate(tensor_config.layers)
     }
-    release_pinned_state(list(runtimes.values()), [])
 
 
 def bind_hisparse_kv_caches(
@@ -188,14 +304,7 @@ def bind_hisparse_kv_caches(
 ) -> list[HiSparseCacheHandle]:
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
-    tensor_configs = {
-        name: (
-            tensor_config,
-            tensor_config.offset + layer_index * tensor_config.layer_stride,
-        )
-        for tensor_config in kv_cache_config.kv_cache_tensors
-        for layer_index, name in enumerate(tensor_config.layers)
-    }
+    tensor_configs = _tensor_placements(kv_cache_config)
     resident_groups = [
         (group_id, group)
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -210,7 +319,7 @@ def bind_hisparse_kv_caches(
         assert len(table_shapes) == 1
         max_num_reqs, max_num_pages = table_shapes.pop()
         residency = torch.zeros(
-            (max_num_reqs, len(resident_groups), max_num_pages),
+            (len(resident_groups), max_num_reqs, max_num_pages),
             dtype=torch.int32,
             device=block_tables.input_block_tables[resident_groups[0][0]].device,
         )
@@ -228,7 +337,7 @@ def bind_hisparse_kv_caches(
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
-                block_table=residency[:, resident_source_index],
+                block_table=residency[resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
             cache_handle.residency = residency
@@ -277,7 +386,7 @@ def bind_hisparse_kv_caches(
                 host_pool.registered.untyped_storage().data_ptr()
             )
             cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
-            cache_handle.runtime.shared_host_region = host_pool.shared_region
+            cache_handle.runtime.host_pool = host_pool
             cache_handle.runtime.bind_source_cache(
                 source_cache,
                 registered_host_pool=host_pool.registered,
@@ -296,3 +405,50 @@ def bind_hisparse_kv_caches(
         ]
         cache_handle.mirror_slot_mapping = block_tables.slot_mappings[source_group_id]
     return cache_handles
+
+
+def rebind_hisparse_device_caches(
+    *,
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    kv_caches: dict[str, torch.Tensor],
+) -> None:
+    """Rebind the resident and hot views over resized raw device storage.
+
+    kv_caches holds each resident and hot cache's raw storage, as allocation
+    returns it; as in `bind_hisparse_kv_caches`, resident entries become their
+    views and hot entries are dropped.
+    """
+    tensor_configs = _tensor_placements(kv_cache_config)
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        for cache_name in group.layer_names:
+            if isinstance(spec, HiSparseResidentSpec):
+                layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+                cache_handle = _get_hisparse_cache(forward_context, layer_name)
+                tensor_config, byte_offset = tensor_configs[cache_name]
+                assert cache_handle.block_table is not None
+                assert cache_handle.slot_mapping is not None
+                cache_handle.bind_cache(
+                    kv_caches[cache_name],
+                    byte_offset=byte_offset,
+                    block_stride=tensor_config.block_stride,
+                    num_blocks=kv_cache_config.num_blocks,
+                    block_size=spec.block_size,
+                    block_table=cache_handle.block_table,
+                    slot_mapping=cache_handle.slot_mapping,
+                )
+                assert cache_handle.view is not None
+                kv_caches[cache_name] = cache_handle.view.cache
+            elif isinstance(spec, HiSparseHotSpec):
+                layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
+                runtime = _get_hisparse_cache(forward_context, layer_name).runtime
+                tensor_config, byte_offset = tensor_configs[cache_name]
+                runtime.bind_hot_cache(
+                    kv_caches.pop(cache_name),
+                    byte_offset=byte_offset,
+                    block_stride=tensor_config.block_stride,
+                    num_blocks=kv_cache_config.num_blocks,
+                    block_size=spec.block_size,
+                    block_table=runtime.hot_block_table,
+                )

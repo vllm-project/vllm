@@ -48,6 +48,7 @@
 
 using bf16_t = __bf16;
 using bf16x2 = __bf16 __attribute__((ext_vector_type(2)));
+using bf16x4 = __bf16 __attribute__((ext_vector_type(4)));
 using bf16x8 = __bf16 __attribute__((ext_vector_type(8)));
 using f32x4 = float __attribute__((ext_vector_type(4)));
 using u32x2 = uint32_t __attribute__((ext_vector_type(2)));
@@ -120,11 +121,12 @@ struct Params {
   // separate pointers so that a paged cache (both equal) and a dense
   // [N, H, V, K] pair (two tensors, identity rows) share one code path.
   // Either pointer may be null.
-  const float* cache_in;
-  float* cache_out;
+  const void* cache_in;
+  void* cache_out;
+  bool cache_bf16;
   const int* sidx;
   const bool* hh0;
-  // Floats between consecutive rows: the tensor's stride(0), which a paged
+  // Elements between consecutive rows: the tensor's stride(0), which a paged
   // cache may pad beyond H * kV * kK. Only each row itself is dense.
   int64_t crow;
   int64_t ckrow;  // the same, for the checkpoint destination
@@ -151,7 +153,8 @@ struct Params {
   // replaying the tail as a second model forward.  `ckidx`, when present,
   // redirects sequence n's snapshot to row `ckidx[n]`, which lets the store go
   // straight into the paged state cache; a negative row disables it.
-  float* ckpt;
+  void* ckpt;
+  bool ckpt_bf16;
   const int* ckoff;
   const int* ckidx;
   int G;
@@ -162,6 +165,17 @@ struct Params {
 // Transfer blocks stage an all-zero `u` tile by pointing it at this single row
 // with a leading dimension of 0, so nothing inside the chunk loop changes.
 [[maybe_unused]] __device__ bf16_t g_uzero[kK];
+
+__device__ __forceinline__ void store_state4(void* dst, int64_t offset,
+                                             f32x4 value, bool bf16) {
+  if (bf16) {
+    const bf16x4 packed = __builtin_convertvector(value, bf16x4);
+    __builtin_memcpy(static_cast<bf16_t*>(dst) + offset, &packed,
+                     sizeof(packed));
+  } else {
+    *reinterpret_cast<f32x4*>(static_cast<float*>(dst) + offset) = value;
+  }
+}
 
 union Frag {
   bf16x8 v;
@@ -758,13 +772,22 @@ __global__ __launch_bounds__(64 * WAVES * KS,
   // state the scan composed for it; in pass one they start at zero, which is
   // the B_g the scan expects.  Transfer blocks start at the identity.
   if (HAS_H0 && g == 0 && warm && !from_sin) {
-    const float* s0 =
-        p.cache_in + h0_row +
-        ((static_cast<int64_t>(h) * kV + v0 + lrow) * kK + 4 * lgrp);
+    const int64_t base =
+        h0_row + ((static_cast<int64_t>(h) * kV + v0 + lrow) * kK + 4 * lgrp);
     for (int vt = 0; vt < kNV; ++vt)
-      for (int kt = 0; kt < kNKTL; ++kt)
-        S[kt][vt] = *reinterpret_cast<const f32x4*>(s0 + vt * 16 * kK +
-                                                    (kt0 + kt) * 16);
+      for (int kt = 0; kt < kNKTL; ++kt) {
+        const int64_t offset = base + vt * 16 * kK + (kt0 + kt) * 16;
+        if (p.cache_bf16) {
+          bf16x4 packed;
+          __builtin_memcpy(&packed,
+                           static_cast<const bf16_t*>(p.cache_in) + offset,
+                           sizeof(packed));
+          S[kt][vt] = __builtin_convertvector(packed, f32x4);
+        } else {
+          S[kt][vt] = *reinterpret_cast<const f32x4*>(
+              static_cast<const float*>(p.cache_in) + offset);
+        }
+      }
   } else if (PASS2 && (g > 0 || (from_sin && warm))) {
     const float* s0 = p.sin_ +
                       (static_cast<int64_t>(g) * p.NH() + nh) *
@@ -842,11 +865,12 @@ __global__ __launch_bounds__(64 * WAVES * KS,
   // Same store as the final state below, at an interior boundary instead of
   // the last one.
   auto store_checkpoint = [&]() {
-    float* dst = p.ckpt + ck_dst + (v0 + lrow) * kK + 4 * lgrp;
+    const int64_t base = ck_dst + (v0 + lrow) * kK + 4 * lgrp;
     for (int vt = 0; vt < kNV; ++vt)
-      for (int kt = 0; kt < kNKTL; ++kt)
-        *reinterpret_cast<f32x4*>(dst + vt * 16 * kK + (kt0 + kt) * 16) =
-            S[kt][vt];
+      for (int kt = 0; kt < kNKTL; ++kt) {
+        const int64_t offset = base + vt * 16 * kK + (kt0 + kt) * 16;
+        store_state4(p.ckpt, offset, S[kt][vt], p.ckpt_bf16);
+      }
   };
 
   const int tail = last_group ? T - (nt_all - 1) * kBT : kBT;
@@ -1049,15 +1073,18 @@ __global__ __launch_bounds__(64 * WAVES * KS,
 
   // With G == 1 this is the final state. With G > 1 it is what the group
   // reaches from a zero start, which the scan then composes.
-  float* s1 = nullptr;
-  int64_t st_vt = 16 * kK, st_kt = 16;  // the cache row is [H][V][K] fp32
   if constexpr (PASS2) {
-    // Only the last group holds the sequence's final state. The row's inner
-    // layout is [V][K], so this is one f32x4 per lane per tile, strictly
-    // inside the row this block owns.
-    if (last_group && p.cache_out != nullptr)
-      s1 = p.cache_out + h0_row +
-           ((static_cast<int64_t>(h) * kV + v0 + lrow) * kK + 4 * lgrp);
+    // Only the last group writes the persistent state; group workspaces
+    // retain the accumulator precision regardless of the cache dtype.
+    if (last_group && p.cache_out != nullptr) {
+      const int64_t base =
+          h0_row + ((static_cast<int64_t>(h) * kV + v0 + lrow) * kK + 4 * lgrp);
+      for (int vt = 0; vt < kNV; ++vt)
+        for (int kt = 0; kt < kNKTL; ++kt)
+          store_state4(p.cache_out, base + vt * 16 * kK + (kt0 + kt) * 16,
+                       S[kt][vt], p.cache_bf16);
+    }
+    return;
   } else if (xfer) {
     // Publish C_g = M_g - diag(A_g).  A_g is broadcast through the
     // double-buffer half the last chunk did not use, so the diagonal comes off
@@ -1086,18 +1113,15 @@ __global__ __launch_bounds__(64 * WAVES * KS,
   } else {
     if (slice == 0 && tid < kK)
       p.ag[(static_cast<int64_t>(g) * p.NH() + nh) * kK + tid] = aacc;
-    s1 = p.bg +
-         (static_cast<int64_t>(g) * p.NH() + nh) *
-             (static_cast<int64_t>(kV) * kK) +
-         static_cast<int64_t>(v0 / 16) * kStTile + lane * 4;
-    st_vt = kStTile;
-    st_kt = kStKt;
-  }
-  if (s1 != nullptr)
+    float* const s1 = p.bg +
+                      (static_cast<int64_t>(g) * p.NH() + nh) *
+                          (static_cast<int64_t>(kV) * kK) +
+                      static_cast<int64_t>(v0 / 16) * kStTile + lane * 4;
     for (int vt = 0; vt < kNV; ++vt)
       for (int kt = 0; kt < kNKTL; ++kt)
-        *reinterpret_cast<f32x4*>(s1 + vt * st_vt + (kt0 + kt) * st_kt) =
+        *reinterpret_cast<f32x4*>(s1 + vt * kStTile + (kt0 + kt) * kStKt) =
             S[kt][vt];
+  }
 #else
   kda_unsupported_arch("kda_chunk_fused");
 #endif  // ifdef ROCM_USE_FUSED_PREFILL_KDA
@@ -2112,7 +2136,7 @@ void fused_kda_chunk(
   // Prefill checkpoint export. `checkpoint_state` is either a [N, H, V, K]
   // staging buffer, as FlashKDA takes, or the paged state cache itself when
   // `checkpoint_state_indices` says which row each sequence owns.
-  float* ckpt_ptr = nullptr;
+  void* ckpt_ptr = nullptr;
   int const* ckoff_ptr = nullptr;
   int const* ckidx_ptr = nullptr;
   if (checkpoint_state.has_value() || checkpoint_offsets.has_value()) {
@@ -2121,7 +2145,8 @@ void fused_kda_chunk(
         "checkpoint_state and checkpoint_offsets must be given together");
     STD_TORCH_CHECK(
         checkpoint_state->is_cuda() &&
-            checkpoint_state->scalar_type() == ScalarType::Float &&
+            (checkpoint_state->scalar_type() == ScalarType::Float ||
+             checkpoint_state->scalar_type() == ScalarType::BFloat16) &&
             checkpoint_state->dim() == 4 &&
             checkpoint_state->size(1) == num_heads &&
             checkpoint_state->size(2) == kV &&
@@ -2129,7 +2154,8 @@ void fused_kda_chunk(
             checkpoint_state->stride(3) == 1 &&
             checkpoint_state->stride(2) == kK &&
             checkpoint_state->stride(1) == kV * kK,
-        "checkpoint_state must be an fp32 [rows, H, 128, 128] tensor whose "
+        "checkpoint_state must be an fp32 or bf16 [rows, H, 128, 128] tensor "
+        "whose "
         "rows are dense; stride(0) may be padded, as the paged state cache "
         "it usually is");
     STD_TORCH_CHECK(checkpoint_offsets->is_cuda() &&
@@ -2154,7 +2180,7 @@ void fused_kda_chunk(
                       checkpoint_state->size(0), " rows for ", num_seqs,
                       " sequences");
     }
-    ckpt_ptr = static_cast<float*>(checkpoint_state->data_ptr());
+    ckpt_ptr = checkpoint_state->data_ptr();
     ckoff_ptr = static_cast<int const*>(checkpoint_offsets->data_ptr());
   }
 
@@ -2162,8 +2188,8 @@ void fused_kda_chunk(
   // reads and writes row `state_indices[n]` of a paged cache. Without it, the
   // dense `initial_state` / `final_state` pair is used, which is the same
   // layout with one row per sequence in order.
-  float const* cache_in = h0_ptr;
-  float* cache_out = ht_ptr;
+  void const* cache_in = h0_ptr;
+  void* cache_out = ht_ptr;
   int const* sidx_ptr = nullptr;
   bool const* hh0_ptr = nullptr;
   if (state_cache.has_value()) {
@@ -2175,13 +2201,14 @@ void fused_kda_chunk(
                     "state_cache needs state_indices and has_initial_state");
     STD_TORCH_CHECK(
         state_cache->is_cuda() &&
-            state_cache->scalar_type() == ScalarType::Float &&
+            (state_cache->scalar_type() == ScalarType::Float ||
+             state_cache->scalar_type() == ScalarType::BFloat16) &&
             state_cache->dim() == 4 && state_cache->size(1) == num_heads &&
             state_cache->size(2) == kV && state_cache->size(3) == kK &&
             state_cache->stride(3) == 1 && state_cache->stride(2) == kK &&
             state_cache->stride(1) == kV * kK,
-        "state_cache must be an fp32 [slots, H, 128, 128] tensor whose rows "
-        "are dense; stride(0) may be padded");
+        "state_cache must be an fp32 or bf16 [slots, H, 128, 128] tensor whose "
+        "rows are dense; stride(0) may be padded");
     STD_TORCH_CHECK(state_indices->is_cuda() &&
                         state_indices->is_contiguous() &&
                         state_indices->scalar_type() == ScalarType::Int &&
@@ -2197,8 +2224,8 @@ void fused_kda_chunk(
     // A block reads row `state_indices[n]` at entry and writes it at exit, so
     // `checkpoint_state_indices` must name no row in `state_indices`; a
     // checkpoint aimed at one would be a write racing that read.
-    cache_in = static_cast<float const*>(state_cache->data_ptr());
-    cache_out = static_cast<float*>(state_cache->data_ptr());
+    cache_in = state_cache->data_ptr();
+    cache_out = state_cache->data_ptr();
     sidx_ptr = static_cast<int const*>(state_indices->data_ptr());
     hh0_ptr = static_cast<bool const*>(has_initial_state->data_ptr());
   }
@@ -2231,6 +2258,8 @@ void fused_kda_chunk(
   params.NHv = static_cast<int>(nh_total);
   params.cache_in = cache_in;
   params.cache_out = cache_out;
+  params.cache_bf16 = state_cache.has_value() &&
+                      state_cache->scalar_type() == ScalarType::BFloat16;
   params.sidx = sidx_ptr;
   params.hh0 = hh0_ptr;
   params.crow =
@@ -2238,6 +2267,8 @@ void fused_kda_chunk(
   params.ckrow = checkpoint_state.has_value() ? checkpoint_state->stride(0)
                                               : num_heads * kV * kK;
   params.ckpt = ckpt_ptr;
+  params.ckpt_bf16 = checkpoint_state.has_value() &&
+                     checkpoint_state->scalar_type() == ScalarType::BFloat16;
   params.ckoff = ckoff_ptr;
   params.ckidx = ckidx_ptr;
 

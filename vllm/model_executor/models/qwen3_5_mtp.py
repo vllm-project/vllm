@@ -10,11 +10,8 @@ from transformers import Qwen3_5MoeTextConfig, Qwen3_5TextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -31,6 +28,9 @@ from vllm.model_executor.models.qwen3_next import (
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
 )
+from vllm.model_executor.models.qwen3_next_mtp import (
+    should_torch_compile_mtp_drafter,
+)
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
@@ -42,8 +42,8 @@ from .interfaces import (
 )
 from .utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
     _merge_multimodal_embeddings,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -61,7 +61,8 @@ logger = init_logger(__name__)
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
         "hidden_states": 0,
-    }
+    },
+    enable_if=should_torch_compile_mtp_drafter,
 )
 class Qwen3_5MultiTokenPredictor(nn.Module):
     hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper
@@ -124,10 +125,10 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             for idx in range(self.num_mtp_layers)
         )
         vllm_config.quant_config = original_quant
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Qwen3NextSparseMoeBlock,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
@@ -152,20 +153,14 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        # Branch on the inputs, not the rank: the drafter is built entirely on
-        # the last PP stage, where `is_first_rank` is False.
-        if intermediate_tensors is None:
-            if inputs_embeds is None:
-                inputs_embeds = self.embed_input_ids(input_ids)
-            assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
-            inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
-            hidden_states = self.pre_fc_norm_hidden(hidden_states)
-            hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
-            hidden_states = self.fc(hidden_states)
-            residual = None
-        else:
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_input_ids(input_ids)
+        assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
+        inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+        hidden_states = self.pre_fc_norm_hidden(hidden_states)
+        hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+        hidden_states = self.fc(hidden_states)
+        residual = None
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[current_step_idx]
@@ -179,11 +174,6 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             residual=residual,
         )
 
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
-
         hidden_states, _ = self.norm(hidden_states, residual)
         if mtp_layer.use_attn_reduce_scatter_for_moe:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -193,7 +183,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=getattr(self.config, "num_experts", 0),
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -211,7 +201,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
         "hidden_states": 0,
-    }
+    },
+    enable_if=should_torch_compile_mtp_drafter,
 )
 class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
     packed_modules_mapping = {
@@ -234,17 +225,14 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=self.quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-            if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
-        else:
-            self.lm_head = PPMissingLayer()
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=self.quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -285,10 +273,15 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs: object,
+        spec_step_idx: int = 0,
     ):
         hidden_states = self.model(
-            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            hidden_states,
+            intermediate_tensors,
+            inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 
@@ -298,6 +291,14 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # One lm_head is shared by all MTP modules, as in compute_logits.
+        return super().get_top_tokens(hidden_states)
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
         return not name.startswith("mtp.") and not any(
