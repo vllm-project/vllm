@@ -14,8 +14,7 @@ INVALID_JOB_ID = -1
 
 @dataclass
 class SimpleCPUOffloadMetadata(KVConnectorMetadata):
-    """
-    Metadata passed from scheduler to worker for CPU offload operations.
+    """Metadata passed from scheduler to worker for CPU offload operations.
 
     The worker receives flat block lists keyed by a monotonic event_idx.
     Job->req_id translation is handled by the scheduler-side manager
@@ -43,9 +42,9 @@ class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed store events.
 
     Each worker reports {event_idx: 1} for newly completed stores.
-    ``aggregate()`` sums counts across workers within a step.
+    `aggregate()` sums counts across workers within a step.
     The scheduler-side manager accumulates across steps and processes
-    a store completion only when count reaches ``world_size``.
+    a store completion only when count reaches `world_size`.
     """
 
     completed_store_events: dict[int, int]

@@ -187,6 +187,42 @@ def test_scheduler_falls_back_to_static_k_when_dsd_not_configured():
     assert output.num_spec_tokens_to_schedule == 3
 
 
+@pytest.mark.parametrize(
+    ("model", "keeps_schedule"),
+    [
+        # Dense DP ranks run as independent engines with no DP collectives.
+        ("facebook/opt-125m", True),
+        # MoE DP ranks step in lockstep, so their K must match.
+        ("ibm-research/PowerMoE-3b", False),
+    ],
+    ids=["dense", "moe"],
+)
+def test_dynamic_sd_with_data_parallel(model: str, keeps_schedule: bool):
+    scheduler = create_scheduler(
+        model=model,
+        max_num_seqs=256,
+        max_num_batched_tokens=2560,
+        num_speculative_tokens=3,
+        num_speculative_tokens_per_batch_size=[
+            (1, 16, 3),
+            (64, 128, 2),
+            (256, 4096, 0),
+        ],
+        data_parallel_size=2,
+    )
+
+    speculative_config = scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    assert (speculative_config.num_speculative_tokens_per_batch_size is not None) is (
+        keeps_schedule
+    )
+
+    output = _add_requests_and_schedule(scheduler, 256)
+    assert len(output.num_scheduled_tokens) == 256
+    # The schedule drafts 0 tokens at batch size 256; the static K is 3.
+    assert output.num_spec_tokens_to_schedule == (0 if keeps_schedule else 3)
+
+
 def test_scheduler_uses_static_k_when_no_requests_are_scheduled():
     scheduler = _make_scheduler_with_dynamic_sd(
         [(1, 16, 3), (64, 128, 2), (256, 4096, 0)],

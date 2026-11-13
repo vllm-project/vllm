@@ -1,12 +1,16 @@
-use std::collections::HashMap;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use indexmap::IndexMap;
 use itertools::Itertools as _;
 use vllm_text::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
     DecodedTokenLogprob,
 };
 
-use super::types::{ChatLogProbs, ChatLogProbsContent, LogProbs, TopLogProb};
+use super::types::{
+    ChatLogProbs, ChatLogProbsContent, LogProbs, PromptLogprob, PromptLogprobs, TopLogProb,
+};
 use crate::error::{ApiError, server_error};
 
 /// Convert decoded token-position logprobs into the OpenAI completions
@@ -97,32 +101,55 @@ pub fn decoded_prompt_logprobs_to_openai(
     })
 }
 
-/// Convert decoded prompt logprobs into the vLLM-style prompt-logprobs response
-/// shape.
-pub fn decoded_prompt_logprobs_to_maps(
-    prompt_logprobs: &DecodedPromptLogprobs,
-    return_tokens_as_token_ids: bool,
-) -> Vec<Option<HashMap<String, f32>>> {
-    std::iter::once(None)
-        .chain(prompt_logprobs.scored_positions.iter().map(|position| {
-            Some(position_top_logprobs_map(
-                position,
-                return_tokens_as_token_ids,
-            ))
-        }))
-        .collect()
+/// Map decoded prompt logprobs into vLLM-style per-position maps, treating a
+/// missing single-token payload as `[None]`.
+pub fn prompt_logprobs_to_maps(
+    prompt_logprobs: Option<&DecodedPromptLogprobs>,
+    prompt_token_ids: &[u32],
+) -> Result<PromptLogprobs, ApiError> {
+    if let Some(prompt_logprobs) = prompt_logprobs {
+        return Ok(std::iter::once(None)
+            .chain(prompt_logprobs.scored_positions.iter().map(|position| {
+                Some(
+                    position
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            (
+                                entry.token_id,
+                                PromptLogprob {
+                                    logprob: clamp_logprob(entry.logprob),
+                                    rank: entry.rank,
+                                    decoded_token: entry.token.clone(),
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+            }))
+            .collect());
+    }
+
+    if let [_token_id] = prompt_token_ids {
+        return Ok(vec![None]);
+    }
+
+    Err(server_error!(
+        "prompt_logprobs were requested but generation returned none"
+    ))
 }
 
 /// Convert decoded token-position logprobs into the OpenAI chat `logprobs`
 /// shape.
 pub fn decoded_logprobs_to_openai_chat(
     logprobs: &DecodedLogprobs,
+    top_logprobs: i32,
     return_tokens_as_token_ids: bool,
 ) -> Result<ChatLogProbs, ApiError> {
     let content = logprobs
         .positions
         .iter()
-        .map(|pos| position_to_chat_logprobs_content(pos, return_tokens_as_token_ids))
+        .map(|pos| position_to_chat_logprobs_content(pos, top_logprobs, return_tokens_as_token_ids))
         .try_collect()?;
 
     Ok(ChatLogProbs {
@@ -134,6 +161,16 @@ pub fn decoded_logprobs_to_openai_chat(
 /// convention.
 pub fn text_len(text: &str) -> u32 {
     u32::try_from(text.chars().count()).unwrap_or(u32::MAX)
+}
+
+/// The text offset just past the last token of a completions `logprobs`
+/// payload, where the next token's offset starts.
+pub fn text_end_offset(logprobs: &LogProbs) -> Option<u32> {
+    logprobs
+        .text_offset
+        .last()
+        .zip(logprobs.tokens.last())
+        .map(|(&offset, token)| offset.saturating_add(text_len(token)))
 }
 
 /// Concatenate two OpenAI-style completion logprobs payloads in token order.
@@ -165,12 +202,7 @@ pub fn collected_logprobs_to_openai(
         })?;
         let prompt_logprobs =
             decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids)?;
-        let completion_start = prompt_logprobs
-            .text_offset
-            .last()
-            .zip(prompt_logprobs.tokens.last())
-            .map(|(&offset, token)| offset.saturating_add(text_len(token)))
-            .unwrap_or(0);
+        let completion_start = text_end_offset(&prompt_logprobs).unwrap_or(0);
         return match collected.logprobs.as_ref() {
             Some(completion_logprobs) => Ok(append_openai_logprobs(
                 prompt_logprobs,
@@ -203,10 +235,13 @@ fn format_token(entry: &DecodedTokenLogprob, as_token_id: bool) -> String {
     }
 }
 
+/// Collecting keeps each key at its first position and the last value for it,
+/// like Python's dict, so a sampled token repeated among the top-k candidates,
+/// or two tokens decoding to the same string, yield one entry in Python's place.
 fn position_top_logprobs_map(
     position: &DecodedPositionLogprobs,
     return_tokens_as_token_ids: bool,
-) -> HashMap<String, f32> {
+) -> IndexMap<String, f32> {
     position
         .entries
         .iter()
@@ -221,6 +256,7 @@ fn position_top_logprobs_map(
 
 fn position_to_chat_logprobs_content(
     position: &DecodedPositionLogprobs,
+    top_logprobs: i32,
     return_tokens_as_token_ids: bool,
 ) -> Result<ChatLogProbsContent, ApiError> {
     let chosen = position.entries.first().ok_or_else(|| {
@@ -232,9 +268,7 @@ fn position_to_chat_logprobs_content(
         token: token_str.clone(),
         logprob: clamp_logprob(chosen.logprob),
         bytes: Some(token_bytes(&token_str)),
-        top_logprobs: position
-            .entries
-            .iter()
+        top_logprobs: chat_top_logprob_entries(position, top_logprobs)
             .map(|entry| {
                 let t = format_token(entry, return_tokens_as_token_ids);
                 TopLogProb {
@@ -247,10 +281,204 @@ fn position_to_chat_logprobs_content(
     })
 }
 
+fn chat_top_logprob_entries(
+    position: &DecodedPositionLogprobs,
+    top_logprobs: i32,
+) -> impl Iterator<Item = &DecodedTokenLogprob> {
+    let limit = if top_logprobs == -1 {
+        position.entries.len()
+    } else {
+        usize::try_from(top_logprobs).unwrap_or(0)
+    };
+
+    // The engine row is the sampled token followed by the top-k or requested
+    // tokens, so the sampled token may repeat. Keep each token's first entry.
+    position.entries.iter().unique_by(|entry| entry.token_id).take(limit)
+}
+
 fn token_bytes(token: &str) -> Vec<u8> {
     token.as_bytes().to_vec()
 }
 
 pub fn clamp_logprob(logprob: f32) -> f32 {
     logprob.max(-9999.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
+
+    use super::{
+        decoded_logprobs_to_openai, decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
+    };
+
+    #[test]
+    fn prompt_logprobs_maps_reject_missing_multi_token_payload() {
+        prompt_logprobs_to_maps(None, &[9707, 11])
+            .expect_err("multi-token prompt without payload is an engine failure");
+    }
+
+    #[test]
+    fn prompt_logprobs_maps_preserve_token_ids_and_metadata() {
+        let prompt_logprobs = vllm_text::DecodedPromptLogprobs {
+            first_token_id: 10,
+            first_token: "first".to_string(),
+            scored_positions: sample_logprobs().positions,
+        };
+
+        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs), &[10, 1]).expect("maps");
+        assert_eq!(
+            serde_json::to_value(maps).expect("serialize prompt logprobs"),
+            serde_json::json!([
+                null,
+                {
+                    "1": {"logprob": -0.10000000149011612_f64, "rank": 1, "decoded_token": "A"},
+                    "2": {"logprob": -1.0, "rank": 2, "decoded_token": "B"},
+                    "3": {"logprob": -2.0, "rank": 3, "decoded_token": "C"},
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn prompt_logprobs_maps_keep_engine_order() {
+        // Prompt token `C` is the rank-3 token: the engine row is `[C, A, B, C]`.
+        let mut scored_positions = sample_logprobs().positions;
+        let prompt_token = scored_positions[0].entries[2].clone();
+        scored_positions[0].entries.insert(0, prompt_token);
+        let prompt_logprobs = vllm_text::DecodedPromptLogprobs {
+            first_token_id: 10,
+            first_token: "first".to_string(),
+            scored_positions,
+        };
+
+        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs), &[10, 3]).unwrap();
+        let token_ids = maps[1].as_ref().unwrap().keys().copied().collect::<Vec<_>>();
+        assert_eq!(token_ids, [3, 1, 2]);
+    }
+
+    fn sample_logprobs() -> DecodedLogprobs {
+        DecodedLogprobs {
+            positions: vec![DecodedPositionLogprobs {
+                entries: vec![
+                    DecodedTokenLogprob {
+                        token_id: 1,
+                        token: "A".to_string(),
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                    DecodedTokenLogprob {
+                        token_id: 2,
+                        token: "B".to_string(),
+                        logprob: -1.0,
+                        rank: 2,
+                    },
+                    DecodedTokenLogprob {
+                        token_id: 3,
+                        token: "C".to_string(),
+                        logprob: -2.0,
+                        rank: 3,
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn completion_top_logprobs_keep_engine_order() {
+        // Sampled `C` is the rank-3 token: the engine row is `[C, A, B, C]`.
+        // Python's dict keeps `C` first and once, then the rest in rank order.
+        let mut logprobs = sample_logprobs();
+        let sampled = logprobs.positions[0].entries[2].clone();
+        logprobs.positions[0].entries.insert(0, sampled);
+
+        let top_logprobs = |as_token_ids| {
+            let logprobs = decoded_logprobs_to_openai(&logprobs, 0, as_token_ids).unwrap();
+            serde_json::to_string(&logprobs.top_logprobs).unwrap()
+        };
+        expect_test::expect![[r#"[{"C":-2.0,"A":-0.1,"B":-1.0}]"#]].assert_eq(&top_logprobs(false));
+        expect_test::expect![[r#"[{"token_id:3":-2.0,"token_id:1":-0.1,"token_id:2":-1.0}]"#]]
+            .assert_eq(&top_logprobs(true));
+    }
+
+    fn chat_top_logprobs_len(top_logprobs: i32) -> usize {
+        let chat_logprobs =
+            decoded_logprobs_to_openai_chat(&sample_logprobs(), top_logprobs, false)
+                .expect("chat logprobs");
+        chat_logprobs.content.expect("content")[0].top_logprobs.len()
+    }
+
+    #[test]
+    fn chat_logprobs_respects_requested_top_logprobs_count() {
+        assert_eq!(chat_top_logprobs_len(0), 0);
+        assert_eq!(chat_top_logprobs_len(1), 1);
+        assert_eq!(chat_top_logprobs_len(-1), 3);
+    }
+
+    #[test]
+    fn chat_logprobs_dedupes_repeated_tokens_before_top_logprobs_cut() {
+        // Sampled `A` is also the top-1 token: the engine row is `[A, A, B, C]`.
+        let mut logprobs = sample_logprobs();
+        let sampled = logprobs.positions[0].entries[0].clone();
+        logprobs.positions[0].entries.insert(0, sampled);
+
+        let top_tokens = |top_logprobs| {
+            let chat_logprobs =
+                decoded_logprobs_to_openai_chat(&logprobs, top_logprobs, false).unwrap();
+            chat_logprobs.content.unwrap()[0]
+                .top_logprobs
+                .iter()
+                .map(|entry| entry.token.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(top_tokens(2), ["A", "B"]);
+        assert_eq!(top_tokens(-1), ["A", "B", "C"]);
+    }
+
+    #[test]
+    fn chat_logprobs_clamps_nan_and_negative_infinity_for_json() {
+        let mut logprobs = sample_logprobs();
+        logprobs.positions[0].entries[0].logprob = f32::NAN;
+        logprobs.positions[0].entries[0].rank = 0;
+        logprobs.positions[0].entries[1].logprob = f32::NEG_INFINITY;
+
+        let response = decoded_logprobs_to_openai_chat(&logprobs, -1, false).unwrap();
+        let json = serde_json::to_string_pretty(&response).unwrap();
+        expect_test::expect![[r#"
+            {
+              "content": [
+                {
+                  "token": "A",
+                  "logprob": -9999.0,
+                  "bytes": [
+                    65
+                  ],
+                  "top_logprobs": [
+                    {
+                      "token": "A",
+                      "logprob": -9999.0,
+                      "bytes": [
+                        65
+                      ]
+                    },
+                    {
+                      "token": "B",
+                      "logprob": -9999.0,
+                      "bytes": [
+                        66
+                      ]
+                    },
+                    {
+                      "token": "C",
+                      "logprob": -2.0,
+                      "bytes": [
+                        67
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }"#]]
+        .assert_eq(&json);
+    }
 }

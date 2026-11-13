@@ -23,8 +23,8 @@ class ExpertsInt8Config(QuantizationConfig):
     """Online int8 quantization for MoE expert weights.
     Linear layers are left unquantized.
 
-    Backward-compatible config for ``--quantization experts_int8``.
-    Prefer ``--quantization int8_per_channel``
+    Backward-compatible config for `--quantization experts_int8`.
+    Prefer `--quantization int8_per_channel`
     """
 
     def __init__(self) -> None:
@@ -56,5 +56,5 @@ class ExpertsInt8Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         elif isinstance(layer, RoutedExperts):
-            return Int8OnlineMoEMethod(layer=layer)
+            return Int8OnlineMoEMethod(moe=layer.moe_config)
         return None

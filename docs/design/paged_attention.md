@@ -4,9 +4,18 @@
     This is a historical document based on the [original paper for vLLM](https://arxiv.org/abs/2309.06180).
     It no longer describes the code used in vLLM today.
 
-Currently, vLLM utilizes its own implementation of a multi-head query
-attention kernel (`csrc/attention/attention_kernels.cu`).
-This kernel is designed to be compatible with
+At the time this document was written, vLLM used its own implementation
+of a multi-head query attention kernel (`csrc/attention/attention_kernels.cu`),
+described step by step below. That file no longer exists in the codebase.
+Paged attention is now implemented directly inside vLLM's attention
+backends (for example `TritonAttentionImpl` in
+`vllm/v1/attention/backends/triton_attn.py`, or the FlashAttention-based
+backend) using block tables built by the scheduler's KV-cache manager;
+`vllm/v1/attention/ops/paged_attn.py` only provides KV-cache layout
+helpers (`split_kv_cache`, `write_to_paged_cache`), not the attention
+computation itself.
+
+The kernel walked through below was designed to be compatible with
 vLLM's paged KV caches, where the key and value cache are stored in
 separate blocks (note that this block concept differs from the GPU
 thread block. So in a later document, I will refer to vLLM paged
@@ -52,7 +61,7 @@ __device__ void paged_attention_kernel(
 )
 ```
 
-There are also a list of template arguments above the function
+There is also a list of template arguments above the function
 signature that are determined during compilation time. `scalar_t`
 represents the data type of the query, key, and value data elements,
 such as FP16. `HEAD_SIZE` indicates the number of elements in each
@@ -178,7 +187,7 @@ const scalar_t* k_ptr = k_cache + physical_block_number * kv_block_stride
                     + physical_block_offset * x;
 ```
 
-Unlike to `q_ptr`, `k_ptr` in each thread will point to different
+Unlike `q_ptr`, `k_ptr` in each thread will point to different
 key token at different iterations. As shown above, that `k_ptr`
 points to key token data based on `k_cache` at assigned block,
 assigned head and assigned token.

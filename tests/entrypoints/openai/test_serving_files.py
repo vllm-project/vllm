@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Tests for OpenAIServingFiles."""
+
 import os
 import tempfile
 
@@ -24,8 +28,10 @@ def serving_files(storage_dir):
 
 @pytest.mark.asyncio
 async def test_upload_file(serving_files, storage_dir):
-    content = (b'{"custom_id": "r1", "method": "POST", '
-               b'"url": "/v1/chat/completions", "body": {}}\n')
+    content = (
+        b'{"custom_id": "r1", "method": "POST", '
+        b'"url": "/v1/chat/completions", "body": {}}\n'
+    )
     result = await serving_files.upload_file(
         content=content,
         filename="batch.jsonl",
@@ -36,8 +42,7 @@ async def test_upload_file(serving_files, storage_dir):
     assert result.filename == "batch.jsonl"
     assert result.purpose == "batch"
     assert result.bytes == len(content)
-    assert os.path.exists(
-        os.path.join(storage_dir, "files", result.id + ".jsonl"))
+    assert os.path.exists(os.path.join(storage_dir, "files", result.id + ".jsonl"))
 
 
 @pytest.mark.asyncio
@@ -88,7 +93,8 @@ async def test_delete_file(serving_files, storage_dir):
     assert result.deleted is True
     assert await serving_files.get_file(uploaded.id) is None
     assert not os.path.exists(
-        os.path.join(storage_dir, "files", uploaded.id + ".jsonl"))
+        os.path.join(storage_dir, "files", uploaded.id + ".jsonl")
+    )
 
 
 @pytest.mark.asyncio
@@ -102,7 +108,6 @@ async def test_delete_file_in_active_batch(serving_files):
     uploaded = await serving_files.upload_file(b"data\n", "f.jsonl", "batch")
 
     class _BatchHandler:
-
         def is_file_in_active_batch(self, file_id):
             return file_id == uploaded.id
 

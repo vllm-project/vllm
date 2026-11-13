@@ -37,7 +37,7 @@ implies that:
 ### Dynamic SD Eagle Drafter
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --speculative-config '{
     "method": "eagle",
     "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
@@ -53,7 +53,7 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 ### Dynamic SD Eagle3 Drafter
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --speculative-config '{
     "method": "eagle3",
     "model": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
@@ -71,8 +71,5 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 ## Limitations
 
-* only tested with Eagle and Eagle-3. Other SD methods may or may not work out of the box
-* only usable with Model Runner V1
-* not compatible with full cuda graph so we force piece-wise cuda graph with this feature
-
-We are working on enabling it on MRv2 with full cuda graph support.
+* Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
+* Not compatible with data parallelism (`--data-parallel-size > 1`) for MoE models. Their DP ranks step together, but each schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. For MoE models with DP, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens` value. Dense models run each DP rank as an independent engine, so each rank uses its own schedule.

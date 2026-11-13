@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Tracking of the external→internal request-id mapping for in-flight requests.
 //!
-//! When request-id randomization is enabled (the default), [`crate::Llm`]
+//! When request-id randomization is enabled (the default), [`crate::EngineCoreLlm`]
 //! rewrites the external (user-supplied) request id into a unique internal
 //! engine id before reaching engine-core. Engine-core only ever knows the
 //! internal id, so aborting a request by its external id requires resolving it
@@ -62,6 +65,13 @@ impl InflightRequests {
             .flat_map(|internal_ids| internal_ids.keys())
             .cloned()
             .collect()
+    }
+
+    /// Collect the internal engine ids of every in-flight request. Used to
+    /// abort all outstanding requests when no external ids are given.
+    pub(crate) fn all_internal_ids(&self) -> Vec<String> {
+        let map = self.map.lock();
+        map.values().flat_map(|internal_ids| internal_ids.keys()).cloned().collect()
     }
 
     #[cfg(test)]

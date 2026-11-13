@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-GLM-4 Tool Call Parser with incremental string streaming support.
+"""GLM-4 Tool Call Parser with incremental string streaming support.
 
 This parser fixes the streaming issue reported in Issue #32829 where long string
 parameters (e.g., file content with 4000+ characters of code) are buffered until
@@ -17,13 +16,10 @@ from typing import Any
 
 import partial_json_parser.core.complete
 import regex as re
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -31,15 +27,21 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.schema_types import ParameterTypesCache, convert_value
 from vllm.tool_parsers.utils import safe_literal_eval
 
 logger = init_logger(__name__)
@@ -52,6 +54,8 @@ class PoolsideV1ToolParser(ToolParser):
     For string-type parameters, content is streamed character-by-character
     rather than waiting for the complete </arg_value> tag.
     """
+
+    supports_required_and_named = False
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
@@ -72,7 +76,7 @@ class PoolsideV1ToolParser(ToolParser):
 
         self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
         self.func_detail_regex = re.compile(
-            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL
+            r"<tool_call>\s*([^\n<]+?)\s*\n?\s*(<arg_key>.*?)?</tool_call>", re.DOTALL
         )
         self.func_arg_regex = re.compile(
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
@@ -88,6 +92,8 @@ class PoolsideV1ToolParser(ToolParser):
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self._buffer: str = ""
 
+        self._parameter_types_cache = ParameterTypesCache()
+
         # Streaming state for incremental tool-call streaming
         self._in_tool_call: bool = False
         self._current_tool_name: str | None = None
@@ -100,6 +106,7 @@ class PoolsideV1ToolParser(ToolParser):
 
     @staticmethod
     def _deserialize(value: str) -> Any:
+        value = value.strip()
         try:
             return json.loads(value)
         except json.JSONDecodeError:
@@ -123,27 +130,13 @@ class PoolsideV1ToolParser(ToolParser):
             return ""
         return json.dumps(s, ensure_ascii=False)[1:-1]
 
-    @staticmethod
-    def _is_string_type(
-        tool_name: str,
-        arg_name: str,
-        tools: list[Tool] | None,
-    ) -> bool:
-        if tools is None:
-            return False
-        for tool in tools:
-            if tool.function.name != tool_name:
-                continue
-            if tool.function.parameters is None:
-                return False
-            arg_type = (
-                tool.function.parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
-            )
-            return arg_type == "string"
-        logger.debug("No tool named '%s'.", tool_name)
-        return False
+    def _allowed_types(
+        self, tool_name: str, arg_name: str, tools: list[Tool] | None
+    ) -> set[str] | None:
+        """JSON types the argument's schema admits; `None` if unconstrained."""
+        tool_types = self._parameter_types_cache.for_tools(tools)
+        props, extra = tool_types.get(tool_name, ({}, None))
+        return props.get(arg_name, extra)
 
     @staticmethod
     def _tools_enabled(request: ChatCompletionRequest) -> bool:
@@ -159,7 +152,24 @@ class PoolsideV1ToolParser(ToolParser):
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """Adjust request parameters for tool call token handling."""
+        """Adjust request parameters for tool call token handling.
+
+        For required/named tool_choice, skip super().adjust_request() so it
+        does not install JSON guided decoding. These models emit XML tool
+        calls (per the chat template), which JSON guidance would break.
+        """
+        if request.tools:
+            tc = request.tool_choice
+            if tc == "required" or isinstance(
+                tc,
+                (
+                    ChatCompletionNamedToolChoiceParam,
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                ),
+            ):
+                request.skip_special_tokens = False
+                return request
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens (<tool_call>, </tool_call>) are not skipped
@@ -192,9 +202,13 @@ class PoolsideV1ToolParser(ToolParser):
                 arg_dct: dict[str, Any] = {}
                 for key, value in pairs:
                     arg_key = key.strip()
-                    arg_val = value.strip()
-                    if not self._is_string_type(tc_name, arg_key, request.tools):
-                        arg_val = self._deserialize(arg_val)
+                    # Keep string values verbatim; whitespace is significant
+                    # (e.g. code/file content). Only strip non-string types.
+                    arg_val = convert_value(
+                        value,
+                        self._allowed_types(tc_name, arg_key, request.tools),
+                        self._deserialize,
+                    )
                     logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
                 tool_calls.append(
@@ -342,12 +356,12 @@ class PoolsideV1ToolParser(ToolParser):
 
                 key = (self._pending_key or "").strip()
 
-                is_string = self._is_string_type(
+                allowed = self._allowed_types(
                     self._current_tool_name, key, request.tools
                 )
 
-                if is_string:
-                    # String type: stream incrementally
+                if allowed == {"string"}:
+                    # String-only type: stream incrementally
                     self._buffer = self._buffer[len(self.arg_val_start) :]
 
                     if key in self._seen_keys[self.current_tool_id]:
@@ -368,16 +382,19 @@ class PoolsideV1ToolParser(ToolParser):
                     self._update_tool_args(pending_deltas, frag)
                     continue
 
-                # Non-string type: wait for complete value
+                # Other types, including nullable strings: wait for the
+                # complete value, since e.g. "null" is not a string prefix.
                 val_end = self._buffer.find(self.arg_val_end)
                 if val_end == -1:
                     break
 
-                raw_val = self._buffer[len(self.arg_val_start) : val_end].strip()
+                raw_val = self._buffer[len(self.arg_val_start) : val_end]
                 self._buffer = self._buffer[val_end + len(self.arg_val_end) :]
                 self._pending_key = None
 
-                frag_or_none = self._append_arg_fragment(key=key, raw_val=raw_val)
+                frag_or_none = self._append_arg_fragment(
+                    key=key, raw_val=raw_val, allowed=allowed
+                )
                 if frag_or_none:
                     self._update_tool_args(pending_deltas, frag_or_none)
                 continue
@@ -424,7 +441,11 @@ class PoolsideV1ToolParser(ToolParser):
 
         tool_calls = list(pending_deltas.values())
         if content is None and len(tool_calls) == 0:
-            if request.logprobs:
+            wants_logprobs = getattr(request, "logprobs", None) or (
+                isinstance(request, ResponsesRequest)
+                and request.is_include_output_logprobs()
+            )
+            if wants_logprobs:
                 return DeltaMessage(content="")
             return None
         return DeltaMessage(content=content, tool_calls=tool_calls)
@@ -510,9 +531,9 @@ class PoolsideV1ToolParser(ToolParser):
 
         Returns (formatted_prefix, parsed_dict) or None on failure.
 
-        Note: ``partial_json_parser`` strips trailing whitespace before
-        parsing (``complete.py:20``), which means the returned slice is
-        shorter than ``json_prefix`` when it has trailing whitespace.
+        Note: `partial_json_parser` strips trailing whitespace before
+        parsing (`complete.py:20`), which means the returned slice is
+        shorter than `json_prefix` when it has trailing whitespace.
         Since the parser controls the construction of the json_prefix value,
         this code relies on it being a valid prefix and we only use the fix for
         the completion of the JSON object.
@@ -546,6 +567,7 @@ class PoolsideV1ToolParser(ToolParser):
         *,
         key: str,
         raw_val: str,
+        allowed: set[str] | None,
     ) -> str | None:
         key = key.strip()
         if not key:
@@ -553,9 +575,7 @@ class PoolsideV1ToolParser(ToolParser):
         if key in self._seen_keys[self.current_tool_id]:
             return None
 
-        # This function is only called for non-string types (already checked
-        # by _is_string_type in the caller), so we always deserialize.
-        val_obj: Any = self._deserialize(raw_val)
+        val_obj: Any = convert_value(raw_val, allowed, self._deserialize)
 
         key_json = json.dumps(key, ensure_ascii=False)
         val_json = json.dumps(val_obj, ensure_ascii=False)

@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Tests for OpenAIServingBatches."""
+
 import asyncio
 import json
 import os
@@ -17,12 +21,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponseChoice,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.serving_batches import OpenAIServingBatches
+from vllm.entrypoints.openai.serving_files import OpenAIServingFiles
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_batches import OpenAIServingBatches
-from vllm.entrypoints.openai.serving_files import OpenAIServingFiles
 
 
 @pytest.fixture
@@ -55,8 +59,7 @@ def _make_chat_response():
 
 def _make_mock_chat_handler():
     handler = AsyncMock()
-    handler.create_chat_completion = AsyncMock(
-        return_value=_make_chat_response())
+    handler.create_chat_completion = AsyncMock(return_value=_make_chat_response())
     return handler
 
 
@@ -80,16 +83,20 @@ def _make_batch_jsonl(n=2):
     """Create JSONL content with n chat completion requests."""
     lines = []
     for i in range(n):
-        lines.append(json.dumps({
-            "custom_id": f"req-{i}",
-            "method": "POST",
-            "url": "/v1/chat/completions",
-            "body": {
-                "model": "test-model",
-                "messages": [{"role": "user", "content": f"Hello {i}"}],
-                "max_tokens": 10,
-            },
-        }))
+        lines.append(
+            json.dumps(
+                {
+                    "custom_id": f"req-{i}",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": f"Hello {i}"}],
+                        "max_tokens": 10,
+                    },
+                }
+            )
+        )
     return "\n".join(lines).encode()
 
 
@@ -170,8 +177,7 @@ async def test_list_batches_pagination(serving_batches, serving_files):
     ids = []
     for i in range(3):
         f = await serving_files.upload_file(content, f"{i}.jsonl", "batch")
-        b = await serving_batches.create_batch(
-            f.id, "/v1/chat/completions", "24h")
+        b = await serving_batches.create_batch(f.id, "/v1/chat/completions", "24h")
         ids.append(b.id)
 
     batches, has_more = await serving_batches.list_batches(limit=2)
@@ -179,7 +185,8 @@ async def test_list_batches_pagination(serving_batches, serving_files):
     assert has_more
 
     batches2, has_more2 = await serving_batches.list_batches(
-        limit=2, after=batches[-1].id)
+        limit=2, after=batches[-1].id
+    )
     assert len(batches2) == 1
     assert not has_more2
 
@@ -204,8 +211,7 @@ async def test_batch_processes_to_completion(serving_batches, serving_files):
     assert updated.completed_at is not None
 
     # Output file should exist and contain valid JSONL
-    output_content = await serving_files.get_file_content(
-        updated.output_file_id)
+    output_content = await serving_files.get_file_content(updated.output_file_id)
     assert output_content is not None
     lines = output_content.decode().strip().split("\n")
     assert len(lines) == 2
@@ -287,6 +293,7 @@ async def test_metadata_persistence(storage_dir, serving_files):
     content = _make_batch_jsonl(1)
     f = await serving_files.upload_file(content, "in.jsonl", "batch")
     batch = await sb1.create_batch(f.id, "/v1/chat/completions", "24h")
+    assert isinstance(batch, BatchObject)
     await sb1.wait_for_batch(batch.id, timeout=10)
     await sb1.shutdown()
 
@@ -307,21 +314,22 @@ async def test_metadata_persistence(storage_dir, serving_files):
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_marks_in_progress_as_failed(
-        storage_dir, serving_files):
+async def test_crash_recovery_marks_in_progress_as_failed(storage_dir, serving_files):
     """Simulate a crash by writing metadata with in_progress batch."""
     metadata_dir = os.path.join(storage_dir, "metadata")
     os.makedirs(metadata_dir, exist_ok=True)
-    batch_data = [{
-        "id": "batch-crashed",
-        "object": "batch",
-        "endpoint": "/v1/chat/completions",
-        "input_file_id": "file-x",
-        "status": "in_progress",
-        "completion_window": "24h",
-        "created_at": int(time.time()),
-        "request_counts": {"total": 10, "completed": 3, "failed": 0},
-    }]
+    batch_data = [
+        {
+            "id": "batch-crashed",
+            "object": "batch",
+            "endpoint": "/v1/chat/completions",
+            "input_file_id": "file-x",
+            "status": "in_progress",
+            "completion_window": "24h",
+            "created_at": int(time.time()),
+            "request_counts": {"total": 10, "completed": 3, "failed": 0},
+        }
+    ]
     with open(os.path.join(metadata_dir, "batches.json"), "w") as f:
         json.dump(batch_data, f)
 
@@ -335,6 +343,7 @@ async def test_crash_recovery_marks_in_progress_as_failed(
         retention_hours=24,
     )
     recovered = await sb.get_batch("batch-crashed")
+    assert recovered is not None
     assert recovered.status == "failed"
     assert recovered.failed_at is not None
     await sb.shutdown()

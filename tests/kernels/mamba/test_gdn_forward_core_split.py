@@ -1,29 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Integration test for the non-spec decode split in
-``GatedDeltaNet._forward_core``.
+`GatedDeltaNet._forward_core`.
 
 On a pure non-spec batch that mixes prefills with 1-token decodes, the layer
 peels the decodes (the contiguous decode-first front slice) off to
-``fused_sigmoid_gating_delta_rule_update`` -- the same recurrent update kernel
+`fused_sigmoid_gating_delta_rule_update` -- the same recurrent update kernel
 the spec-decode path uses -- and runs only the prefill tail through
-``chunk_gated_delta_rule``. This must produce the same core-attention output and
+`chunk_gated_delta_rule`. This must produce the same core-attention output and
 the same ssm-state pool update as running *everything* through
-``chunk_gated_delta_rule`` (the previous behavior).
+`chunk_gated_delta_rule` (the previous behavior).
 
-Both paths are exercised through the REAL ``_forward_core``:
+Both paths are exercised through the REAL `_forward_core`:
 
-* ``meta_split`` is built by the real ``GDNAttentionMetadataBuilder`` for a
-  mixed batch, so ``num_decodes > 0`` triggers the peel (and the builder rebases
-  ``chunk_indices``/``chunk_offsets`` to the prefill-only tail).
-* ``meta_unified`` is the same metadata with the decodes reclassified as
-  prefills and full-batch chunk metadata, which forces ``_forward_core`` through
+* `meta_split` is built by the real `GDNAttentionMetadataBuilder` for a
+  mixed batch, so `num_decodes > 0` triggers the peel (and the builder rebases
+  `chunk_indices`/`chunk_offsets` to the prefill-only tail).
+* `meta_unified` is the same metadata with the decodes reclassified as
+  prefills and full-batch chunk metadata, which forces `_forward_core` through
   the existing chunk-only path on identical inputs (the conv is unified over all
   non-spec tokens in both paths, so it cancels out and only the recurrent split
   is compared).
 
-The Triton/FLA chunk backend is forced so the prefill-only ``chunk_indices``
-must stay consistent with the rebased ``cu_seqlens`` (a stringent, backend
+The Triton/FLA chunk backend is forced so the prefill-only `chunk_indices`
+must stay consistent with the rebased `cu_seqlens` (a stringent, backend
 portable check of the split wiring).
 """
 
@@ -53,11 +53,6 @@ from tests.v1.attention.utils import (  # noqa: E402
     create_vllm_config,
 )
 from vllm.config import set_current_vllm_config  # noqa: E402
-from vllm.model_executor.layers.fla.ops.index import (  # noqa: E402
-    prepare_chunk_indices,
-    prepare_chunk_offsets,
-)
-from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,
@@ -65,6 +60,13 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa:
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
     MambaStateShapeCalculator,
+)
+from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+)
+from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
+    FLA_CHUNK_SIZE,
 )
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
@@ -103,7 +105,7 @@ def _make_vllm_config():
 def _build_layer(
     vllm_config, conv_state, ssm_state, A_log, dt_bias, conv_weight, conv_bias
 ):
-    """A minimal object that runs the real ``_forward_core`` bound to it."""
+    """A minimal object that runs the real `_forward_core` bound to it."""
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
     layer.enable_packed_recurrent_decode = False
@@ -121,6 +123,7 @@ def _build_layer(
     layer.kv_cache = (conv_state, ssm_state)
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
@@ -172,6 +175,8 @@ def test_forward_core_split_matches_unified(
     batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
 
     builder = GDNAttentionMetadataBuilder(
+        # GDNAttentionMetadataBuilder declares kv_cache_spec as AttentionSpec but
+        # asserts isinstance(kv_cache_spec, MambaSpec). MambaSpec is correct here.
         kv_cache_spec=MambaSpec(
             block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
         ),
@@ -196,6 +201,7 @@ def test_forward_core_split_matches_unified(
     # Full-batch chunk metadata for the unified reference path, built the same
     # way the builder would for a non-split batch (backend-matched).
     cu_full = meta_split.non_spec_query_start_loc
+    assert cu_full is not None
     if builder.gdn_prefill_backend == "cutedsl":
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             prepare_metadata_cutedsl,
@@ -225,6 +231,7 @@ def test_forward_core_split_matches_unified(
     )
 
     # Size the state pools from the indices the builder actually produced.
+    assert meta_split.non_spec_state_indices_tensor is not None
     pool_size = int(meta_split.non_spec_state_indices_tensor.max().item()) + 1
     conv_state_shape, temporal_state_shape = (
         MambaStateShapeCalculator.gated_delta_net_state_shape(

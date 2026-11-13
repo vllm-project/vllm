@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 import torch.nn.functional as F
 import transformers.utils
 from PIL import Image
@@ -17,8 +18,8 @@ from ...utils import check_embeddings_close
 
 # BC for method that was deleted in Transformers v5.
 # Only needed for generating the HF reference.
-transformers.utils.is_flash_attn_greater_or_equal_2_10 = (
-    lambda: transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
+transformers.utils.is_flash_attn_greater_or_equal_2_10 = lambda: (
+    transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
 )
 
 HF_TEXT_PROMPTS = [
@@ -52,6 +53,7 @@ def _get_cherry_blossom_image() -> Image.Image:
     )
 
 
+@torch.inference_mode()
 def _run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
@@ -117,7 +119,7 @@ def test_models_text(
         hf_runner,
         vllm_runner,
         input_texts,
-        input_images,  # type: ignore
+        input_images,
         model,
         dtype=dtype,
     )

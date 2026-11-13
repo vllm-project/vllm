@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Batch processing for the OpenAI-compatible Batch API."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +11,7 @@ import json
 import os
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import IO, Any
 
 import pydantic
 from pydantic import TypeAdapter
@@ -22,8 +26,8 @@ from vllm.entrypoints.openai.batch.protocol import (
     BatchRequestOutput,
     BatchResponseData,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.openai.serving_files import OpenAIServingFiles
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -42,50 +46,63 @@ _BATCH_CONCURRENCY_LIMIT = 256
 class _BatchResultWriter:
     """Appends batch results to output/error JSONL files as they complete,
     so the full result set is never held in memory. Files are created
-    lazily on first write and registered with the file store on ``close``.
+    lazily on first write and registered with the file store on `close`.
     """
 
-    def __init__(self, serving_files: OpenAIServingFiles,
-                 batch_id: str) -> None:
+    def __init__(self, serving_files: OpenAIServingFiles, batch_id: str) -> None:
         self._files = serving_files
         self._batch_id = batch_id
-        self._out_handle: Any | None = None
+        self._out_handle: IO[bytes] | None = None
         self._out_id: str | None = None
         self._out_bytes = 0
-        self._err_handle: Any | None = None
+        self._err_handle: IO[bytes] | None = None
         self._err_id: str | None = None
         self._err_bytes = 0
 
     async def write(self, output: BatchRequestOutput) -> None:
         data = (output.model_dump_json() + "\n").encode()
         if output.error is not None:
-            if self._err_handle is None:
+            err_handle = self._err_handle
+            if err_handle is None:
                 self._err_id, path = self._files.begin_file(
-                    f"{self._batch_id}_errors.jsonl", "batch_error")
-                self._err_handle = await asyncio.to_thread(open, path, "wb")
-            await asyncio.to_thread(self._err_handle.write, data)
+                    f"{self._batch_id}_errors.jsonl", "batch_error"
+                )
+                err_handle = await asyncio.to_thread(open, path, "wb")
+                self._err_handle = err_handle
+            await asyncio.to_thread(err_handle.write, data)
             self._err_bytes += len(data)
         else:
-            if self._out_handle is None:
+            out_handle = self._out_handle
+            if out_handle is None:
                 self._out_id, path = self._files.begin_file(
-                    f"{self._batch_id}_output.jsonl", "batch_output")
-                self._out_handle = await asyncio.to_thread(open, path, "wb")
-            await asyncio.to_thread(self._out_handle.write, data)
+                    f"{self._batch_id}_output.jsonl", "batch_output"
+                )
+                out_handle = await asyncio.to_thread(open, path, "wb")
+                self._out_handle = out_handle
+            await asyncio.to_thread(out_handle.write, data)
             self._out_bytes += len(data)
 
     async def close(self) -> tuple[str | None, str | None]:
         out_id = err_id = None
         if self._out_handle is not None:
+            assert self._out_id is not None
             await asyncio.to_thread(self._out_handle.close)
             out = await self._files.commit_file(
-                self._out_id, f"{self._batch_id}_output.jsonl",
-                "batch_output", self._out_bytes)
+                self._out_id,
+                f"{self._batch_id}_output.jsonl",
+                "batch_output",
+                self._out_bytes,
+            )
             out_id = out.id
         if self._err_handle is not None:
+            assert self._err_id is not None
             await asyncio.to_thread(self._err_handle.close)
             err = await self._files.commit_file(
-                self._err_id, f"{self._batch_id}_errors.jsonl",
-                "batch_error", self._err_bytes)
+                self._err_id,
+                f"{self._batch_id}_errors.jsonl",
+                "batch_error",
+                self._err_bytes,
+            )
             err_id = err.id
         return out_id, err_id
 
@@ -148,8 +165,7 @@ class OpenAIServingBatches:
             for item in data:
                 bo = BatchObject.model_validate(item)
                 self._batches[bo.id] = bo
-            logger.info("Loaded %d batches from metadata",
-                        len(self._batches))
+            logger.info("Loaded %d batches from metadata", len(self._batches))
 
     def _recover_crashed_batches(self) -> None:
         now = int(time.time())
@@ -166,9 +182,9 @@ class OpenAIServingBatches:
                         code="server_restart",
                         message="Batch was in progress when server "
                         "stopped. Marked as failed on restart.",
-                    ))
-                logger.warning("Batch %s marked failed (crash recovery)",
-                               batch.id)
+                    )
+                )
+                logger.warning("Batch %s marked failed (crash recovery)", batch.id)
         self._save_metadata_sync()
 
     def _save_metadata_sync(self) -> None:
@@ -188,24 +204,29 @@ class OpenAIServingBatches:
     ) -> BatchObject | ErrorResponse:
         file_obj = await self._serving_files.get_file(input_file_id)
         if file_obj is None:
-            return ErrorResponse(error=ErrorInfo(
-                message=f"File {input_file_id} not found",
-                type="invalid_request_error",
-                code=404,
-            ))
+            return ErrorResponse(
+                error=ErrorInfo(
+                    message=f"File {input_file_id} not found",
+                    type="invalid_request_error",
+                    code=404,
+                )
+            )
 
         if endpoint not in SUPPORTED_ENDPOINTS:
-            return ErrorResponse(error=ErrorInfo(
-                message=f"Endpoint {endpoint} is not supported. "
-                f"Supported: {', '.join(sorted(SUPPORTED_ENDPOINTS))}",
-                type="invalid_request_error",
-                code=400,
-            ))
+            return ErrorResponse(
+                error=ErrorInfo(
+                    message=f"Endpoint {endpoint} is not supported. "
+                    f"Supported: {', '.join(sorted(SUPPORTED_ENDPOINTS))}",
+                    type="invalid_request_error",
+                    code=400,
+                )
+            )
 
         now = int(time.time())
         batch_id = f"batch-{random_uuid()}"
-        expires_at = (now + self._retention_hours * 3600
-                      if self._retention_hours > 0 else None)
+        expires_at = (
+            now + self._retention_hours * 3600 if self._retention_hours > 0 else None
+        )
 
         batch = BatchObject(
             id=batch_id,
@@ -215,8 +236,7 @@ class OpenAIServingBatches:
             status="validating",
             created_at=now,
             expires_at=expires_at,
-            request_counts=BatchRequestCounts(
-                total=0, completed=0, failed=0),
+            request_counts=BatchRequestCounts(total=0, completed=0, failed=0),
             metadata=metadata,
         )
 
@@ -228,20 +248,27 @@ class OpenAIServingBatches:
         cancel_event = asyncio.Event()
         self._cancel_events[batch_id] = cancel_event
         task = asyncio.get_running_loop().create_task(
-            self._process_batch(batch_id, cancel_event))
+            self._process_batch(batch_id, cancel_event)
+        )
         self._tasks[batch_id] = task
 
-        logger.info("Created batch %s (file=%s, endpoint=%s)",
-                     batch_id, input_file_id, endpoint)
+        logger.info(
+            "Created batch %s (file=%s, endpoint=%s)", batch_id, input_file_id, endpoint
+        )
         return batch
 
     def is_file_in_active_batch(self, file_id: str) -> bool:
         """Check if a file is referenced by a non-terminal batch."""
         for batch in self._batches.values():
-            if (batch.status in ("validating", "in_progress", "cancelling")
-                    and file_id in (batch.input_file_id,
-                                    batch.output_file_id,
-                                    batch.error_file_id)):
+            if batch.status in (
+                "validating",
+                "in_progress",
+                "cancelling",
+            ) and file_id in (
+                batch.input_file_id,
+                batch.output_file_id,
+                batch.error_file_id,
+            ):
                 return True
         return False
 
@@ -273,19 +300,19 @@ class OpenAIServingBatches:
         has_more = len(all_batches) > limit
         return all_batches[:limit], has_more
 
-    async def cancel_batch(
-        self, batch_id: str
-    ) -> BatchObject | ErrorResponse | None:
+    async def cancel_batch(self, batch_id: str) -> BatchObject | ErrorResponse | None:
         batch = self._batches.get(batch_id)
         if batch is None:
             return None
 
         if batch.status not in ("validating", "in_progress"):
-            return ErrorResponse(error=ErrorInfo(
-                message=f"Cannot cancel batch with status '{batch.status}'",
-                type="invalid_request_error",
-                code=400,
-            ))
+            return ErrorResponse(
+                error=ErrorInfo(
+                    message=f"Cannot cancel batch with status '{batch.status}'",
+                    type="invalid_request_error",
+                    code=400,
+                )
+            )
 
         batch.status = "cancelling"
         batch.cancelling_at = int(time.time())
@@ -306,8 +333,7 @@ class OpenAIServingBatches:
         batch = self._batches[batch_id]
 
         try:
-            content = await self._serving_files.get_file_content(
-                batch.input_file_id)
+            content = await self._serving_files.get_file_content(batch.input_file_id)
             if content is None:
                 await self._fail_batch(batch, "Input file not found")
                 return
@@ -323,27 +349,30 @@ class OpenAIServingBatches:
                 try:
                     req = BatchRequestInput.model_validate_json(line)
                     if req.url != batch.endpoint:
-                        validation_errors.append(BatchError(
-                            code="invalid_request",
-                            message=f"Request URL {req.url} does not match "
-                            f"batch endpoint {batch.endpoint}",
-                            line=line_num,
-                        ))
+                        validation_errors.append(
+                            BatchError(
+                                code="invalid_request",
+                                message=f"Request URL {req.url} does not match "
+                                f"batch endpoint {batch.endpoint}",
+                                line=line_num,
+                            )
+                        )
                     else:
                         valid_lines.append(line)
                 except Exception as e:
-                    validation_errors.append(BatchError(
-                        code="invalid_request",
-                        message=str(e),
-                        line=line_num,
-                    ))
+                    validation_errors.append(
+                        BatchError(
+                            code="invalid_request",
+                            message=str(e),
+                            line=line_num,
+                        )
+                    )
             del content
 
             # Validation is all-or-nothing, matching the OpenAI contract.
             if validation_errors:
                 batch.errors = BatchErrors(data=validation_errors)
-                await self._fail_batch(
-                    batch, "One or more requests failed validation")
+                await self._fail_batch(batch, "One or more requests failed validation")
                 return
 
             if not valid_lines:
@@ -359,14 +388,15 @@ class OpenAIServingBatches:
             # Process in bounded chunks, streaming results to disk.
             writer = _BatchResultWriter(self._serving_files, batch.id)
             try:
-                for start in range(0, len(valid_lines),
-                                   _BATCH_CONCURRENCY_LIMIT):
+                for start in range(0, len(valid_lines), _BATCH_CONCURRENCY_LIMIT):
                     if cancel_event.is_set():
                         break
-                    chunk = valid_lines[start:start + _BATCH_CONCURRENCY_LIMIT]
+                    chunk = valid_lines[start : start + _BATCH_CONCURRENCY_LIMIT]
                     results = await asyncio.gather(
-                        *[self._run_one_line(batch, line, cancel_event)
-                          for line in chunk],
+                        *[
+                            self._run_one_line(batch, line, cancel_event)
+                            for line in chunk
+                        ],
                         return_exceptions=True,
                     )
                     for output in results:
@@ -378,8 +408,7 @@ class OpenAIServingBatches:
                         else:
                             batch.request_counts.completed += 1
             finally:
-                batch.output_file_id, batch.error_file_id = \
-                    await writer.close()
+                batch.output_file_id, batch.error_file_id = await writer.close()
 
             status = "cancelled" if cancel_event.is_set() else "completed"
             await self._finalize_batch(batch, status=status)
@@ -408,9 +437,9 @@ class OpenAIServingBatches:
         request: BatchRequestInput,
     ) -> BatchRequestOutput:
         try:
-            if hasattr(request.body, 'stream'):
+            if hasattr(request.body, "stream"):
                 request.body.stream = False
-            if hasattr(request.body, 'priority'):
+            if hasattr(request.body, "priority"):
                 request.body.priority = self._batch_priority
 
             handler_fn = self._get_handler_fn(request.url)
@@ -419,13 +448,15 @@ class OpenAIServingBatches:
                     id=f"vllm-{random_uuid()}",
                     custom_id=request.custom_id,
                     response=BatchResponseData(
-                        status_code=400,
-                        request_id=f"vllm-batch-{random_uuid()}"),
-                    error=ErrorResponse(error=ErrorInfo(
-                        message=f"No handler for {request.url}",
-                        type="invalid_request_error",
-                        code=400,
-                    )),
+                        status_code=400, request_id=f"vllm-batch-{random_uuid()}"
+                    ),
+                    error=ErrorResponse(
+                        error=ErrorInfo(
+                            message=f"No handler for {request.url}",
+                            type="invalid_request_error",
+                            code=400,
+                        )
+                    ),
                 )
 
             response = await handler_fn(request.body)
@@ -434,12 +465,13 @@ class OpenAIServingBatches:
             # response model so the body serializes to the OpenAI shape.
             if isinstance(response, JSONResponse):
                 # Lazy import: run_batch pulls in api_server and the engine.
-                from vllm.entrypoints.openai.run_batch import AllResponse
+                from vllm.entrypoints.launchers.run_batch import AllResponse
+
                 parsed: Any = response
                 with contextlib.suppress(pydantic.ValidationError):
-                    parsed = TypeAdapter(
-                        AllResponse | ErrorResponse).validate_python(
-                            json.loads(response.body))
+                    parsed = TypeAdapter(AllResponse | ErrorResponse).validate_python(
+                        json.loads(response.body)
+                    )
                 if isinstance(parsed, JSONResponse):
                     # Could not parse into a known response shape.
                     return BatchRequestOutput(
@@ -447,13 +479,15 @@ class OpenAIServingBatches:
                         custom_id=request.custom_id,
                         response=BatchResponseData(
                             status_code=response.status_code,
-                            request_id=f"vllm-batch-{random_uuid()}"),
-                        error=ErrorResponse(error=ErrorInfo(
-                            message="Handler returned an unparseable "
-                            "response",
-                            type="server_error",
-                            code=response.status_code,
-                        )),
+                            request_id=f"vllm-batch-{random_uuid()}",
+                        ),
+                        error=ErrorResponse(
+                            error=ErrorInfo(
+                                message="Handler returned an unparsable response",
+                                type="server_error",
+                                code=response.status_code,
+                            )
+                        ),
                     )
                 response = parsed
 
@@ -463,7 +497,8 @@ class OpenAIServingBatches:
                     custom_id=request.custom_id,
                     response=BatchResponseData(
                         status_code=response.error.code,
-                        request_id=f"vllm-batch-{random_uuid()}"),
+                        request_id=f"vllm-batch-{random_uuid()}",
+                    ),
                     error=response,
                 )
             elif response is not None:
@@ -471,8 +506,8 @@ class OpenAIServingBatches:
                     id=f"vllm-{random_uuid()}",
                     custom_id=request.custom_id,
                     response=BatchResponseData(
-                        body=response,
-                        request_id=f"vllm-batch-{random_uuid()}"),
+                        body=response, request_id=f"vllm-batch-{random_uuid()}"
+                    ),
                     error=None,
                 )
             else:
@@ -480,22 +515,26 @@ class OpenAIServingBatches:
                     id=f"vllm-{random_uuid()}",
                     custom_id=request.custom_id,
                     response=None,
-                    error=ErrorResponse(error=ErrorInfo(
-                        message="Unexpected response type",
-                        type="server_error",
-                        code=500,
-                    )),
+                    error=ErrorResponse(
+                        error=ErrorInfo(
+                            message="Unexpected response type",
+                            type="server_error",
+                            code=500,
+                        )
+                    ),
                 )
         except Exception as e:
             return BatchRequestOutput(
                 id=f"vllm-{random_uuid()}",
                 custom_id=request.custom_id,
                 response=None,
-                error=ErrorResponse(error=ErrorInfo(
-                    message=str(e),
-                    type="server_error",
-                    code=500,
-                )),
+                error=ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type="server_error",
+                        code=500,
+                    )
+                ),
             )
 
     def _get_handler_fn(self, url: str) -> Callable | None:
@@ -517,8 +556,7 @@ class OpenAIServingBatches:
             batch.expires_at = now + self._retention_hours * 3600
         if batch.errors is None:
             batch.errors = BatchErrors(data=[])
-        batch.errors.data.append(
-            BatchError(code="batch_failed", message=message))
+        batch.errors.data.append(BatchError(code="batch_failed", message=message))
         async with self._lock:
             await self._save_metadata()
 
@@ -542,11 +580,13 @@ class OpenAIServingBatches:
         async with self._lock:
             await self._save_metadata()
 
-        logger.info("Batch %s finalized with status=%s "
-                     "(completed=%d, failed=%d)",
-                     batch.id, status,
-                     batch.request_counts.completed,
-                     batch.request_counts.failed)
+        logger.info(
+            "Batch %s finalized with status=%s (completed=%d, failed=%d)",
+            batch.id,
+            status,
+            batch.request_counts.completed,
+            batch.request_counts.failed,
+        )
 
     async def _cleanup_loop(self) -> None:
         while True:
@@ -561,16 +601,19 @@ class OpenAIServingBatches:
     async def _cleanup_expired(self) -> None:
         now = int(time.time())
         expired_ids = [
-            b.id for b in self._batches.values()
+            b.id
+            for b in self._batches.values()
             if b.expires_at is not None
             and b.expires_at <= now
             and b.status in ("completed", "failed", "cancelled")
         ]
         for batch_id in expired_ids:
             batch = self._batches[batch_id]
-            for file_id in (batch.input_file_id,
-                            batch.output_file_id,
-                            batch.error_file_id):
+            for file_id in (
+                batch.input_file_id,
+                batch.output_file_id,
+                batch.error_file_id,
+            ):
                 if file_id:
                     await self._serving_files.delete_file(file_id)
 
@@ -580,9 +623,7 @@ class OpenAIServingBatches:
 
             logger.info("Cleaned up expired batch %s", batch_id)
 
-    async def wait_for_batch(
-        self, batch_id: str, timeout: float = 60
-    ) -> None:
+    async def wait_for_batch(self, batch_id: str, timeout: float = 60) -> None:
         """Wait for a batch task to complete. Used in tests."""
         task = self._tasks.get(batch_id)
         if task is not None:
@@ -601,7 +642,7 @@ class OpenAIServingBatches:
         for task in list(self._tasks.values()):
             try:
                 await asyncio.wait_for(task, timeout=30)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 task.cancel()
 
         now = int(time.time())

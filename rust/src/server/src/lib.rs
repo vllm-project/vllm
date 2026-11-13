@@ -1,39 +1,104 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
 
 mod config;
 mod error;
+mod fingerprint;
 mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod mm_wire;
+mod model_names;
+mod render;
 mod routes;
+mod runtime;
 mod server_info;
 mod state;
+mod tls;
+#[cfg(test)]
+mod tls_tests;
 mod utils;
 
+use std::future::Future;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use axum::Router;
-use axum::serve::ListenerExt as _;
-pub use config::{ApiServerOptions, Config, CoordinatorMode, CorsConfig, HttpListenerMode};
-use tokio::net::TcpListener;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::Request;
+pub use config::{
+    AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, TlsConfig,
+};
+pub use fingerprint::FingerprintMode;
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
+pub use render::{RenderConfig, serve_render};
+pub use routes::openai::utils::types::ReasoningEffort;
+use thiserror_ext::AsReport as _;
+use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
-use tokio_stream::wrappers::TcpListenerStream;
-use tokio_util::either::Either;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
+use tonic_health::server::health_reporter;
+use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
-pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
+pub use vllm_chat::{
+    ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
+pub use vllm_metrics::CustomHistogramBuckets;
+use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
-use crate::listener::Listener;
+use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
+
+/// How often the server PINGs an idle gRPC connection to reap a dead peer;
+/// tonic enables no keepalive by default. 2h matches the gRPC-core default.
+const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
+/// How long the server waits for a keepalive PING reply before dropping the gRPC
+/// connection. 20s matches the gRPC-core default.
+const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+async fn monitor_llm_health(
+    mut health: watch::Receiver<bool>,
+    shutdown: CancellationToken,
+    keep_alive: bool,
+) -> Result<()> {
+    if keep_alive {
+        shutdown.cancelled().await;
+        return Ok(());
+    }
+
+    let health_result = tokio::select! {
+        biased;
+
+        result = health.wait_for(|healthy| !*healthy) => result,
+        _ = shutdown.cancelled() => return Ok(()),
+    };
+    let health_channel_error = health_result.err();
+
+    shutdown.cancel();
+    match health_channel_error {
+        None => bail!("LLM became permanently unhealthy"),
+        Some(error) => Err(error).context("LLM health channel closed"),
+    }
+}
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -45,8 +110,11 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
 }
 
 /// Build the shared application state for one configured model and one engine
-/// client.
+/// client, including any static LoRA adapters from `--lora-modules`.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+    // Fix the histogram buckets before the engine connection records metrics.
+    METRICS.set_custom_histogram_buckets(config.custom_histogram_buckets.clone());
+
     // If no served names are specified, fall back to the backend model path so
     // that the API always has at least one valid model ID. Use the same primary
     // public name for frontend-side metrics labels.
@@ -57,14 +125,22 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let loaded = load_model_backends(
         &config.model,
         LoadModelBackendsOptions {
+            revision: config.revision.clone(),
+            tokenizer: config.tokenizer.clone(),
+            hf_config: config.hf_config.clone(),
+            skip_tokenizer_init: config.skip_tokenizer_init,
+            hf_overrides: config.hf_overrides.clone(),
+            generation_config: config.generation_config,
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config
                 .default_chat_template_kwargs
                 .clone()
                 .unwrap_or_default(),
+            limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
         },
     )
     .await
@@ -83,26 +159,74 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: config.transport_mode.clone(),
         coordinator_mode,
-        model_name: metrics_model_name,
+        model_name: metrics_model_name.clone(),
         client_index: 0,
+        engine_stats_enabled: !config.disable_log_stats,
     })
     .await
     .context("failed to connect to engine core")?;
+    let server_info = ServerInfoSnapshot::new(config, &client);
+    let system_fingerprint = config
+        .fingerprint_mode
+        .fingerprint(&client.ready_responses(), client.data_parallel_size());
 
-    let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
-    let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
+    let llm = EngineCoreLlm::new(client)
+        .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
+        .with_request_id_randomization(!config.disable_request_id_randomization)
+        .with_stream_interval(config.stream_interval);
+    let text = TextLlm::new(llm, text_backend)
+        .with_served_model_name(metrics_model_name)
+        .with_max_logprobs(config.max_logprobs)
+        .with_structured_outputs_backend(config.structured_outputs_backend);
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
-        .with_reasoning_parser(config.reasoning_parser.clone());
+        .with_reasoning_parser(config.reasoning_parser.clone())
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_reasoning_effort_map(
+            config
+                .reasoning_effort_map
+                .iter()
+                .map(|(effort, value)| (effort.as_str().to_owned(), value.clone()))
+                .collect(),
+        )
+        .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
 
-    Ok(Arc::new(
+    let state = Arc::new(
         AppState::new(served_model_names, chat)
+            .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
-            .with_server_info(ServerInfoSnapshot::from_config(config))
+            .with_system_fingerprint(system_fingerprint)
+            .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
-            .with_cors(config.cors.clone()),
-    ))
+            .with_cors(config.cors.clone())
+            .with_access_log(config.access_log.clone())
+            .with_profiler(config.profiler.clone()),
+    );
+
+    // Load operator-configured static LoRA adapters before serving, failing
+    // startup on any error like Python's `init_static_loras` does.
+    load_static_loras(&state, &config.lora_modules).await?;
+
+    Ok(state)
+}
+
+async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Result<()> {
+    for module in modules {
+        let request = state.load_static_lora(module).await.with_context(|| {
+            format!(
+                "failed to load LoRA adapter `{}` from --lora-modules",
+                module.name
+            )
+        })?;
+        info!(
+            lora_name = %request.lora_name,
+            lora_int_id = request.lora_int_id,
+            lora_path = %request.lora_path,
+            "loaded static LoRA adapter"
+        );
+    }
+    Ok(())
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
@@ -128,51 +252,82 @@ where
 {
     config.validate().context("invalid OpenAI frontend configuration")?;
 
-    // Also check shutdown during the (potentially long) startup handshake.
+    // Build the TLS server config once, up front, so a bad cert/key fails fast
+    // before the (potentially long) engine handshake.
+    let tls_config = config
+        .tls
+        .as_ref()
+        .map(tls::build_server_config)
+        .transpose()
+        .context("invalid TLS configuration")?;
+
+    // Also check shutdown during the (potentially long) startup handshake and
+    // static LoRA loading.
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
+    let model = state.primary_model_name().to_owned();
+    let mut app = extend_router(build_router(state.clone()));
+    if let Some(root_path) = config.root_path.clone() {
+        app = routes::with_root_path(app, root_path);
+    }
+
+    info!(model, "starting vLLM server");
+
     let listener = Listener::bind(&config.listener_mode)
         .await
         .context("failed to bind listener for OpenAI server")?;
-    let bind_address = listener.local_addr()?;
-    let model = state.primary_model_name().to_owned();
-    let app = extend_router(build_router(state.clone()));
+    let bind_address = listener.local_addr_display()?;
 
-    // Optionally bind the gRPC Generate server on a separate port. Bind
+    // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
-    // surface before we start serving, rather than being deferred until
-    // shutdown. The gRPC listener follows the same host as the HTTP listener so
-    // that enabling --grpc-port does not accidentally expose the service on all
-    // interfaces when HTTP is intentionally local-only.
-    let grpc_setup = if let Some(grpc_port) = config.grpc_port {
-        let grpc_host = match &config.listener_mode {
-            HttpListenerMode::BindTcp { host, .. } => host.as_str(),
-            HttpListenerMode::BindUnix { .. } | HttpListenerMode::InheritedFd { .. } => "0.0.0.0",
-        };
-        let grpc_listener = TcpListener::bind((grpc_host, grpc_port))
+    // surface before serving rather than being deferred until shutdown.
+    let grpc_setup = if let Some(grpc_listener_mode) = &config.grpc_listener_mode {
+        let grpc_listener = Listener::bind(grpc_listener_mode)
             .await
-            .with_context(|| format!("failed to bind gRPC listener on {grpc_host}:{grpc_port}"))?;
-        let addr = grpc_listener.local_addr()?;
-        let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
-        info!(%addr, "starting gRPC server");
-        Some((grpc_listener, svc))
+            .with_context(|| format!("failed to bind gRPC listener for {grpc_listener_mode:?}"))?;
+        let addr = grpc_listener.local_addr_display()?;
+        // gRPC reuses the HTTP TLS config (same SslContext) plus ALPN h2.
+        let grpc_tls = config
+            .tls
+            .as_ref()
+            .map(tls::build_grpc_server_config)
+            .transpose()
+            .context("invalid gRPC TLS configuration")?;
+        let (health_reporter, health_service) = health_reporter();
+        let engine_health = grpc::EngineHealth::subscribe(state.llm());
+        let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
+        let control_service = grpc::ControlGrpcService::new(
+            grpc::ControlServiceImpl::new(state.clone())
+                .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
+        )
+        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let inference_service =
+            grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let render_service =
+            grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let svc = TonicServer::builder()
+            .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+            .layer(middleware::request_runtime_layer(state.clone()))
+            .add_service(health_service)
+            .add_service(control_service)
+            .add_service(inference_service)
+            .add_service(render_service);
+        Some((addr, grpc_listener, svc, grpc_tls, health_monitor))
     } else {
         None
     };
 
-    info!(%bind_address, %model, "starting OpenAI server");
-
-    // Set TCP_NODELAY on accepted connections to reduce latency.
-    // By `tap_io` we will do this on every accepted connection.
-    let listener = listener.tap_io(|io| {
-        if let Either::Left(tcp_stream) = io
-            && let Err(err) = tcp_stream.set_nodelay(true)
-        {
-            trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
-        }
-    });
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let model = model.as_str();
 
     // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
     // token. Caller cancellation propagates into both protocols; if either
@@ -181,6 +336,11 @@ where
     let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
+    let health_fut = monitor_llm_health(
+        state.llm().subscribe_health(),
+        server_shutdown.clone(),
+        config.keep_alive_on_engine_death,
+    );
 
     // Spawn a task to trigger `force_shutdown` after shutdown deadline elapses.
     tokio::spawn({
@@ -203,13 +363,33 @@ where
         }
     });
 
+    // 0 disables keep-alive but still bounds the head read (default), so a
+    // silent client cannot hold the connection open.
+    let keep_alive_timeout = config.keep_alive_timeout;
+    let timeouts = ConnectionTimeouts {
+        header_read: if keep_alive_timeout.is_zero() {
+            DEFAULT_KEEP_ALIVE_TIMEOUT
+        } else {
+            keep_alive_timeout
+        },
+        keep_alive_enabled: !keep_alive_timeout.is_zero(),
+    };
+
     let http_fut = {
         let shutdown = server_shutdown.child_token();
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let server =
-                axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
+            let listener = match tls_config {
+                Some(context) => MaybeTlsListener::tls(listener, context),
+                None => MaybeTlsListener::plain(listener),
+            };
+            let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
+
+            info!(
+                bind_address,
+                scheme, model, "OpenAI server is ready to accept requests"
+            );
 
             let result = tokio::select! {
                 result = server => {
@@ -231,44 +411,112 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((grpc_listener, svc)) = grpc_setup else {
+            let Some((addr, grpc_listener, svc, grpc_tls, health_monitor)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
                 return Ok(());
             };
-            let server = TonicServer::builder().add_service(svc).serve_with_incoming_shutdown(
-                TcpListenerStream::new(grpc_listener),
-                shutdown.cancelled_owned(),
-            );
-
-            let result = tokio::select! {
-                result = server => {
-                    result.context("gRPC server failed")
-                }
-                _ = force_shutdown.cancelled() => {
-                    warn!("gRPC graceful shutdown deadline elapsed; aborting server");
-                    Ok(())
-                }
+            let tls = grpc_tls.is_some();
+            let incoming = match grpc_tls {
+                Some(context) => MaybeTlsListener::tls(grpc_listener, context),
+                None => MaybeTlsListener::plain(grpc_listener),
             };
+            let server = health_monitor.serve(shutdown, force_shutdown.cancelled(), |stop| {
+                let server = svc.serve_with_incoming_shutdown(incoming, stop);
+                async move {
+                    let result = server.await.context("gRPC server failed");
+                    server_shutdown.cancel();
+                    result
+                }
+            });
 
-            server_shutdown.cancel();
-            result
+            info!(%addr, tls, model, "gRPC server is ready to accept requests");
+
+            server.await.unwrap_or_else(|| {
+                warn!("gRPC graceful shutdown deadline elapsed; aborting server");
+                Ok(())
+            })
         }
     };
 
-    let (http_res, grpc_res) = tokio::join!(http_fut, grpc_fut);
+    let (http_res, grpc_res, health_res) = tokio::join!(http_fut, grpc_fut, health_fut);
     http_res.and(grpc_res)?;
 
     let shutdown_deadline = shutdown_deadline
         .get()
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
-    state.shutdown(shutdown_deadline).await
+    let shutdown_result = state.shutdown(shutdown_deadline).await;
+    health_res?;
+    shutdown_result
+}
+
+/// Per-connection timeouts applied while serving HTTP/HTTPS.
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionTimeouts {
+    /// HTTP/1 header-read timeout (bounds idle keep-alive and the head read).
+    pub(crate) header_read: Duration,
+    /// Whether HTTP/1 keep-alive is enabled; `false` closes after each response.
+    pub(crate) keep_alive_enabled: bool,
+}
+
+/// Serve `app` per connection (HTTP/1) with a keep-alive idle timeout and
+/// graceful drain. Hand-rolled on hyper because [`axum::serve()`] takes no config.
+async fn serve_connections<L>(
+    mut listener: L,
+    app: Router,
+    shutdown: impl Future<Output = ()> + Send,
+    timeouts: ConnectionTimeouts,
+) -> Result<()>
+where
+    L: axum::serve::Listener<Addr = ListenerAddr>,
+{
+    let graceful = GracefulShutdown::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let (io, addr) = tokio::select! {
+            conn = listener.accept() => conn,
+            () = &mut shutdown => break,
+        };
+
+        // Expose the TCP peer to handlers, as `ConnectInfo` does for `axum::serve`.
+        let peer = match addr {
+            ListenerAddr::Tcp(addr) => Some(ConnectInfo(addr)),
+            ListenerAddr::Unix(_) => None,
+        };
+        let service =
+            TowerToHyperService::new(app.clone().map_request(move |req: Request<Incoming>| {
+                let mut req = req.map(Body::new);
+                if let Some(peer) = peer {
+                    req.extensions_mut().insert(peer);
+                }
+                req
+            }));
+        let mut builder = http1::Builder::new();
+        builder.timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
+        if !timeouts.keep_alive_enabled {
+            builder.keep_alive(false);
+        }
+        let connection = builder.serve_connection(TokioIo::new(io), service);
+        let connection = graceful.watch(connection);
+
+        tokio::spawn(async move {
+            if let Err(err) = connection.await {
+                trace!(error = %err.as_report(), "failed to serve connection");
+            }
+        });
+    }
+
+    drop(listener);
+    graceful.shutdown().await;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::task::Poll;
+
     use super::*;
 
     #[test]
@@ -287,5 +535,57 @@ mod tests {
             effective_served_model_names("backend-model", &served_names),
             served_names
         );
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_cancels_server_shutdown_and_returns_error() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), false));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not react to an unhealthy LLM");
+        };
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "LLM became permanently unhealthy"
+        );
+        assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn unhealthy_llm_remains_fatal_when_shutdown_is_already_requested() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+
+        health_tx.send(false).expect("publish unhealthy LLM");
+        shutdown.cancel();
+
+        let result = monitor_llm_health(health, shutdown, false).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "LLM became permanently unhealthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_alive_ignores_unhealthy_llm_until_shutdown() {
+        let (health_tx, health) = watch::channel(true);
+        let shutdown = CancellationToken::new();
+        let mut monitor = Box::pin(monitor_llm_health(health, shutdown.clone(), true));
+
+        assert!(futures::poll!(&mut monitor).is_pending());
+        health_tx.send(false).expect("publish unhealthy LLM");
+        assert!(futures::poll!(&mut monitor).is_pending());
+        assert!(!shutdown.is_cancelled());
+
+        shutdown.cancel();
+        let Poll::Ready(result) = futures::poll!(&mut monitor) else {
+            panic!("health monitor did not finish during shutdown");
+        };
+        result.expect("keep-alive shutdown is graceful");
     }
 }

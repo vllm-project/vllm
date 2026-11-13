@@ -2,19 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Data transfer objects for encoder CUDA graph management."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 
 import torch
 
 EncoderCudaGraphPaddingLogic = Callable[[torch.Tensor, torch.Tensor], None]
 
+# Reserved mm_kwargs key: models with ``EncoderCudaGraphConfig.capture_axes``
+# put the resolved per-axis keys (one per axis, in order) into the dict
+# returned by ``select_encoder_cudagraph_items()``; the manager pops it before
+# the kwargs are used anywhere else.
+ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG = "encoder_cudagraph_axis_keys"
+
 
 @dataclass
 class EncoderItemSpec:
     """Description of a single encoder input item.
 
-    Returned by ``get_encoder_cudagraph_item_specs()`` to describe each
+    Returned by `get_encoder_cudagraph_item_specs()` to describe each
     image or video in a batch without the manager needing to understand
     model-specific input formats.
     """
@@ -26,13 +32,30 @@ class EncoderItemSpec:
     """Number of output tokens after encoder processing (e.g. after
     spatial merge)."""
 
-    global_output_tokens: int = 0
-    """Number of output tokens from the global image path.
-    Only used when ``EncoderCudaGraphConfig.enable_dual_path_graph`` is True."""
+    path_output_tokens: dict[str, int] = field(default_factory=dict)
+    """Per-path output token counts for multi-path encoders.
 
-    local_output_tokens: int = 0
-    """Number of output tokens from the local patch path.
-    Only used when ``EncoderCudaGraphConfig.enable_dual_path_graph`` is True."""
+    Single-path encoders leave this empty and use `output_tokens` for the
+    default path.
+    """
+
+    def get_path_output_tokens(self, path: str) -> int:
+        if path == "default" and not self.path_output_tokens:
+            return self.output_tokens
+        return self.path_output_tokens.get(path, 0)
+
+
+@dataclass(frozen=True)
+class EncoderCudaGraphPathConfig:
+    """Capture policy for one independently replayable encoder path."""
+
+    min_token_budget: int | None = None
+    """Output tokens of one item on this path, for paths whose items all have
+    the same size. Budgets are then multiples of it, so few-item batches fit
+    exactly. Unset: the model default range and grid."""
+
+    allow_zero_tokens: bool = False
+    """Whether a batch may omit this path entirely."""
 
 
 @dataclass
@@ -40,7 +63,7 @@ class EncoderCudaGraphConfig:
     """Configuration for encoder CUDA graph management.
 
     Provided by the model at init time via
-    ``get_encoder_cudagraph_config()``. Values are fixed for the
+    `get_encoder_cudagraph_config()`. Values are fixed for the
     lifetime of the manager.
     """
 
@@ -61,38 +84,41 @@ class EncoderCudaGraphConfig:
     )
     """Optional per-buffer replay padding/copy logic.
     If absent for a key, the manager zeros the capture buffer and slice-copies
-    the replay buffer into it."""
+    the replay buffer into it. A padding logic must write the whole capture
+    buffer: budgets share buffers, so rows it leaves untouched may hold another
+    budget's data."""
 
     max_frames_per_video: int = 1
     """Maximum number of frames per video.
-    Only relevant when "video" is in ``modalities``.
+    Only relevant when "video" is in `modalities`.
     Image-only models can use the default of 1."""
 
-    enable_dual_path_graph: bool = False
-    """If True, the manager captures two independent graph sets
-    (global + local) and runs dual-path graph selection during inference."""
+    paths: dict[str, EncoderCudaGraphPathConfig] = field(
+        default_factory=lambda: {"default": EncoderCudaGraphPathConfig()}
+    )
+    """Independently captured encoder paths keyed by their forward name."""
 
-    global_token_per_image: int = 0
-    """Tokens per global image (e.g. 272 for DeepSeek-OCR).
-    Only used when ``enable_dual_path_graph`` is True."""
+    capture_axes: tuple[tuple[Hashable, ...], ...] = ()
+    """Extra capture axes beyond the token budget; empty to disable.
 
-    local_token_per_patch: int = 0
-    """Tokens per local patch (e.g. 100 for DeepSeek-OCR).
-    Only used when ``enable_dual_path_graph`` is True."""
+    Each entry is the ordered key set of one axis. When non-empty, one graph
+    is captured per token budget per combination of axis keys (cartesian
+    product), so the total number of captured graphs is
+    `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
 
 @dataclass
 class EncoderCudaGraphCaptureInputs:
     """Everything needed for one CUDA graph capture.
 
-    Returned by ``prepare_encoder_cudagraph_capture_inputs()``.
+    Returned by `prepare_encoder_cudagraph_capture_inputs()`.
     """
 
     values: dict[str, torch.Tensor]
     """Precomputed tensor buffers that will be recorded into the
     CUDA graph.  The manager stores references to these exact
     tensor objects and copies new data into them before each
-    ``graph.replay()`` call (buffer identity invariant)."""
+    `graph.replay()` call (buffer identity invariant)."""
 
 
 @dataclass
@@ -100,11 +126,11 @@ class EncoderCudaGraphReplayBuffers:
     """New buffer values for graph replay, computed by the model from
     actual batch inputs.
 
-    Returned by ``prepare_encoder_cudagraph_replay_buffers()``.
-    Keys match ``EncoderCudaGraphConfig.buffer_keys``.
+    Returned by `prepare_encoder_cudagraph_replay_buffers()`.
+    Keys match `EncoderCudaGraphConfig.buffer_keys`.
     """
 
     values: dict[str, torch.Tensor | None]
     """Data to copy into the captured buffers before replay.
-    ``None`` values leave the corresponding captured buffer
+    `None` values leave the corresponding captured buffer
     unchanged."""

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use axum::extract::Request;
 use axum::http::HeaderValue;
 use axum::http::header::HeaderName;

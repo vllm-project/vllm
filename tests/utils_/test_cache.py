@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
 from vllm.utils.cache import CacheInfo, LRUCache
 
 
@@ -123,3 +125,34 @@ def test_lru_cache():
     assert 2 in cache
     assert 4 in cache
     assert 6 in cache
+
+
+def test_lru_cache_peek_preserves_eviction_order_and_stats():
+    cache = LRUCache[str, object | None](2)
+    payload = object()
+    cache.put("oldest", payload)
+    cache.put("newest", None)
+    initial_stats = cache.stat()
+
+    assert cache.peek("oldest") is payload
+    assert cache.peek("newest", payload) is None
+    assert cache.peek("missing") is None
+    assert cache.peek("missing", payload) is payload
+    assert cache.stat() == initial_stats
+
+    cache.put("replacement", object())
+    assert "oldest" not in cache
+    assert "newest" in cache
+
+
+def test_lru_cache_put_if_fits():
+    cache = LRUCache[str, int](10, getsizeof=lambda x: x)
+
+    assert cache.put_if_fits("ok", 4) is True
+    assert cache["ok"] == 4
+
+    assert cache.put_if_fits("big", 11) is False
+    assert "big" not in cache
+
+    with pytest.raises(ValueError, match="value too large"):
+        cache.put("big", 11)

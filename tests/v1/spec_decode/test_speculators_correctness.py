@@ -24,7 +24,6 @@ class SpeculatorTestConfig:
     expected_per_pos_acceptance_rates: tuple[float, ...]
     per_pos_rtol: float
     quantization: str | None = None
-    parallel_drafting: bool | None = None
 
 
 DFLASH_CONFIG = SpeculatorTestConfig(
@@ -37,25 +36,27 @@ DFLASH_CONFIG = SpeculatorTestConfig(
     acceptance_len_rtol=0.15,
     expected_per_pos_acceptance_rates=(0.795, 0.611, 0.429, 0.282),
     per_pos_rtol=0.15,
-    quantization="fp8",
+    quantization="fp8_per_tensor",
 )
 
-PEAGLE_CONFIG = SpeculatorTestConfig(
-    model_path="nm-testing/qwen3-8b-peagle-speculators",
+QWEN3_EAGLE3_CONFIG = SpeculatorTestConfig(
+    model_path=(
+        "inference-optimization/"
+        "Qwen3-8B-from-Qwen3-8B_regen-speculators.eagle3-qwen3arch-ckpt1"
+    ),
     method="eagle3",
-    display_name="PEagle",
+    display_name="Qwen3 Eagle3",
     expected_gsm8k_accuracy=0.88,
     accuracy_rtol=0.05,
-    expected_acceptance_len=2.27,
-    acceptance_len_rtol=0.20,
-    expected_per_pos_acceptance_rates=(0.66, 0.36, 0.18, 0.09),
-    per_pos_rtol=0.20,
-    parallel_drafting=True,
+    expected_acceptance_len=2.67,
+    acceptance_len_rtol=0.10,
+    expected_per_pos_acceptance_rates=(0.76, 0.55, 0.36),
+    per_pos_rtol=0.10,
 )
 
 SPECULATOR_CONFIGS = [
     pytest.param(DFLASH_CONFIG, id="dflash"),
-    pytest.param(PEAGLE_CONFIG, id="peagle"),
+    pytest.param(QWEN3_EAGLE3_CONFIG, id="qwen3arch_eagle3"),
 ]
 
 
@@ -104,16 +105,14 @@ def print_spec_decode_stats(stats: dict) -> None:
 
 @pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
 def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
-    """
-    Test speculators model properly initializes speculative decoding.
+    """Test speculators model properly initializes speculative decoding.
 
     Verifies:
     1. Speculative config is automatically initialized from speculators config
     2. Method is detected correctly
-    3. parallel_drafting is set correctly (if applicable)
-    4. The draft model path is correctly set
-    5. Speculative tokens count is valid
-    6. Text generation works with speculative decoding enabled
+    3. The draft model path is correctly set
+    4. Speculative tokens count is valid
+    5. Text generation works with speculative decoding enabled
     """
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -132,11 +131,6 @@ def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
         assert spec_config.method == config.method, (
             f"Expected method='{config.method}', got '{spec_config.method}'"
         )
-        if config.parallel_drafting is not None:
-            assert spec_config.parallel_drafting is config.parallel_drafting, (
-                f"Expected parallel_drafting={config.parallel_drafting} "
-                f"for {config.display_name} model"
-            )
         assert spec_config.num_speculative_tokens > 0, (
             f"Expected positive speculative tokens, "
             f"got {spec_config.num_speculative_tokens}"
@@ -155,8 +149,7 @@ def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
 def test_speculators_correctness(monkeypatch, config):
-    """
-    E2E correctness test via the speculators auto-detect path.
+    """E2E correctness test via the speculators auto-detect path.
 
     Evaluates GSM8k accuracy to ensure the speculators-format model produces
     correct outputs, and checks that acceptance length does not collapse under
@@ -169,13 +162,13 @@ def test_speculators_correctness(monkeypatch, config):
         trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=128,
-        gpu_memory_utilization=0.85,
         enforce_eager=False,
         disable_log_stats=False,
     )
 
     results = evaluate_gsm8k_offline(spec_llm)
     accuracy = results["accuracy"]
+    print(f"GSM8K Accuracy: {accuracy:.4f}")
     accuracy_threshold = config.expected_gsm8k_accuracy * (1 - config.accuracy_rtol)
     assert accuracy >= accuracy_threshold, (
         f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, got {accuracy:.3f}"

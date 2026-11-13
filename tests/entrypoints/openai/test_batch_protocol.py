@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Tests for Batch API protocol models."""
+
 import time
 
 from vllm.entrypoints.openai.batch.protocol import (
@@ -49,9 +53,11 @@ def test_batch_error_model():
 
 
 def test_batch_errors_model():
-    errs = BatchErrors(data=[
-        BatchError(code="err", message="msg", param=None, line=1),
-    ])
+    errs = BatchErrors(
+        data=[
+            BatchError(code="err", message="msg", param=None, line=1),
+        ]
+    )
     assert errs.object == "list"
     assert len(errs.data) == 1
 

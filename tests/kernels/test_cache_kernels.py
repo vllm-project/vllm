@@ -15,15 +15,13 @@ except ImportError:
 
 @pytest.mark.skipif(torch.accelerator.device_count() < 1, reason="Need CUDA device")
 def test_gather_cache_oob():
-    """
-    Tests for OOB read in gather_and_maybe_dequant_cache (Issue #27909).
+    """Tests for OOB read in gather_and_maybe_dequant_cache (Issue #27909).
     This test constructs a boundary case identified in the issue where
     seq_starts causes the block_table offset to read out of bounds.
     """
-
-    batch_size = 1
     block_size = 64
-    entry_size = 128
+    # The kernel only supports the MLA entry sizes.
+    entry_size = 576
 
     block_table = torch.tensor([[1, 2]], dtype=torch.int32, device="cuda")
 
@@ -34,6 +32,7 @@ def test_gather_cache_oob():
 
     seq_len = 65
     cu_seq_lens = torch.tensor([0, seq_len], dtype=torch.int32, device="cuda")
+    token_to_seq = torch.zeros(seq_len, dtype=torch.int32, device="cuda")
 
     # src_cache: [num_blocks, block_size, entry_size]
     num_blocks = 5
@@ -51,7 +50,8 @@ def test_gather_cache_oob():
         dst,
         block_table,
         cu_seq_lens,
-        batch_size,
+        token_to_seq,
+        seq_len,
         "auto",  # kv_cache_dtype
         scale,
         seq_starts,

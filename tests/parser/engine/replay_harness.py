@@ -13,10 +13,10 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 
 
 @dataclass
@@ -34,6 +34,7 @@ class Sample:
     tools: list[dict] | None = None
     chat_template_kwargs: dict | None = None
     prompt_token_ids: list[int] | None = None
+    content_lstrip: str | None = None
 
 
 @dataclass
@@ -48,8 +49,8 @@ class ParseOutput:
 class MockTokenizer:
     """Lightweight tokenizer mock that avoids unittest.mock overhead.
 
-    Used by ``benchmarks/benchmark_parsers.py`` in tight timing loops,
-    so hot-path methods (``decode``, ``get_vocab``) must be cheap.
+    Used by `benchmarks/benchmark_parsers.py` in tight timing loops,
+    so hot-path methods (`decode`, `get_vocab`) must be cheap.
     MagicMock's call-recording machinery added ~40% overhead to small-
     sample benchmarks, inflating the per-token cost of the parser engine.
     """
@@ -62,6 +63,7 @@ class MockTokenizer:
         "eos_token_id",
         "bos_token_id",
         "pad_token_id",
+        "_all_special_tokens",
     )
 
     def __init__(
@@ -73,6 +75,7 @@ class MockTokenizer:
         self._token_ids = [tid for tid, _ in tokens]
         self._token_decode_map = {tid: text for tid, text in tokens}
         self._special_ids = set(vocab.values())
+        self._all_special_tokens = list(vocab.keys())
         self.eos_token_id = None
         self.bos_token_id = None
         self.pad_token_id = None
@@ -82,6 +85,14 @@ class MockTokenizer:
 
     def get_vocab(self) -> dict[str, int]:
         return self._vocab
+
+    @property
+    def all_special_tokens(self) -> list[str]:
+        return self._all_special_tokens
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return [self._vocab[t] for t in self._all_special_tokens if t in self._vocab]
 
     def encode(self, text: str, **kwargs) -> list[int]:
         return self._token_ids
@@ -94,6 +105,9 @@ class MockTokenizer:
             text = self._token_decode_map.get(tid, f"?{tid}?")
             parts.append(text)
         return "".join(parts)
+
+
+CHUNK_SIZES = [1, 2, 3, 5, 11, 23, None]
 
 
 def make_mock_tokenizer(sample: Sample) -> MockTokenizer:
@@ -114,6 +128,37 @@ def _test_request(
     )
 
 
+DUMMY_TOOLS = [
+    {
+        "type": "function",
+        "function": {"name": "stub", "parameters": {"type": "object"}},
+    },
+]
+
+
+def parse_non_streaming(
+    parser,
+    sample: Sample,
+    request: ChatCompletionRequest,
+) -> ParseOutput:
+    """Run `parser.parse()` and return a `ParseOutput`."""
+    full_text = "".join(text for _, text in sample.tokens)
+    reasoning, content, tool_calls = parser.parse(
+        full_text,
+        request,
+        enable_auto_tools=True,
+    )
+    tc_list: list[dict] = []
+    if tool_calls:
+        for tc in tool_calls:
+            tc_list.append({"name": tc.name, "arguments": tc.arguments})
+    return ParseOutput(
+        reasoning=reasoning or "",
+        content=content or "",
+        tool_calls=tc_list,
+    )
+
+
 def replay_streaming(
     parser,
     tokens: list[tuple[int, str]],
@@ -123,22 +168,23 @@ def replay_streaming(
     tools: list[dict] | None = None,
     prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
-    """Feed tokens through ``parser.parse_delta()`` at a given chunk size.
+    """Feed tokens through `parser.parse_delta()` at a given chunk size.
 
     Args:
-        parser: A :class:`Parser` instance with ``parse_delta()`` method.
-        tokens: List of ``(token_id, decoded_text)`` pairs.
-        chunk_size: Number of tokens per batch. ``None`` means all at once.
+        parser: A `Parser` instance with `parse_delta()` method.
+        tokens: List of `(token_id, decoded_text)` pairs.
+        chunk_size: Number of tokens per batch. `None` means all at once.
         holdback_chars: Simulate detokenizer holdback by holding back
             this many characters of decoded text between batches.
-        finished_on_last: When True, pass ``finished=True`` on the last
-            ``parse_delta()`` call, matching real server behavior.
+        finished_on_last: When True, pass `finished=True` on the last
+            `parse_delta()` call, matching real server behavior.
         tools: Optional tool definitions to include on the request,
             matching the serving layer where tools set
-            ``tool_choice`` to ``"auto"``.
+            `tool_choice` to `"auto"`.
 
     Returns:
-        List of ``DeltaMessage`` results from each ``parse_delta()`` call.
+        List of `DeltaMessage` results from each `parse_delta()` call.
+
     """
     if chunk_size is None:
         chunk_size = len(tokens)
@@ -235,7 +281,7 @@ def replay_with_text_holdback(
         step N-1: ids=[tokN-1], text=remaining_texts (flush all)
 
     This exercises the TokenIDScanner deferred-terminal path that
-    ``replay_streaming`` (which keeps text and IDs aligned) does not.
+    `replay_streaming` (which keeps text and IDs aligned) does not.
     """
     results: list[DeltaMessage | None] = []
     request = _test_request(tools=tools)
@@ -310,7 +356,7 @@ def accumulate_deltas(
 
 
 def collect_output(results: list[DeltaMessage | None]) -> ParseOutput:
-    """Accumulate ``DeltaMessage`` results into a :class:`ParseOutput`."""
+    """Accumulate `DeltaMessage` results into a `ParseOutput`."""
     result = accumulate_deltas(results)
     return ParseOutput(
         reasoning=result["reasoning"],

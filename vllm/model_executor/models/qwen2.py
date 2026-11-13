@@ -54,12 +54,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import is_interleaved, set_default_rope_theta
+from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
@@ -68,15 +64,16 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    extract_layer_index,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 
@@ -129,7 +126,6 @@ class Qwen2Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         qk_norm: bool = False,
         rms_norm_eps: float = 1e-6,
     ) -> None:
@@ -153,7 +149,6 @@ class Qwen2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = dual_chunk_attention_config
         self.qk_norm = qk_norm
 
         self.qkv_proj = QKVParallelLinear(
@@ -182,7 +177,6 @@ class Qwen2Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
         attn_cls = (
             EncoderOnlyAttention
@@ -198,12 +192,6 @@ class Qwen2Attention(nn.Module):
             quant_config=quant_config,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
         )
 
     def forward(
@@ -245,11 +233,17 @@ class Qwen2DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        # Every layer gets the global sliding window, so it can't be per layer
+        if len(set(getattr(config, "layer_types", []))) > 1:
+            assert config.max_window_layers == config.num_hidden_layers, (
+                "Sliding window for some but all layers is not supported. "
+                "This model uses sliding window but `max_window_layers` = "
+                f"{config.max_window_layers} is less than `num_hidden_layers` = "
+                f"{config.num_hidden_layers}. Please open an issue "
+                "to discuss this feature."
+            )
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
 
         # By default, Qwen2 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
@@ -273,7 +267,6 @@ class Qwen2DecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             qk_norm=qk_norm,
             rms_norm_eps=config.rms_norm_eps,
         )
@@ -323,6 +316,18 @@ class Qwen2DecoderLayer(nn.Module):
     }
 )
 class Qwen2Model(nn.Module, EagleModelMixin):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(
         self,
         *,
@@ -336,24 +341,14 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        # TODO (@robertgshaw2): see if this can be moved out
-        if is_interleaved(vllm_config.model_config.hf_text_config):
-            assert config.max_window_layers == config.num_hidden_layers, (
-                "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = {} "
-                "is less than `num_hidden_layers` = {}. Please open an issue "
-                "to discuss this feature.".format(
-                    config.max_window_layers,
-                    config.num_hidden_layers,
-                )
-            )
-
         self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank or (
-            config.tie_word_embeddings and get_pp_group().is_last_rank
+        if (
+            get_pp_group().is_first_rank
+            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -404,9 +399,14 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
         for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
@@ -415,7 +415,11 @@ class Qwen2Model(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -426,72 +430,17 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name.endswith("scale"):
-                    # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                if weight_loader == default_weight_loader:
-                    weight_loader(param, loaded_weight)
-                else:
-                    weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen2ForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3, SupportsQuant
 ):
+    hf_to_vllm_mapper = Qwen2Model.hf_to_vllm_mapper
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -507,15 +456,14 @@ class Qwen2ForCausalLM(
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -548,8 +496,5 @@ class Qwen2ForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

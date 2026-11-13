@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import to_int8
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.platforms import current_platform
 
 if not current_platform.is_cpu():
@@ -15,6 +15,7 @@ NK_FACTORS = [
     (256, 128),
     (4096, 4096),
     (16384, 4096),
+    (64128, 4096),
     (1023, 491),
     (1001, 15),
 ]

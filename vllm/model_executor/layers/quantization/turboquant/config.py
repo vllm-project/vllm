@@ -83,6 +83,7 @@ class TurboQuantConfig:
         norm_correction: Re-normalize centroid vectors to unit norm before
             inverse rotation during dequant. Fixes quantization-induced norm
             distortion, improving PPL by ~0.8% at 4-bit.
+
     """
 
     head_dim: int = 128
@@ -235,8 +236,8 @@ class TurboQuantConfig:
 def _get_full_attention_layer_indices(model_config: ModelConfig) -> list[int]:
     """Global indices of full-attention layers in a hybrid model.
 
-    Covers the conventions used across vLLM: ``layer_types`` (Qwen3.5/Next),
-    ``layers_block_type`` (Jamba/Zamba2), ``attn_type_list`` (Minimax).
+    Covers the conventions used across vLLM: `layer_types` (Qwen3.5/Next),
+    `layers_block_type` (Jamba/Zamba2), `attn_type_list` (Minimax).
     """
     text_cfg = model_config.hf_text_config
     hf_cfg = model_config.hf_config

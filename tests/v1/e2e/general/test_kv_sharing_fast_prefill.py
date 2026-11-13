@@ -17,9 +17,7 @@ SEED = 42
 
 @pytest.fixture
 def test_prompts():
-    """
-    Adapted from tests/v1/e2e/spec_decode/test_spec_decode.py
-    """
+    """Adapted from tests/v1/e2e/spec_decode/utils.py."""
     prompt_types = ["repeat", "sentence"]
     # Setting higher num prompts increases the chance of numerics mismatch
     # due to matrix multiplication numerics depending on batch dimension
@@ -45,13 +43,23 @@ def test_prompts():
 
 
 use_fork_for_test = (
-    fork_new_process_for_each_test if not current_platform.is_rocm() else lambda x: x
+    fork_new_process_for_each_test
+    if not (current_platform.is_rocm() or current_platform.is_xpu())
+    else lambda x: x
 )
 
 
 @use_fork_for_test
-@pytest.mark.parametrize("kv_sharing_fast_prefill", [False, True])
-@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize(
+    "kv_sharing_fast_prefill,enforce_eager",
+    [
+        (True, True),
+        (True, False),
+        # (False, False) omitted: it saves ~9 min of mostly torch.compile time
+        # in CI.
+        (False, True),
+    ],
+)
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     kv_sharing_fast_prefill: bool,

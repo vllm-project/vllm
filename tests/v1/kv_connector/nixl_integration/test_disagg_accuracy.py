@@ -11,22 +11,25 @@ import requests
 MAX_OUTPUT_LEN = 30
 
 SAMPLE_PROMPTS = (
-    "Red Hat is the best company in the world to work for because it works on "
-    "open source software, which means that all the contributions are "
-    "delivered to the community. As a result, when working on projects like "
-    "vLLM we are able to meet many amazing people from various organizations "
-    "like AMD, Google, NVIDIA, ",
-    "We hold these truths to be self-evident, that all men are created equal, "
-    "that they are endowed by their Creator with certain unalienable Rights, "
-    "that among these are Life, Liberty and the pursuit of Happiness.--That "
-    "to secure these rights, Governments are instituted among Men, deriving "
-    "their just powers from the consent of the governed, ",
+    (
+        "Red Hat is the best company in the world to work for because it works on "
+        "open source software, which means that all the contributions are "
+        "delivered to the community. As a result, when working on projects like "
+        "vLLM we are able to meet many amazing people from various organizations "
+        "like AMD, Google, NVIDIA, "
+    ),
+    (
+        "We hold these truths to be self-evident, that all men are created equal, "
+        "that they are endowed by their Creator with certain unalienable Rights, "
+        "that among these are Life, Liberty and the pursuit of Happiness.--That "
+        "to secure these rights, Governments are instituted among Men, deriving "
+        "their just powers from the consent of the governed, "
+    ),
 )
 
 
 def check_vllm_server(url: str, timeout=5, retries=3) -> bool:
-    """
-    Checks if the vLLM server is ready by sending a GET request to the
+    """Checks if the vLLM server is ready by sending a GET request to the
     /health endpoint.
 
     Args:
@@ -36,6 +39,7 @@ def check_vllm_server(url: str, timeout=5, retries=3) -> bool:
 
     Returns:
         bool: True if the server is ready, False otherwise.
+
     """
     for attempt in range(retries):
         try:
@@ -81,8 +85,7 @@ def run_simple_prompt(
 
 
 def main():
-    """
-    This script demonstrates how to accept two optional string arguments
+    """This script demonstrates how to accept two optional string arguments
     ("service_url" and "file_name") from the command line, each with a
     default value of an empty string, using the argparse module.
     """

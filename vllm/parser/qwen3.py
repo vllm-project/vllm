@@ -10,8 +10,8 @@ Qwen3 XML tool call format::
     </function>
     </tool_call>
 
-The argument body consists of ``<parameter=NAME>VALUE</parameter>`` tags.
-The ``_qwen3_arg_converter`` parses these into a JSON object.
+The argument body consists of `<parameter=NAME>VALUE</parameter>` tags.
+The `_qwen3_arg_converter` parses these into a JSON object.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import regex as re
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -38,10 +39,15 @@ if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
+THINK_START = "<think>"
+THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
+CHATML_TURN_BOUNDARIES = frozenset(("<|im_start|>", "<|im_end|>"))
 FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
+PARAM_START = "<parameter="
+PARAM_END = "</parameter>"
 
 _PARAM_RE = re.compile(
     r"<\s*parameter\s*=\s*([^>]*)>"
@@ -49,50 +55,171 @@ _PARAM_RE = re.compile(
     r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))",
     re.DOTALL,
 )
-_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>([^<]*)$", re.DOTALL)
+_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
+_PARAM_OPENER_RE = re.compile(r"<\s*parameter\s*=")
 
 
-def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
-    params: dict[str, object] = {}
+def _trim_wrapping_newlines(value: str) -> str:
+    """Strip one leading and one trailing newline (the Qwen3 template markup)."""
+    if value.startswith("\n"):
+        value = value[1:]
+    if value.endswith("\n"):
+        value = value[:-1]
+    return value
 
-    for match in _PARAM_RE.finditer(raw_args):
-        name = match.group(1)
-        value = match.group(2)
-        params[name] = value.strip()
 
+class _ClosedParams:
+    """Closed parameters of a raw argument text, reused by longer texts.
+
+    Raw arguments only grow while a call streams, so a parse of a text that
+    extends `text` resumes after its last closed parameter.
+    """
+
+    __slots__ = ("text", "end", "params", "outside")
+
+    def __init__(self) -> None:
+        self.text = ""  # raw text the closed parameters depend on
+        self.end = 0  # end of the last closed parameter in ``text``
+        self.params: dict[str, str] = {}
+        self.outside = ""  # text before ``end`` outside the closed parameters
+
+
+def _qwen3_parse_params(
+    raw_args: str, partial: bool, closed: _ClosedParams | None = None
+) -> tuple[dict[str, str], re.Match | None]:
+    """Return the closed parameters, trimmed, and the open trailing one."""
+    params: dict[str, str] = {}
+    outside: list[str] = []
+    pos = 0
+    if closed is not None and raw_args.startswith(closed.text):
+        params.update(closed.params)
+        outside.append(closed.outside)
+        pos = closed.end
+    start = pos
+
+    for match in _PARAM_RE.finditer(raw_args, pos):
+        outside.append(raw_args[pos : match.start()])
+        params[match.group(1)] = _trim_wrapping_newlines(match.group(2))
+        pos = match.end()
+
+    if closed is not None and pos > start:
+        # A value closed by the next opener holds only while that opener follows.
+        opener = _PARAM_OPENER_RE.match(raw_args, pos)
+        closed.text = raw_args[: opener.end() if opener else pos]
+        closed.end = pos
+        closed.params = dict(params)
+        closed.outside = "".join(outside)
+
+    open_param = None
     if partial:
-        remaining = _PARAM_RE.sub("", raw_args)
-        m = _PARTIAL_PARAM_RE.search(remaining)
-        if m:
-            name = m.group(1)
-            value = m.group(2)
-            if name:
-                params[name] = value
+        open_param = _PARTIAL_PARAM_RE.search("".join(outside) + raw_args[pos:])
+    return params, open_param
+
+
+def _qwen3_arg_converter(
+    raw_args: str, partial: bool, closed: _ClosedParams | None = None
+) -> str:
+    params, open_param = _qwen3_parse_params(raw_args, partial, closed)
+    if open_param is not None and open_param.group(1):
+        params[open_param.group(1)] = _trim_wrapping_newlines(open_param.group(2))
 
     return json.dumps(params, ensure_ascii=False)
 
 
+# What ends an open value in ``_PARAM_RE``: a closing tag or the next opener.
+_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s*=")
+
+
+def _param_value_end_window(text: str) -> str:
+    """Return the suffix of *text* that may still grow into a value end."""
+    start = text.rfind("<")
+    if start == -1:
+        return ""
+    tail = text[start:]
+    return tail if _PARAM_VALUE_END_RE.fullmatch(tail, partial=True) else ""
+
+
+def _param_value_extender(
+    raw_args: str, trim_newlines: bool, closed: _ClosedParams | None = None
+) -> ArgValueExtender | None:
+    """Extend the open trailing `<parameter=...>` value of *raw_args*.
+
+    The extender streams exactly what the converter would for the same text.
+    With *trim_newlines* it follows `_trim_wrapping_newlines`: it drops a
+    leading newline of the value and holds back a trailing one.
+    """
+    closed_params, match = _qwen3_parse_params(raw_args, True, closed)
+    if match is None:
+        return None
+    name, value = match.group(1), match.group(2)
+    # A repeated key keeps its first position, so its value is not last.
+    if name in closed_params:
+        return None
+
+    window = _param_value_end_window(value)
+    started = bool(value)
+    held = "\n" if trim_newlines and value.endswith("\n") and value != "\n" else ""
+
+    def extend(delta: str) -> str | None:
+        nonlocal window, started, held
+        text = window + delta
+        if _PARAM_VALUE_END_RE.search(text):
+            return None
+        window = _param_value_end_window(text)
+        if trim_newlines:
+            text = held + delta
+            if not started and text:
+                started = True
+                text = text.removeprefix("\n")
+            held = "\n" if text.endswith("\n") else ""
+            text = text[: len(text) - len(held)]
+        else:
+            text = delta
+        return json.dumps(text, ensure_ascii=False)[1:-1]
+
+    return extend
+
+
+def _qwen3_arg_value_extender(
+    raw_args: str, closed: _ClosedParams | None = None
+) -> ArgValueExtender | None:
+    return _param_value_extender(raw_args, trim_newlines=True, closed=closed)
+
+
 @functools.cache
-def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
+def qwen3_config(
+    thinking: bool = True,
+    *,
+    name: str = "qwen3",
+    think_start: str = THINK_START,
+    think_end: str = THINK_END,
+    tool_start: str = TOOL_CALL_START,
+    tool_end: str = TOOL_CALL_END,
+    turn_boundary_tokens: frozenset[str] = frozenset(),
+) -> ParserEngineConfig:
     return ParserEngineConfig(
-        name="qwen3",
+        name=name,
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
+        wait_for_reasoning=thinking,
+        turn_boundary_tokens=turn_boundary_tokens,
         terminals={
             # Reasoning terminals
-            "THINK_START": "<think>",
-            "THINK_END": "</think>",
+            "THINK_START": think_start,
+            "THINK_END": think_end,
             # Tool call terminals
-            "TOOL_START": TOOL_CALL_START,
-            "TOOL_END": TOOL_CALL_END,
+            "TOOL_START": tool_start,
+            "TOOL_END": tool_end,
             "FUNC_PREFIX": FUNC_PREFIX,
             "FUNC_END": FUNC_END,
+            "PARAM_START": PARAM_START,
+            "PARAM_END": PARAM_END,
             "CLOSE_ANGLE": ">",
         },
         token_id_terminals={
-            "THINK_START": "<think>",
-            "THINK_END": "</think>",
-            "TOOL_START": TOOL_CALL_START,
-            "TOOL_END": TOOL_CALL_END,
+            "THINK_START": think_start,
+            "THINK_END": think_end,
+            "TOOL_START": tool_start,
+            "TOOL_END": tool_end,
         },
         transitions={
             # -- Reasoning transitions --
@@ -125,6 +252,10 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
             (ParserState.TOOL_PREAMBLE, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (),
@@ -138,9 +269,44 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
+            # regression issue 58227
+            # <function=...</tool_call>
+            # function name is not closed, go to content
+            (ParserState.TOOL_NAME, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+            # regression issue 58227
+            # <function=...<tool_call>
+            # unclosed tool call followed by another tool call
+            (ParserState.TOOL_NAME, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
+            ),
+            # regression issue 58227
+            # <function=...<function=
+            # unclosed function name followed by another function name
+            (ParserState.TOOL_NAME, "FUNC_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
+            ),
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
+            ),
+            # regression issue 58227
+            # <function=abc>...<function=
+            (ParserState.TOOL_ARGS, "FUNC_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_END"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
             ),
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
                 ParserState.CONTENT,
@@ -157,6 +323,7 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             ),
         },
         arg_converter=_qwen3_arg_converter,
+        arg_value_extender=_qwen3_arg_value_extender,
         stream_arg_deltas=True,
         strip_trailing_reasoning_whitespace=False,
         tool_args_json=False,
@@ -164,12 +331,23 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
 
 
 class Qwen3Parser(ParserEngine):
-    """Qwen3 parser: ``<think>``/``</think>`` reasoning +
-    ``<tool_call>`` XML tool calls in a single engine.
+    """Qwen3 parser: `<think>`/`</think>` reasoning +
+    `<tool_call>` XML tool calls in a single engine.
 
-    - ``<tool_call>`` as implicit reasoning end
-    - Unpaired ``<tool_call>`` token ID detection for ``is_reasoning_end``
+    - `<tool_call>` as implicit reasoning end (a grammar transition, so it
+      also feeds `is_reasoning_end` and the structured-output gate)
+
+    Subclasses that share the grammar but differ only in the four wrapper
+    token strings (reasoning + tool-call) override the class attributes
+    below; everything else is inherited unchanged.
     """
+
+    CONFIG_NAME = "qwen3"
+    THINK_START = THINK_START
+    THINK_END = THINK_END
+    TOOL_START = TOOL_CALL_START
+    TOOL_END = TOOL_CALL_END
+    TURN_BOUNDARIES: frozenset[str] = CHATML_TURN_BOUNDARIES
 
     def __init__(
         self,
@@ -181,16 +359,28 @@ class Qwen3Parser(ParserEngine):
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
         kwargs.setdefault(
             "parser_engine_config",
-            qwen3_config(thinking=self.thinking_enabled),
+            qwen3_config(
+                thinking=self.thinking_enabled,
+                name=self.CONFIG_NAME,
+                think_start=self.THINK_START,
+                think_end=self.THINK_END,
+                tool_start=self.TOOL_START,
+                tool_end=self.TOOL_END,
+                turn_boundary_tokens=self.TURN_BOUNDARIES,
+            ),
         )
         super().__init__(
             tokenizer,
             tools,
             **kwargs,
         )
-        vocab = self.vocab
-        self._tool_call_token_id: int | None = vocab.get("<tool_call>")
-        self._tool_call_end_token_id: int | None = vocab.get("</tool_call>")
+        # Each streaming conversion resumes after the last closed parameter.
+        if self._arg_converter is _qwen3_arg_converter:
+            closed = _ClosedParams()
+            self._arg_converter = functools.partial(_qwen3_arg_converter, closed=closed)
+            self._arg_value_extender = functools.partial(
+                _qwen3_arg_value_extender, closed=closed
+            )
 
     def extract_reasoning(
         self,
@@ -200,25 +390,3 @@ class Qwen3Parser(ParserEngine):
         if not self.thinking_enabled:
             return None, model_output
         return super().extract_reasoning(model_output, request)
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if super().is_reasoning_end(input_ids):
-            return True
-        tool_call_id = self._tool_call_token_id
-        tool_call_end_id = self._tool_call_end_token_id
-        reasoning_start_id = self._reasoning_start_token_id
-        if tool_call_id is not None:
-            for i in range(len(input_ids) - 1, -1, -1):
-                if (
-                    reasoning_start_id is not None
-                    and input_ids[i] == reasoning_start_id
-                ):
-                    return False
-                if input_ids[i] == tool_call_id:
-                    if tool_call_end_id is not None and any(
-                        input_ids[j] == tool_call_end_id
-                        for j in range(i + 1, len(input_ids))
-                    ):
-                        continue
-                    return True
-        return False

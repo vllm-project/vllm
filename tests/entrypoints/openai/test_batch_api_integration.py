@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Integration tests for the Online Batch API.
 
 These tests start a vLLM server and exercise the full batch workflow
@@ -5,6 +8,7 @@ via HTTP: upload file -> create batch -> poll status -> download results.
 
 Requires a GPU and model to be available.
 """
+
 import json
 import time
 
@@ -19,13 +23,17 @@ MODEL_NAME = "facebook/opt-125m"
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--dtype", "float16",
-        "--max-model-len", "256",
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "256",
         # opt-125m's tokenizer defines no chat template; supply one so
         # /v1/chat/completions requests can be served.
-        "--chat-template", "examples/template_chatml.jinja",
+        "--chat-template",
+        "examples/template_chatml.jinja",
         "--enable-batch-api",
-        "--batch-storage-dir", "/tmp/vllm-test-batches",
+        "--batch-storage-dir",
+        "/tmp/vllm-test-batches",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -38,21 +46,24 @@ def base_url(server):
 
 def test_full_batch_workflow(base_url):
     """Test: upload -> create batch -> poll -> get results."""
-
     # 1. Upload input file
-    batch_input = "\n".join([
-        json.dumps({
-            "custom_id": f"req-{i}",
-            "method": "POST",
-            "url": "/v1/chat/completions",
-            "body": {
-                "model": MODEL_NAME,
-                "messages": [{"role": "user", "content": f"Say hello {i}"}],
-                "max_tokens": 10,
-            },
-        })
-        for i in range(3)
-    ])
+    batch_input = "\n".join(
+        [
+            json.dumps(
+                {
+                    "custom_id": f"req-{i}",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": MODEL_NAME,
+                        "messages": [{"role": "user", "content": f"Say hello {i}"}],
+                        "max_tokens": 10,
+                    },
+                }
+            )
+            for i in range(3)
+        ]
+    )
 
     upload_resp = requests.post(
         f"{base_url}/v1/files",
@@ -94,7 +105,8 @@ def test_full_batch_workflow(base_url):
 
     # 4. Download results
     output_resp = requests.get(
-        f"{base_url}/v1/files/{batch_obj['output_file_id']}/content")
+        f"{base_url}/v1/files/{batch_obj['output_file_id']}/content"
+    )
     assert output_resp.status_code == 200
     lines = output_resp.text.strip().split("\n")
     assert len(lines) == 3
@@ -145,9 +157,16 @@ def test_create_batch_invalid_file(base_url):
 def test_create_batch_invalid_endpoint(base_url):
     upload_resp = requests.post(
         f"{base_url}/v1/files",
-        files={"file": ("batch.jsonl", b'{"custom_id":"r1","method":"POST",'
-                         b'"url":"/v1/chat/completions","body":{"model":"x",'
-                         b'"messages":[]}}\n')},
+        files={
+            "file": (
+                "batch.jsonl",
+                (
+                    b'{"custom_id":"r1","method":"POST",'
+                    b'"url":"/v1/chat/completions","body":{"model":"x",'
+                    b'"messages":[]}}\n'
+                ),
+            )
+        },
         data={"purpose": "batch"},
     )
     file_id = upload_resp.json()["id"]
