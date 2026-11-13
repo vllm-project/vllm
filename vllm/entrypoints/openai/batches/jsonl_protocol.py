@@ -44,20 +44,30 @@ class BatchRequestInput(OpenAIBaseModel):
 
 
 class BatchResponseData(OpenAIBaseModel):
-    status_code: int = 200
-    request_id: str = Field(default_factory=lambda: f"vllm-batch-{random_uuid()}")
-    body: Any | None = None
+    status_code: int = Field(default=200, description="The HTTP status code.")
+    request_id: str = Field(
+        default_factory=lambda: f"vllm-batch-{random_uuid()}",
+        description="A unique identifier for the request.",
+    )
+    body: Any | None = Field(default=None, description="The response body.")
 
 
 class BatchRequestOutput(OpenAIBaseModel):
     """A line of a batch output or error file."""
 
-    id: str = Field(default_factory=lambda: f"vllm-{random_uuid()}")
+    id: str = Field(
+        default_factory=lambda: f"vllm-{random_uuid()}",
+        description="A unique identifier for the output line.",
+    )
     custom_id: str = Field(
         description="The custom_id of the request this output belongs to."
     )
-    response: BatchResponseData | None
-    error: ErrorResponse | None = None
+    response: BatchResponseData | None = Field(
+        description="The response of the request."
+    )
+    error: ErrorResponse | None = Field(
+        default=None, description="The error, if the request failed."
+    )
 
     @classmethod
     def success(cls, custom_id: str, body: Any) -> "BatchRequestOutput":

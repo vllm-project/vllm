@@ -28,22 +28,32 @@ TERMINAL_BATCH_STATUSES: tuple[BatchStatus, ...] = ("completed", "failed", "canc
 
 
 class BatchCreateRequest(OpenAIBaseModel):
-    input_file_id: str
-    endpoint: BatchEndpoint
-    completion_window: Literal["24h"] = "24h"
-    metadata: dict[str, str] | None = None
+    input_file_id: str = Field(
+        description="The id of an uploaded JSONL file containing the requests."
+    )
+    endpoint: BatchEndpoint = Field(
+        description="The endpoint used for all requests in the batch."
+    )
+    completion_window: Literal["24h"] = Field(
+        default="24h", description="The time frame to process the batch in."
+    )
+    metadata: dict[str, str] | None = Field(
+        default=None, description="Key-value pairs attached to the batch."
+    )
 
 
 class BatchRequestCounts(OpenAIBaseModel):
-    total: int = 0
-    completed: int = 0
-    failed: int = 0
+    total: int = Field(default=0, description="Total number of requests.")
+    completed: int = Field(default=0, description="Requests that succeeded.")
+    failed: int = Field(default=0, description="Requests that failed.")
 
 
 class BatchError(OpenAIBaseModel):
-    code: str
-    message: str
-    param: str | None = None
+    code: str = Field(description="An error code identifying the error type.")
+    message: str = Field(description="A human-readable description of the error.")
+    param: str | None = Field(
+        default=None, description="The parameter that caused the error."
+    )
     line: int | None = Field(
         default=None, description="The input file line number of the request."
     )
@@ -51,34 +61,69 @@ class BatchError(OpenAIBaseModel):
 
 class BatchErrors(OpenAIBaseModel):
     object: Literal["list"] = "list"
-    data: list[BatchError] = Field(default_factory=list)
+    data: list[BatchError] = Field(
+        default_factory=list, description="The errors of the batch."
+    )
 
 
 class BatchObject(OpenAIBaseModel):
-    id: str
+    id: str = Field(description="The batch identifier.")
     object: Literal["batch"] = "batch"
-    endpoint: BatchEndpoint
-    input_file_id: str
-    output_file_id: str | None = None
-    error_file_id: str | None = None
-    status: BatchStatus
-    completion_window: str
-    created_at: int
-    in_progress_at: int | None = None
-    finalizing_at: int | None = None
-    completed_at: int | None = None
-    failed_at: int | None = None
-    cancelling_at: int | None = None
-    cancelled_at: int | None = None
-    expires_at: int | None = None
-    request_counts: BatchRequestCounts = Field(default_factory=BatchRequestCounts)
-    errors: BatchErrors | None = None
-    metadata: dict[str, str] | None = None
+    endpoint: BatchEndpoint = Field(
+        description="The endpoint used for all requests in the batch."
+    )
+    input_file_id: str = Field(description="The id of the input file.")
+    output_file_id: str | None = Field(
+        default=None, description="The id of the file with successful results."
+    )
+    error_file_id: str | None = Field(
+        default=None, description="The id of the file with failed results."
+    )
+    status: BatchStatus = Field(description="The current status of the batch.")
+    completion_window: str = Field(
+        description="The time frame to process the batch in."
+    )
+    created_at: int = Field(
+        description="The Unix timestamp (in seconds) when the batch was created."
+    )
+    in_progress_at: int | None = Field(
+        default=None, description="When the batch started processing."
+    )
+    finalizing_at: int | None = Field(
+        default=None, description="When the batch started finalizing."
+    )
+    completed_at: int | None = Field(
+        default=None, description="When the batch was completed."
+    )
+    failed_at: int | None = Field(default=None, description="When the batch failed.")
+    cancelling_at: int | None = Field(
+        default=None, description="When the batch started cancelling."
+    )
+    cancelled_at: int | None = Field(
+        default=None, description="When the batch was cancelled."
+    )
+    expires_at: int | None = Field(
+        default=None, description="When the batch and its files will be deleted."
+    )
+    request_counts: BatchRequestCounts = Field(
+        default_factory=BatchRequestCounts,
+        description="The request counts per status.",
+    )
+    errors: BatchErrors | None = Field(
+        default=None, description="Errors that made the batch fail."
+    )
+    metadata: dict[str, str] | None = Field(
+        default=None, description="Key-value pairs attached to the batch."
+    )
 
 
 class BatchListResponse(OpenAIBaseModel):
     object: Literal["list"] = "list"
-    data: list[BatchObject]
-    has_more: bool
-    first_id: str | None = None
-    last_id: str | None = None
+    data: list[BatchObject] = Field(description="The batches, newest first.")
+    has_more: bool = Field(description="Whether more batches are available.")
+    first_id: str | None = Field(
+        default=None, description="The id of the first batch in `data`."
+    )
+    last_id: str | None = Field(
+        default=None, description="The id of the last batch in `data`."
+    )
