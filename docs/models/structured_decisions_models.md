@@ -436,13 +436,10 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   appends the mamba block's multiples to the default capture sizes, up to
   the 16,384-token chunked-prefill budget; size the list to your own
   budget.
-- Up to 128 options, the read asks for the labels' logprobs directly, so
-  `diagnostics.label_mass` is the labels' share over the whole vocabulary
-  and `argmax_is_label` reports the model's actual first token. Above 128
-  the read masks the vocabulary to the labels, which renormalizes over
-  them: `label_mass` is then near 1 and `argmax_is_label` always true, and
-  the questions need `--logprobs-mode processed_logprobs` plus
-  `--max-logprobs 255` (or higher).
+- The read asks for the labels' logprobs over the whole vocabulary, so
+  `diagnostics.label_mass` is the labels' share and `argmax_is_label`
+  reports the model's actual first token. One request asks for up to 256
+  labels, so every question, up to 255 options, is one read.
 - A request reads the state and the question a second time when the
   single-pass request fits the marker's `twice_max_tokens` bound, 3000 by
   default, as the checkpoint was trained. The bound is on the read-once

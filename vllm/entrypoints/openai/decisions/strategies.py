@@ -1463,13 +1463,8 @@ class KnowLineStrategy(ReadStrategy):
     shipped with the checkpoint.
 
     Each question is one read of its prompt, scored at the reply's first
-    token. Up to ``MAX_LOGPROB_TOKEN_IDS`` options read through
-    ``logprob_token_ids``, so the logprobs are the labels' over the whole
-    vocabulary. Above that count the labels outnumber ``logprob_token_ids``,
-    so the read masks the vocabulary to them instead: the mask renormalizes
-    over the labels, one read returns every label's logprob, and the server
-    needs ``--logprobs-mode processed_logprobs``, because a raw mode returns
-    the logprobs before the mask."""
+    token through ``logprob_token_ids``, so the logprobs are the labels' over
+    the whole vocabulary. ``MAX_LOGPROB_TOKEN_IDS`` covers all 255 labels."""
 
     #: The read-twice layout's bound, in tokens, when the checkpoint's
     #: marker does not carry its own.
@@ -1512,8 +1507,6 @@ class KnowLineStrategy(ReadStrategy):
         self.twice_max_tokens = cut
         logger.info("KnowLine strategy: twice_max_tokens=%d", cut)
         self.max_model_len = model_config.max_model_len
-        self.max_logprobs = model_config.max_logprobs
-        self.logprobs_mode = model_config.logprobs_mode
 
     def limits(self) -> DecisionLimits:
         return DecisionLimits(
@@ -1562,23 +1555,6 @@ class KnowLineStrategy(ReadStrategy):
             raise StructuredDecisionError(
                 "this model reads a fixed prompt, so it takes no instructions"
             )
-        # The bounds a masked read needs, checked before any rendering.
-        for q in questions:
-            if len(q.options) > MAX_LOGPROB_TOKEN_IDS:
-                if self.logprobs_mode != "processed_logprobs":
-                    raise StructuredDecisionError(
-                        f"question {q.id!r} has {len(q.options)} options; "
-                        f"over {MAX_LOGPROB_TOKEN_IDS} the read masks the "
-                        "labels and needs --logprobs-mode processed_logprobs, "
-                        f"not {self.logprobs_mode}"
-                    )
-                if 0 <= self.max_logprobs < len(q.options):
-                    raise StructuredDecisionError(
-                        f"question {q.id!r} reads {len(q.options)} label "
-                        f"logprobs, but the server allows {self.max_logprobs}; "
-                        f"restart with --max-logprobs {len(q.options)} or "
-                        "higher"
-                    )
         rendered = await self._render_prompts(
             self.tokenizer,
             state,
@@ -1591,7 +1567,7 @@ class KnowLineStrategy(ReadStrategy):
         params: list[SamplingParams] = []
         label_groups: list[list[int]] = []
         for q in questions:
-            _, prompt_ids, n_options = rendered[q.id]
+            _, prompt_ids, _ = rendered[q.id]
             ids = [self.label_token[label] for label in q.labels]
             if len(prompt_ids) + 1 > self.max_model_len:
                 raise StructuredDecisionError(
@@ -1602,26 +1578,14 @@ class KnowLineStrategy(ReadStrategy):
             # The read scores the reply's logprobs, never its text;
             # detokenizing would prime a decoder with the whole prompt
             # on every read.
-            if n_options > MAX_LOGPROB_TOKEN_IDS:
-                # Too many labels for logprob_token_ids: mask the rest out.
-                params.append(
-                    SamplingParams(
-                        max_tokens=1,
-                        temperature=0.0,
-                        allowed_token_ids=ids,
-                        logprobs=n_options,
-                        detokenize=False,
-                    )
+            params.append(
+                SamplingParams(
+                    max_tokens=1,
+                    temperature=0.0,
+                    logprob_token_ids=ids,
+                    detokenize=False,
                 )
-            else:
-                params.append(
-                    SamplingParams(
-                        max_tokens=1,
-                        temperature=0.0,
-                        logprob_token_ids=ids,
-                        detokenize=False,
-                    )
-                )
+            )
             label_groups.append(ids)
         await self._warm_shared_prefix(
             [entry[1] for entry in rendered.values()],
@@ -1650,9 +1614,8 @@ class KnowLineStrategy(ReadStrategy):
     def _question_read(
         result: RequestOutput, ids: list[int], logprobs: list[float]
     ) -> QuestionRead:
-        """The read's answer. Through ``logprob_token_ids`` the logprobs are
-        the labels' over the whole vocabulary; a masked read renormalizes
-        over the labels instead, so its label_mass sits near 1."""
+        """The read's answer from the labels' logprobs over the whole
+        vocabulary."""
         token_ids = result.outputs[0].token_ids
         read = QuestionRead(
             probs=label_softmax(logprobs),
