@@ -63,6 +63,14 @@ Modular kernels are supported by the following `FusedMoEMethodBase` classes.
 - [`GptOssMxfp4MoEMethod`][vllm.model_executor.layers.quantization.mxfp4.GptOssMxfp4MoEMethod]
 - [`UnquantizedFusedMoEMethod`][vllm.model_executor.layers.fused_moe.UnquantizedFusedMoEMethod]
 
+## DeepGEMM MegaMoE on SM120
+
+DeepGEMM MegaMoE fuses expert-parallel dispatch, routed-expert GEMMs, SwiGLU and combine on SM120 GPUs such as the RTX PRO 6000 Blackwell. Enable it for supported MXFP4 models, including DeepSeek V4 and V4.1, with `--moe-backend deep_gemm_mega_moe --enable-expert-parallel`. It is opt-in; the default MoE backend selection is unchanged.
+
+SM120 requires CUDA 13.0 or newer and an installed DeepGEMM build containing the SM120 FP8 × MXFP4 MegaMoE kernel. The external `deep_gemm` package takes precedence over vLLM's vendored copy. If the selected build lacks the kernel, vLLM reports the missing dependency during model initialization; `--moe-backend deep_gemm` continues to use the existing grouped-GEMM backend.
+
+The SM120 path uses MXFP8 activations, MXFP4 routed weights with per-32 UE8M0 scales, SwiGLU (including clamp, alpha and beta), and BF16 output. Hidden and intermediate sizes must be multiples of 128. Expert parallelism is limited to peer-accessible GPUs on one node. Shared experts remain a separate MLP and are added once after the routed experts; shared-expert fusion, SiTU, NVFP4, BF16 routed weights and MXFP8 routed weights are not supported on SM120. DeepSeek's SM100-only Mega Gate is not used on SM120; routing retains `GateLinear` and the existing fused top-k implementation.
+
 ## Fused Experts Kernels
 
 There are a number of MoE experts kernel implementations for different quantization types and architectures. Most follow the general API of the base Triton [`fused_experts`][vllm.model_executor.layers.fused_moe.fused_moe.fused_experts] function. Many have modular kernel adapters, so they can be used with compatible all2all backends. This table lists each experts kernel and its particular properties.

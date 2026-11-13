@@ -12,7 +12,9 @@ scales each token by its own FP32 scale.
 import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from functools import cache
 from inspect import signature
+from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import torch
@@ -193,6 +195,41 @@ MEGA_MOE_MXFP4_SM90 = replace(
     ),
     activations=frozenset({"swiglu"}),
 )
+MEGA_MOE_MXFP4_SM120 = replace(
+    MEGA_MOE_MXFP4,
+    shared=(),
+    activations=frozenset({"swiglu"}),
+)
+
+
+@cache
+def _check_sm120_mega_moe_dependencies() -> None:
+    from vllm.utils.deep_gemm import (
+        _deep_gemm_nvcc_path,
+        _import_deep_gemm,
+        _nvcc_version,
+    )
+
+    nvcc = _deep_gemm_nvcc_path()
+    version = _nvcc_version(nvcc) if nvcc is not None else None
+    if version is None or version < (13, 0):
+        raise RuntimeError(
+            "DeepGEMM MegaMoE on SM120 requires nvcc 13.0 or newer. "
+            "Set CUDA_HOME to a CUDA 13 toolkit."
+        )
+    deep_gemm = _import_deep_gemm()
+    if (
+        deep_gemm is None
+        or not (
+            Path(deep_gemm.__file__).parent
+            / "include/deep_gemm/impls/sm120_fp8_fp4_mega_moe.cuh"
+        ).is_file()
+    ):
+        raise RuntimeError(
+            "DeepGEMM MegaMoE on SM120 requires a DeepGEMM build with the "
+            "SM120 FP8 x MXFP4 MegaMoE kernel. Upgrade the installed DeepGEMM "
+            "package, or use --moe-backend deep_gemm."
+        )
 
 
 def check_deep_gemm_mega_moe_supported(
@@ -200,12 +237,16 @@ def check_deep_gemm_mega_moe_supported(
     hidden_size: int,
     intermediate_size: int,
     weight_format: MegaMoEWeightFormat,
-) -> None:
-    """Raise unless DeepGEMM MegaMoE can run on `device` with these shapes.
+) -> MegaMoEWeightFormat:
+    """Validate the device and shapes, and resolve its MegaMoE weight format.
+
+    Returns:
+        The device-specific weight and activation quantization format.
 
     Raises:
         NotImplementedError: If the device architecture is unsupported.
         ValueError: If the shapes are unsupported.
+        RuntimeError: If the SM120 kernel or CUDA toolkit is unavailable.
 
     """
     device_id = device.index or 0
@@ -215,13 +256,26 @@ def check_deep_gemm_mega_moe_supported(
                 "DeepGEMM MegaMoE on SM90 supports MXFP4 experts only, "
                 f"not {weight_format.name}."
             )
+        if weight_format == MEGA_MOE_MXFP4:
+            weight_format = MEGA_MOE_MXFP4_SM90
+    elif current_platform.is_device_capability(120, device_id=device_id):
+        if weight_format not in (MEGA_MOE_MXFP4, MEGA_MOE_MXFP4_SM120):
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE on SM120 supports MXFP4 experts with "
+                f"MXFP8 activations only, not {weight_format.name}."
+            )
+        _check_sm120_mega_moe_dependencies()
+        weight_format = MEGA_MOE_MXFP4_SM120
     elif not current_platform.is_device_capability_family(100, device_id=device_id):
-        raise NotImplementedError("DeepGEMM MegaMoE requires SM90 or SM100 GPUs.")
+        raise NotImplementedError(
+            "DeepGEMM MegaMoE requires SM90, SM100 or SM120 GPUs."
+        )
     if hidden_size % 128 != 0 or intermediate_size % 128 != 0:
         raise ValueError(
             "DeepGEMM MegaMoE requires hidden and intermediate sizes "
             "to be multiples of 128."
         )
+    return weight_format
 
 
 def _linear_weight_scale(linear: nn.Module) -> torch.Tensor | None:
@@ -310,13 +364,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
             device = torch.device(
                 current_platform.device_type, torch.accelerator.current_device_index()
             )
-        check_deep_gemm_mega_moe_supported(
+        weight_format = check_deep_gemm_mega_moe_supported(
             device, hidden_size, intermediate_size, weight_format
         )
-        if weight_format == MEGA_MOE_MXFP4 and current_platform.is_device_capability(
-            90, device_id=device.index or 0
-        ):
-            weight_format = MEGA_MOE_MXFP4_SM90
         if activation.name not in weight_format.activations:
             raise NotImplementedError(
                 f"DeepGEMM MegaMoE {weight_format.name} experts support "
@@ -382,7 +432,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self, shared_experts: nn.Module | None
     ) -> tuple[int, MegaMoEWeightSpec | None]:
         """How many shared experts the launch fuses, and in which precision."""
-        if shared_experts is None:
+        if shared_experts is None or not self.weight_format.shared:
             return 0, None
         gate_up, down = shared_experts.gate_up_proj, shared_experts.down_proj
         hidden, inter = self.hidden_size, self.intermediate_size
