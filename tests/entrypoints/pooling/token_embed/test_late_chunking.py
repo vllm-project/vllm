@@ -4,6 +4,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import mock
 from unittest.mock import Mock
 
@@ -33,6 +34,7 @@ from vllm.entrypoints.pooling.types import (
     OfflineEncodeInputsContext,
     OfflineOutputsContext,
     PoolingServeContext,
+    input_to_seq,
 )
 from vllm.entrypoints.pooling.utils import encode_pooling_output_float_or_ndarray
 from vllm.exceptions import GenerationError, VLLMValidationError
@@ -78,6 +80,9 @@ def late_chunk_processor():
             "prompt_token_offsets": [(0, 0), (0, 1), (2, 3), (0, 0)],
         }
     ]
+    processor.chat_template = None
+    cast(Any, processor).chat_template_content_format = "auto"
+    processor.trust_request_chat_template = True
     return processor
 
 
@@ -87,7 +92,7 @@ def _late_chunk_context(prompts="a b", **kwargs):
         tokenization_kwargs=kwargs or None,
         lora_request=None,
         priorities=None,
-        prompts=prompts,
+        inputs_seq=input_to_seq(prompts),
         pooling_params=PoolingParams(
             late_chunking_params=LateChunkingParams(chunk_size=2)
         ),

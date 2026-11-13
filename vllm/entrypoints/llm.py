@@ -42,6 +42,7 @@ from vllm.platforms import current_platform
 from vllm.renderers import ChatParams
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
+    ChatTemplateConfig,
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
@@ -103,6 +104,10 @@ class LLM(
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id.
         chat_template: The chat template to apply.
+        trust_request_chat_template: If True, accept chat templates supplied
+            at request level. Defaults to False, which means only
+            the engine-level `chat_template` is allowed. Mirrors the server-side
+            `--trust-request-chat-template` flag.
         seed: The seed to initialize the random number generator for sampling.
         gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
             reserve for the model weights, activations, and KV cache. Higher
@@ -201,6 +206,7 @@ class LLM(
         revision: str | None = None,
         tokenizer_revision: str | None = None,
         chat_template: Path | str | None = None,
+        trust_request_chat_template: bool = False,
         seed: int = 0,
         gpu_memory_utilization: float | None = None,
         cpu_offload_gb: float = 0,
@@ -364,6 +370,11 @@ class LLM(
         self.runner_type = self.model_config.runner_type
         self.renderer = self.llm_engine.renderer
         self.chat_template = load_chat_template(chat_template)
+        self.trust_request_chat_template = trust_request_chat_template
+        self.chat_template_config = ChatTemplateConfig(
+            chat_template=self.chat_template,
+            trust_request_chat_template=self.trust_request_chat_template,
+        )
         self.input_processor = self.llm_engine.input_processor
 
         self.renderer.warmup(ChatParams(chat_template=self.chat_template))
