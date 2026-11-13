@@ -583,6 +583,9 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     decoder.fuse_mhc_all_reduce = False
     decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
+    # The stock mHC boundaries, not the SM80/SM90 CuTe DSL ones.
+    decoder.ampere_mhc = False
+    decoder.mhc_overlap_max_tokens = MHC_OVERLAP_MAX_TOKENS
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
 
@@ -716,6 +719,8 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     inputs -- and Engram must not be folded into it, since the injection
     happens after the aux consumers read the stream.
     """
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
+
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -728,6 +733,9 @@ def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_conf
     decoder.fuse_mhc_all_reduce = False
     decoder.hc_attn_boundary_weight = decoder.hc_ffn_boundary_weight = None
     decoder.mhc_stream = None
+    # The stock mHC boundaries, not the SM80/SM90 CuTe DSL ones.
+    decoder.ampere_mhc = False
+    decoder.mhc_overlap_max_tokens = MHC_OVERLAP_MAX_TOKENS
     decoder.engram = None
     from vllm.model_executor.layers.layernorm import RMSNorm
 
