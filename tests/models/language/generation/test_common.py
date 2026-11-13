@@ -240,10 +240,10 @@ def test_models(
         tokenizer_mode=model_info.tokenizer_mode,
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
-        # Remove the effects of batch variance on ROCm since batch invariance
-        # is not yet supported.
+        # Remove the effects of batch variance on this comparison since
+        # batch invariance is not yet supported.
         # See: https://github.com/vllm-project/vllm/issues/27433
-        max_num_seqs=1 if current_platform.is_rocm() else 2,
+        max_num_seqs=1,
         enable_prompt_embeds=use_prompt_embeds,
         compilation_config={"cudagraph_capture_sizes": [1, 2]},
         **vllm_kwargs,
@@ -256,12 +256,16 @@ def test_models(
                 prompt_embeds, max_tokens, num_logprobs
             )
 
+    # Tolerate near-ties at the top-k boundary: HF and vLLM bf16 numerics
+    # can reorder nearly tied candidates (see #42392), which otherwise
+    # fails the comparison spuriously.
     try:
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_outputs,
             name_0="hf",
             name_1="vllm",
+            near_tie_tol=0.1,
         )
     except AssertionError:
         # A rerun has to redraw the reference: HF decoding is nondeterministic
@@ -275,6 +279,7 @@ def test_models(
             outputs_1_lst=vllm_outputs_from_embeds,
             name_0="vllm",
             name_1="vllm_from_embeds",
+            near_tie_tol=0.1,
         )
 
     if use_rocm_aiter:

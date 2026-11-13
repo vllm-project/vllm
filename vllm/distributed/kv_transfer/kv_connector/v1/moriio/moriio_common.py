@@ -5,7 +5,7 @@ import math
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -103,6 +103,8 @@ class RemoteAllocInfo:
     """Information about remote block allocation."""
 
     block_ids: BlockIds | None
+    # Leading blocks the consumer already holds from its own prefix cache.
+    num_skip_blocks: int = 0
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -698,7 +700,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Generator[zmq.Socket]:
     """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")

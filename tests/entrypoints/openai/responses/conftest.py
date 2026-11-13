@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,11 @@ BASE_TEST_ENV = {
     # The day vLLM said "hello world" on arxiv 🚀
     "VLLM_SYSTEM_START_DATE": "2023-09-12",
 }
+# The Rust frontend serves the stateless Responses API only and fails startup when
+# the response store is enabled; tests that do not use the store leave it off there.
+RESPONSES_STORE_ENV = (
+    {} if envs.VLLM_USE_RUST_FRONTEND else {"VLLM_ENABLE_RESPONSES_API_STORE": "1"}
+)
 DEFAULT_MAX_RETRIES = 3
 
 
@@ -395,7 +401,7 @@ def server_with_store(default_server_args):
         "Qwen/Qwen3-1.7B",
         default_server_args,
         env_dict={
-            "VLLM_ENABLE_RESPONSES_API_STORE": "1",
+            **RESPONSES_STORE_ENV,
             "VLLM_SERVER_DEV_MODE": "1",
         },
     ) as remote_server:

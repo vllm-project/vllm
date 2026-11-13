@@ -90,7 +90,7 @@ if TYPE_CHECKING:
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
-    VLLM_MAIN_CUDA_VERSION: str = "13.0"
+    VLLM_MAIN_CUDA_VERSION: str = "13.2"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = True
+    VLLM_PP_TRANSPORT: Literal["auto", "nccl", "copy_engine"] = "auto"
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
@@ -145,6 +146,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_FP8_MOE_REQUANT: Literal["none", "mxfp4"] = "none"
+    VLLM_FP8_MOE_REQUANT_ACT: Literal["a8w4", "a4w4", "a16w4"] = "a8w4"
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
@@ -153,6 +156,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
+    VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
+    VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -197,6 +202,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
+    VLLM_STRICT_QUANT_SCHEME: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
@@ -267,6 +273,7 @@ if TYPE_CHECKING:
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_RAISE_ON_LOGIT_NANS: bool = False
+    VLLM_CONFIDENTIAL_COMPUTE: str | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
     ] = "NONE"
@@ -663,7 +670,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
     # Main CUDA version of vLLM. This follows PyTorch but can be overridden.
     "VLLM_MAIN_CUDA_VERSION": lambda: (
-        os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "13.0"
+        os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "13.2"
     ),
     # Controls PyTorch float32 matmul precision mode within vLLM workers.
     # Valid options mirror torch.set_float32_matmul_precision
@@ -679,13 +686,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),
-    # Use tensor descriptors for Q/K/V loads and output stores in the
-    # Triton unified-attention kernel.  Enables HW 2D block reads on
-    # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
-    # compile time so other platforms see no overhead.  Tri-state override:
-    # unset (default) lets the `triton_attn` backend auto-select per
-    # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
-    # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
+    # Use tensor descriptors (TD) for loads/stores in Triton kernels that
+    # have a TD path: unified attention (`triton_attn` backend), the fused
+    # MoE kernels (`fused_moe_kernel` for unquantized weights,
+    # `fused_moe_kernel_gptq_awq` for grouped int4_w4a16 weights, batched
+    # MoE) and the compressed-tensors `triton_scaled_mm`.  Enables HW 2D
+    # block reads on Intel XPU; the non-TD branch is dead-code-eliminated
+    # at Triton compile time so other platforms see no overhead.
+    # Tri-state override: unset (default) auto-enables TD on XPU only;
+    # ``1`` forces TD on (on CUDA the MoE TD paths need sm100+; the int4
+    # WNA16 MoE kernel stays on the pointer path below sm100 and for shapes
+    # its TD path does not cover); ``0`` forces TD off.  Useful for A/B
+    # benchmarking the TD path.
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
@@ -1271,6 +1283,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # so that vLLM can verify if p2p is actually working.
     # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
+    # How a PP stage sends its intermediate tensors to the next stage.
+    # "copy_engine" uses CUDA copy engines instead of NCCL kernels; it needs
+    # TP=1 and NVLink-connected PP GPUs on one node, and fails startup without.
+    # "auto" uses copy engines when every PP rank can, and NCCL otherwise.
+    "VLLM_PP_TRANSPORT": env_with_choices(
+        "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
+    ),
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
     # selection
@@ -1352,6 +1371,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.
+    # ROCm: re-quantize block-FP8 routed experts to MXFP4 at load (half the
+    # expert bytes, aiter MXFP4 MoE kernels). _ACT picks the activation dtype:
+    # a8w4 (fp8 per-token, FlyDSL interleaved kernels; default), a4w4 (MXFP4
+    # activations, FlyDSL separated kernels) or a16w4 (bf16, aiter Triton).
+    "VLLM_FP8_MOE_REQUANT": env_with_choices(
+        "VLLM_FP8_MOE_REQUANT", "none", ["none", "mxfp4"], case_sensitive=False
+    ),
+    "VLLM_FP8_MOE_REQUANT_ACT": env_with_choices(
+        "VLLM_FP8_MOE_REQUANT_ACT",
+        "a8w4",
+        ["a8w4", "a4w4", "a16w4"],
+        case_sensitive=False,
+    ),
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
@@ -1416,6 +1448,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
         in ("true", "1")
+    ),
+    # Run the sparse MLA calls the FlyDSL kernel accepts (bf16 q, fp8_ds_mla
+    # cache, no sinks: Kimi-K3.1 DSA) on it instead of Triton; others stay on
+    # Triton. gfx950 only. Disabled by default.
+    "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA", "False").lower()
+        in ("true", "1")
+    ),
+    # Smallest query batch VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA sends to the
+    # FlyDSL kernel; smaller ones (decode) stay on Triton, which is faster
+    # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
+    "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
@@ -1702,6 +1747,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel. Supported CUDA grouped routers
     # fuse this into routing; the existing backend opt-in is still required.
+    # Under DP, TRT-LLM block-FP8/MXFP8 monolithic MoE then takes vLLM's
+    # routing instead of routing from logits; 0 restores the kernel's routing.
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
     # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
     # instead of replicated weights and local-token computation.
@@ -1743,6 +1790,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force b12x FP4 MoE to use BF16 activations.
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
+    ),
+    # Forbid kernels that run a different activation quantization than the
+    # checkpoint or quantization config requests (e.g. Marlin running FP8 W8A8
+    # layers as W8A16). Otherwise such fallbacks are allowed with a warning.
+    "VLLM_STRICT_QUANT_SCHEME": lambda: bool(
+        int(os.getenv("VLLM_STRICT_QUANT_SCHEME", "0"))
     ),
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
@@ -1993,6 +2046,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAISE_ON_LOGIT_NANS": lambda: bool(
         int(os.getenv("VLLM_RAISE_ON_LOGIT_NANS", "0"))
     ),
+    # Override NVIDIA Confidential Computing detection. Unset (default)
+    # auto-detects via NVML; "1" forces it on, "0" forces it off. Gates the
+    # Confidential Computing copy paths (see vllm.v1.conf_compute_utils).
+    "VLLM_CONFIDENTIAL_COMPUTE": lambda: os.getenv("VLLM_CONFIDENTIAL_COMPUTE"),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
@@ -2473,6 +2530,7 @@ def compile_factors() -> dict[str, object]:
     hash everything else. This keeps the cache key aligned across workers."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
+        "VLLM_PP_TRANSPORT",
         "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",

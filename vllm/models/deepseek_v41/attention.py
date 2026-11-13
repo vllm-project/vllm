@@ -86,8 +86,9 @@ from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
@@ -1253,7 +1254,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.backend_cls
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Only kv-source layers own a compressed-KV cache; consumers read the
         # source's cache through the forward context, and cr==0 layers are
         # pure SWA. The SWA cache is allocated separately as
@@ -1264,9 +1265,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
         uses_fp8_ds_mla_layout = self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
             tokens_per_state=self.compress_ratio,
@@ -1279,6 +1281,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 self.compressed_bytes_per_token if uses_fp8_ds_mla_layout else None
             ),
         )
+        return FullAttentionManager.layer_config(spec)
 
     def _compressed_kv_cache(self) -> torch.Tensor:
         """The compressed-KV cache tensor of this layer's kv source (own
@@ -1321,7 +1324,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # head_dim already carries the fp8 scale padding
         # tokens_per_state=1 for V3.2, >1 for DeepseekV4; same cache layout.
         # nvfp4_ds_mla is packed too: its compressed record is NVFP4 but the
@@ -1334,9 +1337,10 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         page_alignment = (
             576 if uses_fp8_ds_mla_layout and not _use_v41_mxfp8_kv_record() else 512
         )
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
@@ -1358,6 +1362,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
                 else None
             ),
         )
+        return FullAttentionManager.layer_config(spec)
 
     def forward(self): ...
 

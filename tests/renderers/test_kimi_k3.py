@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import LlamaConfig, TokenizersBackend
 
+from tests.utils import RemoteLaunchRenderServer
+from vllm.config import DeviceConfig, ModelConfig, VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams
 from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
-from vllm.renderers.registry import RENDERER_REGISTRY
+from vllm.renderers.registry import RENDERER_REGISTRY, renderer_from_config
 from vllm.tokenizers.registry import TokenizerRegistry
 
 
@@ -73,6 +80,52 @@ def test_kimi_k3_registered():
     assert (
         TokenizerRegistry.load_tokenizer_cls("kimi_k3").__name__ == "CachedHfTokenizer"
     )
+
+
+@pytest.fixture
+def model_with_jinja_template(tmp_path: Path) -> str:
+    LlamaConfig(max_position_embeddings=32, vocab_size=4).save_pretrained(tmp_path)
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(
+            WordLevel(
+                {"[UNK]": 0, "<s>": 1, "</s>": 2, "rendered": 3}, unk_token="[UNK]"
+            )
+        ),
+        unk_token="[UNK]",
+        bos_token="<s>",
+        eos_token="</s>",
+        chat_template="{{ 'rendered' }}",
+    )
+    tokenizer.save_pretrained(tmp_path)
+    return str(tmp_path)
+
+
+def test_kimi_k3_sync_render_rejects_jinja_fallback(model_with_jinja_template):
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=model_with_jinja_template, tokenizer_mode="kimi_k3"
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    renderer = renderer_from_config(config)
+    try:
+        with pytest.raises(VLLMValidationError, match="requires native chat encoding"):
+            renderer.render_messages([{"role": "user", "content": "hi"}], ChatParams())
+    finally:
+        renderer.shutdown()
+
+
+def test_kimi_k3_render_server_rejects_jinja_fallback(model_with_jinja_template):
+    args = ["--tokenizer-mode", "kimi_k3"]
+    with RemoteLaunchRenderServer(model_with_jinja_template, args) as server:
+        response = httpx.post(
+            server.url_for("v1/chat/completions/render"),
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            timeout=10,
+        )
+
+    assert response.status_code == 400, response.text
+    assert "requires native chat encoding" in response.json()["error"]["message"]
 
 
 def test_k3_media_io_defaults_preserve_original_mode():
