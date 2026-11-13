@@ -223,6 +223,7 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/kimi_k3/
+  - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
@@ -250,6 +251,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/models/kimi_k3/
+      - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
       - tests/models/kimi_k3/
       - vllm/platforms/rocm.py
       commands:
