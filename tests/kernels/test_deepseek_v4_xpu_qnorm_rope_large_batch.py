@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression test for the DeepSeek-V4 XPU qnorm/RoPE kernel on large batches.
 
-``token_idx * num_heads * HEAD_DIM`` used to be computed in int32, so the Q
+`token_idx * num_heads * HEAD_DIM` used to be computed in int32, so the Q
 address wrapped once a step held more than 2^31 Q elements (65536 tokens with
 64 heads) and the device faulted (UR_RESULT_ERROR_DEVICE_LOST).
 """
