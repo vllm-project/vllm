@@ -3,11 +3,12 @@
 """Prepare and execute Humming linear layers."""
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.humming.schema import (
     check_and_fallback_input_schema,
@@ -22,7 +23,9 @@ from vllm.model_executor.utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.utils.humming import BaseInputSchema, LayerConfig
+    from vllm.utils.humming import BaseInputSchema, BaseWeightSchema, LayerConfig
+
+logger = init_logger(__name__)
 
 # A param the conversion leaves unused keeps its loaded data, retired, when it is
 # at most this fraction of the largest converted tensor (scalars, per-tensor and
@@ -125,6 +128,88 @@ def convert_linear_layer_to_humming_standard(
         replace_parameter(layer, name, tensor)
 
 
+def _fused_e8m0_lossy_blocks(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    max_range: int,
+    per_row: bool = False,
+    pad_n: bool = False,
+) -> int:
+    """Count the blocks with a nonzero E2M1 value whose E8M0 code is more than
+    ``max_range`` below the largest code of the tensor (of their row if
+    ``per_row``). ``weight`` packs two E2M1 values per byte along K. Humming
+    pads N with code 127 (2^0), which ``pad_n`` takes into account."""
+    codes = weight_scale.view(torch.uint8).to(torch.int16)
+    if per_row:
+        top = codes.amax(dim=-1, keepdim=True)
+    else:
+        top = codes.amax()
+        if pad_n:
+            top = top.clamp(min=127)
+    outside = codes < top - max_range
+    blocks = weight.view(torch.uint8).reshape(*codes.shape, -1)[outside]
+    # Mask the sign bits: +0 and -0 decode exactly at any scale.
+    return int(blocks.bitwise_and(0x77).any(dim=-1).sum())
+
+
+def _avoid_lossy_fused_e8m0_scale(
+    layer: LinearBase,
+    tensors: dict[str, torch.Tensor],
+    weight_schema: "BaseWeightSchema",
+    input_schema: "BaseInputSchema",
+    layout: dict[str, Any],
+) -> "BaseInputSchema":
+    """Use 16-bit activations if Humming's fused-E8M0 path would round or zero
+    weights: it keeps only 11 (FP8) or 3 (INT8) binades of E8M0 scales below
+    the largest one (``process_fused_e8m0_scale`` in humming/transform.py)."""
+    from vllm.utils.humming import (
+        HummingInputSchema,
+        WeightScale2Type,
+        dtypes,
+        prepare_layer_config,
+    )
+
+    if weight_schema.b_dtype != dtypes.float4e2m1:
+        return input_schema
+    config = prepare_layer_config(
+        weight_schema=weight_schema, input_schema=input_schema, **layout
+    )
+    max_range = {dtypes.float8e4m3: 11, dtypes.int8: 3}.get(config.a_dtype)
+    if not config.use_fused_e8m0_scale or max_range is None:
+        return input_schema
+    per_row = config.weight_scale_2_type == WeightScale2Type.CHANNEL
+    num_blocks = _fused_e8m0_lossy_blocks(
+        tensors["weight"],
+        tensors["weight_scale"],
+        max_range,
+        per_row=per_row,
+        pad_n=config.pad_shape_n > 0,
+    )
+    if num_blocks == 0:
+        return input_schema
+    if per_row:
+        scope = "row"
+    elif config.pad_shape_n:
+        scope = "weight tensor, padded with scale 2^0"
+    else:
+        scope = "weight tensor"
+    codes = tensors["weight_scale"].view(torch.uint8)
+    logger.warning(
+        "%s: %d MXFP4 weight blocks have an E8M0 scale more than %d binades "
+        "below the largest scale of their %s (scales range from 2^%d to 2^%d), "
+        "which Humming rounds or zeroes with %s activations. Using 16-bit "
+        "activations for this layer.",
+        getattr(layer, "prefix", "") or type(layer).__name__,
+        num_blocks,
+        max_range,
+        scope,
+        int(codes.min()) - 127,
+        int(codes.max()) - 127,
+        config.a_dtype,
+    )
+    return HummingInputSchema()
+
+
 def prepare_humming_linear_layer_config(
     layer: LinearBase,
     quant_config: dict,
@@ -194,6 +279,18 @@ def prepare_humming_linear_layer_config(
         param_dtype=layer.params_dtype,
         allow_fallback=allow_input_schema_fallback,
     )
+    layout = {
+        "shape_n": sum(layer.output_partition_sizes),
+        "shape_k": input_size_per_partition,
+        "pad_n_to_multiple": 256,
+        "pad_k_to_multiple": 128,
+        "has_bias": layer.has_bias,
+        "torch_dtype": layer.params_dtype,
+        "device": tensors["weight"].device,
+    }
+    input_schema = _avoid_lossy_fused_e8m0_scale(
+        layer, tensors, weight_schema, input_schema, layout
+    )
     for name in ("input_scale", "input_scale_2"):
         if name != input_schema.static_tensor_scale_name:
             tensors.pop(name, None)
@@ -202,15 +299,9 @@ def prepare_humming_linear_layer_config(
     # Step 2: transform weight (humming standard format) for forwarding.
     config, tensors = prepare_and_transform_humming_tensors(
         tensors=tensors,
-        shape_n=sum(layer.output_partition_sizes),
-        shape_k=input_size_per_partition,
         weight_schema=weight_schema,
         input_schema=input_schema,
-        pad_n_to_multiple=256,
-        pad_k_to_multiple=128,
-        has_bias=layer.has_bias,
-        torch_dtype=layer.params_dtype,
-        device=tensors["weight"].device,
+        **layout,
     )
     tensors.update(input_tensors)
     if "bias" in tensors:

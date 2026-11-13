@@ -59,6 +59,10 @@ Other transforms, older GPUs, and an explicit `--linear-backend` other than `aut
 
     Use `{"dtype":"float8e4m3"}` for FP8 activations. Checkpoints that declare 8-bit activations, such as compressed-tensors W4A8, select a kernel that supports them automatically.
 
+## MXFP4 Linear Layers with 8-bit Activations
+
+When the Humming backend runs compressed-tensors MXFP4 linear layers with FP8 or INT8 activations (with FP8, the default for these checkpoints on Hopper GPUs), it can apply only the E8M0 weight scales that are at most 11 (FP8) or 3 (INT8) binades below the largest scale of the layer's weight tensor on that rank. Fused shards such as q, k, and v count as one tensor, and when Humming pads the output size to a multiple of 256, the padding counts as scale 2^0. A layer with nonzero weights in blocks further down runs with 16-bit activations instead, which keeps its weights exact, and vLLM logs a warning that names the layer.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
