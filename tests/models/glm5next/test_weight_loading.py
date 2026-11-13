@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FP8 (weight, weight_scale_inv) pairs in the GLM-5.3-Flash loader must
-survive being delivered in different ``load_weights`` calls.
+survive being delivered in different `load_weights` calls.
 
-``Glm5NextModel.load_weights`` dequantizes the block-FP8 ``q_a_proj`` /
-``kv_a_proj_with_mqa`` / ``q_b_proj`` / ``o_proj`` / ``indexer.wk`` tensors to
+`Glm5NextModel.load_weights` dequantizes the block-FP8 `q_a_proj` /
+`kv_a_proj_with_mqa` / `q_b_proj` / `o_proj` / `indexer.wk` tensors to
 BF16 once both halves of a pair have been seen, parking the first half in a
-pending dict. ``AutoWeightsLoader`` invokes a child's ``load_weights`` once per
-contiguous run of a top-level prefix (``itertools.groupby``), so a stream such
-as ``language_model…, visual…, language_model…`` produces two calls. A
+pending dict. `AutoWeightsLoader` invokes a child's `load_weights` once per
+contiguous run of a top-level prefix (`itertools.groupby`), so a stream such
+as `language_model…, visual…, language_model…` produces two calls. A
 streaming loader that reorders tensors (Run:ai distributed streaming deals
 chunks to ranks by size and interleaves the vision-tower shard) delivers the
 two halves of a pair in different calls. The pair must still complete; today
 the pending dict is local to one call and the half-pair is silently dropped,
-leaving ``fused_qkv_a_proj`` unwritten.
+leaving `fused_qkv_a_proj` unwritten.
 
-These tests run on CPU and drive the real ``load_weights`` implementations on
-minimal module trees, in the style of ``tests/models/kimi_k3``.
+These tests run on CPU and drive the real `load_weights` implementations on
+minimal module trees, in the style of `tests/models/kimi_k3`.
 """
 
 from types import SimpleNamespace
@@ -69,11 +69,11 @@ def _pair_tensors() -> dict[str, torch.Tensor]:
 
 
 def _make_text_model() -> tuple[Glm5NextModel, list[int]]:
-    """A ``Glm5NextModel`` shell with only layer 7's fused_qkv_a_proj param.
+    """A `Glm5NextModel` shell with only layer 7's fused_qkv_a_proj param.
 
-    ``load_weights`` is the real implementation; the module tree carries just
-    what it touches: ``config`` and a BF16 ``fused_qkv_a_proj.weight`` whose
-    ``weight_loader`` writes shard 0 (q_a) into the first rows and shard 1
+    `load_weights` is the real implementation; the module tree carries just
+    what it touches: `config` and a BF16 `fused_qkv_a_proj.weight` whose
+    `weight_loader` writes shard 0 (q_a) into the first rows and shard 1
     (kv_a, rope-padded) into the rest, recording the shards it received.
     """
     model = object.__new__(Glm5NextModel)
@@ -135,7 +135,7 @@ def test_fp8_pairs_split_across_load_weights_calls() -> None:
     """The same four tensors, halves delivered in two calls.
 
     This is what AutoWeightsLoader does when any tensor with another
-    top-level prefix (e.g. ``visual.*``) sits between the weight and its
+    top-level prefix (e.g. `visual.*`) sits between the weight and its
     scale in the stream. The pair must still complete.
     """
     model, shards_seen = _make_text_model()
@@ -159,12 +159,12 @@ def _make_multimodal_model() -> tuple[
 ]:
     text_model, shards_seen = _make_text_model()
 
-    language_model = object.__new__(Glm5NextForCausalLM)
+    language_model = object.__new__(Glm5NextForCausalLM)  # type: ignore[type-abstract]
     nn.Module.__init__(language_model)
     language_model.config = SimpleNamespace(tie_word_embeddings=False)
     language_model.model = text_model
 
-    model = object.__new__(Glm5NextForConditionalGeneration)
+    model = object.__new__(Glm5NextForConditionalGeneration)  # type: ignore[type-abstract]
     nn.Module.__init__(model)
     model.language_model = language_model
     model.visual = nn.Module()
@@ -177,7 +177,7 @@ def _make_multimodal_model() -> tuple[
 
 
 def _hf_stream(order: list[str]) -> list[tuple[str, torch.Tensor]]:
-    """Checkpoint-named tensors (``model.language_model.*`` / ``model.visual.*``)."""
+    """Checkpoint-named tensors (`model.language_model.*` / `model.visual.*`)."""
     pair = _pair_tensors()
     visual = (
         "model.visual.patch_embed.proj.weight",
@@ -218,11 +218,11 @@ def _hf_stream(order: list[str]) -> list[tuple[str, torch.Tensor]]:
     ],
 )
 def test_multimodal_stream_order_does_not_change_loaded_weights(order) -> None:
-    """End to end through ``Glm5NextForConditionalGeneration.load_weights``.
+    """End to end through `Glm5NextForConditionalGeneration.load_weights`.
 
     Same five tensors, two orders. In the second, the vision-tower tensor
-    splits the language-model run in two, so ``AutoWeightsLoader`` calls
-    ``Glm5NextModel.load_weights`` twice. The result must not depend on it.
+    splits the language-model run in two, so `AutoWeightsLoader` calls
+    `Glm5NextModel.load_weights` twice. The result must not depend on it.
     """
     model, text_model, shards_seen = _make_multimodal_model()
 
