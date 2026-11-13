@@ -5621,9 +5621,13 @@ def test_shared_sliding_window_block_survives_delayed_store(
     runner.new_request(token_ids=list(range(prompt_length)))
     state = runner.connector_scheduler._req_status["0"]
     occupied = [make_offload_key(bytes([i]) * 32, 99) for i in range(8)]
-    stored = manager.prepare_store(occupied, state.req_context)
+    stored = manager.prepare_store(
+        occupied, state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert stored is not None
-    manager.complete_store(stored.keys_to_store, state.req_context)
+    manager.complete_store(
+        stored.keys_to_store, state.req_context, trigger=StoreTrigger.ON_COMPUTE
+    )
     manager.prepare_load(occupied, state.req_context)
 
     output = runner.scheduler.schedule()
