@@ -441,6 +441,39 @@ def test_hybrid_write_attention_uses_its_own_group_not_the_first_group():
     assert plan.sess_idx == 5
 
 
+def test_write_skips_blocks_the_consumer_prefix_cache_already_holds():
+    worker = SimpleNamespace(
+        _has_mamba=False,
+        kv_caches={"dense": torch.empty((8, 2, 4, 2, 3))},
+        layer_to_group={"dense": 0},
+        _region_session_indices=lambda _: [0],
+        _check_peer_block_size=lambda layer_name, remote_moriio_meta: None,
+        _compute_block_transfer_offsets=Mock(return_value=([1], [2], [3])),
+    )
+    writer = make_moriio_writer(worker)
+    task = _write_task("dense")
+    task.local_block_ids = [[10, 11, 12]]
+    set_role(ROLE.PRODUCER)
+    wrapper = _wrapper_for_messages()
+    wrapper._handle_message(
+        msgpack.dumps(
+            {
+                "type": "remote_blocks",
+                "transfer_id": "xfer",
+                "block_notify_list": [40, 41, 42, 43],
+                "num_skip_blocks": 2,
+            }
+        )
+    )
+    meta = _remote_meta()
+    writer._prepare_transfer_plan(
+        task, wrapper.done_remote_allocate_req_dict["xfer"], meta
+    )
+    worker._compute_block_transfer_offsets.assert_called_once_with(
+        "dense", [12], [42, 43], meta, remote_engine_id=task.dst_engine_id
+    )
+
+
 def test_hybrid_write_posts_both_regions_before_layer_completion():
     from unittest.mock import Mock
 
@@ -460,12 +493,16 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         _is_mamba_layer=lambda name: True,
         _hybrid_payload_index_by_layer={"kda": 2},
         _region_session_indices=lambda name: [0, 1],
+        kv_region_mr_offsets={},
         _compute_mamba_transfer_offsets=Mock(
             return_value=([10, 20, 30, 40], [50, 60, 70, 80], [2, 4, 8, 16], 3)
         ),
     )
     worker._mamba_blocks_for_layer = lambda name, blocks: (
         MoRIIOConnectorWorker._mamba_blocks_for_layer(worker, name, blocks)
+    )
+    worker._mamba_region_mr_offsets = lambda *args: (
+        MoRIIOConnectorWorker._mamba_region_mr_offsets(worker, *args)
     )
     writer = make_moriio_writer(worker)
     task = _write_task("kda")

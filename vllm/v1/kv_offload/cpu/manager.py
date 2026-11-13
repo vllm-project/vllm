@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    StoreTrigger,
     get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import (
@@ -269,6 +270,13 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
+    ) -> PrepareStoreOutput | None:
+        return self._prepare_store(keys, req_context)
+
+    def _prepare_store(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
         keys = list(keys)
         state = self._get_request_cache_access(req_context)
@@ -383,6 +391,16 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def complete_store(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
+        success: bool = True,
+    ) -> None:
+        self._complete_store(keys, req_context, success)
+
+    def _complete_store(
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
