@@ -1487,11 +1487,53 @@ def multi_process_parallel(
         ),
         **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
     }
+    # Debug-only: sample host, container and GCS state from a separate process
+    # while ray.init() starts the local cluster (see ray_startup_sampler.py).
+    samples_path = tempfile.mktemp(prefix="vllm_ray_startup_", suffix=".jsonl")
+    sampler = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("ray_startup_sampler.py")),
+            samples_path,
+            "120",
+        ]
+    )
+    init_start = time.monotonic()
     try:
         ray.init(runtime_env={"env_vars": env_vars})
     except Exception:
+        sampler.kill()
+        sampler.wait()
         _print_ray_startup_state()
+        print(f"===== ray startup samples ({time.monotonic() - init_start:.1f}s):")
+        with contextlib.suppress(OSError), open(samples_path) as fp:
+            print(fp.read())
         raise
+    finally:
+        if sampler.poll() is None:
+            sampler.kill()
+            sampler.wait()
+    init_s = time.monotonic() - init_start
+    samples = []
+    with contextlib.suppress(OSError), open(samples_path) as fp:
+        samples = [json.loads(line) for line in fp if line.strip()]
+    with contextlib.suppress(OSError):
+        os.remove(samples_path)
+    if samples:
+        first, last = samples[0]["cgroup"], samples[-1]["cgroup"]
+        throttled = {
+            k: int(last["cpu.stat"].get(k, 0)) - int(first["cpu.stat"].get(k, 0))
+            for k in ("nr_throttled", "throttled_usec", "throttled_time")
+            if k in last["cpu.stat"]
+        }
+        print(
+            f"===== ray.init ok in {init_s:.1f}s: "
+            f"loadavg={samples[-1]['loadavg']} "
+            f"host_busy={[x['host_busy_pct'] for x in samples]} "
+            f"cpu_quota={last.get('cpu.max') or last.get('cfs_quota_us')} "
+            f"throttled_delta={throttled} "
+            f"cpu_pressure={last.get('cpu.pressure')!r}"
+        )
 
     distributed_init_port = get_open_port()
     # Separate port for the DP master group; only used when data_parallel_size > 1.
