@@ -33,8 +33,6 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -74,30 +72,6 @@ def _on_gfx115x() -> bool:
     from vllm.platforms.rocm import on_gfx115x
 
     return on_gfx115x()
-
-
-def _fits_in_memory_budget(nbytes: int, device: torch.device) -> bool:
-    # Same budget the KV cache is later sized from. Keep room for the
-    # activation peak and for KV of one max_model_len request (the floor the
-    # engine enforces), else startup fails later with a generic KV-cache error.
-    from vllm.v1.core.kv_cache_planning import max_memory_usage_bytes
-    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
-
-    vllm_config = get_current_vllm_config()
-    util = vllm_config.cache_config.resolved_gpu_memory_utilization
-    min_kv_bytes = max_memory_usage_bytes(
-        vllm_config, get_kv_cache_spec(vllm_config).values()
-    )
-    # Peak activation + CUDA graph pool measured on gfx1151 at max_model_len
-    # 4096: 0.85 GiB (Qwen3-4B) to 3.27 GiB (Gemma-4-31B, MTP-3).
-    activation_headroom_bytes = 4 * GiB_bytes
-    snapshot = MemorySnapshot(device=device)
-    reserved = (
-        snapshot.total_memory * (1.0 - util) + activation_headroom_bytes + min_kv_bytes
-    )
-    # Allocator-cached blocks are reusable, and KV sizing excludes them too.
-    cached_free = snapshot.torch_memory - snapshot.torch_allocated
-    return snapshot.free_memory + cached_free - reserved >= nbytes
 
 
 def _profile_scope(name: str) -> AbstractContextManager:
@@ -778,19 +752,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         w_zp: torch.Tensor | None,
     ) -> None:
         c = self.config
-        N, K = unpacked.shape
-        nbytes = N * K * c.act_type.itemsize
-        # All-or-nothing: the compile cache key does not record which layers
-        # hold a copy, so a partial cache can crash or silently skip copies.
-        if not _fits_in_memory_budget(nbytes, unpacked.device):
-            raise ValueError(
-                "Not enough room in the gpu_memory_utilization budget to cache "
-                "a dequantized W4A16 prefill weight "
-                "(kernel_config.rdna_hybrid_w4a16_prefill_dequant) while "
-                "keeping KV cache for one max_model_len request. Increase "
-                "`gpu_memory_utilization`, lower `max_model_len`, or disable it."
-            )
-
         logger.info_once(
             "Caching dense %s copies of W4A16 weights for prefill "
             "(kernel_config.rdna_hybrid_w4a16_prefill_dequant). Each copy "

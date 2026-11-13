@@ -580,12 +580,11 @@ def _build_prefill_dequant_case(K: int, N: int, G: int, has_zp: bool):
     return layer, kernel, w_int4_kn.t().contiguous(), scales_nkg, zp_nkg
 
 
-def _prefill_dequant_vllm_config(mode: str, gpu_memory_utilization: float):
-    from vllm.config import CacheConfig, KernelConfig, VllmConfig
+def _prefill_dequant_vllm_config(mode: str):
+    from vllm.config import KernelConfig, VllmConfig
 
     return VllmConfig(
-        kernel_config=KernelConfig(rdna_hybrid_w4a16_prefill_dequant=mode),
-        cache_config=CacheConfig(gpu_memory_utilization=gpu_memory_utilization),
+        kernel_config=KernelConfig(rdna_hybrid_w4a16_prefill_dequant=mode)
     )
 
 
@@ -610,7 +609,7 @@ def test_rdna_hybrid_w4a16_prefill_dequant_mode_normalized(value, expected):
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize("mode", ["disable", "enable"])
 def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
-    """Within budget, enabling caches the dense copy; disabled caches nothing."""
+    """Enabling caches the dense copy; disabled caches nothing."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -622,8 +621,7 @@ def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
         K, N, G, has_zp
     )
 
-    # Utilization 1.0 leaves all free memory in budget, so the tiny layer fits.
-    with set_current_vllm_config(_prefill_dequant_vllm_config(mode, 1.0)):
+    with set_current_vllm_config(_prefill_dequant_vllm_config(mode)):
         kernel.process_weights_after_loading(layer)
 
     if mode == "disable":
@@ -635,90 +633,6 @@ def test_rdna_hybrid_w4a16_prefill_dequant_cached(mode, has_zp, dist_init):
         getattr(layer, _W_DEQUANT_ATTR), expected, rtol=0, atol=0
     )
     assert _W_DEQUANT_ATTR not in layer.state_dict()
-
-
-def _stub_memory_snapshot(monkeypatch, free_gib, cached_free_gib=0):
-    from types import SimpleNamespace
-
-    # The real free memory is machine dependent.
-    monkeypatch.setattr(
-        hybrid_module,
-        "MemorySnapshot",
-        lambda device: SimpleNamespace(
-            free_memory=free_gib * 2**30,
-            total_memory=100 * 2**30,
-            torch_memory=cached_free_gib * 2**30,
-            torch_allocated=0,
-        ),
-    )
-
-
-def test_rdna_hybrid_w4a16_prefill_dequant_budget_exhausted(dist_init, monkeypatch):
-    """Over budget, enabling the cache raises instead of caching a subset."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA/HIP device not available")
-
-    from vllm.config import set_current_vllm_config
-
-    # 40 GiB free with 50 GiB outside a 0.5 budget leaves nothing to spend.
-    _stub_memory_snapshot(monkeypatch, free_gib=40)
-    set_random_seed(0)
-    layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
-
-    with (
-        set_current_vllm_config(_prefill_dequant_vllm_config("enable", 0.5)),
-        pytest.raises(ValueError, match="gpu_memory_utilization"),
-    ):
-        kernel.process_weights_after_loading(layer)
-
-
-@pytest.mark.parametrize("min_kv_gib, fits", [(0, True), (8, False)])
-def test_rdna_hybrid_w4a16_prefill_dequant_reserves_min_kv(
-    min_kv_gib, fits, dist_init, monkeypatch
-):
-    """The budget keeps room for one max_model_len request of KV cache."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA/HIP device not available")
-
-    from vllm.config import set_current_vllm_config
-
-    # 60 GiB free with 50 GiB outside a 0.5 budget leaves 10 GiB, 6 GiB after
-    # the activation headroom: enough for the layer unless KV claims 8 GiB.
-    _stub_memory_snapshot(monkeypatch, free_gib=60)
-    monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_planning.max_memory_usage_bytes",
-        lambda vllm_config, specs: min_kv_gib * 2**30,
-    )
-    set_random_seed(0)
-    layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
-
-    with set_current_vllm_config(_prefill_dequant_vllm_config("enable", 0.5)):
-        if fits:
-            kernel.process_weights_after_loading(layer)
-            assert hasattr(layer, _W_DEQUANT_ATTR)
-        else:
-            with pytest.raises(ValueError, match="gpu_memory_utilization"):
-                kernel.process_weights_after_loading(layer)
-
-
-def test_rdna_hybrid_w4a16_prefill_dequant_counts_allocator_cache_as_free(
-    dist_init, monkeypatch
-):
-    """Blocks cached by the torch allocator count as free memory."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA/HIP device not available")
-
-    from vllm.config import set_current_vllm_config
-
-    # Only 40 GiB is free on the device, but 20 GiB more sits in the allocator
-    # cache: the same 10 GiB of headroom as 60 GiB free.
-    _stub_memory_snapshot(monkeypatch, free_gib=40, cached_free_gib=20)
-    set_random_seed(0)
-    layer, kernel, *_ = _build_prefill_dequant_case(256, 128, 128, has_zp=False)
-
-    with set_current_vllm_config(_prefill_dequant_vllm_config("enable", 0.5)):
-        kernel.process_weights_after_loading(layer)
-    assert hasattr(layer, _W_DEQUANT_ATTR)
 
 
 # ---------------------------------------------------------------------------
