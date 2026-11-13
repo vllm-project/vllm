@@ -246,6 +246,14 @@ steps:
     "$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64-cpu"
   parallelism: 3
 
+- label: "Arm docker plugin probe"
+  key: arm-docker-plugin-probe
+  depends_on: []
+  device: arm_cpu
+  no_plugin: true
+  commands:
+  - buildkite-agent pipeline upload .buildkite/arm-plugin-probe.yaml
+
 - label: ":docker: Build Zen CPU image"
   key: zen-cpu-image-build
   # Reuse the shared `<repo>:<commit>-cpu` image that image-build-cpu publishes

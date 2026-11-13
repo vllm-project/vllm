@@ -1,0 +1,20 @@
+# Throwaway probe, not for merge: does the arm-cpu queue run a docker-plugin
+# step? Read-only: it lists two mounts and writes nothing on the host.
+steps:
+  - label: "Arm docker plugin probe (in plugin container)"
+    key: arm-docker-plugin-probe-inner
+    agents:
+      queue: arm-cpu
+    timeout_in_minutes: 10
+    plugins:
+      - docker#v5.2.0:
+          image: "public.ecr.aws/docker/library/python:3.12-slim"
+          shm-size: "4g"
+          volumes:
+            - "/var/lib/buildkite-agent/.cache/huggingface:/root/.cache/huggingface:ro"
+    commands:
+      - id
+      - nproc
+      - df -h /dev/shm
+      - ls /workdir/.buildkite/hardware_tests
+      - ls /root/.cache/huggingface
