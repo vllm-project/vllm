@@ -341,12 +341,15 @@ class Scheduler(SchedulerInterface):
             resources = self.speculator_config.resources(
                 self.scheduler_config.max_num_seqs
             )
-            if resources.max_rows > self.num_spec_tokens + 1:
+            # Sized from num_speculative_tokens, which prefill_context_kv_only
+            # keeps though it schedules no drafts.
+            max_rows = speculative_config.num_speculative_tokens + 1
+            if resources.max_rows > max_rows:
                 raise ValueError(
                     f"SpecResources.max_rows ({resources.max_rows}) must "
-                    "be at most num_speculative_tokens + 1 "
-                    f"({self.num_spec_tokens + 1}): KV slots and the runner's "
-                    "buffers are sized from num_speculative_tokens."
+                    f"be at most num_speculative_tokens + 1 ({max_rows}): KV "
+                    "slots and the runner's buffers are sized from "
+                    "num_speculative_tokens."
                 )
             # The engine core's adaptation of a branching speculator's resources
             # to the model's layers, else the declared ones. KV slots stay
