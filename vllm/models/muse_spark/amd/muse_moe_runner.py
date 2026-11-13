@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm MoE implementation for Muse Spark checkpoints."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 
 import torch
@@ -69,6 +70,24 @@ from vllm.models.muse_spark.common.ops.fused_finalize import (
 _FINALIZE_CHUNK_ELEMS = 32 * 1024 * 1024
 # Below this, one custom all-reduce beats the two-RCCL-kernel RS + AG pair.
 _TOKEN_SHARDED_MIN_TOKENS = 256
+# Set while the model's residual stream is token-sharded across the TP ranks.
+_token_sharded_output = False
+
+
+@contextmanager
+def token_sharded_moe_output() -> Iterator[None]:
+    """Make the TP finalize write only current rank's rows of a token-sharded stream.
+
+    Rank `r` keeps rows `[r * R, (r + 1) * R)` with `R = ceil(T / tp)`, the
+    rows its reduce-scatter receives; the other rows of the output are left
+    unwritten.
+    """
+    global _token_sharded_output
+    previous, _token_sharded_output = _token_sharded_output, True
+    try:
+        yield
+    finally:
+        _token_sharded_output = previous
 
 
 def _validate_tp_post_norm_deployment(
@@ -91,7 +110,7 @@ def _validate_tp_post_norm_deployment(
         raise NotImplementedError(
             f"Muse Spark {precision} on ROCm does not support MoE LoRA."
         )
-    if moe_config.skip_final_all_reduce:
+    if moe_config.skip_final_all_reduce and parallel_config.tp_size > 1:
         raise NotImplementedError(
             f"Muse Spark {precision} performs the TP reduction before its post-expert "
             "norm and cannot return an unreduced MoE output."
@@ -216,6 +235,21 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
             routed.masked_fill_((expert_map[topk_ids.long()] < 0).unsqueeze(-1), 0)
             expert_map = None
 
+        if _token_sharded_output and self.pre_norm_all_reduce:
+            if self.fused_norm is None or routed.dtype != self.reduce_dtype:
+                raise NotImplementedError(
+                    "A token-sharded Muse Spark stream needs the fused post-expert "
+                    "norm and VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE=bf16."
+                )
+            self._token_sharded_finalize(
+                routed,
+                topk_weights,
+                output,
+                get_tensor_model_parallel_world_size(),
+                gather=False,
+            )
+            return output
+
         chunk_size = self._chunk_size(top_k, hidden_dim)
         for start in range(0, num_tokens, chunk_size):
             end = min(start + chunk_size, num_tokens)
@@ -261,7 +295,11 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
         topk_weights: torch.Tensor,
         out: torch.Tensor,
         tp_size: int,
+        gather: bool = True,
     ) -> None:
+        """Reduce-scatter `rows` by token, finalize the current rank's tokens, and
+        all-gather them into `out`. Without `gather`, only current rank's rows
+        are written to `out`."""
         num_tokens, top_k, hidden_dim = rows.shape
         pad = (-num_tokens) % tp_size
         if pad:
@@ -273,9 +311,13 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
         per_rank = local.shape[0]
         rank = get_tensor_model_parallel_rank()
         tw_local = topk_weights[rank * per_rank : (rank + 1) * per_rank]
-        out_local = torch.empty(
-            (per_rank, hidden_dim), dtype=out.dtype, device=out.device
-        )
+        owned = max(0, min(per_rank, num_tokens - rank * per_rank))
+        if not gather and owned == per_rank:
+            out_local = out[rank * per_rank : (rank + 1) * per_rank]
+        else:
+            out_local = torch.empty(
+                (per_rank, hidden_dim), dtype=out.dtype, device=out.device
+            )
         norm = self.fused_norm
         assert norm is not None
         fused_post_expert_finalize(
@@ -287,6 +329,10 @@ class MuseSparkTopKWeightAndReduce(mk.TopKWeightAndReduce):
             norm.applies_weight_before_norm,
             out_local,
         )
+        if not gather:
+            if owned != per_rank:
+                out[rank * per_rank : rank * per_rank + owned].copy_(out_local[:owned])
+            return
         gathered = tensor_model_parallel_all_gather(out_local, dim=0)
         out.copy_(gathered[:num_tokens])
 
@@ -411,6 +457,11 @@ class MuseSparkUnquantizedFusedMoE(UnquantizedFusedMoEMethod):
         )
 
 
+# Unit route weights of MuseSparkAiterExperts by (width, device), shared across
+# instances and kept for the process lifetime.
+_UNIT_WEIGHTS_BUFS: dict[tuple[int, torch.device], list[torch.Tensor]] = {}
+
+
 class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
     """AITER experts that return one unweighted output per selected route."""
 
@@ -426,19 +477,23 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             )
         if quant_config.post_expert_norm_fn is None:
             raise ValueError("Muse Spark post-expert norm is not configured.")
-        self._unit_weights_bufs: dict[int, torch.Tensor] = {}
 
     def _unit_weights(
         self, num_routes: int, width: int, device: torch.device
     ) -> torch.Tensor:
-        """A cached `[num_routes, width]` fp32 ones buffer (grown on demand)."""
-        buf = self._unit_weights_bufs.get(width)
-        if buf is None or buf.shape[0] < num_routes or buf.device != device:
-            buf = torch.ones(
-                (max(num_routes, 1), width), dtype=torch.float32, device=device
+        """A `[num_routes, width]` fp32 ones view of a shared, grow-only cache.
+
+        Captured CUDA graphs keep reading the buffer they were captured with,
+        and a weight reload rebuilds the experts, so no buffer is ever freed.
+        """
+        bufs = _UNIT_WEIGHTS_BUFS.setdefault((width, device), [])
+        if not bufs or bufs[-1].shape[0] < num_routes:
+            bufs.append(
+                torch.ones(
+                    (max(num_routes, 1), width), dtype=torch.float32, device=device
+                )
             )
-            self._unit_weights_bufs[width] = buf
-        return buf[:num_routes]
+        return bufs[-1][:num_routes]
 
     def workspace_shapes(
         self,
@@ -495,7 +550,28 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
                 f"{tuple(output.shape)}, expected {expected_output_shape}."
             )
 
-        expanded_hidden_states = take_expanded(hidden_states, top_k)
+        from .decode_moe import prequant_routes_experts
+        from .ulysses_sp import expand_rows, take_prequant
+
+        # One pre-quantized row per token (Ulysses FP4 gather), or None.
+        prequant = take_prequant(hidden_states)
+        if prequant is not None:
+            a1, a1_scale = prequant
+            if expert_map is not None:
+                routes = prequant_routes_experts(
+                    a1, a1_scale, topk_ids, w1, w2, self.quant_config, expert_map
+                )
+                if routes is not None:
+                    self._park_route_output(*routes)
+                    return
+            expanded_hidden_states = expand_rows(a1.view(torch.uint8), top_k).view(
+                a1.dtype
+            )
+            a1q_scale = expand_rows(a1_scale.view(torch.uint8), top_k).view(
+                a1_scale.dtype
+            )
+        else:
+            expanded_hidden_states = take_expanded(hidden_states, top_k)
         if expanded_hidden_states is None:
             expanded_hidden_states = (
                 hidden_states[:, None, :]
@@ -550,6 +626,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             quant_config.post_expert_norm_fn,
             pre_norm_all_reduce=self.moe_config.moe_parallel_config.tp_size > 1,
             take_route_output=self._take_route_output,
+            take_route_expert_map=self._take_route_expert_map,
         )
 
 
@@ -837,5 +914,6 @@ __all__ = [
     "MuseSparkTritonExperts",
     "validate_bf16_deployment",
     "validate_fp8_deployment",
+    "token_sharded_moe_output",
     "validate_mxfp4_deployment",
 ]
