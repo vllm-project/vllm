@@ -42,7 +42,14 @@ def _apply_rope(
     return torch.cat((x_rot, x[..., rotary_dim:]), dim=-1).reshape(shape)
 
 
-def _lookup_cos_sin(positions: Tensor, cos_sin_cache: Tensor) -> tuple[Tensor, Tensor]:
+def _lookup_cos_sin(
+    positions: Tensor, query: Tensor, cos_sin_cache: Tensor
+) -> tuple[Tensor, Tensor]:
+    if positions.dim() == 1:
+        # Size by query's token dim, not positions: equating the two here
+        # would unify their symbols when this impl is lowered after graph
+        # splitting, so cached piecewise subgraphs miss on a warm start.
+        positions = positions[: query.shape[0]]
     cos_sin = cos_sin_cache.index_select(0, positions.flatten())
     cos, sin = cos_sin.chunk(2, dim=-1)
     return cos, sin
@@ -58,7 +65,7 @@ def rotary_embedding(
     is_neox: bool,
 ) -> tuple[Tensor, Tensor]:
     """Rotate the first `cos_sin_cache.shape[-1]` channels of each head."""
-    cos, sin = _lookup_cos_sin(positions, cos_sin_cache)
+    cos, sin = _lookup_cos_sin(positions, query, cos_sin_cache)
     return (
         _apply_rope(query, cos, sin, head_size, is_neox),
         _apply_rope(key, cos, sin, head_size, is_neox),
@@ -90,7 +97,7 @@ def rotary_embedding_query_only(
     is_neox: bool,
 ) -> Tensor:
     """RoPE over query only, for layers that reuse another layer's KV cache."""
-    cos, sin = _lookup_cos_sin(positions, cos_sin_cache)
+    cos, sin = _lookup_cos_sin(positions, query, cos_sin_cache)
     return _apply_rope(query, cos, sin, head_size, is_neox)
 
 
