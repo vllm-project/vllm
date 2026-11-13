@@ -208,7 +208,6 @@ class PipelineRelay(nn.Module):
                 f"{self.prefix}.layers.{source}.attn",
                 source,
                 self.main_row_bytes,
-                (576 if self.main_row_bytes == 584 else self.main_row_bytes),
             )
         source = boundary.indexer_k_source
         if source is not None:
@@ -217,7 +216,6 @@ class PipelineRelay(nn.Module):
                 f"{self.prefix}.layers.{source}.attn.indexer.k_cache",
                 source,
                 self.index_row_bytes,
-                128 if self.index_row_bytes == 132 else 64,
             )
 
     def empty_tensors(
@@ -225,7 +223,7 @@ class PipelineRelay(nn.Module):
     ) -> dict[str, torch.Tensor]:
         tensors = {
             key: torch.zeros((batch_size, width), dtype=torch.uint8, device=device)
-            for key, _, _, width, _ in self._cache_entries(boundary)
+            for key, _, _, width in self._cache_entries(boundary)
         }
         if boundary.index_source is not None:
             tensors["pp_topk"] = torch.full(
@@ -264,14 +262,13 @@ class PipelineRelay(nn.Module):
         metadata = context.attn_metadata
         if not isinstance(metadata, dict) or not metadata:
             return tensors
-        for key, prefix, source, _, value_bytes in self._cache_entries(boundary):
+        for key, prefix, source, _ in self._cache_entries(boundary):
             copy_pipeline_cache_rows(
                 self.context[prefix].kv_cache,
                 tensors[key],
                 positions,
                 cast(Any, metadata[prefix]).slot_mapping,
                 self.config.compress_ratios[source],
-                value_bytes,
                 scatter=importing,
             )
         for key, buffer in (("pp_topk", topk), ("pp_candidates", candidates)):

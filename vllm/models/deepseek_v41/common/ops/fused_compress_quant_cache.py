@@ -292,13 +292,18 @@ def _store_latent(pooled, t, norm_weight, latent, EPS: tl.constexpr):
     tl.store(latent + t.to(tl.int64) * 512 + d, normed.to(tl.bfloat16))
 
 
+# Value bytes per packed row width. The 584-byte V4 main KV row and the FP8 and
+# MXFP4 indexer K rows keep their scales after the values of the whole page; the
+# 528-byte and 288-byte V4.1 rows keep each row's scales right after its values.
+_PIPELINE_CACHE_VALUE_BYTES = {584: 576, 528: 528, 288: 288, 132: 128, 68: 64}
+
+
 def copy_pipeline_cache_rows(
     cache: torch.Tensor,
     rows: torch.Tensor,
     positions: torch.Tensor,
     slot_mapping: torch.Tensor,
     compress_ratio: int,
-    value_bytes: int,
     *,
     scatter: bool,
 ) -> None:
@@ -307,7 +312,9 @@ def copy_pipeline_cache_rows(
     assert rows.shape == (positions.numel(), cache.shape[-1])
     assert rows.is_contiguous() and positions.is_contiguous()
     assert slot_mapping.is_contiguous() and slot_mapping.numel() <= rows.shape[0]
-    assert 0 < value_bytes <= cache.shape[-1] and compress_ratio in (1, 2)
+    assert compress_ratio in (1, 2)
+    value_bytes = _PIPELINE_CACHE_VALUE_BYTES.get(cache.shape[-1])
+    assert value_bytes is not None, f"unsupported paged cache row {cache.shape[-1]} B"
     if rows.shape[0] == 0:
         return
     _copy_pipeline_cache_rows[(rows.shape[0],)](
