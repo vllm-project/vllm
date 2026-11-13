@@ -49,6 +49,7 @@ def beam_batch_llm(tmp_path_factory, vllm_runner):
         enforce_eager=True,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.1,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
     ) as runner:
         yield runner.llm
 
