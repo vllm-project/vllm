@@ -299,18 +299,50 @@ class EngineCore:
         logger.info("KV identity: %s %s", identity.digest, identity.components)
 
     def _change_kv_identity(self, identity: KVIdentity) -> None:
-        """Publish the identity of changed weights."""
+        """Publish the identity of changed weights.
+
+        With enforcement, a known identity is published only once the caches
+        computed with the old weights are reset; otherwise it stays unknown.
+        Peers then check the engine again: NIXL through its handshake, the
+        offloading tiers through their namespace and P2P sessions.
+        """
         cache_config = self.vllm_config.cache_config
         if identity.digest == cache_config.kv_identity or (
             not is_known_kv_identity(identity.digest)
             and not is_known_kv_identity(cache_config.kv_identity)
         ):
             return
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        enforced = (
+            kv_transfer_config is not None and kv_transfer_config.enforces_kv_identity()
+        )
+        if enforced and is_known_kv_identity(identity.digest):
+            try:
+                # Not the multi-modal cache: preprocessed inputs don't depend
+                # on the weights, and resetting only its engine half here
+                # would desync it from the frontend's.
+                if not self.reset_prefix_cache(
+                    reset_running_requests=True, reset_connector=True
+                ):
+                    raise RuntimeError("Failed to reset the KV connector cache.")
+                self.reset_encoder_cache()
+            except Exception:
+                logger.exception(
+                    "Failed to reset the caches computed with the previous "
+                    "weights; the KV identity stays unknown."
+                )
+                if not is_known_kv_identity(cache_config.kv_identity):
+                    return
+                identity = self._kv_identity.unknown()
         cache_config.kv_identity = identity.digest
         cache_config.kv_identity_components = identity.components
         self.collective_rpc(
             "set_kv_identity", args=(identity.digest, identity.components)
         )
+        kv_connector = self.scheduler.get_kv_connector()
+        if enforced and kv_connector is not None:
+            kv_connector.update_kv_identity()
+            self._set_kv_connector_handshake_metadata()
         logger.info("KV identity: %s %s", identity.digest, identity.components)
 
     def _weight_rpc(

@@ -358,7 +358,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._local_id = f"{host}:{port}"
         self._nixl_agent_name = str(uuid.uuid4())
 
-        config_fields = FileMapper.from_offloading_spec(
+        self._config_fields = FileMapper.from_offloading_spec(
             root_dir="",
             offloading_spec=offloading_spec,
             blocks_per_file=offloading_spec.blocks_per_chunk,
@@ -367,7 +367,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._data: DataTransport = NixlTransport(
             self._nixl_agent_name,
             primary_kv_view,
-            config_fields=config_fields,
+            config_fields=self._config_fields,
             backends=backends,
             num_threads=int(num_threads),
         )
@@ -1117,27 +1117,39 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         if idle is None:
             return
         for pid in idle:
-            session = self._sessions.pop(pid)
-            stale_kv_ids = [
-                kid for kid, s in self._kv_to_session.items() if s is session
-            ]
-            for kid in stale_kv_ids:
-                del self._kv_to_session[kid]
-            close_result = session.close()
-            for job_id in close_result.failed_jobs:
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
-            for job_id in close_result.failed_stores:
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
-            self._retain(pid, close_result.retained)
-            self._failed_req_ids.update(close_result.failed_req_ids)
-            self._failed_serve_ctxs.extend(close_result.failed_serves)
-            self._data.remove_remote_peer(pid)
+            self._close_session(pid)
             logger.info(
                 "P2P %s: evicted idle peer %s (idle > %ds)",
                 self._local_id,
                 pid,
                 idle_timeout,
             )
+
+    def _close_session(self, pid: str) -> None:
+        session = self._sessions.pop(pid)
+        stale_kv_ids = [kid for kid, s in self._kv_to_session.items() if s is session]
+        for kid in stale_kv_ids:
+            del self._kv_to_session[kid]
+        close_result = session.close()
+        for job_id in close_result.failed_jobs:
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+        for job_id in close_result.failed_stores:
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+        self._retain(pid, close_result.retained)
+        self._failed_req_ids.update(close_result.failed_req_ids)
+        self._failed_serve_ctxs.extend(close_result.failed_serves)
+        self._data.remove_remote_peer(pid)
+
+    @override
+    def set_kv_identity(self, kv_identity: str) -> None:
+        if "kv_identity" not in self._config_fields:
+            return
+        self._config_fields["kv_identity"] = kv_identity
+        self._data.set_config_fields(self._config_fields)
+        # Peers connect again and are checked against the new fingerprint.
+        for pid in list(self._sessions):
+            self._close_session(pid)
+        logger.info("P2P %s: closed all sessions for a new KV identity", self._local_id)
 
     # ------------------------------------------------------------------
     # Polling

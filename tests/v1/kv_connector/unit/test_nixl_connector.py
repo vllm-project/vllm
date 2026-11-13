@@ -2555,6 +2555,7 @@ def recv_worker():
     worker._failed_remote_engines = set()
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
+    worker._stale_remote_engines = set()
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -3763,6 +3764,31 @@ class TestPeerReplacement:
         self.transport.remove_remote_agent.assert_called_once_with("old")
         assert not self.worker._failed_remote_engines
         assert not self.worker._invalid_remote_engines
+
+    def test_rehandshakes_peers_after_kv_identity_change(self):
+        """Peers handshaked against the previous KV identity are checked
+        against the new one before the next read."""
+        self.worker.xfer_handshake_metadata = NixlHandshakePayload(
+            compatibility_hash=self.worker.compat_hash, agent_metadata_bytes=b""
+        )
+        self.worker._compat_backend_name = "FLASH_ATTN"
+        self.worker.vllm_config.kv_transfer_config.kv_connector_extra_config[
+            "enforce_kv_identity"
+        ] = True
+        self.worker.vllm_config.cache_config.kv_identity = "new"
+
+        self.worker.update_kv_identity()
+        assert (
+            self.worker.xfer_handshake_metadata.compatibility_hash
+            == self.worker.compat_hash
+            == compute_nixl_compatibility_hash(
+                self.worker.vllm_config, "FLASH_ATTN", transfer_mode="pull"
+            )
+        )
+        self.worker.start_load_kv(self._request("old"))
+        self.transport.make_prepped_xfer.assert_not_called()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert "old" in self.worker._handshake_futures
 
     def test_rehandshakes_re_registered_peer(self):
         metadata = self._request("old")

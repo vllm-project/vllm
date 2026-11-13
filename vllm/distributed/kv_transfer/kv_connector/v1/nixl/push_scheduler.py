@@ -186,6 +186,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             "remote_port": params["remote_port"],
             "remote_tp_size": params["tp_size"],
             "remote_pp_size": params.get("pp_size", 1),
+            "remote_registration_generation": params.get(
+                "remote_registration_generation", 0
+            ),
         }
         self._push_registration_deadlines[request.request_id] = (
             time.perf_counter() + self._push_registration_timeout
@@ -290,6 +293,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            remote_registration_generation=self._registration_generation,
             transfer_mode=self._TRANSFER_MODE,
         )
 

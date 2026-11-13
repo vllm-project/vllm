@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.logger import init_logger
+from vllm.v1.kv_identity import is_known_kv_identity
 from vllm.v1.kv_offload.base import (
     ConfigInfoMapping,
     LoadStoreSpec,
@@ -311,6 +312,9 @@ class TieringOffloadingManager(OffloadingManager):
         self._deferred_releases: dict[JobId, _DeferredRelease] = {}
         # Set by reset_cache() until on_reset_flushed(); see lookup().
         self._promotions_held = False
+        # Cleared while the engine's KV identity is unknown; see
+        # set_kv_identity().
+        self._share_secondary_tiers = True
         primary_view = self.primary_tier.get_kv_memoryview()
         assert primary_view.strides is not None
         self._metrics = TieringMetricsTracker(
@@ -660,6 +664,8 @@ class TieringOffloadingManager(OffloadingManager):
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
     ) -> bool:
+        if not self._share_secondary_tiers:
+            return False
         detector = tier.bp_detector
         if detector is None:
             return True
@@ -746,7 +752,7 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
-        if self._promotions_held:
+        if self._promotions_held or not self._share_secondary_tiers:
             return LookupResult.MISS
 
         any_retry = False
@@ -1309,6 +1315,14 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def on_reset_flushed(self) -> None:
         self._promotions_held = False
+
+    @override
+    def set_kv_identity(self, kv_identity: str) -> None:
+        # Secondary tiers may be shared with other engines, so none is read or
+        # written while the KV identity is unknown.
+        self._share_secondary_tiers = is_known_kv_identity(kv_identity)
+        for tier in self.secondary_tiers:
+            tier.set_kv_identity(kv_identity)
 
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:

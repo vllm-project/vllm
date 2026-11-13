@@ -4,9 +4,27 @@
 changes: unknown until the new weights are identified, then an identity other
 engines with the same weights share."""
 
+import json
+
 import requests
 
 from tests.entrypoints.rl.conftest import gen, ok, server
+
+# With enforcement, the engine also resets the caches computed with the
+# previous weights before publishing a new identity.
+ENFORCED_OFFLOADING = [
+    "--kv-transfer-config",
+    json.dumps(
+        {
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "cpu_bytes_to_use": 1 << 30,
+                "enforce_kv_identity": True,
+            },
+        }
+    ),
+]
 
 
 def kv_identity(url: str) -> dict:
@@ -16,7 +34,7 @@ def kv_identity(url: str) -> dict:
 
 
 def test_weight_changes_update_kv_identity():
-    with server(port=8774) as url:
+    with server(extra_args=ENFORCED_OFFLOADING, port=8774) as url:
         startup = kv_identity(url)
         assert startup["components"]["weights_source"] == "hf_cache"
 

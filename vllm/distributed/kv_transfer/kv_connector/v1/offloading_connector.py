@@ -95,6 +95,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
         offloading_config = build_offloading_config(vllm_config, kv_cache_config)
         self._canonical_layout = offloading_config.canonical_layout
+        self._enforces_kv_identity = offloading_config.model.kv_identity is not None
         spec = OffloadingSpecFactory.create_spec(offloading_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
@@ -259,6 +260,12 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.reset_cache()
         return True
+
+    def update_kv_identity(self) -> None:
+        if self.connector_scheduler is not None and self._enforces_kv_identity:
+            kv_identity = self._vllm_config.cache_config.kv_identity
+            assert kv_identity is not None
+            self.connector_scheduler.set_kv_identity(kv_identity)
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_scheduler is not None:

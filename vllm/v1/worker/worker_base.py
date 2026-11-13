@@ -9,6 +9,7 @@ import torch.nn as nn
 
 import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -181,8 +182,11 @@ class WorkerBase:
         return self.checkpoint_digest
 
     def set_kv_identity(self, digest: str, components: dict[str, str]) -> None:
+        changed = self.cache_config.kv_identity is not None
         self.cache_config.kv_identity = digest
         self.cache_config.kv_identity_components = components
+        if changed and has_kv_transfer_group():
+            get_kv_transfer_group().update_kv_identity()
 
     def supports_draft_weight_updates(self) -> bool:
         """Whether this worker can update its configured speculative model."""

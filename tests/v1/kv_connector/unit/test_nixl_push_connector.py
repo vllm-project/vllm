@@ -197,6 +197,11 @@ class TestPushScheduler:
         assert ret_params is not None
         assert ret_params["do_remote_prefill"] is True
         assert ret_params["do_remote_decode"] is False
+        # D compares it to its handshake, to handshake again after P's changes.
+        assert (
+            ret_params["remote_registration_generation"]
+            == sched._registration_generation
+        )
         assert request.request_id in sched._finished_request_blocks
         assert request.request_id in sched._newly_finished_push_blocks
         assert request.request_id in sched._reqs_need_send  # lease armed
@@ -383,6 +388,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._remote_agents = {}
         w._failed_remote_engines = set()
         w._invalid_remote_engines = set()
+        w._stale_remote_engines = set()
+        w._remote_registration_generations = {}
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w.region_group_ids = [0]
@@ -398,6 +405,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}
+        w.compat_hash = "compat"
+        w.enforce_compat_hash = True
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -473,6 +482,7 @@ class TestPushWriterRegSend:
             assert decoded["request_id"] == "req-1"
             assert decoded["decode_engine_id"] == rd["decode_engine_id"]
             assert decoded["remote_engine_id"] == rd["remote_engine_id"]
+            assert decoded["compatibility_hash"] == "compat"
             assert decoded["local_block_ids"] == [
                 list(group) for group in rd["local_block_ids"]
             ]
@@ -747,6 +757,29 @@ def test_do_start_push_kv_drops_request_on_handshake_failure():
     assert w.xfer_stats.data["num_failed_transfers"] == []
 
 
+def test_do_start_push_kv_refuses_decode_with_changed_compat_hash():
+    """D's KV identity, part of its compatibility hash, may change after the
+    handshake, eg with its weights: P checks the hash D registers with before
+    each write. Without a hash (an older D) the handshake check stands."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    failures: list[dict[str, Any]] = []
+    w._log_failure = lambda **kw: failures.append(kw)
+    w._ensure_handshake = lambda *a, **k: None
+
+    changed = {**_registration_data("changed"), "compatibility_hash": "other"}
+    _real_do_start_push_kv(w, "changed", ([1],), changed)
+    assert xfer_calls == []
+    assert [f["failure_type"] for f in failures] == ["push_compat_mismatch"]
+
+    same = {**_registration_data("same"), "compatibility_hash": "compat"}
+    _real_do_start_push_kv(w, "same", ([1],), same)
+    _real_do_start_push_kv(w, "older", ([1],), _registration_data("older"))
+    assert [call["req_id"] for call in xfer_calls] == ["same", "older"]
+
+
 def test_writer_loop_drains_deferred_push_inbox():
     """The writer loop drains ``_deferred_push_inbox`` and re-drives
     ``_do_start_push_kv`` for each entry (event-driven, no polling)."""
@@ -832,6 +865,41 @@ def test_stale_engine_evicted_on_push():
     assert "D-old" not in w._remote_agents
     assert "D-old" not in w._engine_last_active
     w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
+
+
+@pytest.mark.parametrize(
+    "stale,generation,rehandshakes",
+    [(False, 0, False), (True, 0, True), (False, 1, True)],
+    ids=["unchanged", "local-kv-identity-changed", "prefill-reregistered"],
+)
+def test_registration_rehandshakes_outdated_prefill_engine(
+    stale: bool, generation: int, rehandshakes: bool
+):
+    """D handshakes P again before a PUSH_REG when either side changed its KV
+    identity since the last handshake, so the compatibility check fails the
+    request at once instead of D waiting for a WRITE that P refuses."""
+    w = _eviction_worker(engine_ttl=0.0)
+    w._remote_agents["prefill-engine"] = {(0, 0): "agent-prefill"}
+    if stale:
+        w._stale_remote_engines.add("prefill-engine")
+    handshakes: list[str] = []
+
+    def ensure_handshake(engine_id, *args, **kwargs):
+        if engine_id in w._remote_agents:
+            return None
+        handshakes.append(engine_id)
+        return Future()
+
+    w._ensure_handshake = ensure_handshake
+    w._do_send_reg_notif = MagicMock()
+    rd = {**_registration_data("req"), "remote_registration_generation": generation}
+
+    w._send_registration_to_p("req", rd)
+
+    assert handshakes == (["prefill-engine"] if rehandshakes else [])
+    assert w._do_send_reg_notif.called is not rehandshakes
+    assert not w._stale_remote_engines
+    assert w._remote_registration_generations.get("prefill-engine", 0) == generation
 
 
 def test_cleanup_remote_engine_pops_under_handshake_lock():

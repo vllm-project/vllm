@@ -165,6 +165,17 @@ class KVTransferConfig:
             ]
         return any(config.get("custom_mem_pool") for config in configs)
 
+    def enforces_kv_identity(self) -> bool:
+        """Whether a connector enforces the engine's KV identity
+        (enforce_kv_identity), directly or in MultiConnector."""
+        configs = [self.kv_connector_extra_config]
+        if self.kv_connector == "MultiConnector":
+            configs += [
+                child.get("kv_connector_extra_config", {})
+                for child in self.kv_connector_extra_config.get("connectors", [])
+            ]
+        return any(config.get("enforce_kv_identity") for config in configs)
+
     def registers_kv_cache_memory(self) -> bool:
         """Whether a connector registers the device KV cache itself with UCX or
         RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector. NIXL with

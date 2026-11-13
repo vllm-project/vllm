@@ -4,10 +4,11 @@
 identity must change with what computes the KV and nothing else."""
 
 import dataclasses
+from typing import Any
 
 import pytest
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, KVTransferConfig, ModelConfig, VllmConfig
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.v1.kv_identity import (
     CACHE_FACTORS_OUTSIDE_KV,
@@ -115,6 +116,25 @@ def test_weight_version_identifies_updated_weights():
     assert first.versioned("step-2").digest != step_1.digest
     other_files = _tracker({"weights": "1" * 64, "weights_source": "hf_cache"})
     assert other_files.versioned("step-1").digest != step_1.digest
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_enforcement_found_in_multi_connector(nested):
+    extra_config: dict[str, Any] = {"enforce_kv_identity": True}
+    if nested:
+        child = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+        extra_config = {
+            "connectors": [{**child, "kv_connector_extra_config": extra_config}]
+        }
+    config = KVTransferConfig(
+        kv_connector="MultiConnector" if nested else "NixlConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+
+    assert config.enforces_kv_identity()
+    config.kv_connector_extra_config = {}
+    assert not config.enforces_kv_identity()
 
 
 def test_engine_reports_identity(vllm_runner):
