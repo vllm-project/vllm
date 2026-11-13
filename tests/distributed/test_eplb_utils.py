@@ -317,13 +317,6 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
         torch.cuda.set_sync_debug_mode(prev_mode)
 
 
-@pytest.fixture
-def dist_init_backend() -> str:
-    # rearrange() all-reduces device tensors, which the gloo fallback that
-    # dist_init uses on XPU cannot do.
-    return current_platform.dist_backend
-
-
 class _WorkerProbe:
     """Reports each point where the async worker blocks, so a test can advance
     in lockstep with it instead of sleeping or polling. The tests then do not
