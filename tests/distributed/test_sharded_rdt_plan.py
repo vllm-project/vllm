@@ -1639,7 +1639,7 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
         ShardedRDTWeightTransferEngine,
         ShardedRDTWeightTransferInitInfo,
     )
-    from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+    from vllm.model_executor.model_loader.reload.layerwise import LAYERWISE_INFO
     from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 
     model = self.model_runner.model
@@ -1791,10 +1791,11 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
     # param may not share, e.g. under ROCm MoE padding. Tensors never put on
     # meta were baked against the live param itself.
     touched = set()
-    staged: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor]] = {}
+    restrided = 0
     _poison()
     with torch.no_grad():
         for plan in scatters.values():
+            staged: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor]] = {}
             for c in plan:
                 src_name, chain = c.src
                 t = ckpt[src_name]
@@ -1804,7 +1805,7 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
                 key = (id(c.layer), c.param_name)
                 if key not in staged:
                     dest = getattr(c.layer, c.param_name)
-                    params, buffers = get_layerwise_info(c.layer).restore_metadata
+                    params, buffers = LAYERWISE_INFO[c.layer].restore_metadata
                     fmt = {**params, **buffers}.get(c.param_name)
                     scratch = dest
                     if fmt is not None:
@@ -1814,12 +1815,13 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
                             dtype=dest.dtype,
                             device=dest.device,
                         ).copy_(dest)
+                        restrided += fmt.stride() != dest.stride()
                     staged[key] = (dest, scratch)
                 staged[key][1].as_strided(c.shape, c.stride, c.offset).copy_(t)
                 touched.add(param_name_of[key])
-        for dest, scratch in staged.values():
-            if scratch is not dest:
-                dest.copy_(scratch)
+            for dest, scratch in staged.values():
+                if scratch is not dest:
+                    dest.copy_(scratch)
 
     assert loaded, "the reference load wrote nothing"
     # The plan owns everything with a checkpoint source. Anything else the model
@@ -1861,6 +1863,7 @@ def _bake_probe(self, model_name):  # noqa: PLR0915  (runs in the vLLM worker)
         "loaded_params": len(loaded),
         "derived_not_in_plan": len(derived),
         "replayed_params": len(touched),
+        "restrided_params": restrided,
         "total_params": sum(1 for _ in model.named_parameters()),
     }
 
