@@ -86,6 +86,8 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._num_ssm_scratch_blocks = 0
         self._is_hma_required = False
         self._write_recv_timer_enabled = False
+        self._write_recv_timed_out: set[str] = set()
+        self._write_recv_held: set[str] = set()
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
