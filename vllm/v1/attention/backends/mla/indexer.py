@@ -30,6 +30,7 @@ from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     get_paged_mqa_page_sizes,
     has_deep_gemm,
+    is_deep_gemm_supported,
     native_next_n_supported,
 )
 from vllm.utils.math_utils import round_down
@@ -919,18 +920,20 @@ def dense_logits_rows(max_seqlen_k: int, max_logits_bytes: int | None = None) ->
 
 
 def _supports_varlen_paged_mqa_logits() -> bool:
+    """Return whether Blackwell supports the DeepGEMM variable-length paged path."""
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
-        and has_deep_gemm()
+        and is_deep_gemm_supported()
     )
 
 
 def _supports_flattened_device_query_lens() -> bool:
+    """Return whether Hopper supports device-side flattened query lengths."""
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(90)
-        and has_deep_gemm()
+        and is_deep_gemm_supported()
     )
 
 
@@ -951,7 +954,7 @@ def _supports_native_decode(next_n: int) -> bool:
     instead of flattening to one single-token row per query, which re-reads
     the KV tile once per row.
     """
-    if not (current_platform.is_cuda() and has_deep_gemm()):
+    if not (current_platform.is_cuda() and is_deep_gemm_supported()):
         return next_n in (1, 2)
     if current_platform.is_device_capability_family(100):
         return True
@@ -1470,6 +1473,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> DeepseekV32IndexerMetadata:
+        """Build indexing metadata for the current prefill and decode batches."""
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
@@ -1834,9 +1838,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            # DeepGEMM is required for the paged MQA logits on CUDA devices
+            # Only the DeepGEMM paged-MQA path consumes scheduler metadata.
             schedule_metadata = self.scheduler_metadata_buffer
-            if current_platform.is_cuda() and has_deep_gemm():
+            if current_platform.is_cuda() and is_deep_gemm_supported():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.num_states,
@@ -1879,6 +1883,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self,
         metadata: DeepseekV32IndexerMetadata,
     ) -> None:
+        """Update decode indexing lengths after a speculative draft step."""
         decode = metadata.decode
         if decode is None or metadata.num_decode_tokens == 0:
             return
@@ -1919,7 +1924,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             decode.seq_lens.view(-1).copy_(metadata.seq_lens)
         decode.decode_lens.fill_(1)
 
-        if current_platform.is_cuda() and has_deep_gemm():
+        if current_platform.is_cuda() and is_deep_gemm_supported():
             schedule_metadata = get_paged_mqa_logits_metadata(
                 decode.seq_lens,
                 self.kv_cache_spec.num_states,

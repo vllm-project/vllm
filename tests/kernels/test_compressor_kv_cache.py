@@ -23,6 +23,9 @@ from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )
+from vllm.models.deepseek_v4.common.ops.cache_utils import (
+    _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL,
+)
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
@@ -2187,6 +2190,46 @@ def test_dequantize_and_gather_k_cache(
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("num_reqs", [1, 2, 4, 8, 16, 32, 64, 128, 256])
+def test_dequantize_and_gather_k_cache_triton(num_reqs: int):
+    """Verify cache gathering respects a noncontiguous block-table view."""
+    block_size = 256
+    head_dim = 512
+    nope_dim = 448
+    scale_dim = 8
+    head_bytes = nope_dim + (head_dim - nope_dim) * 2 + scale_dim
+    device = "cuda"
+
+    compressed_kv = torch.randn(num_reqs, head_dim, dtype=torch.bfloat16, device=device)
+    physical_blocks = torch.randperm(num_reqs, device=device)
+    block_table_storage = torch.full(
+        (num_reqs, 4), int(-1e6), dtype=torch.int32, device=device
+    )
+    block_table = block_table_storage[:, :1]
+    block_table[:, 0] = physical_blocks
+    assert block_table.stride(0) != block_table.shape[-1]
+
+    slot_mapping = physical_blocks.to(torch.int64) * block_size
+    k_cache = torch.empty(
+        num_reqs, block_size, head_bytes, dtype=torch.uint8, device=device
+    )
+    quantize_and_insert_k_cache(
+        compressed_kv, k_cache.view(num_reqs, -1), slot_mapping, block_size
+    )
+
+    seq_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
+    expected = torch.empty(num_reqs, 1, head_dim, dtype=torch.bfloat16, device=device)
+    actual = torch.empty_like(expected)
+    _dequantize_and_gather_k_cache_reference(
+        expected, k_cache, seq_lens, None, block_table, block_size, 0
+    )
+    _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL(
+        actual, k_cache, seq_lens, None, block_table, block_size, 0
+    )
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 # ── Test C: Indexer path ────────────────────────────────────────────────────
 
 
@@ -2590,6 +2633,17 @@ def test_fused_kv_insert_indexer(
         device=device,
     )
 
+    fp8_software_conv = (
+        current_platform.is_cuda() and not current_platform.has_device_capability(89)
+    )
+    kernel_kwargs = {}
+    if not use_fp4:
+        kernel_kwargs["FP8_SOFTWARE_CONV"] = fp8_software_conv
+        if fp8_software_conv:
+            from vllm.v1.attention.ops.fp8e4nv import FP8E4NV_EXTERN_LIBS
+
+            kernel_kwargs["extern_libs"] = FP8E4NV_EXTERN_LIBS
+
     kernel[(num_tokens,)](
         state_cache,
         state_cache.stride(0),
@@ -2619,6 +2673,7 @@ def test_fused_kv_insert_indexer(
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
         MX_SCALE=mx_scale,
+        **kernel_kwargs,
         num_warps=1,
     )
 
@@ -3213,3 +3268,15 @@ def test_v41_indexer_forward_q(quant_tuple):
         "use_fp4": False,
         "weights_out_dtype": torch.float32,
     }
+
+
+def test_cutedsl_gather_warmup_skips_triton_dispatch(monkeypatch):
+    """Do not compile an unused CuTeDSL gather on the Triton fallback path."""
+    pytest.importorskip("cutlass")
+    from vllm.models.deepseek_v4.common.ops import cache_utils
+    from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
+        DequantGatherKCacheKernel,
+    )
+
+    monkeypatch.setattr(cache_utils, "_can_use_cutedsl", lambda: False)
+    assert DequantGatherKCacheKernel().get_warmup_keys(None) == []

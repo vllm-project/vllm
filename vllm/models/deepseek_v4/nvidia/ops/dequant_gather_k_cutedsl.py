@@ -334,6 +334,11 @@ class DequantGatherKCacheKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        from vllm.models.deepseek_v4.common.ops.cache_utils import _can_use_cutedsl
+
+        # Match dispatch: the Triton gather is used when CuTeDSL is ineligible.
+        if not _can_use_cutedsl():
+            return []
         block_size = vllm_config.cache_config.block_size
         compress_ratios = get_compress_ratios(vllm_config.model_config.hf_config)
         return self._trace_dispatch(self.dispatch)(

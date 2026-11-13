@@ -93,7 +93,8 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
+        """Return whether the CUDA family supports the DeepSeek V4 sparse backend."""
+        return capability.major in [8, 9, 10]
 
 
 @dataclass
@@ -400,6 +401,7 @@ class BuildC128ATopkMetadataKernel(
         slot_mapping_ptr,
         BLOCK_SIZE: tl.constexpr,
     ):
+        """Construct decode and prefill top-k metadata for compressed attention."""
         token_idx = tl.program_id(0)
         position = tl.load(positions_ptr + token_idx)
         num_compressed = (position + 1) // compress_ratio
@@ -409,6 +411,7 @@ class BuildC128ATopkMetadataKernel(
         if is_decode:
             # --- Decode: block-table lookup → global slot ids + count ---
             is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
+            num_compressed = tl.where(is_valid_token, num_compressed, 0)
             req_idx = tl.load(token_to_req_indices_ptr + token_idx)
             count = tl.zeros((), dtype=tl.int32)
             for i in range(0, max_compressed_tokens, BLOCK_SIZE):
