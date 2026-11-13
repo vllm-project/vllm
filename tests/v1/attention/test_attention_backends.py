@@ -2052,7 +2052,8 @@ def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
 )
 def test_flashinfer_trtllm_prefill_bf16_query_fp8_kv_scales(default_vllm_config):
     """TRTLLM prefill with a BF16 query dequantizes the FP8 KV cache with
-    k_scale / v_scale, so the kernel must not apply them a second time."""
+    k_scale / v_scale, so the kernel must not apply them a second time, nor
+    the q_scale of a query that was never quantized."""
     import unittest.mock
 
     from vllm.utils.flashinfer import supports_trtllm_attention
@@ -2086,6 +2087,7 @@ def test_flashinfer_trtllm_prefill_bf16_query_fp8_kv_scales(default_vllm_config)
             kv_cache_dtype="fp8",
             layer_k_scale=0.5,
             layer_v_scale=2.0,
+            layer_q_scale=0.25,
             attention_config=attention_config,
         )
     assert dequant.called
