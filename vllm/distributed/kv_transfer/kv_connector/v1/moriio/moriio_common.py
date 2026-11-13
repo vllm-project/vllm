@@ -242,10 +242,12 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
 def get_port_offset(
     dp_rank: int,
     tp_rank: int,
-    tp_size: int = 1,
+    tp_size: int,
     pp_rank: int = 0,
     pp_stride: int = 0,
 ) -> int:
+    """Port offset of a worker; tp_size is the TP size of the instance that
+    owns the port, so listeners and senders agree."""
     return pp_rank * pp_stride + dp_rank * tp_size + tp_rank
 
 
@@ -391,7 +393,7 @@ class MoRIIOConfig:
             tp_size, pc.data_parallel_size_local or pc.data_parallel_size
         )
         port_offset = get_port_offset(
-            dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_port_stride
+            dp_rank, tp_rank, tp_size, pp_rank=pp_rank, pp_stride=pp_port_stride
         )
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):

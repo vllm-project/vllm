@@ -70,7 +70,7 @@ def _moriio_config(pp_rank, pp_size, tp_rank, tp_size, dp_rank=0, dp_size=1):
 
 @pytest.mark.parametrize(
     ("pp_size", "tp_size", "dp_size"),
-    [(1, 4, 1), (4, 1, 1), (2, 2, 1), (2, 1, 2)],
+    [(1, 4, 1), (4, 1, 1), (2, 2, 1), (2, 1, 2), (2, 2, 2)],
 )
 def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
     configs = [
@@ -86,7 +86,9 @@ def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
         assert config.notify_port == NOTIFY_PORT + config.port_offset
         if config.pp_rank == 0:
             # Stage 0 keeps the ports of a pipeline-free instance.
-            assert config.port_offset == get_port_offset(config.dp_rank, config.tp_rank)
+            assert config.port_offset == get_port_offset(
+                config.dp_rank, config.tp_rank, config.tp_size
+            )
 
         # The first stage forwards to the same worker of every later stage.
         later = [
