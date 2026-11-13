@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from msgspec.structs import replace as replace_event
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
@@ -17,7 +19,13 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
-from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_events import (
+    BlockRemoved,
+    BlockStored,
+    EventPublisherFactory,
+    KVEventBatch,
+    KVEventSource,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -147,6 +155,12 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
+        self.enable_kv_event_metadata = (
+            self.enable_kv_cache_events
+            and self.kv_events_config is not None
+            and self.kv_events_config.enable_kv_event_metadata
+        )
+        self._kv_event_source = KVEventSource(source_id="cache_manager")
         # Pooling and diffusion models do not append a sampled token after
         # prefill, so they should not reserve one context slot while scheduling.
         self.num_sampled_tokens_per_step = (
@@ -2632,10 +2646,18 @@ class Scheduler(SchedulerInterface):
 
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
+        if events and self.enable_kv_event_metadata:
+            events = [
+                replace_event(event, source=self._kv_event_source) for event in events
+            ]
 
         # collect KV cache events from connector
         if self.connector is not None:
-            connector_events = self.connector.take_events()
+            connector_events = (
+                self.connector.take_events_with_metadata()
+                if self.enable_kv_event_metadata
+                else self.connector.take_events()
+            )
             if connector_events:
                 if events is None:
                     events = list(connector_events)
@@ -2644,6 +2666,15 @@ class Scheduler(SchedulerInterface):
 
         # publish collected KV cache events
         if events:
+            if not self.enable_kv_event_metadata:
+                for index, event in enumerate(events):
+                    if isinstance(event, (BlockStored, BlockRemoved)):
+                        if event.source is not None or event.sharing_scope is not None:
+                            events[index] = replace_event(
+                                event, source=None, sharing_scope=None
+                            )
+                    elif event.source is not None:
+                        events[index] = replace_event(event, source=None)
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
@@ -3425,7 +3456,13 @@ class Scheduler(SchedulerInterface):
         return self.ec_connector
 
     def get_kv_event_publisher_config(self) -> KVEventsConfig | None:
-        return self.kv_event_publisher.get_publisher_config()
+        publisher_config = self.kv_event_publisher.get_publisher_config()
+        if publisher_config is None or self.kv_events_config is None:
+            return publisher_config
+        return replace(
+            publisher_config,
+            enable_kv_event_metadata=self.kv_events_config.enable_kv_event_metadata,
+        )
 
     def _connector_finished(
         self, request: Request

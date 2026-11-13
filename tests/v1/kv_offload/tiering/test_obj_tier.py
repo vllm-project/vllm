@@ -1021,3 +1021,64 @@ def test_obj_tier_namespace_includes_blocks_per_chunk():
     finally:
         for tier in tiers:
             tier.shutdown()
+
+
+@pytest.mark.parametrize(
+    "scope_config",
+    [
+        {},
+        {"sharing_scope": None},
+        {"sharing_scope": "instance"},
+        {"sharing_scope": "shared"},
+    ],
+)
+@pytest.mark.parametrize(
+    "global_events,tier_events", [(True, True), (False, True), (True, False)]
+)
+def test_obj_scope_reaches_successful_store(scope_config, global_events, tier_events):
+    from dataclasses import replace
+
+    from tests.v1.kv_offload.conftest import make_offloading_config
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    spec = CPUOffloadingSpec(
+        replace(make_offloading_config(), enable_kv_cache_events=global_events)
+    )
+    tier, _ = _make_tier(
+        offloading_spec=spec,
+        enable_kv_events=tier_events,
+        locality="LOCAL",
+        **scope_config,
+    )
+    try:
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(tier)
+        assert len(results) == 1 and results[0].success
+        events = list(tier.take_events())
+        if global_events and tier_events:
+            [event] = events
+            assert event.sharing_scope == scope_config.get("sharing_scope")
+            assert event.locality is Locality.LOCAL
+            assert event.medium is Medium.STORAGE
+            assert event.keys == [key(1)]
+        else:
+            assert events == []
+    finally:
+        tier.shutdown()
+
+
+@pytest.mark.parametrize("scope", ["local", "", "SHARED", True, 1, [], {}])
+@pytest.mark.parametrize("global_events", [False, True])
+def test_obj_rejects_invalid_scope_at_construction(scope, global_events):
+    from dataclasses import replace
+
+    from tests.v1.kv_offload.conftest import make_offloading_config
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    with pytest.raises(ValueError, match="sharing_scope"):
+        _make_tier(
+            offloading_spec=CPUOffloadingSpec(
+                replace(make_offloading_config(), enable_kv_cache_events=global_events)
+            ),
+            sharing_scope=scope,
+        )

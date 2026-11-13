@@ -131,6 +131,28 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 | `canonical_layout` | no | `false` | both | Store each offloaded block in a common canonical representation instead of each worker's local GPU page (enables sharing across TP sizes and single-copy storage of replicated KV). See [Canonical Layout](#canonical-layout). |
 
+## KV event metadata
+
+[KV event metadata](kv_event_metadata.md) is disabled by default. To publish
+logical source and resource sharing scope, add this argument to an offloading
+launch command:
+
+```bash
+--kv-events-config '{"enable_kv_cache_events":true,"enable_kv_event_metadata":true,"publisher":"zmq","endpoint":"tcp://*:5557","replay_endpoint":"tcp://*:5558"}'
+```
+
+The native primary CPU cache declares `instance` scope. Other resources reported
+by an offloading connector keep their own declarations; the `CPU` medium alone
+does not establish scope. With metadata enabled, a standalone connector uses
+`source_id: "connector/0"` and its configured connector name.
+
+`self_describing_kv_events` independently controls complete versus hash-only
+placeholder payloads. Disabling metadata omits `source` and `sharing_scope` from
+both forms and from existing remove events, without changing their hashes,
+tokens, group, locality, ownership, or session fields. Metadata does not repair
+chunk matching or change the removal contract and reference-counting rules
+above.
+
 ## Canonical Layout
 
 By default, each worker copies its own GPU page to the CPU tier unchanged, so an offloaded block is stored in whatever form that worker happens to hold it.
@@ -236,6 +258,48 @@ The filesystem and object-store tiers can publish hash-only `BlockStored` KV eve
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
 
+### Declaring filesystem and object-store sharing
+
+Both `fs` and `obj` tiers accept an optional `sharing_scope` property. Set it to
+`instance` for a private resource or `shared` for a resource shared across
+instances. Omission or JSON `null` means unknown. Empty strings, other strings
+(including uppercase variants), and non-string values are rejected at tier
+initialization, even when metadata publication is disabled. vLLM does not infer
+scope from a directory or bucket.
+
+For example, these entries in `secondary_tiers` describe a private filesystem
+tier and a shared object-store tier:
+
+```json
+[
+  {
+    "type": "fs",
+    "root_dir": "/mnt/private-kv-cache",
+    "enable_kv_events": true,
+    "locality": "LOCAL",
+    "sharing_scope": "instance"
+  },
+  {
+    "type": "obj",
+    "store_config": {"bucket": "kv", "endpoint_override": "s3.example:9000"},
+    "enable_kv_events": true,
+    "locality": "REMOTE",
+    "sharing_scope": "shared"
+  }
+]
+```
+
+Either tier accepts either scope; a shared filesystem can also have
+`locality: "LOCAL"`. Locality is relative to the publisher, `ownership` is the
+tier identifier, and scope describes resource sharing. None of these fields is
+a storage-domain ID or permission grant.
+
+Each tier's `enable_kv_events` and global `enable_kv_cache_events` must both be
+true to generate its events. A valid scope declaration does not enable metadata:
+only global `enable_kv_event_metadata: true` publishes it. Default/false mode
+still publishes eligible events with both new fields omitted. Tier resource
+validation and internal scope propagation apply in both modes.
+
 ### Threading model
 
 Tier methods run in the scheduler process, under the tiering manager's lock, so they are never entered concurrently. They are not always called from the same thread, though.
@@ -261,6 +325,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
+| `sharing_scope` | no | unspecified | `instance`, `shared`, or `null`. A resource declaration; published only with global `enable_kv_event_metadata: true`. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
 
@@ -304,6 +369,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `io_threads` | no | `4` | Number of NIXL OBJ backend I/O threads. |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
+| `sharing_scope` | no | unspecified | `instance`, `shared`, or `null`. A resource declaration; published only with global `enable_kv_event_metadata: true`. |
 
 `store_config` fields:
 

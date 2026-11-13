@@ -448,3 +448,143 @@ def test_ephemeral_bind_needs_a_node_ip(monkeypatch, node_ip):
     )
     with pytest.raises(ValueError, match="VLLM_HOST_IP"):
         EventPublisherFactory.create(config, DP_RANK)
+
+
+@pytest.mark.parametrize("metadata", [False, True])
+def test_metadata_keeps_distinct_sources_and_original_replay_bytes(
+    publisher_config, subscriber, metadata
+):
+    """Transport preserves prepared batches, including equal legacy-mode events."""
+    from tests.distributed.test_kv_cache_events import _STRICT_PRE_METADATA_EVENT
+    from vllm.distributed.kv_events import BlockStored, KVEventBatch, KVEventSource
+
+    publisher_config.enable_kv_event_metadata = metadata
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    events = [
+        BlockStored(
+            block_hashes=[b"block"],
+            parent_block_hash=None,
+            token_ids=[1, 2],
+            block_size=2,
+            lora_id=None,
+            medium="CPU",
+            lora_name=None,
+            source=(
+                KVEventSource(f"connector/{index}", "OffloadingConnector")
+                if metadata
+                else None
+            ),
+            sharing_scope="instance" if metadata else None,
+        )
+        for index in range(2)
+    ]
+    try:
+        publisher.publish(KVEventBatch(ts=1.0, events=events))
+        assert subscriber.sub.poll(5000), "No live metadata batch"
+        live = subscriber.sub.recv_multipart()
+        topic, seq, payload = live
+        decoded = msgspec.msgpack.decode(payload, type=KVEventBatch)
+        assert decoded.events == events
+        assert len(decoded.events) == 2
+        assert decoded.data_parallel_rank == DP_RANK
+        assert topic == subscriber.topic_bytes
+        assert int.from_bytes(seq, "big") == 0
+        if not metadata:
+            for event_payload in msgspec.msgpack.decode(payload)[1]:
+                assert "source" not in event_payload
+                assert "sharing_scope" not in event_payload
+                msgspec.msgpack.decode(
+                    msgspec.msgpack.encode(event_payload),
+                    type=_STRICT_PRE_METADATA_EVENT,
+                )
+
+        subscriber.request_replay(0)
+        replay = subscriber.replay_sockets[0]
+        assert replay.poll(5000), "No replay metadata batch"
+        assert replay.recv_multipart() == [b"", *live]
+        assert replay.poll(5000), "Missing replay end marker"
+        assert replay.recv_multipart() == [b"", b"", ZmqEventPublisher.END_SEQ, b""]
+    finally:
+        publisher.shutdown()
+
+
+@pytest.mark.parametrize("metadata", [None, False, True])
+def test_metadata_preserves_custom_publisher_constructor_and_discovery(
+    publisher_config,
+    metadata,
+):
+    from dataclasses import asdict
+    from uuid import uuid4
+
+    def constructor(
+        *,
+        data_parallel_rank,
+        endpoint,
+        replay_endpoint,
+        buffer_steps,
+        hwm,
+        max_queue_size,
+        topic,
+    ):
+        return ZmqEventPublisher(
+            data_parallel_rank=data_parallel_rank,
+            endpoint=endpoint,
+            replay_endpoint=replay_endpoint,
+            buffer_steps=buffer_steps,
+            hwm=hwm,
+            max_queue_size=max_queue_size,
+            topic=topic,
+        )
+
+    if metadata is not None:
+        publisher_config.enable_kv_event_metadata = metadata
+    name = f"metadata-contract-{uuid4().hex}"
+    EventPublisherFactory.register_publisher(name, constructor)
+    # Plugin publishers register at runtime; this retains the existing factory API.
+    publisher_config.publisher = name
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    try:
+        discovery = asdict(publisher.get_publisher_config())
+        assert set(discovery) == {
+            "enable_kv_cache_events",
+            "enable_kv_event_metadata",
+            "publisher",
+            "endpoint",
+            "replay_endpoint",
+            "buffer_steps",
+            "hwm",
+            "max_queue_size",
+            "topic",
+        }
+        expected = asdict(publisher_config)
+        expected["publisher"] = "zmq"
+        assert discovery == expected
+    finally:
+        publisher.shutdown()
+
+
+@pytest.mark.parametrize("metadata", [None, False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_metadata_opt_in_factory_and_resolved_config(metadata, enabled):
+    """Metadata is independent of event admission and survives endpoint resolution."""
+    from vllm.config import KVEventsConfig
+
+    config = KVEventsConfig(
+        enable_kv_cache_events=enabled,
+        endpoint="tcp://*:0",
+        replay_endpoint="tcp://*:0",
+        **({} if metadata is None else {"enable_kv_event_metadata": metadata}),
+    )
+    assert config.enable_kv_event_metadata is bool(metadata)
+    publisher = EventPublisherFactory.create(config, data_parallel_rank=2)
+    try:
+        if not enabled:
+            assert isinstance(publisher, NullEventPublisher)
+        else:
+            resolved = publisher.get_publisher_config()
+            assert resolved.enable_kv_event_metadata is bool(metadata)
+            assert resolved.endpoint != config.endpoint
+            assert resolved.replay_endpoint != config.replay_endpoint
+            assert resolved.endpoint != resolved.replay_endpoint
+    finally:
+        publisher.shutdown()

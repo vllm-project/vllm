@@ -22,6 +22,7 @@ import numpy as np
 import torch
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_events import SharingScope
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
         OffloadingConnectorStats,
     )
@@ -221,6 +222,7 @@ class OffloadingEvent:
     metadata_only: bool = False
     # Originating request context for a stored event.
     req_context: ReqContext | None = field(default=None, repr=False, compare=False)
+    sharing_scope: "SharingScope | None" = None
 
 
 """

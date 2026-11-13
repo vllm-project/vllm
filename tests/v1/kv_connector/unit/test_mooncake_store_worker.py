@@ -20,7 +20,7 @@ import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.distributed import mooncake_store
-from vllm.distributed.kv_events import KVEventAggregator
+from vllm.distributed.kv_events import BlockStored, KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     transfer_engine_registry,
 )
@@ -688,6 +688,81 @@ def test_tp_shared_kv_events_aggregate_once_per_logical_block():
         aggregator.add_events(events)
 
     assert len(aggregator.get_common_events()) == 1
+
+
+def _make_scope_event_sender(store, *, enable_kv_event=True):
+    db, cache = _make_tp_shared_db()
+    sender = mooncake_store_worker.KVCacheStoreSendingThread(
+        store=store,
+        coord=_default_send_coord(),
+        token_databases=[db],
+        block_size=16,
+        tp_rank=0,
+        group_put_steps=[1],
+        kv_role="kv_producer",
+        ready_event=threading.Event(),
+        enable_kv_event=enable_kv_event,
+    )
+    return sender, cache
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "exists,results,enabled,expected_count",
+    [
+        pytest.param([0, 0], [256, 256], True, 1, id="all-shards-stored"),
+        pytest.param([0, 0], [256, -1], True, 0, id="failed-shard"),
+        pytest.param([1, 0], [256], True, 1, id="existing-shard"),
+        pytest.param([1, 1], [], True, 0, id="already-stored"),
+        pytest.param([0, 0], [256, 256], False, 0, id="events-disabled"),
+    ],
+)
+def test_successful_store_events_declare_shared_scope(
+    tmp_path, exists, results, enabled, expected_count
+):
+    """Only successful logical stores report shared scope, with their old payload."""
+    store = MagicMock()
+    store.batch_is_exist.return_value = exists
+    store.batch_put_from_multi_buffers.return_value = results
+    sender, cache = _make_scope_event_sender(store, enable_kv_event=enabled)
+    request = _make_event_store_req(16)
+    _run_store_req(sender, request)
+
+    events = sender.get_kv_events()
+    assert len(events) == expected_count
+    if expected_count:
+        assert events == [
+            BlockStored(
+                block_hashes=[maybe_convert_block_hash(BlockHash(b"a0"))],
+                parent_block_hash=None,
+                token_ids=list(range(16)),
+                block_size=16,
+                lora_id=None,
+                medium="cpu",
+                lora_name=None,
+                group_idx=0,
+                sharing_scope="shared",
+            )
+        ]
+        assert events[0].source is None
+        from tests.v1.kv_connector.unit.test_multi_connector import (
+            publish_test_events_with_scheduler,
+        )
+
+        for metadata in (False, True):
+            published = publish_test_events_with_scheduler(
+                tmp_path, events, metadata
+            ).events[1:]
+            assert len(published) == 2
+            for event in published:
+                assert event.medium == "cpu"
+                assert event.block_hashes == events[0].block_hashes
+                assert event.token_ids == events[0].token_ids
+                assert event.sharing_scope == ("shared" if metadata else None)
+            assert events[0].sharing_scope == "shared"
+            assert events[0].source is None
+    assert sender.get_kv_events() == []
+    assert sender.take_completed_saves() == {request.store_job_id: 1}
 
 
 def test_tp_shared_kv_event_waits_for_all_missing_shards():

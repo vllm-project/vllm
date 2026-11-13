@@ -363,6 +363,7 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=to_evict,
                     medium=self.medium,
                     removed=True,
+                    sharing_scope="instance",
                 )
             )
 
@@ -441,6 +442,7 @@ class CPUOffloadingManager(OffloadingManager):
                     removed=False,
                     removal_expected=True,
                     req_context=req_context,
+                    sharing_scope="instance",
                 )
             )
 

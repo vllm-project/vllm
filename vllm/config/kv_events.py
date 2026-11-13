@@ -16,6 +16,11 @@ class KVEventsConfig:
     Events can be published externally by zmq using the event publisher config.
     """
 
+    enable_kv_event_metadata: bool = False
+    """Include logical source and known resource sharing scope in KV events.
+    Requires `enable_kv_cache_events`. When False, both fields are omitted.
+    """
+
     publisher: Literal["null", "zmq"] = None  # type: ignore[assignment]
     """The publisher to use for publishing kv events. Can be "null", "zmq".
     """

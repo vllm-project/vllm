@@ -1209,6 +1209,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             medium="cpu",
                             lora_name=None,
                             group_idx=g_idx,
+                            sharing_scope="shared",
                         )
                     )
 

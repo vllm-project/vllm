@@ -3,20 +3,32 @@
 import filecmp
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 import torch
+import zmq
 
 from tests.v1.kv_connector.unit.utils import (
+    create_request,
+    create_scheduler,
     create_vllm_config,
     maybe_update_block_size,
     set_mtp_config,
 )
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import KVEventsConfig, KVTransferConfig
+from vllm.distributed.kv_events import (
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
+    KVEventBatch,
+    KVEventSource,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -42,7 +54,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVConnectorWorkerMetadata,
+    ModelRunnerOutput,
+)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -157,6 +173,343 @@ class LookaheadHashingTestConnector(ExampleConnector):
                 "supports_lookahead_block_hashes", False
             )
         )
+
+
+class EventTestConnector(ExampleConnector):
+    """Real scheduler-side connector with an explicit event queue."""
+
+    def __init__(self, vllm_config, role, kv_cache_config):
+        super().__init__(vllm_config, role, kv_cache_config)
+        self.events = []
+        self.drain_count = 0
+
+    def add_event(self, event):
+        self.events.append(event)
+
+    def take_events(self):
+        self.drain_count += 1
+        events, self.events = self.events, []
+        return events
+
+
+class OpaqueEventTestConnector(EventTestConnector):
+    """A plugin composite whose internal layout is outside MultiConnector."""
+
+    def __init__(self, vllm_config, role, kv_cache_config):
+        super().__init__(vllm_config, role, kv_cache_config)
+        self.sub_connectors = [EventTestConnector(vllm_config, role, kv_cache_config)]
+
+    def take_events(self):
+        for connector in self.sub_connectors:
+            yield from connector.take_events()
+
+
+KVConnectorFactory.register_connector("EventAlias", __name__, "EventTestConnector")
+KVConnectorFactory.register_connector(
+    "OpaqueAlias", __name__, "OpaqueEventTestConnector"
+)
+
+
+def _event_connector_config(name="EventAlias"):
+    return {"kv_connector": name, "kv_role": "kv_both"}
+
+
+def _event_test_connector(
+    children=None, enabled=True, name="EventAlias", metadata=True
+):
+    config = create_vllm_config(
+        kv_connector=name if children is None else "MultiConnector",
+        kv_connector_extra_config={} if children is None else {"connectors": children},
+        disable_hybrid_kv_cache_manager=True,
+    )
+    config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=enabled,
+        **({} if metadata is None else {"enable_kv_event_metadata": metadata}),
+    )
+    return KVConnectorFactory.create_connector(
+        config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+
+def _source_test_events():
+    source = KVEventSource("producer-supplied", "wrong-name")
+    return [
+        BlockStored(
+            block_hashes=[1],
+            parent_block_hash=None,
+            token_ids=[2, 3],
+            block_size=2,
+            lora_id=None,
+            medium="CPU",
+            lora_name=None,
+            extra_keys=[("tenant",)],
+            group_idx=1,
+            locality="REMOTE",
+            ownership="tier-a",
+            session_id="session-a",
+            lookahead_token_ids=[[4]],
+            sharing_scope="shared",
+            source=source,
+        ),
+        BlockRemoved([1], "CPU", sharing_scope="instance", source=source),
+        AllBlocksCleared(source=source),
+    ]
+
+
+@pytest.mark.cpu_test
+def test_connector_metadata_copies_events_and_reuses_configured_source():
+    connector = _event_test_connector()
+    originals = _source_test_events()
+    original_hashes = [hash(event) for event in originals]
+    for event in originals:
+        connector.add_event(event)
+    attributed = list(connector.take_events_with_metadata())
+
+    assert len(attributed) == len(originals)
+    for original, event in zip(originals, attributed):
+        assert event is not original
+        assert event.source == KVEventSource("connector/0", "EventAlias")
+        assert event.source is attributed[0].source
+        assert original.source == KVEventSource("producer-supplied", "wrong-name")
+        for field in original.__struct_fields__:
+            if field != "source":
+                assert getattr(event, field) == getattr(original, field)
+                if isinstance(getattr(original, field), list):
+                    assert getattr(event, field) is getattr(original, field)
+    assert [hash(event) for event in originals] == original_hashes
+    connector.add_event(originals[0])
+    assert list(connector.take_events_with_metadata())[0].source is attributed[0].source
+    assert list(connector.take_events_with_metadata()) == []
+    assert connector.drain_count == 3
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("nested", [False, True])
+def test_multi_connector_metadata_preserves_config_positions_and_drain_order(nested):
+    children = [_event_connector_config(), _event_connector_config()]
+    if nested:
+        children[1] = {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "connectors": [
+                    _event_connector_config(),
+                    _event_connector_config(),
+                ]
+            },
+        }
+    connector = _event_test_connector(children)
+    first, second = connector.sub_connectors
+    leaves = [first, *second.sub_connectors] if nested else [first, second]
+    events = _source_test_events()
+    for leaf in (leaves[0], leaves[-1]):
+        for event in events:
+            leaf.add_event(event)
+    attributed = list(connector.take_events_with_metadata())
+    expected_ids = ["connector/0"] * 3 + [
+        "connector/1/1" if nested else "connector/1"
+    ] * 3
+    assert [event.source.source_id for event in attributed] == expected_ids
+    expected_types = [type(event) for event in events] * 2
+    assert [type(event) for event in attributed] == expected_types
+    assert all(event.source.connector_name == "EventAlias" for event in attributed)
+    assert all(leaf.drain_count == 1 for leaf in leaves)
+    for leaf in leaves:
+        leaf.add_event(events[0])
+    next_batch = list(connector.take_events_with_metadata())
+    assert [event.source.source_id for event in next_batch] == (
+        ["connector/0", "connector/1/0", "connector/1/1"]
+        if nested
+        else ["connector/0", "connector/1"]
+    )
+    assert next_batch[0].source is attributed[0].source
+    assert next_batch[-1].source is attributed[-1].source
+    assert all(leaf.drain_count == 2 for leaf in leaves)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize(
+    ("enabled", "metadata"), [(False, True), (True, None), (True, False)]
+)
+def test_connector_metadata_disabled_returns_original_events(multi, enabled, metadata):
+    connector = _event_test_connector(
+        [_event_connector_config()] if multi else None,
+        enabled=enabled,
+        metadata=metadata,
+    )
+    leaf = connector.sub_connectors[0] if multi else connector
+    event = _source_test_events()[0]
+    leaf.add_event(event)
+    assert list(connector.take_events_with_metadata()) == [event]
+    leaf.add_event(event)
+    assert list(connector.take_events_with_metadata())[0] is event
+    assert leaf.drain_count == 2
+
+
+@pytest.mark.cpu_test
+def test_opaque_connector_metadata_does_not_infer_internal_source_paths():
+    connector = _event_test_connector(name="OpaqueAlias")
+    event = _source_test_events()[0]
+    connector.sub_connectors[0].add_event(event)
+    attributed = list(connector.take_events_with_metadata())
+    assert len(attributed) == 1
+    assert attributed[0].source == KVEventSource("connector/0", "OpaqueAlias")
+    assert event.source.source_id == "producer-supplied"
+
+
+def publish_test_events_with_scheduler(
+    tmp_path, originals, metadata, *, native_stores=False, publisher_name=None
+):
+    """Publish real producer events through scheduler collection and ZMQ replay."""
+    from uuid import uuid4
+
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [_event_connector_config(), _event_connector_config()]
+        },
+        disable_hybrid_kv_cache_manager=True,
+    )
+    endpoint = f"inproc://{tmp_path}-{uuid4().hex}"
+    config.kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        endpoint=endpoint,
+        replay_endpoint=endpoint + "-replay",
+        **({} if metadata is None else {"enable_kv_event_metadata": metadata}),
+    )
+    if publisher_name is not None:
+        config.kv_events_config.publisher = publisher_name
+    scheduler = create_scheduler(config, num_blocks=10)
+    replay = zmq.Context.instance().socket(zmq.DEALER)
+    replay.connect(endpoint + "-replay")
+    try:
+        for _ in range(2):
+            runtime_config = scheduler.get_kv_event_publisher_config()
+            assert runtime_config.enable_kv_event_metadata is bool(metadata)
+            assert runtime_config.endpoint == endpoint
+            assert runtime_config.replay_endpoint == endpoint + "-replay"
+        for leaf in scheduler.connector.sub_connectors:
+            for event in originals:
+                leaf.add_event(event)
+        if native_stores:
+            manager = scheduler.kv_cache_manager
+            block_size = config.cache_config.block_size
+            for index in range(2):
+                request = create_request(
+                    request_id=index + 1,
+                    num_tokens=9 * block_size,
+                    block_size=block_size,
+                )
+                assert manager.allocate_slots(request, 9 * block_size) is not None
+                manager.free(request)
+        assert scheduler.reset_prefix_cache()
+        scheduler.update_from_output(
+            scheduler.schedule(), ModelRunnerOutput(req_ids=[])
+        )
+        deadline = time.monotonic() + 5
+        published: list[KVEventBatch] = []
+        while not published and time.monotonic() < deadline:
+            replay.send_multipart([b"", (0).to_bytes(8, "big")])
+            while time.monotonic() < deadline:
+                assert replay.poll(1000), "Timed out waiting for scheduler event replay"
+                _, _, _, payload = replay.recv_multipart()
+                if not payload:
+                    break
+                published.append(msgspec.msgpack.decode(payload, type=KVEventBatch))
+        assert len(published) == 1
+        assert all(leaf.drain_count == 1 for leaf in scheduler.connector.sub_connectors)
+        return published[0]
+    finally:
+        replay.close(linger=0)
+        scheduler.shutdown()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("metadata", [None, False, True])
+@pytest.mark.parametrize("payload_kind", ["full", "placeholder", "mooncake"])
+def test_scheduler_metadata_attributes_native_and_connector_events(
+    tmp_path, metadata, payload_kind
+):
+    """Suppression preserves payloads and duplicate configured producer occurrences."""
+    from tests.distributed.test_kv_cache_events import _STRICT_PRE_METADATA_EVENT
+
+    originals = _source_test_events()
+    if payload_kind == "placeholder":
+        originals[0] = msgspec.structs.replace(
+            originals[0], token_ids=[], block_size=0, parent_block_hash=None
+        )
+    elif payload_kind == "mooncake":
+        originals[0] = msgspec.structs.replace(originals[0], medium="cpu")
+    original_bytes = [msgspec.msgpack.encode(event) for event in originals]
+    events = publish_test_events_with_scheduler(
+        tmp_path, originals, metadata, native_stores=True
+    ).events
+    native, connector_events = events[:-6], events[-6:]
+    assert [type(event) for event in native] == (
+        [BlockStored] + [BlockRemoved] * 9 + [BlockStored, AllBlocksCleared]
+    )
+    assert all(
+        event.source == (KVEventSource("cache_manager") if metadata else None)
+        for event in native
+    )
+    for event in native[:-1]:
+        assert event.medium == "GPU"
+        assert event.sharing_scope == ("instance" if metadata else None)
+    assert "sharing_scope" not in native[-1].__struct_fields__
+    assert [type(event) for event in connector_events] == [
+        type(event) for event in originals + originals
+    ]
+    for index, (original, published_event) in enumerate(
+        zip(originals + originals, connector_events)
+    ):
+        fields = msgspec.to_builtins(published_event)
+        expected = msgspec.to_builtins(original)
+        expected.pop("source")
+        if metadata:
+            expected["source"] = {
+                "source_id": f"connector/{index // len(originals)}",
+                "connector_name": "EventAlias",
+            }
+        else:
+            expected.pop("sharing_scope", None)
+        assert fields == expected
+        for field in original.__struct_fields__:
+            if isinstance(getattr(original, field), list):
+                assert getattr(original, field) == getattr(published_event, field)
+    if not metadata:
+        for event in events:
+            msgspec.msgpack.decode(
+                msgspec.msgpack.encode(event), type=_STRICT_PRE_METADATA_EVENT
+            )
+    assert [msgspec.msgpack.encode(event) for event in originals] == original_bytes
+    assert all(event.source.source_id == "producer-supplied" for event in originals)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("metadata", [False, True])
+def test_scheduler_metadata_runtime_config_with_copying_custom_publisher(
+    tmp_path, metadata
+):
+    """Framework discovery retains its setting with fresh plugin config copies."""
+    from dataclasses import replace
+    from uuid import uuid4
+
+    from vllm.distributed.kv_events import EventPublisherFactory, ZmqEventPublisher
+
+    class CopyingConfigPublisher(ZmqEventPublisher):
+        def get_publisher_config(self):
+            return replace(super().get_publisher_config())
+
+    name = f"copying-config-{uuid4().hex}"
+    EventPublisherFactory.register_publisher(name, CopyingConfigPublisher)
+    batch = publish_test_events_with_scheduler(
+        tmp_path, _source_test_events(), metadata, publisher_name=name
+    )
+    assert len(batch.events) == 7
+    assert all((event.source is not None) is metadata for event in batch.events)
 
 
 class MockDivergentHMAConnector(MockHMAConnector):

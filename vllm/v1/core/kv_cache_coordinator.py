@@ -130,6 +130,7 @@ class KVCacheCoordinator(ABC):
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
+            sharing_scope="instance",
         )
 
         # KV cache group indices that get the EAGLE last-block drop.

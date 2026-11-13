@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import Counter
 from typing import Any
 
 import msgspec
 import pytest
 
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved, BlockStored
 
 # Minimal ExternalBlockHash for testing (bytes are a valid ExternalBlockHash).
 _FAKE_HASH: bytes = b"\xab" * 32
+
+
+class _LegacyAllBlocksCleared(
+    msgspec.Struct,
+    tag="AllBlocksCleared",  # type: ignore[call-arg]
+):
+    pass
 
 
 class _LegacyBlockStored(
@@ -66,6 +74,42 @@ class _PreSessionBlockStored(
     kv_cache_spec_kind: str | None = None
     kv_cache_spec_sliding_window: int | None = None
     locality: str | None = None
+
+
+class _StrictPreMetadataBlockStored(
+    _PreSessionBlockStored,
+    forbid_unknown_fields=True,  # type: ignore[call-arg]
+):
+    """Exact store schema immediately before source and scope were introduced."""
+
+    block_hashes: list[bytes | int]
+    parent_block_hash: bytes | int | None
+    ownership: str | None = None
+    session_id: str | None = None
+    lookahead_token_ids: list[list[int]] | None = None
+
+
+class _StrictPreMetadataBlockRemoved(
+    _LegacyBlockRemoved,
+    forbid_unknown_fields=True,  # type: ignore[call-arg]
+):
+    block_hashes: list[bytes | int]
+    locality: str | None = None
+    ownership: str | None = None
+
+
+class _StrictPreMetadataAllBlocksCleared(
+    _LegacyAllBlocksCleared,
+    forbid_unknown_fields=True,  # type: ignore[call-arg]
+):
+    pass
+
+
+_STRICT_PRE_METADATA_EVENT = (
+    _StrictPreMetadataBlockStored
+    | _StrictPreMetadataBlockRemoved
+    | _StrictPreMetadataAllBlocksCleared
+)
 
 
 def _make_block_stored(
@@ -247,3 +291,137 @@ def test_block_stored_session_id_is_wire_compatible():
     assert (
         msgspec.msgpack.decode(new_payload, type=_PreSessionBlockStored).medium == "GPU"
     )
+
+
+@pytest.mark.parametrize(
+    ("make_event", "legacy_type"),
+    [
+        (_make_block_stored, _LegacyBlockStored),
+        (_make_block_removed, _LegacyBlockRemoved),
+        (AllBlocksCleared, _LegacyAllBlocksCleared),
+    ],
+)
+def test_event_metadata_round_trip_and_legacy_decoder(make_event, legacy_type):
+    """New metadata survives the wire while tolerant old consumers keep payloads."""
+    event = make_event()
+    original = msgspec.msgpack.encode(event)
+    payload = msgspec.msgpack.decode(original)
+    payload["source"] = {
+        "source_id": "connector/1/0",
+        "connector_name": "ConfiguredConnector",
+    }
+    if not isinstance(event, AllBlocksCleared):
+        payload["sharing_scope"] = "shared"
+    encoded = msgspec.msgpack.encode(payload)
+    decoded = msgspec.msgpack.decode(encoded, type=type(event))
+    assert msgspec.msgpack.decode(msgspec.msgpack.encode(decoded)) == payload
+    assert msgspec.msgpack.decode(encoded, type=legacy_type) == (
+        msgspec.msgpack.decode(original, type=legacy_type)
+    )
+
+
+@pytest.mark.parametrize(
+    "make_event", [_make_block_stored, _make_block_removed, AllBlocksCleared]
+)
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_missing_event_metadata_stays_unknown(make_event, explicit_null):
+    event = make_event()
+    payload = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+    assert "source" not in payload
+    assert "sharing_scope" not in payload
+    if explicit_null:
+        payload["source"] = None
+        if not isinstance(event, AllBlocksCleared):
+            payload["sharing_scope"] = None
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=type(event))
+    assert decoded.source is None
+    if isinstance(event, AllBlocksCleared):
+        assert "sharing_scope" not in decoded.__struct_fields__
+    else:
+        assert decoded.sharing_scope is None
+    assert decoded == event
+
+
+@pytest.mark.parametrize(
+    "make_event", [_make_block_stored, _make_block_removed, AllBlocksCleared]
+)
+def test_event_sources_remain_distinct_in_counters(make_event):
+    """Equal payloads from separate configured producers must not collapse."""
+    event = make_event()
+    payload = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+    events = []
+    for source_id in ("connector/0", "connector/1", "connector/0"):
+        payload["source"] = {
+            "source_id": source_id,
+            "connector_name": "SameConnector",
+        }
+        events.append(
+            msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=type(event))
+        )
+    assert events[0] != events[1]
+    assert events[0] == events[2]
+    assert hash(events[0]) == hash(events[2])
+    assert Counter(events) == {events[0]: 2, events[1]: 1}
+
+
+@pytest.mark.parametrize("make_event", [_make_block_stored, _make_block_removed])
+def test_event_scopes_remain_distinct_in_counters(make_event):
+    event = make_event()
+    payload = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+    events = []
+    for scope in (None, "instance", "shared", "shared"):
+        payload["sharing_scope"] = scope
+        events.append(
+            msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=type(event))
+        )
+    assert len(Counter(events)) == 3
+    assert Counter(events)[events[-1]] == 2
+
+
+@pytest.mark.parametrize("source", [{}, {"source_id": ""}, {"source_id": 1}])
+def test_invalid_event_source_rejected_on_decode(source):
+    payload = {"type": "AllBlocksCleared", "source": source}
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=AllBlocksCleared)
+
+
+@pytest.mark.parametrize("scope", ["local", "", "SHARED", True, 1])
+def test_invalid_event_scope_rejected_on_decode(scope):
+    payload = msgspec.msgpack.decode(msgspec.msgpack.encode(_make_block_removed()))
+    payload["sharing_scope"] = scope
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=BlockRemoved)
+
+
+@pytest.mark.parametrize(
+    ("make_event", "legacy_type"),
+    [
+        (_make_block_stored, _StrictPreMetadataBlockStored),
+        (_make_block_removed, _StrictPreMetadataBlockRemoved),
+        (AllBlocksCleared, _StrictPreMetadataAllBlocksCleared),
+    ],
+)
+def test_strict_pre_metadata_schema_accepts_only_legacy_fields(make_event, legacy_type):
+    """Strict consumers accept omitted metadata but reject even explicit nulls."""
+    event = make_event()
+    payload = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+    if not isinstance(event, AllBlocksCleared):
+        payload.update(locality="LOCAL", ownership="tier-a", group_idx=2)
+    if isinstance(event, BlockStored):
+        payload.update(session_id="session-a", lookahead_token_ids=[[5]])
+    legacy = msgspec.msgpack.decode(msgspec.msgpack.encode(payload), type=legacy_type)
+    assert msgspec.msgpack.decode(msgspec.msgpack.encode(legacy)) == payload
+    fields = (
+        ["source"]
+        if isinstance(event, AllBlocksCleared)
+        else ["source", "sharing_scope"]
+    )
+    for field in fields:
+        for value in (
+            None,
+            {"source_id": "cache_manager"} if field == "source" else "instance",
+        ):
+            with pytest.raises(msgspec.ValidationError, match="unknown field"):
+                msgspec.msgpack.decode(
+                    msgspec.msgpack.encode({**payload, field: value}), type=legacy_type
+                )
