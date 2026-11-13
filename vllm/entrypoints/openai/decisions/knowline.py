@@ -345,14 +345,24 @@ def render_prompts(
     *,
     template_kwargs: Mapping[str, Any],
     twice_max_tokens: int,
+    max_model_len: int | None = None,
 ) -> dict[str, tuple[str, list[int], int]]:
     """Each question's prompt, ending in ``Answer:``: -> {qid: (prompt, prompt
     token ids, n options)}. The label tokens sit right after the prompt's ids.
 
     A Gen1.5 request reads the state and the question twice, when the
-    single-pass request fits ``twice_max_tokens`` tokens.
+    single-pass request fits ``twice_max_tokens`` tokens. A state that alone
+    leaves no room in ``max_model_len`` is rejected before the questions are
+    encoded.
     """
     prefix, _, ending = _scaffold(tokenizer, state, False, template_kwargs)
+    # The state is shared, so it counts once toward the bound.
+    state_tokens = len(tokenizer.encode(prefix, add_special_tokens=False))
+    if max_model_len is not None and state_tokens + 1 > max_model_len:
+        raise StructuredDecisionError(
+            f"the prompt must fit {max_model_len - 1} tokens, and the state "
+            f"alone takes {state_tokens}"
+        )
     blocks = {q.id: question_block(q) for q in questions}
     once: dict[str, tuple[str, list[int], int]] = {}
     for q in questions:
@@ -363,8 +373,6 @@ def render_prompts(
             len(q.options),
         )
 
-    # The state is shared, so it counts once toward the bound.
-    state_tokens = len(tokenizer.encode(prefix, add_special_tokens=False))
     once_tokens = state_tokens + sum(
         len(ids) - state_tokens for _, ids, _ in once.values()
     )

@@ -3,7 +3,9 @@
 import json
 import logging
 import math
+import threading
 from argparse import Namespace
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
@@ -1565,6 +1567,7 @@ class KnowLineMockTok:
 
 KNOWLINE_LABELS, _ = knowline.discover_labels(KnowLineMockTok(), KNOWLINE_KW)
 KNOWLINE_TYPES = knowline.knowline_question_types(KNOWLINE_LABELS)
+KNOWLINE_RENDER_POOL = ThreadPoolExecutor(1, thread_name_prefix="knowline-render")
 
 
 def knowline_question(type_name, criteria, instructions=None):
@@ -1635,7 +1638,9 @@ def knowline_strategy(
     engine.generate = generate
     engine.check_admission = check_admission
     renderer = SimpleNamespace(
-        renderer=SimpleNamespace(get_tokenizer=lambda: tokenizer),
+        renderer=SimpleNamespace(
+            get_tokenizer=lambda: tokenizer, _executor=KNOWLINE_RENDER_POOL
+        ),
         validate_chat_template=lambda **kw: None,
         trust_request_chat_template=False,
     )
@@ -2136,6 +2141,91 @@ async def test_knowline_read_needs_the_prompt_within_max_model_len():
             lora_request=None,
             priority=0,
         )
+
+
+class KnowLineRecordingTok(KnowLineMockTok):
+    """Records the thread of every render and encode call."""
+
+    def __init__(self):
+        super().__init__()
+        self.encodes: list[str] = []
+        self.renders: list[str] = []
+
+    def apply_chat_template(self, msgs, **kw):
+        self.renders.append(threading.current_thread().name)
+        return super().apply_chat_template(msgs, **kw)
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        self.encodes.append(threading.current_thread().name)
+        return super().encode(text, add_special_tokens)
+
+
+@pytest.mark.asyncio
+async def test_knowline_renders_off_the_event_loop():
+    tokenizer = KnowLineRecordingTok()
+    strategy, _ = knowline_strategy(tokenizer)
+    tokenizer.encodes.clear()
+    tokenizer.renders.clear()
+    questions = [
+        build_question(
+            f"q{i}",
+            "noul",
+            None,
+            None,
+            strategy.limits().max_options,
+            labeled=True,
+            question_types=strategy.question_types,
+        )
+        for i in range(3)
+    ]
+    await strategy.read(
+        questions,
+        None,
+        "state",
+        request_id="r",
+        chat_template_kwargs=None,
+        lora_request=None,
+        priority=0,
+    )
+    # Rendering and tokenizing a long state takes seconds, so it runs on the
+    # renderer's pool and the event loop keeps serving other requests.
+    assert tokenizer.renders and tokenizer.encodes
+    assert all(
+        name.startswith("knowline-render")
+        for name in tokenizer.renders + tokenizer.encodes
+    )
+
+
+@pytest.mark.asyncio
+async def test_knowline_rejects_a_long_state_before_encoding_the_questions():
+    tokenizer = KnowLineRecordingTok()
+    strategy, engine = knowline_strategy(tokenizer, max_model_len=64)
+    tokenizer.encodes.clear()
+    questions = [
+        build_question(
+            f"q{i}",
+            "noul",
+            None,
+            None,
+            strategy.limits().max_options,
+            labeled=True,
+            question_types=strategy.question_types,
+        )
+        for i in range(3)
+    ]
+    with pytest.raises(StructuredDecisionError, match="the state alone takes"):
+        await strategy.read(
+            questions,
+            None,
+            "word " * 100,
+            request_id="r",
+            chat_template_kwargs=None,
+            lora_request=None,
+            priority=0,
+        )
+    # The state is encoded once, not once more per question.
+    assert len(tokenizer.encodes) == 1
+    assert engine.generated == []
 
 
 def test_knowline_detects_a_template_that_drops_the_question_slot():
