@@ -12,7 +12,7 @@ import pytest
 import torch._inductor.config as inductor_config
 
 import vllm.triton_utils.tp_synced_autotune as tp_synced_autotune
-from vllm.model_executor.models.qwen3_5 import _setup_replicated_ffn
+from vllm.model_executor.models.qwen3_5_replicate import setup_replicated_ffn
 
 
 def _config(model_type="qwen3_5_text"):
@@ -35,19 +35,19 @@ def installs(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_dense_turns_on_determinism(installs):
-    _setup_replicated_ffn(_config(), _layout())
+    setup_replicated_ffn(_config(), _layout())
     assert installs == [1]
     assert inductor_config.deterministic is True
 
 
 def test_moe_is_refused(installs):
     with pytest.raises(NotImplementedError, match="dense"):
-        _setup_replicated_ffn(_config("qwen3_5_moe_text"), _layout())
+        setup_replicated_ffn(_config("qwen3_5_moe_text"), _layout())
     assert installs == []
 
 
 @pytest.mark.parametrize("layout", [_layout(dcp=2), _layout(pcp=2)])
 def test_context_parallel_is_refused(installs, layout):
     with pytest.raises(NotImplementedError, match="context parallelism"):
-        _setup_replicated_ffn(_config(), layout)
+        setup_replicated_ffn(_config(), layout)
     assert installs == []
