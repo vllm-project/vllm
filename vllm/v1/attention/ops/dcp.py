@@ -220,7 +220,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
 
         tl.store(new_output_ptr + output_offsets, output)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         output_dtype: torch.dtype,

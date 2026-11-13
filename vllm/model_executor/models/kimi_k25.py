@@ -658,13 +658,13 @@ class KimiK25ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = inputs.pop("pixel_values")
+        pixel_values = values.pop("pixel_values")
         # Remaining keys (pos_embeds, rope_freqs_cis, cu_seqlens, max_seqlen,
         # merge_gather_idx, sequence_lengths) are consumed as encoder_metadata.
-        encoder_metadata = inputs
+        encoder_metadata = values
 
         # Fast path: uses precomputed pos_embeds + merge_gather_idx.
         vt_output = self.vision_tower(

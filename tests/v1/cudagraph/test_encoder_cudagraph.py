@@ -152,7 +152,7 @@ class _MockModel(SupportsEncoderCudaGraph):
         return EncoderCudaGraphReplayBuffers(values={})
 
     def encoder_cudagraph_forward(
-        self, inputs: dict[str, torch.Tensor], path: str = "default"
+        self, values: dict[str, torch.Tensor], path: str = "default"
     ) -> torch.Tensor:
         return torch.zeros(0)
 

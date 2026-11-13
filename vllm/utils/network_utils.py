@@ -8,7 +8,7 @@ import sys
 import tempfile
 import warnings
 from collections.abc import (
-    Iterator,
+    Generator,
     Sequence,
 )
 from dataclasses import dataclass
@@ -456,7 +456,7 @@ def zmq_socket_ctx(
     linger: int = 0,
     identity: bytes | None = None,
     router_handover: bool = False,
-) -> Iterator[zmq.Socket]:
+) -> Generator[zmq.Socket]:
     """Context manager for a ZMQ socket."""
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
