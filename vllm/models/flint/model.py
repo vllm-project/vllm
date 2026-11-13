@@ -308,7 +308,6 @@ class FlintAttention(nn.Module):
         )
         # The fused kernel writes the KV cache itself (in the FlashInfer layout)
         # and then calls the attention backend directly.
-        impl = self.attn.impl
         if current_platform.is_rocm():
             # No FlashInfer: the selected backend must page K|V the same way,
             # packed in one slot per KV head.
@@ -334,6 +333,7 @@ class FlintAttention(nn.Module):
                 FlashInferTrtllmAPIDecode,
             )
 
+            impl = self.attn.impl
             assert isinstance(impl, FlashInferImpl), (
                 "Flint requires FlashInfer attention"
             )
