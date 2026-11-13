@@ -270,9 +270,6 @@ def select_nvfp4_moe_backend(
     requested_backend = (
         map_nvfp4_backend(runner_backend) if runner_backend != "auto" else None
     )
-    # B12X can run with BF16 activations when the env forces a16.
-    if requested_backend is not None and _use_a16(requested_backend, False):
-        activation_key = None
     oracle = NvFp4MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
