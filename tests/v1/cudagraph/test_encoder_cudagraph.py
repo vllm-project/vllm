@@ -28,10 +28,12 @@ from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import (
     EncoderCudaGraphManager,
+    create_encoder_cudagraph_manager,
 )
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
@@ -165,6 +167,27 @@ class _MockModel(SupportsEncoderCudaGraph):
         self, mm_kwargs: dict[str, Any], indices: list[int]
     ) -> dict[str, Any]:
         return {}
+
+
+class _DisabledMockModel(_MockModel):
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=[],
+            buffer_keys=[],
+            out_hidden_size=32,
+        )
+
+
+def test_empty_modalities_disable_encoder_cudagraph_manager():
+    assert (
+        create_encoder_cudagraph_manager(
+            vllm_config=_MockVllmConfig(),
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            model=_DisabledMockModel(),
+        )
+        is None
+    )
 
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
@@ -301,6 +324,25 @@ class TestFindBudgetGraph:
         # Budget selection still works correctly after sorting
         assert mgr._find_smallest_fitting_budget_given_tokens(3000) == 4096
 
+    @pytest.mark.parametrize(
+        "total_tokens,expected",
+        [
+            (2048, 2048),
+            (2049, None),
+            (4096, 4096),
+            (8191, None),
+            (8192, 8192),
+            (9000, None),
+        ],
+    )
+    def test_require_exact_match(self, total_tokens, expected):
+        mgr = _make_manager_with_budgets([2048, 4096, 8192])
+        result = mgr._find_smallest_fitting_budget_given_tokens(
+            total_tokens,
+            require_exact_match=True,
+        )
+        assert result == expected
+
     def test_num_graphs_to_capture_tracks_budgets(self):
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
@@ -384,6 +426,21 @@ class TestExecuteLocalDispatch:
         assert runs == []
         assert mgr.graph_misses == 2
 
+    @pytest.mark.parametrize(
+        "item_tokens,expected_runs,expected_misses",
+        [(128, [([0, 1], "default", 256)], 0), (100, [], 2)],
+    )
+    def test_exact_budget_policy_applies_to_whole_batch(
+        self, item_tokens, expected_runs, expected_misses
+    ):
+        mgr = _make_manager_with_budgets([256, 4096])
+        mgr.config.paths["default"] = EncoderCudaGraphPathConfig(
+            require_exact_token_budget_match=True
+        )
+        runs = _run_packing(mgr, [self._spec(item_tokens)] * 2)
+        assert runs == expected_runs
+        assert mgr.graph_misses == expected_misses
+
     def test_batch_beyond_max_batch_size_runs_eager(self):
         mgr = _make_manager_with_budgets([1024, 4096])
         mgr.max_batch_size = 3
@@ -396,6 +453,10 @@ class TestExecuteLocalDispatch:
         mgr.path_token_budgets = {
             "a": [0, 256, 4096, 8192],
             "b": [256, 4096, 8192],
+        }
+        mgr.config.paths = {
+            "a": EncoderCudaGraphPathConfig(allow_zero_tokens=True),
+            "b": EncoderCudaGraphPathConfig(),
         }
         specs = [
             EncoderItemSpec(
@@ -757,6 +818,20 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == 1
         # Eager output: SimpleMockViTModel produces n_out = 81 tokens
         assert result[0].shape == (81, _HIDDEN)
+        assert self.mgr.graph_misses == 1
+
+    def test_eager_fallback_when_exact_budget_is_required(self):
+        self.mgr.config.paths["default"] = EncoderCudaGraphPathConfig(
+            require_exact_token_budget_match=True
+        )
+        # [1,6,6] produces 9 tokens, which fits the 16-token graph but does
+        # not exactly match a captured budget.
+        mm_kwargs = _make_mm_kwargs([[1, 6, 6]], self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+
+        assert result is not None
+        assert result[0].shape == (9, _HIDDEN)
+        assert self.mgr.graph_hits == 0
         assert self.mgr.graph_misses == 1
 
     # --- counters ---
