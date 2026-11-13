@@ -127,7 +127,9 @@ impl Error {
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {
-            Self::ChatTemplateThrown { .. }
+            Self::EmptyMessages
+            | Self::ContinueFinalAssistantWithoutFinalAssistant
+            | Self::ChatTemplateThrown { .. }
             | Self::InvalidReasoningEffort(_)
             | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }

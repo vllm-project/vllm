@@ -1107,13 +1107,13 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
 
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     capacity = 8
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_batched_tokens = 16
     vllm_config.parallel_config.prefill_context_parallel_size = 1
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=capacity,
         num_kv_heads=1,
         head_size=1024,
@@ -1495,7 +1495,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
     )
     from vllm.models.deepseek_v41.compressor import DeepseekCompressor
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
     torch.manual_seed(42)
@@ -1514,7 +1514,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
         if num_speculative_tokens
         else None,
     )
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=capacity,
         num_kv_heads=1,
         head_size=1024,
@@ -1710,7 +1710,7 @@ def test_v41_compressor_bi_batch_chunk_pd_graph_cache_bytes(length, monkeypatch)
         DeepseekCompressor,
     )
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     torch.manual_seed(3741)
@@ -1724,7 +1724,7 @@ def test_v41_compressor_bi_batch_chunk_pd_graph_cache_bytes(length, monkeypatch)
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         speculative_config=None,
     )
-    spec = CircularBufferSpec(
+    spec = AttentionSpec(
         block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
     )
     builder = CompressorMetadataBuilder(spec, ["state"], config, torch.device("cuda"))
