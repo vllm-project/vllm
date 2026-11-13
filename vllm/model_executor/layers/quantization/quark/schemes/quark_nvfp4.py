@@ -13,6 +13,9 @@ from vllm.model_executor.kernels.linear.nvfp4.emulation import (
 from vllm.model_executor.layers.quantization.quark.schemes.quark_scheme import (
     QuarkScheme,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    fold_nvfp4_shard_global_scales,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -129,18 +132,14 @@ class QuarkNVFP4(QuarkScheme):
         # Kernels read input_global_scale; the loaded param keeps its data.
         retire_parameter(layer, "input_scale_2")
 
-        weight_global_scale = layer.weight_scale_2.to(torch.float32)
-
-        if torch.unique(weight_global_scale).numel() != 1:
-            logger.warning_once(
-                "In NVFP4 linear, the global scale for weight are different"
-                " for parallel layers (e.g. q_proj, k_proj, v_proj). This"
-                " will likely result in reduced accuracy. Please verify the"
-                " model accuracy. Consider using a checkpoint with a shared"
-                " global NVFP4 scale for fused layers."
-            )
-
-        weight_global_scale = weight_global_scale.max()
+        # Merged layers carry one weight global scale per shard; fold them into
+        # the block scales (Quark stores multipliers).
+        weight_global_scale = fold_nvfp4_shard_global_scales(
+            layer.weight_scale,
+            layer.weight_scale_2,
+            getattr(layer, "output_partition_sizes", None),
+            divisor=False,
+        )
 
         replace_parameter(layer, "weight_global_scale", weight_global_scale)
         retire_parameter(layer, "weight_scale_2")

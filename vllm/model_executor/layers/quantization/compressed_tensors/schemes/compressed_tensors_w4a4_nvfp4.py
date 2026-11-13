@@ -12,6 +12,9 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    fold_nvfp4_shard_global_scales,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -96,18 +99,14 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # Rename CT checkpoint names to standardized names
         move_parameter(layer, "weight_packed", "weight")
 
-        # Check for mismatched weight global scales
-        if torch.unique(layer.weight_global_scale).numel() != 1:
-            logger.warning_once(
-                "In NVFP4 linear, the weight global scale is different"
-                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
-                " will likely result in reduced accuracy. Please verify the model"
-                " accuracy. Consider using a checkpoint with a shared global NVFP4"
-                " scale for fused layers."
-            )
-
-        # Process weight global scale (CT stores as divisors, i.e. 1/scale)
-        weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
+        # Merged layers carry one weight global scale per shard; fold them into
+        # the block scales (CT stores global scales as divisors, i.e. 1/scale).
+        weight_global_scale = fold_nvfp4_shard_global_scales(
+            layer.weight_scale,
+            layer.weight_global_scale,
+            getattr(layer, "output_partition_sizes", None),
+            divisor=True,
+        )
         replace_parameter(layer, "weight_global_scale", 1.0 / weight_global_scale)
 
         if not self.use_a16:

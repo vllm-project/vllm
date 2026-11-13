@@ -17,6 +17,59 @@ from vllm.utils.math_utils import round_up
 logger = init_logger(__name__)
 
 
+@torch.no_grad()
+def fold_nvfp4_shard_global_scales(
+    block_scales: torch.Tensor,
+    global_scales: torch.Tensor,
+    partition_sizes: Iterable[int] | None,
+    *,
+    divisor: bool,
+) -> torch.Tensor:
+    """Give every shard of a merged NVFP4 weight one common global scale.
+
+    A merged linear (q/k/v, gate/up, or a model-specific merge such as
+    Kimi-Linear's `in_proj_qkvgfab` or the Qwen3.5 GDN `in_proj_qkvz`) loads one
+    weight global scale per shard, but the kernels take a single one. Each
+    shard's FP8 block scales (the rows of `block_scales` that belong to it, in
+    `partition_sizes` order) are multiplied by a factor <= 1 so that the common
+    global scale dequantizes them to the same values; E4M3 cannot overflow.
+    `block_scales` is updated in place.
+
+    Returns the common global scale as a 0-d float32 tensor. If the rows do not
+    line up with `partition_sizes` or a scale is not finite and positive, the
+    block scales are left untouched and the largest scale is returned, as before.
+    """
+    scales = global_scales.detach().to(torch.float32).reshape(-1)
+    if torch.unique(scales).numel() == 1:
+        return scales[0]
+    sizes = list(partition_sizes or [])
+    if (
+        len(sizes) != scales.numel()
+        or sum(sizes) != block_scales.shape[0]
+        or not bool(torch.isfinite(scales).all())
+        or not bool((scales > 0).all())
+    ):
+        logger.warning_once(
+            "In NVFP4 linear, the weight global scale is different for parallel "
+            "layers (e.g. q_proj, k_proj, v_proj) and could not be folded into "
+            "the block scales. Using the largest one, which will likely reduce "
+            "accuracy."
+        )
+        return scales.max()
+    # Divisors (compressed-tensors: dequant multiplies by 1/scale) fold onto the
+    # smallest scale, multipliers (ModelOpt, Quark) onto the largest one, so every
+    # shard's factor is <= 1.
+    common = scales.min() if divisor else scales.max()
+    factors = common / scales if divisor else scales / common
+    start = 0
+    for size, factor in zip(sizes, factors.tolist()):
+        if factor != 1.0:
+            rows = block_scales.data[start : start + size]
+            rows.copy_((rows.to(torch.float32) * factor).to(rows.dtype))
+        start += size
+    return common.reshape(())
+
+
 def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
     """Pad and block-interleave the FP4 block-scales so that they match the data
     layout expected by the CUTLASS / FlashInfer kernels.
