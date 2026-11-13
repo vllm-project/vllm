@@ -76,10 +76,16 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             use_tqdm: Whether to use tqdm to display the progress bar.
             concurrency_limit: The maximum number of concurrent requests.
                 If None, the number of concurrent requests is unlimited.
+                Otherwise, must be greater than zero.
             priority: Scheduling priority, either shared or one per prompt.
                 Lower values have higher priority. Defaults to 0.
 
         """
+        if concurrency_limit is not None and concurrency_limit <= 0:
+            raise ValueError("concurrency_limit must be greater than zero")
+        if not prompts:
+            return []
+
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
         beam_width = params.beam_width
