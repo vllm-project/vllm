@@ -326,7 +326,7 @@ def resolve_quant_method(
         OnlineMoEMethodBase,
     )
     from vllm.model_executor.layers.quantization.online.requantization import (
-        requantization_source_scope,
+        skip_checkpoint_backend_selection,
     )
     from vllm.model_executor.layers.vocab_parallel_embedding import (
         ParallelLMHead,
@@ -352,11 +352,14 @@ def resolve_quant_method(
             )
             target_spec = target[3] if target is not None else None
 
-    # The checkpoint method of requantized experts is only a dequantization source.
+    # With an online target, the checkpoint method is never used for compute: it
+    # is either a dequantization source or discarded in favour of the online
+    # method (all paths below return the online method or raise). It therefore
+    # needs no kernel backend, which the oracles skip in this scope.
     with (
         (
-            requantization_source_scope()
-            if online_target is not None and isinstance(layer, RoutedExperts)
+            skip_checkpoint_backend_selection()
+            if online_target is not None
             else nullcontext()
         ),
         layer_target_spec_scope(target_spec if online_target is None else None),

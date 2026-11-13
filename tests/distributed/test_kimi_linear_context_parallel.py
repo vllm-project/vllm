@@ -176,7 +176,6 @@ def _run_k3_partial_prefix_reuse(
         max_model_len=512,
         max_num_seqs=4,
         max_num_batched_tokens=256,
-        gpu_memory_utilization=0.85,
         block_size=block_size,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
