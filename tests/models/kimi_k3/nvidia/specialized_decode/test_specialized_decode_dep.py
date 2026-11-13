@@ -338,18 +338,26 @@ def dep_layer_step(core, batch, q, contexts):
         topk_buffer = torch.full((length, 2048), -1, dtype=torch.int32, device=dev)
         attn = dsa_layer(config, topk_buffer, HEADS)
         layer, indexer = attn.mla_attn.mla_attn, attn.dsa_indexer
-        spec = layer.get_kv_cache_spec(config)
+        spec = layer.get_kv_cache_config(config).spec
         builder = layer.attn_backend.get_builder_cls()(
             spec, [layer.layer_name], config, dev
         )
-        index_spec = indexer.k_cache.get_kv_cache_spec(config)
+        index_config = indexer.k_cache.get_kv_cache_config(config)
+        index_spec = index_config.spec
         index_builder = DeepseekV32IndexerMetadataBuilder(
             index_spec,
             [indexer.k_cache.prefix],
             config,
             dev,
             block_table_width=get_block_table_width(
-                index_spec.max_num_blocks_per_req(config, length), UNIT
+                index_config.manager_cls.max_num_blocks_per_req(
+                    index_config.manager_config,
+                    index_spec.block_size,
+                    index_spec.dcp_sharded,
+                    config,
+                    length,
+                ),
+                UNIT,
             ),
         )
         reqs = batch // q

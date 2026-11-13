@@ -1409,7 +1409,6 @@ def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) 
             num_kv_heads=1,
             head_size=cp.HEAD_SIZE,
             dtype=config.model_config.dtype,
-            non_causal_multi_token_decode=False,
         )
         L = ctx + qlen
         fp8 = current_platform.fp8_dtype()
