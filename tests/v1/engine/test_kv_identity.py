@@ -12,7 +12,9 @@ from vllm.transformers_utils.repo_utils import hf_api
 from vllm.v1.kv_identity import (
     CACHE_FACTORS_OUTSIDE_KV,
     MODEL_FACTORS_OUTSIDE_KV,
+    KVIdentityTracker,
     compute_kv_identity,
+    is_known_kv_identity,
 )
 
 MODEL = "facebook/opt-125m"
@@ -68,6 +70,51 @@ def test_local_snapshot_matches_hub_id():
     snapshot = hf_api().snapshot_download(MODEL, allow_patterns=["*.json"])
 
     assert _identity(snapshot) == _identity()
+
+
+def _tracker(weights: dict[str, str] = WEIGHTS) -> KVIdentityTracker:
+    return KVIdentityTracker(VllmConfig(model_config=ModelConfig(MODEL)), [weights])
+
+
+def test_unknown_weights_match_no_engine():
+    """Weights that changed without being identified must not pair with any
+    engine, including another engine whose weights are unknown."""
+    tracker = _tracker()
+    first, second = tracker.unknown(), tracker.unknown()
+
+    assert not is_known_kv_identity(first.digest)
+    assert first.digest != second.digest
+    assert first.components["weights_source"] == "unknown"
+
+
+def test_reload_identifies_files_by_content():
+    """A reload of the startup files restores the startup identity. A reload
+    the files cannot vouch for, identified by path or not digested, does not."""
+    tracker = _tracker()
+    startup = tracker.identity
+    tracker.unknown()
+
+    assert tracker.reloaded([WEIGHTS, None]) == startup
+    other_files = {"weights": "1" * 64, "weights_source": "hashed"}
+    assert tracker.reloaded([other_files]).digest != startup.digest
+    path = {"weights": "2" * 64, "weights_source": "path"}
+    assert not is_known_kv_identity(tracker.reloaded([path]).digest)
+    assert not is_known_kv_identity(tracker.reloaded([None]).digest)
+
+
+def test_weight_version_identifies_updated_weights():
+    """Engines that load the same files and update to the same version match,
+    whatever happened in between; other versions or files do not."""
+    first, second = _tracker(), _tracker()
+    second.unknown()
+    step_1 = first.versioned("step-1")
+
+    assert second.versioned("step-1") == step_1
+    assert step_1.components["weight_version"] == "step-1"
+    assert step_1.digest != _tracker().identity.digest
+    assert first.versioned("step-2").digest != step_1.digest
+    other_files = _tracker({"weights": "1" * 64, "weights_source": "hf_cache"})
+    assert other_files.versioned("step-1").digest != step_1.digest
 
 
 def test_engine_reports_identity(vllm_runner):

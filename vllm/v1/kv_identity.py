@@ -8,6 +8,7 @@ identity covers the target model only: draft model KV is checked by the
 connectors that transfer it.
 """
 
+import uuid
 from dataclasses import dataclass
 
 import transformers
@@ -84,7 +85,10 @@ def compute_kv_identity(
     weights = next(
         (digest for digest in checkpoint_digests if digest is not None), None
     ) or path_checkpoint_digest(vllm_config.model_config, vllm_config.load_config)
+    return _kv_identity(vllm_config, weights)
 
+
+def _kv_identity(vllm_config: VllmConfig, weights: dict[str, str]) -> KVIdentity:
     components = {
         "weights": weights["weights"],
         "config": hash_factors(kv_config_factors(vllm_config)),
@@ -96,5 +100,68 @@ def compute_kv_identity(
     digest = hash_factors(digest_factors)
     # Informational only: a Hub-cached checkpoint and a hashed local copy of
     # the same files have equal identities.
-    components["weights_source"] = weights["weights_source"]
+    for key in ("weights_source", "weight_version"):
+        if key in weights:
+            components[key] = weights[key]
     return KVIdentity(digest=digest, components=components)
+
+
+UNKNOWN_KV_IDENTITY_PREFIX = "unknown-"
+# Runtime reloads must identify the files by content: a path cannot tell the
+# reloaded files from the ones loaded before.
+_CONTENT_WEIGHTS_SOURCES = frozenset({"hf_cache", "hashed"})
+
+
+def is_known_kv_identity(kv_identity: str | None) -> bool:
+    return kv_identity is not None and not kv_identity.startswith(
+        UNKNOWN_KV_IDENTITY_PREFIX
+    )
+
+
+class KVIdentityTracker:
+    """The identity across runtime weight changes.
+
+    - Weights loaded from files are identified by the files' digest.
+    - Setting a weight version identifies the weights by the last file digest
+      and that version, which the caller vouches for.
+    - Otherwise, after weights change, the identity is unknown: a unique value
+      that matches no other engine, until a reload from files or a version
+      identifies the weights again.
+    """
+
+    def __init__(
+        self, vllm_config: VllmConfig, checkpoint_digests: list[dict[str, str] | None]
+    ) -> None:
+        self._vllm_config = vllm_config
+        self.identity = compute_kv_identity(vllm_config, checkpoint_digests)
+        self._file_weights = self.identity.components["weights"]
+
+    def unknown(self) -> KVIdentity:
+        weights = {"weights": "unknown", "weights_source": "unknown"}
+        identity = _kv_identity(self._vllm_config, weights)
+        self.identity = KVIdentity(
+            digest=UNKNOWN_KV_IDENTITY_PREFIX + uuid.uuid4().hex,
+            components=identity.components,
+        )
+        return self.identity
+
+    def reloaded(self, checkpoint_digests: list[dict[str, str] | None]) -> KVIdentity:
+        """Identify weights reloaded from files, if rank 0 digested all of
+        them by content."""
+        weights = next((d for d in checkpoint_digests if d is not None), None)
+        if weights is None or weights["weights_source"] not in _CONTENT_WEIGHTS_SOURCES:
+            return self.unknown()
+        self._file_weights = weights["weights"]
+        self.identity = _kv_identity(self._vllm_config, weights)
+        return self.identity
+
+    def versioned(self, weight_version: str) -> KVIdentity:
+        weights = {
+            "weights": hash_factors(
+                {"files": self._file_weights, "weight_version": weight_version}
+            ),
+            "weights_source": "weight_version",
+            "weight_version": weight_version,
+        }
+        self.identity = _kv_identity(self._vllm_config, weights)
+        return self.identity

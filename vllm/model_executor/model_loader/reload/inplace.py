@@ -37,7 +37,7 @@ def reload_weights(
     weights_iterator: Iterable[tuple[str, torch.Tensor]] | None,
     weights_path: str | None,
     is_checkpoint_format: bool,
-) -> None:
+) -> set[str]:
     """Reload a model's weights in place from a weights iterator or from disk.
 
     Callers are responsible for invalidating any state derived from the old
@@ -52,6 +52,10 @@ def reload_weights(
             provided. Use path of original model if neither is provided.
         is_checkpoint_format: set to False if weights have already been
             processed into kernel format (repacking, renaming, etc.)
+
+    Returns:
+        The names of the weights that were not reloaded. Quantized models are
+        not checked.
 
     """
     # TODO(@kylesayrs): generalize to all runners and loaders
@@ -120,6 +124,7 @@ def reload_weights(
         "Reloading and processing weights took %.2f seconds",
         diff_seconds,
     )
+    weights_not_loaded: set[str] = set()
     if model_config.quantization is None and loaded_weights is not None:
         weights_not_loaded = weights_to_load - loaded_weights
         if weights_not_loaded:
@@ -127,3 +132,4 @@ def reload_weights(
                 "Following weights were not loaded from checkpoint: %s",
                 weights_not_loaded,
             )
+    return weights_not_loaded

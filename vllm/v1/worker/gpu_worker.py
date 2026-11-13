@@ -669,9 +669,24 @@ class Worker(WorkerBase):
             if is_checkpoint_format
             else nullcontext()
         )
-        with kv_cache_loan, set_current_vllm_config(self.vllm_config):
-            self.model_runner.reload_weights(
+        # Rank 0 digests the files read for the KV identity, as in load_model.
+        recording = CheckpointRecording(
+            weights_path or self.model_config.model,
+            hash_local_files=self.cache_config.kv_identity_hash_local_weights,
+        )
+        digesting = self.rank == 0 and weights_iterator is None
+        with (
+            kv_cache_loan,
+            set_current_vllm_config(self.vllm_config),
+            recording if digesting else nullcontext(),
+        ):
+            weights_not_loaded = self.model_runner.reload_weights(
                 weights_iterator, weights_path, is_checkpoint_format
+            )
+        self.checkpoint_digest = None
+        if digesting and not weights_not_loaded:
+            self.checkpoint_digest = recording.digest(
+                self.model_config, self.load_config
             )
 
     def set_kv_cache_reclaimable(self, reclaimable: bool) -> None:
