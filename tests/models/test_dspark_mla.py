@@ -256,6 +256,7 @@ def test_v41_dspark_loads_linear_scales(
                 SimpleNamespace(
                     ffn=SimpleNamespace(
                         use_native_mega_moe=False,
+                        n_redundant_experts=0,
                         experts=SimpleNamespace(has_fused_shared_experts=False),
                     )
                 )
@@ -384,7 +385,12 @@ def test_v41_context_wkv_loads_each_layer_into_both_projections(monkeypatch):
         pad_shared_expert=False,
         model=SimpleNamespace(
             layers=[
-                SimpleNamespace(ffn=SimpleNamespace(use_native_mega_moe=False))
+                SimpleNamespace(
+                    ffn=SimpleNamespace(
+                        use_native_mega_moe=False,
+                        n_redundant_experts=0,
+                    )
+                )
                 for _ in range(3)
             ],
             confidence_head=None,
