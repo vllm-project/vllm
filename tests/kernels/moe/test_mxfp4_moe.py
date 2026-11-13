@@ -152,7 +152,7 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
     input_list = []
     weight_list = []
 
-    for g in range(num_experts):
+    for _ in range(num_experts):
         m_g = random.randint(1, 256)
         expert_offsets_input.append(expert_offset)
         expert_offset += m_g

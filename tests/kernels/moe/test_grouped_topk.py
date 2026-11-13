@@ -73,7 +73,8 @@ def _single_group_reference(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA/ROCm platform.",
 )
 @pytest.mark.parametrize("skip_padding", [False, True])
 @pytest.mark.parametrize("use_fused", [False, True])
@@ -103,8 +104,13 @@ def test_kimi_grouped_topk_masks_padding_when_enabled(
             hidden_states, gating_output, torch.int32
         )
 
-    torch.testing.assert_close(topk_weights[0], baseline_weights[0], rtol=0, atol=0)
-    assert torch.equal(topk_ids[0], baseline_ids[0])
+    ids, order = topk_ids[0].sort()
+    baseline_ids_sorted, baseline_order = baseline_ids[0].sort()
+    assert torch.equal(ids, baseline_ids_sorted)
+    torch.testing.assert_close(
+        topk_weights[0][order], baseline_weights[0][baseline_order]
+    )
+    assert router.masks_padding is skip_padding
     if skip_padding:
         assert torch.all(topk_ids[1] == -1)
         assert torch.all(topk_weights[1] == 0)

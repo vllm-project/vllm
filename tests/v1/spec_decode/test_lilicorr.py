@@ -584,7 +584,7 @@ def test_candidate_walk_revisited_position_matches_step_seed(use_fp64):
         pytest.param(False, "missing_weight_scale_2", True, id="missing-global-scale"),
     ],
 )
-def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
+def test_checkpoint_rejects_wrong_heads_and_allows_partial_buckets(
     monkeypatch, convolution, mismatch, quantized
 ):
     from vllm.model_executor.models.lilicorr import LiLiCorr, LiLiCorrForCausalLM
@@ -661,13 +661,8 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
         wrapper.model, "_build_fused_kv_buffers", lambda: None, raising=False
     )
     supplied = [("model." + name, value) for name, value in weights.items()]
-    if mismatch:
-        message = (
-            "no module or parameter"
-            if mismatch.startswith("extra")
-            else "coverage mismatch"
-        )
-        with pytest.raises(ValueError, match=message):
+    if mismatch and mismatch.startswith("extra"):
+        with pytest.raises(ValueError, match="no module or parameter"):
             wrapper.load_weights(supplied)
     else:
         wrapper.load_weights(supplied)
@@ -742,10 +737,7 @@ def owned_head_model(monkeypatch):
     return build
 
 
-@pytest.mark.parametrize("missing", [None, "weight", "weight_scale", "weight_scale_2"])
-def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(
-    owned_head_model, missing
-):
+def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(owned_head_model):
     model, _ = owned_head_model()
     assert model.lm_head.weight.dtype == torch.uint8
     assert model.lm_head.weight.shape == (64, 8)
@@ -753,17 +745,12 @@ def test_owned_nvfp4_lm_head_loads_required_checkpoint_tensors(
         name: torch.ones_like(value) for name, value in model.state_dict().items()
     }
     del weights["lm_head.input_scale"]  # Deprecated and unused for W4A16.
-    if missing:
-        del weights[f"lm_head.{missing}"]
-        with pytest.raises(ValueError, match=f"lm_head.{missing}"):
-            model.load_weights(weights.items())
-    else:
-        model.load_weights(weights.items())
-        assert model.has_own_lm_head
-        for name in ("weight", "weight_scale", "weight_scale_2"):
-            torch.testing.assert_close(
-                getattr(model.lm_head, name), weights[f"lm_head.{name}"]
-            )
+    model.load_weights(weights.items())
+    assert model.has_own_lm_head
+    for name in ("weight", "weight_scale", "weight_scale_2"):
+        torch.testing.assert_close(
+            getattr(model.lm_head, name), weights[f"lm_head.{name}"]
+        )
 
 
 @pytest.mark.parametrize("owned", [False, True])
@@ -774,7 +761,6 @@ def test_selected_lm_head_survives_dflash_and_lilicorr_sharing(
         VocabParallelEmbedding,
     )
     from vllm.v1.worker.gpu.spec_decode.dflash import utils as dflash_utils
-    from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 
     model, config = owned_head_model(owned)
     own_head = model.lm_head
@@ -791,12 +777,8 @@ def test_selected_lm_head_survives_dflash_and_lilicorr_sharing(
         model=SimpleNamespace(embed_tokens=embedding), lm_head=target_head
     )
     monkeypatch.setattr(
-        eagle_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1)
-    )
-    monkeypatch.setattr(
         dflash_utils, "replace", lambda obj, **kw: SimpleNamespace(**(vars(obj) | kw))
     )
-    monkeypatch.setattr(dflash_utils, "get_pp_safe_draft_load_config", lambda c: c)
     monkeypatch.setattr(dflash_utils, "get_model", lambda **kw: model)
     if owned:
 

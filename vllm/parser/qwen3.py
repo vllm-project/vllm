@@ -10,8 +10,8 @@ Qwen3 XML tool call format::
     </function>
     </tool_call>
 
-The argument body consists of ``<parameter=NAME>VALUE</parameter>`` tags.
-The ``_qwen3_arg_converter`` parses these into a JSON object.
+The argument body consists of `<parameter=NAME>VALUE</parameter>` tags.
+The `_qwen3_arg_converter` parses these into a JSON object.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ class _ClosedParams:
     """Closed parameters of a raw argument text, reused by longer texts.
 
     Raw arguments only grow while a call streams, so a parse of a text that
-    extends ``text`` resumes after its last closed parameter.
+    extends `text` resumes after its last closed parameter.
     """
 
     __slots__ = ("text", "end", "params", "outside")
@@ -142,10 +142,10 @@ def _param_value_end_window(text: str) -> str:
 def _param_value_extender(
     raw_args: str, trim_newlines: bool, closed: _ClosedParams | None = None
 ) -> ArgValueExtender | None:
-    """Extend the open trailing ``<parameter=...>`` value of *raw_args*.
+    """Extend the open trailing `<parameter=...>` value of *raw_args*.
 
     The extender streams exactly what the converter would for the same text.
-    With *trim_newlines* it follows ``_trim_wrapping_newlines``: it drops a
+    With *trim_newlines* it follows `_trim_wrapping_newlines`: it drops a
     leading newline of the value and holds back a trailing one.
     """
     closed_params, match = _qwen3_parse_params(raw_args, True, closed)
@@ -331,11 +331,11 @@ def qwen3_config(
 
 
 class Qwen3Parser(ParserEngine):
-    """Qwen3 parser: ``<think>``/``</think>`` reasoning +
-    ``<tool_call>`` XML tool calls in a single engine.
+    """Qwen3 parser: `<think>`/`</think>` reasoning +
+    `<tool_call>` XML tool calls in a single engine.
 
-    - ``<tool_call>`` as implicit reasoning end (a grammar transition, so it
-      also feeds ``is_reasoning_end`` and the structured-output gate)
+    - `<tool_call>` as implicit reasoning end (a grammar transition, so it
+      also feeds `is_reasoning_end` and the structured-output gate)
 
     Subclasses that share the grammar but differ only in the four wrapper
     token strings (reasoning + tool-call) override the class attributes

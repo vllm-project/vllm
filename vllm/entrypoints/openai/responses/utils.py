@@ -81,7 +81,7 @@ def decode_custom_tool_input(arguments: str) -> str:
 
 def decode_custom_tool_input_prefix(arguments: str) -> str:
     """Longest decodable payload prefix of partial shim arguments, so that
-    streamed ``custom_tool_call_input`` deltas stay a prefix of the final input."""
+    streamed `custom_tool_call_input` deltas stay a prefix of the final input."""
     try:
         parsed = partial_json_parser.loads(arguments, Allow.STR | Allow.OBJ)
     except (ValueError, IndexError, AssertionError):
@@ -98,10 +98,10 @@ _CUSTOM_TOOL_INPUT_HEAD = encode_custom_tool_input("")[:-2]
 def extend_custom_tool_input_prefix(
     arguments: str, payload: str, end: int
 ) -> tuple[str, int] | None:
-    """:func:`decode_custom_tool_input_prefix` of *arguments*, decoding only
-    ``arguments[end:]``. *payload* and *end* come from the previous call on a
-    prefix of *arguments* (``""`` and 0 at first). Returns None when the
-    arguments do not start as :func:`encode_custom_tool_input` writes them,
+    """`decode_custom_tool_input_prefix` of *arguments*, decoding only
+    `arguments[end:]`. *payload* and *end* come from the previous call on a
+    prefix of *arguments* (`""` and 0 at first). Returns None when the
+    arguments do not start as `encode_custom_tool_input` writes them,
     or once the payload string closes; only a full decode is exact then."""
     if not end:
         if not arguments.startswith(_CUSTOM_TOOL_INPUT_HEAD):
@@ -148,7 +148,7 @@ def _item_dict(item: ResponseInputOutputItem) -> dict[str, Any]:
 def response_item_status(
     finish_reason: str | None,
 ) -> Literal["completed", "incomplete"]:
-    """Status of the output item that ended a generation with ``finish_reason``."""
+    """Status of the output item that ended a generation with `finish_reason`."""
     return "incomplete" if finish_reason == "length" else "completed"
 
 
@@ -162,8 +162,8 @@ def build_response_output_items(
 ) -> list[ResponseOutputItem]:
     """Build the output items of one generation.
 
-    Only the last item can have been cut short, so ``finish_reason`` decides
-    that item's status and every earlier item is ``completed``.
+    Only the last item can have been cut short, so `finish_reason` decides
+    that item's status and every earlier item is `completed`.
     """
     outputs: list[ResponseOutputItem] = []
     tool_call_name_map = build_responses_tool_call_name_map(tools)

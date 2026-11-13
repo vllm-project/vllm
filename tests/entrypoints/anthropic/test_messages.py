@@ -6,6 +6,7 @@ import json
 import anthropic
 import pytest
 import pytest_asyncio
+import requests
 
 from tests.utils import RemoteOpenAIServer
 
@@ -265,3 +266,47 @@ async def test_anthropic_server_tool_is_rejected(client: anthropic.AsyncAnthropi
     message = exc_info.value.body["error"]["message"]
     assert "'web_search_20250305' is not supported" in message
     assert "Field required" not in message
+
+
+@pytest.mark.asyncio
+async def test_min_tokens_delays_stop_sequence(client: anthropic.AsyncAnthropic):
+    kwargs = dict(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=64,
+        stop_sequences=["\n"],
+        messages=[{"role": "user", "content": "Write two short lines of poetry."}],
+    )
+    baseline = await client.messages.create(**kwargs, extra_body={"temperature": 0.0})
+    assert baseline.stop_reason == "stop_sequence"
+    assert baseline.usage.output_tokens < 16
+
+    resp = await client.messages.create(
+        **kwargs, extra_body={"temperature": 0.0, "min_tokens": 16}
+    )
+    assert resp.usage.output_tokens >= 16
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_over_max_model_len(
+    server: RemoteOpenAIServer, client: anthropic.AsyncAnthropic
+):
+    """Clients count tokens to learn whether a prompt fits, so a prompt longer
+    than max_model_len is counted like /tokenize does, not rejected."""
+    messages = [{"role": "user", "content": "word " * 3000}]
+    response = requests.post(
+        server.url_for("tokenize"),
+        json={"model": "claude-3-7-sonnet-latest", "messages": messages},
+    )
+    response.raise_for_status()
+    tokenized = response.json()
+    assert tokenized["count"] > tokenized["max_model_len"]
+
+    count = await client.messages.count_tokens(
+        model="claude-3-7-sonnet-latest", messages=messages
+    )
+    assert count.input_tokens == tokenized["count"]
+
+    with pytest.raises(anthropic.BadRequestError):
+        await client.messages.create(
+            model="claude-3-7-sonnet-latest", max_tokens=16, messages=messages
+        )

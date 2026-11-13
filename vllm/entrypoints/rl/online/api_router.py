@@ -36,16 +36,16 @@ async def pause_generation(
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
 
-    In ``abort`` and ``wait`` modes new requests are rejected with HTTP 503
-    until /resume; ``keep`` continues to accept and queue them.
+    In `abort` and `wait` modes new requests are rejected with HTTP 503
+    until /resume; `keep` continues to accept and queue them.
 
     Args:
         raw_request: The incoming FastAPI request, used to reach the engine
             client on the app state.
         mode: How to handle in-flight requests:
-            - ``"abort"``: Abort all in-flight requests immediately (default).
-            - ``"wait"``: Wait for in-flight requests to complete.
-            - ``"keep"``: Freeze requests in queue; they resume on /resume.
+            - `"abort"`: Abort all in-flight requests immediately (default).
+            - `"wait"`: Wait for in-flight requests to complete.
+            - `"keep"`: Freeze requests in queue; they resume on /resume.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
             draining. Ignored when mode="keep".
 
@@ -98,7 +98,7 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
 async def abort_requests(raw_request: Request) -> JSONResponse:
     """Abort in-flight requests without pausing the scheduler.
 
-    Empty/missing ``request_ids`` aborts all in-flight requests.
+    Empty/missing `request_ids` aborts all in-flight requests.
     """
     engine = engine_client(raw_request)
 

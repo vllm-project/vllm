@@ -90,9 +90,9 @@ def _supports_fused_pre_indexer(
 class QSAIndexer(nn.Module):
     """QSA projection weights, indexer caches, and paged, weight-free selection.
 
-    ``prefix`` must be the checkpoint's indexer prefix, normally
-    ``model.layers.N.self_attn.indexer``.  Consequently the trainable names are
-    ``index_qk_proj``, ``q_layernorm`` and ``k_layernorm`` under that prefix.
+    `prefix` must be the checkpoint's indexer prefix, normally
+    `model.layers.N.self_attn.indexer`.  Consequently the trainable names are
+    `index_qk_proj`, `q_layernorm` and `k_layernorm` under that prefix.
     """
 
     def __init__(
@@ -222,15 +222,15 @@ class QSAIndexer(nn.Module):
         """Update indexer caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
-        the leading ``output_width`` columns are ``-1``-padded
+        the leading `output_width` columns are `-1`-padded
         request-relative token indices, and the trailing column is the row's
         valid-entry count (the attention kernel's loop bound, never a token
         index).
 
-        With ``attn.use_fused_qsa_prepare``, the same launch also writes
-        ``attn``'s K/V into ``attn.kv_cache`` at ``slot_mapping`` and prepares
-        its Q and gate from ``qkv``, returned as the second element (None
-        otherwise). ``qkv`` and ``slot_mapping`` are only read in that mode.
+        With `attn.use_fused_qsa_prepare`, the same launch also writes
+        `attn`'s K/V into `attn.kv_cache` at `slot_mapping` and prepares
+        its Q and gate from `qkv`, returned as the second element (None
+        otherwise). `qkv` and `slot_mapping` are only read in that mode.
         """
         metadata = self._metadata()
         if metadata is None:
@@ -320,14 +320,8 @@ class QSAIndexer(nn.Module):
             )
         else:
             # Unfused reference path
-            from flashinfer.norm import gemma_rmsnorm
-
             q = projected_q.reshape(-1, self.index_n_heads, self.index_head_dim)
-            q = gemma_rmsnorm(
-                q.reshape(-1, self.index_head_dim),
-                self.q_layernorm.weight,
-                self.q_layernorm.variance_epsilon,
-            ).reshape_as(q)
+            q = self.q_layernorm(q.reshape(-1, self.index_head_dim)).reshape_as(q)
             q = apply_qsa_rope(self.rotary_emb, positions, q)
             q = q.to(self.indexer_dtype)
 
@@ -353,10 +347,8 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 rope_position_cache,
             )
-            compressed_keys = gemma_rmsnorm(
-                pooled.reshape(-1, self.index_head_dim),
-                self.k_layernorm.weight,
-                self.k_layernorm.variance_epsilon,
+            compressed_keys = self.k_layernorm(
+                pooled.reshape(-1, self.index_head_dim)
             ).reshape(-1, 1, self.index_head_dim)
             if getattr(self.rotary_emb, "mrope_section", None):
                 first_positions = first_positions.transpose(0, 1)

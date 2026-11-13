@@ -12,7 +12,7 @@ from transformers import PreTrainedConfig
 
 
 class _SubConfigArgs:
-    """Base for the MuseSpark1x sub-configs; unknown keys are ignored."""
+    """Base for the Muse Spark sub-configs; unknown keys are ignored."""
 
     def _update(self, data: dict[str, Any] | None, kwargs: dict[str, Any]) -> None:
         values = data if data is not None else kwargs
@@ -25,7 +25,7 @@ class _SubConfigArgs:
 
 
 class MoEArgs(_SubConfigArgs):
-    """MoE sub-config of the MuseSpark1x text model."""
+    """MoE sub-config of the Muse Spark text model."""
 
     def __init__(self, data: dict[str, Any] | None = None, **kwargs) -> None:
         self.is_enabled: bool = True
@@ -47,7 +47,7 @@ class MoEArgs(_SubConfigArgs):
 
 
 class GatedDeltaNetArgs(_SubConfigArgs):
-    """GatedDeltaNet (GDN2) sub-config of the MuseSpark1x text model."""
+    """GatedDeltaNet (GDN2) sub-config of the Muse Spark text model."""
 
     def __init__(self, data: dict[str, Any] | None = None, **kwargs) -> None:
         self.enable: bool = False
@@ -63,7 +63,7 @@ class GatedDeltaNetArgs(_SubConfigArgs):
 
 
 class MetapArgs(_SubConfigArgs):
-    """Metap (muP-style) sub-config of the MuseSpark1x text model."""
+    """Metap (muP-style) sub-config of the Muse Spark text model."""
 
     def __init__(self, data: dict[str, Any] | None = None, **kwargs) -> None:
         self.use_metap: bool = False
@@ -77,15 +77,18 @@ class MetapArgs(_SubConfigArgs):
             assert self.metap_mode in ["mup", "sp"]
 
 
-class MuseSpark1xTextConfig(PreTrainedConfig):
-    """Configuration for the MuseSpark1x text model."""
+class MuseSparkDSparkConfig(PreTrainedConfig):
+    """Standalone configuration for a dense Muse Spark DSpark draft."""
 
-    model_type = "musespark1x_text"
-    rope_is_neox_style = True
+    model_type = "muse_spark_dspark"
+    rope_is_neox_style = False
+    has_no_defaults_at_init = True
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
         self,
+        draft_vocab_size: int | None = None,
+        draft_position_mode: str | None = None,
         vocab_size: int = 202048,
         hidden_size: int = 5120,
         num_hidden_layers: int = 48,
@@ -135,6 +138,8 @@ class MuseSpark1xTextConfig(PreTrainedConfig):
         image_token_index: int = 200092,
         **kwargs,
     ) -> None:
+        if draft_position_mode is not None:
+            use_rope = draft_position_mode == "rope"
         if eos_token_id is None:
             eos_token_id = [200001, 200008]
 
@@ -274,12 +279,12 @@ class MuseSpark1xTextConfig(PreTrainedConfig):
         self.output_soft_cap_temp = output_soft_cap_temp
         self.normalize_tok_embeddings = normalize_tok_embeddings
 
-        if self.gated_delta_net.enable:
-            self.architectures = ["MuseSpark1xHybridForCausalLM"]
-        else:
-            self.architectures = ["MuseSpark1xForCausalLM"]
-
         self.hf_overrides = hf_overrides
+        self.draft_position_mode = "rope" if self.use_rope else "nope"
+        self.draft_vocab_size = (
+            self.vocab_size if draft_vocab_size is None else draft_vocab_size
+        )
+        self.architectures = ["MuseSparkDSparkModel"]
 
     def to_dict(self) -> dict[str, Any]:
         """Make the structured sub-configs and torch dtype JSON serializable."""
@@ -293,29 +298,6 @@ class MuseSpark1xTextConfig(PreTrainedConfig):
             if value is not None:
                 output[name] = value.to_dict()
         return output
-
-
-class MuseSparkDSparkConfig(MuseSpark1xTextConfig):
-    """Standalone configuration for a dense Muse Spark DSpark draft."""
-
-    model_type = "muse_spark_dspark"
-    rope_is_neox_style = False
-    has_no_defaults_at_init = True
-
-    def __init__(
-        self,
-        draft_vocab_size: int | None = None,
-        draft_position_mode: str | None = None,
-        **kwargs,
-    ) -> None:
-        if draft_position_mode is not None:
-            kwargs["use_rope"] = draft_position_mode == "rope"
-        super().__init__(**kwargs)
-        self.draft_position_mode = "rope" if self.use_rope else "nope"
-        self.draft_vocab_size = (
-            self.vocab_size if draft_vocab_size is None else draft_vocab_size
-        )
-        self.architectures = ["MuseSparkDSparkModel"]
 
 
 class MuseSparkTextConfig(PreTrainedConfig):
@@ -428,7 +410,6 @@ class MuseSparkConfig(PreTrainedConfig):
 
 
 __all__ = [
-    "MuseSpark1xTextConfig",
     "MuseSparkConfig",
     "MuseSparkTextConfig",
     "MuseSparkVisionConfig",

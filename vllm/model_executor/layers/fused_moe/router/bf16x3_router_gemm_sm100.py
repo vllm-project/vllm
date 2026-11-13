@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CuteDSL BF16x3 router GEMM.
 
-Computes ``X @ W.T`` for BF16 ``X`` with shape ``[N, K]`` and FP32 router
-weights ``W`` with shape ``[M, K]`` by decomposing each FP32 weight value into
+Computes `X @ W.T` for BF16 `X` with shape `[N, K]` and FP32 router
+weights `W` with shape `[M, K]` by decomposing each FP32 weight value into
 three BF16 residual terms inside the kernel, then accumulating the three BF16
 MMA results into FP32 TMEM output.
 
-The TMEM accumulation chain is bounded to ``num_tmem_acc`` K-tiles: at chunk
+The TMEM accumulation chain is bounded to `num_tmem_acc` K-tiles: at chunk
 boundaries the epilogue warps drain the main-term accumulator into a register
 master accumulator and the MMA warp resets it.
 """
@@ -607,7 +607,7 @@ def warmup_bf16x3_router_gemm(
 
 
 def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
-    """Return ``X @ W.T`` using the SM100 BF16x3 router GEMM kernel."""
+    """Return `X @ W.T` using the SM100 BF16x3 router GEMM kernel."""
     N, K = X.shape
     M, _ = W.shape
     if N == 0:
