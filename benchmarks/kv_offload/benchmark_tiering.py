@@ -692,8 +692,8 @@ class BenchmarkSession:
         print(
             f"{len(self.specs)} runs : "
             f"~{len(self.specs) * (self.max_seconds + 120) // 60} min total ; "
-            f" max gpu memory {gib(max_gpu)} GiB ; "
-            f" max cpu memory {gib(max_cpu)} GiB ; "
+            f" max gpu memory {max_gpu / 1024**3:.1f} G ; "
+            f" max cpu memory {max_cpu / 1024**3:.1f} G ; "
         )
 
         for i, spec in enumerate(self.specs, 1):
