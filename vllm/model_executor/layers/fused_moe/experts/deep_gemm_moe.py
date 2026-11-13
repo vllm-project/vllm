@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -202,6 +203,9 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         # NOTE(rob): discovered an IMA with this combination. Needs investigation.
+        # Opt-in: GLM-5.3 DEP8 + flashinfer_nvlink_one_sided ran without an IMA.
+        if envs.VLLM_DEEP_GEMM_MOE_ALLOW_FI_NVL:
+            return True
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
