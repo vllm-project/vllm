@@ -21,12 +21,11 @@ BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
 
-def _create_mamba_spec(num_speculative_blocks: int = 1) -> MambaSpec:
+def _create_mamba_spec() -> MambaSpec:
     return MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        num_speculative_blocks=num_speculative_blocks,
     )
 
 

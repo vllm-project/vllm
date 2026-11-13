@@ -45,9 +45,9 @@ def test_cache_specs_declare_tp_replication(cache_cls):
     )
     if cache_cls is CompressorStateCache:
         state.dtype = torch.float32
-    spec = cache_cls.get_kv_cache_spec(
+    spec = cache_cls.get_kv_cache_config(
         state, SimpleNamespace(cache_config=cache_config)
-    )
+    ).spec
     assert spec.max_tp_shards == 1
 
 

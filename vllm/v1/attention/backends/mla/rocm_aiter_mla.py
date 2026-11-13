@@ -1384,6 +1384,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._graph_seq_lens = torch.zeros(
                 max_num_reqs, dtype=torch.int32, device=device
             )
+            self._decode_indptr_block = triton.next_power_of_2(max_num_reqs + 1)
 
             if (
                 self._supports_segmented_dcp_verify or self._use_triton_dcp_verify
@@ -1911,6 +1912,48 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 query_start_loc_device[1 : num_reqs + 1]
                 - query_start_loc_device[:num_reqs]
             ).to(torch.int32)
+
+        # Full graphs read the kernel lengths and both indptrs from persistent
+        # buffers. Fill all three in one launch rather than ~20 eager ops.
+        fused_indptr = (
+            self._graph_seq_lens is not None
+            and self.dcp_world_size == 1
+            and g_tot_seq_lens is None
+            and num_kernel_reqs > 0
+        )
+        if fused_indptr:
+            assert self._graph_seq_lens is not None
+            assert num_kernel_reqs <= self._graph_seq_lens.shape[0], (
+                f"{num_kernel_reqs} decode requests exceed the "
+                f"{self._graph_seq_lens.shape[0]}-request graph buffers"
+            )
+            # Unused (never dereferenced) unless VARLEN.
+            varlen_rows = (
+                (self._varlen_q_rows, self._varlen_o_rows)
+                if varlen_decode
+                else (self.qo_indptr, self.qo_indptr)
+            )
+            _build_decode_indptr_kernel[(1,)](
+                seq_lens_device,
+                query_start_loc_device,
+                self._graph_seq_lens,
+                self.paged_kv_indptr,
+                self.qo_indptr,
+                num_kernel_reqs,
+                self.paged_kv_indptr.shape[0],
+                int(max_qo_len) if pad_uniform_mtp else 0,
+                varlen_rows[0],
+                varlen_rows[1],
+                varlen_rows[1].shape[0],
+                PAD=pad_uniform_mtp,
+                VARLEN=varlen_decode,
+                BLOCK=self._decode_indptr_block,
+                ROW_W=max(self._varlen_decode_qlen, 1),
+                ROW_P2=triton.next_power_of_2(max(self._varlen_decode_qlen, 1)),
+            )
+            seq_lens_for_kernel = self._graph_seq_lens[:num_kernel_reqs]
+            paged_kv_indptr = self.paged_kv_indptr[: 1 + num_kernel_reqs]
+        elif pad_uniform_mtp:
             seq_lens_for_kernel = torch.where(
                 qo_lens_device > 0,
                 seq_lens_for_kernel,
@@ -1932,14 +1975,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         varlen_q_rows = varlen_o_rows = None
         varlen_left_align = varlen_decode and not self._varlen_right_align
-        if varlen_left_align:
-            seq_lens_for_kernel = seq_lens_device + (max_qo_len - qo_lens_device)
-        if varlen_decode:
+        if varlen_decode and fused_indptr:
+            # The fused build only runs without DCP, whose varlen rows are
+            # always left-aligned.
+            assert varlen_left_align
+            varlen_q_rows = self._varlen_q_rows[: num_reqs * self._varlen_decode_qlen]
+            varlen_o_rows = self._varlen_o_rows
+        elif varlen_decode:
+            if varlen_left_align:
+                seq_lens_for_kernel = seq_lens_device + (max_qo_len - qo_lens_device)
             varlen_q_rows, varlen_o_rows = self._fill_varlen_rows(
                 query_start_loc_device, qo_lens_device, num_reqs
             )
 
-        if self._graph_seq_lens is not None:
+        if self._graph_seq_lens is not None and not fused_indptr:
             self._graph_seq_lens[:num_kernel_reqs].copy_(
                 seq_lens_for_kernel, non_blocking=True
             )
@@ -1950,12 +1999,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         paged_kv_last_page_len = self.paged_kv_last_page_len[:num_kernel_reqs]
 
         # indptr: cumsum of seq_lens (one page per token in the flat view)
-        paged_kv_indptr = torch.cat(
-            [
-                torch.zeros(1, dtype=torch.int32, device=device),
-                seq_lens_for_kernel.cumsum(dim=0, dtype=torch.int32),
-            ]
-        )
+        if not fused_indptr:
+            paged_kv_indptr = torch.cat(
+                [
+                    torch.zeros(1, dtype=torch.int32, device=device),
+                    seq_lens_for_kernel.cumsum(dim=0, dtype=torch.int32),
+                ]
+            )
         use_gluon_decode = AiterMLAHelper.use_gluon_decode(
             self._decode_num_heads,
             int(max_qo_len),
@@ -2047,7 +2097,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             paged_kv_indices = self.paged_kv_indices
 
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        if fused_indptr:
+            qo_indptr = self.qo_indptr[: 1 + num_kernel_reqs]
+        elif self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr[: 1 + num_kernel_reqs].copy_(
                 paged_kv_indptr, non_blocking=True
             )
@@ -2461,6 +2513,86 @@ def _expand_page_indices_kernel(
         flat_indices,
         mask=mask,
     )
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def _build_decode_indptr_kernel(
+    seq_lens,
+    query_start_loc,
+    graph_seq_lens,
+    kv_indptr,
+    qo_indptr,
+    num_reqs,
+    buf_len,
+    pad_qo_len,
+    varlen_q_rows,
+    varlen_o_rows,
+    varlen_o_rows_len,
+    PAD: tl.constexpr,
+    VARLEN: tl.constexpr,
+    BLOCK: tl.constexpr,
+    ROW_W: tl.constexpr,
+    ROW_P2: tl.constexpr,
+):
+    """Single-program form of the eager full-graph decode indptr build.
+
+    Writes the per-request kernel KV lengths to graph_seq_lens[:num_reqs],
+    their zero-prefixed cumsum to kv_indptr and the query indptr to qo_indptr.
+    Both indptr tails, up to buf_len, repeat the last live entry.
+
+    With PAD the query indptr is uniform at pad_qo_len, and a request with no
+    query tokens is a dummy row whose KV length is pad_qo_len. VARLEN instead
+    extends every request's KV length by the query rows it is short of
+    pad_qo_len, and also fills the varlen row maps: varlen_q_rows[r] is the
+    packed query row of slot r = req * ROW_W + pos (0 for a padding slot), and
+    varlen_o_rows maps each packed row back to its slot, 0 past the live
+    tokens. The last varlen_o_rows entry is a dump slot nothing reads.
+    """
+    offs = tl.arange(0, BLOCK)
+    req_mask = offs < num_reqs
+    seq = tl.load(seq_lens + offs, mask=req_mask, other=0).to(tl.int32)
+    q_start = tl.load(query_start_loc + offs, mask=offs <= num_reqs, other=0)
+    q_start = q_start.to(tl.int32)
+    if PAD:
+        q_end = tl.load(query_start_loc + offs + 1, mask=req_mask, other=0)
+        q_len = q_end.to(tl.int32) - q_start
+        if VARLEN:
+            seq = seq + (pad_qo_len - q_len)
+        else:
+            seq = tl.where(q_len > 0, seq, pad_qo_len)
+        seq = tl.where(req_mask, seq, 0)
+    tl.store(graph_seq_lens + offs, seq, mask=req_mask)
+
+    # Lanes past num_reqs hold 0, so their cumsum is already the tail value.
+    kv = tl.cumsum(seq, axis=0)
+    tl.store(kv_indptr + offs + 1, kv, mask=offs + 1 < buf_len)
+    tl.store(kv_indptr + offs, tl.zeros_like(kv), mask=offs == 0)
+
+    if PAD:
+        qo = tl.minimum(offs, num_reqs) * pad_qo_len
+    else:
+        q_last = tl.load(query_start_loc + num_reqs).to(tl.int32)
+        qo = tl.where(offs <= num_reqs, q_start, q_last)
+    tl.store(qo_indptr + offs, qo, mask=offs < buf_len)
+
+    if VARLEN:
+        pos = tl.arange(0, ROW_P2)
+        slot_mask = req_mask[:, None] & (pos[None, :] < ROW_W)
+        slot = (offs[:, None] * ROW_W + pos[None, :]).to(tl.int64)
+        is_real = pos[None, :] < q_len[:, None]
+        packed = (q_start[:, None] + pos[None, :]).to(tl.int64)
+        tl.store(varlen_q_rows + slot, tl.where(is_real, packed, 0), mask=slot_mask)
+        tl.store(varlen_o_rows + packed, slot, mask=slot_mask & is_real)
+        # Disjoint from the packed rows just written, so no ordering is needed.
+        total = tl.load(query_start_loc + num_reqs).to(tl.int32)
+        zero_offs = tl.arange(0, BLOCK * ROW_P2)
+        for start in range(total, varlen_o_rows_len - 1, BLOCK * ROW_P2):
+            o = start + zero_offs
+            tl.store(
+                varlen_o_rows + o,
+                tl.zeros_like(o).to(tl.int64),
+                mask=o < varlen_o_rows_len - 1,
+            )
 
 
 class AiterMLAHelper:
