@@ -576,7 +576,7 @@ class DeepseekV32Attention(MLAAttention):
         if self._use_sparse_mha(attn_metadata):
             assert kv_c is not None and k_pe is not None
             mha_q_pe = (
-                self.rotary_emb(positions, q_pe)[0]
+                self.rotary_emb(positions, q_pe, torch.empty_like(k_pe).unsqueeze(1))[0]
                 if mqa_q.dtype != q_pe.dtype
                 else mqa_q
             )

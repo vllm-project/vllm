@@ -61,6 +61,7 @@ steps:
     - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - vllm/models/glm5next/nvidia/ops/kpool_compress.py
+    - vllm/models/deepseek_v32/attention.py
     - vllm/v1/hisparse/
     - csrc/hisparse_kernels.cu
     - tests/v1/attention

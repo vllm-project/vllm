@@ -468,7 +468,7 @@ def test_deepseek_v32_dispatches_selected_mha(
         use_pcp=False,
         _fp8_query=fp8_query,
         _use_sparse_mha=lambda _: True,
-        rotary_emb=lambda _positions, q: (q + 1, None),
+        rotary_emb=lambda _positions, q, k: (q + 1, k.add_(1)),
         impl=SimpleNamespace(
             record_logical_topk_ready=lambda: None,
             prepare_for_batch=lambda _: None,
@@ -484,7 +484,8 @@ def test_deepseek_v32_dispatches_selected_mha(
         (q_nope, q_pe + 1 if fp8_query and not prepared_mha else mqa_q), dim=-1
     )
     kv_c = torch.empty(2, 2)
-    k_pe = torch.empty(2, 2)
+    k_pe = torch.randn(2, 2)
+    k_pe_before = k_pe.clone()
     output = torch.empty(2, 2)
 
     DeepseekV32Attention._sparse_indexer_and_attn(
@@ -514,6 +515,7 @@ def test_deepseek_v32_dispatches_selected_mha(
     torch.testing.assert_close(actual_args[0], mha_q)
     assert actual_args[2].shape == (2, 1, 2)
     assert actual_args[2].data_ptr() == k_pe.data_ptr()
+    torch.testing.assert_close(k_pe, k_pe_before, atol=0, rtol=0)
     assert all(
         actual is expected
         for actual, expected in zip(
