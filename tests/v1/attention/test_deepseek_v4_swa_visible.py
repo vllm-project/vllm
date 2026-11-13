@@ -2331,7 +2331,7 @@ def test_ds41_bi_exact_replay_matches_full_forward(monkeypatch, length):
                 pages, block_size, record, device=device, dtype=torch.uint8
             )
             caches.append(cache)
-    spec = caches[0].get_kv_cache_spec(config)
+    spec = caches[0].get_kv_cache_config(config).spec
     builder = DeepseekSparseSWAFlashMLAMetadataBuilder(
         spec, [c.prefix for c in caches], config, device
     )
