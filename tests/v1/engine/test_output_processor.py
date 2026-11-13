@@ -1806,6 +1806,36 @@ def test_streaming_input_abort_error_is_terminal(finish_reason: FinishReason):
     assert output.outputs[0].finish_reason == str(finish_reason)
 
 
+@pytest.mark.parametrize("finish_reason", [FinishReason.LENGTH, FinishReason.STOP])
+def test_streaming_input_finish_that_ends_the_stream_is_terminal(
+    finish_reason: FinishReason,
+):
+    """A finish the engine marks as ending the stream is terminal even with a
+    chunk queued: finished stays True with the real finish reason, the state
+    is freed, and an abort is routed back to the engine core. See
+    docs/design/persistent_state.md for the design."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=[4],
+                finish_reason=finish_reason,
+                ends_stream=True,
+            )
+        ]
+    )
+
+    assert processor.get_num_unfinished_requests() == 0
+    assert processed.reqs_to_abort == ["stream-req"]
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.finished is True
+    assert output.outputs[0].finish_reason == str(finish_reason)
+
+
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
 @pytest.mark.parametrize("abort_by", ["internal", "external"])
 def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):

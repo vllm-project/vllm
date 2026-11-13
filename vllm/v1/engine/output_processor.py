@@ -844,8 +844,10 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
-            streaming_chunk_boundary = req_state.streaming_input and (
-                finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
+            streaming_chunk_boundary = (
+                req_state.streaming_input
+                and not engine_core_output.ends_stream
+                and finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
             )
 
             # 4) Create and handle RequestOutput objects.
