@@ -155,7 +155,7 @@ class PPHandler:
         num_dims: int,
     ) -> None:
         """Add the relayed positions to the persistent intermediate tensors,
-        which some PP transports receive into."""
+        which every PP transport checks received tensors against."""
         if not self.relay_positions:
             return
         intermediate_tensors[PP_POSITIONS_KEY] = torch.zeros(
