@@ -50,6 +50,7 @@ from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
+from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -210,6 +211,7 @@ class BaseRenderer(ABC, Generic[_T]):
             # This is used to generate internal request ID for MM processing
             # It has no relation to the request ID for engine core
             self._mm_req_counter = AtomicCounter()
+            self._mm_req_id_prefix = f"renderer{self.api_process_rank}-{random_uuid()}"
             self._mm_timing_registry = MultiModalTimingRegistry(
                 config.observability_config
             )
@@ -978,7 +980,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self._drain_mm_cache_invalidations()
         mm_processor = self.get_mm_processor()
 
-        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
+        mm_req_id = f"{self._mm_req_id_prefix}-mm-{self._mm_req_counter.inc(1)}"
 
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
