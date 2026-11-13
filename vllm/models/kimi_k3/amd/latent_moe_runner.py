@@ -10,7 +10,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
-    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -28,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.online.fp8 import Fp8PtpcOnlineLinearMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineLinearMethod
+from vllm.models.kimi_k3.amd import sp
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.amd.linear import KimiRoutedInputLinear
@@ -154,7 +154,7 @@ class ROCmLatentMoERunner(MoERunner):
 
         if token_sharded:
             # Token-sharded residual stream: keep only this rank's tokens.
-            out = tensor_model_parallel_reduce_scatter(shared_output, dim=0)
+            out = sp.scatter_tokens(shared_output)
             return out[..., :trunc_size] if trunc_size is not None else out
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False

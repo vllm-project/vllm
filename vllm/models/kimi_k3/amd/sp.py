@@ -16,6 +16,12 @@ its output instead of all-reducing it. The extra all-gathers of the latent and
 the top-k add about 17% bytes per MoE layer at K3's sizes. An MoE whose tail is
 not token-shardable all-gathers its input and all-reduces its output in full.
 
+With `VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`, the residual stream's
+reduce-scatters and all-gathers take AITER's INT4 collectives
+(`QuickAllReduce.sp_collectives`) where they serve the payload, as the TP
+all-reduces they replace take INT4 QuickReduce. The latent, the top-k and FP8
+activations keep the exact collectives.
+
 Enabled by `VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS`; see `vllm.envs`.
 """
 
@@ -32,11 +38,21 @@ from vllm.distributed import (
     get_dp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+
+def is_enabled() -> bool:
+    """Whether some prefill can be token-sharded: the environment asks for it
+    and TP is larger than one."""
+    return (
+        envs.VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS > 0
+        and get_tensor_model_parallel_world_size() > 1
+    )
 
 
 def should_shard(
@@ -57,11 +73,9 @@ def should_shard(
     it off: routing runs on each rank's token shard only, so those would see
     just this rank's tokens.
     """
-    min_tokens = envs.VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS
     return (
-        min_tokens > 0
-        and get_tensor_model_parallel_world_size() > 1
-        and num_tokens >= min_tokens
+        is_enabled()
+        and num_tokens >= envs.VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS
         and not has_residual
         and not has_aux_layers
         and not routing_observed
@@ -71,10 +85,21 @@ def should_shard(
     )
 
 
+def int4_collectives() -> Any:
+    """AITER's INT4 reduce-scatter / all-gather of the TP group, or None. The
+    first call builds them and is a collective: every rank makes it, outside
+    CUDA graph capture, before the first token-sharded forward."""
+    qr_comm = getattr(get_tp_group().device_communicator, "qr_comm", None)
+    return None if qr_comm is None else qr_comm.sp_collectives()
+
+
 def gather_tokens(shard: torch.Tensor, num_tokens: int | None = None) -> torch.Tensor:
     """All-gather the token shards, dropping the TP padding rows if
     `num_tokens` is given."""
-    out = tensor_model_parallel_all_gather(shard, dim=0)
+    collectives = int4_collectives()
+    out = None if collectives is None else collectives.all_gather(shard)
+    if out is None:
+        out = tensor_model_parallel_all_gather(shard, dim=0)
     return out if num_tokens is None else out[:num_tokens]
 
 
@@ -101,7 +126,11 @@ def scatter_tokens(partial: torch.Tensor) -> torch.Tensor:
     pad = (-partial.size(0)) % get_tensor_model_parallel_world_size()
     if pad:
         partial = F.pad(partial, (0, 0, 0, pad))
-    return tensor_model_parallel_reduce_scatter(partial, dim=0)
+    collectives = int4_collectives()
+    out = None if collectives is None else collectives.reduce_scatter(partial)
+    if out is None:
+        out = tensor_model_parallel_reduce_scatter(partial, dim=0)
+    return out
 
 
 def all_gather_routing(

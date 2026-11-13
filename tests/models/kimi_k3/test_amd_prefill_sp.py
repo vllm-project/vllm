@@ -22,7 +22,11 @@ from tests.utils import (
     multi_gpu_test,
 )
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed import get_tp_group
+from vllm.distributed import (
+    get_tp_group,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
+)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -213,6 +217,53 @@ def _check_padded_gather_scatter(
             got = sp.gather_activation(quantized, keep)
             assert isinstance(got, QuantizedActivation)
             assert got.orig_shape == (expected_rows, 64)
+
+
+def _nmse(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    error = (actual.float() - expected.float()).pow(2).mean()
+    return (error / expected.float().pow(2).mean()).item()
+
+
+def _check_int4_collectives(device: torch.device, tp_world: int, rank: int) -> None:
+    """Under INT4 QuickReduce, the residual stream's gather and scatter return
+    AITER's INT4 collectives' result where those serve the payload (gfx950 TP2:
+    8 MiB and up) and the exact collectives' result elsewhere."""
+    collectives = sp.int4_collectives()
+    assert collectives is not None
+    group = get_tp_group().device_group
+    for num_tokens, served in ((2049, True), (63, False)):
+        padded = -(-num_tokens // tp_world) * tp_world
+        rows = padded // tp_world
+        gen = torch.Generator(device=device).manual_seed(num_tokens)
+        full = torch.randn(padded, HIDDEN_SIZE, device=device, generator=gen)
+        full[num_tokens:] = 0
+        shard = full[rank * rows : (rank + 1) * rows].to(DTYPE)
+        torch.manual_seed(rank + 1)
+        partial = torch.randn(num_tokens, HIDDEN_SIZE, device=device)
+        padded_partial = F.pad(partial, (0, 0, 0, padded - num_tokens))
+        mine = slice(rank * rows, (rank + 1) * rows)
+
+        gathered = sp.gather_tokens(shard, num_tokens)
+        scattered = sp.scatter_tokens(partial.to(DTYPE))
+
+        int4_gathered = collectives.all_gather(shard)
+        int4_scattered = collectives.reduce_scatter(padded_partial.to(DTYPE))
+        assert (int4_gathered is not None) == served
+        assert (int4_scattered is not None) == served
+        if served:
+            assert torch.equal(gathered, int4_gathered[:num_tokens])
+            assert torch.equal(scattered, int4_scattered)
+            reduced = _all_reduced(padded_partial, group)
+            # AITER's bound for its INT4 codec on normal data (about 6.5e-3).
+            assert _nmse(gathered, full[:num_tokens]) < 2e-2
+            assert _nmse(scattered, reduced[mine]) < 2e-2
+        else:
+            exact_gathered = tensor_model_parallel_all_gather(shard, dim=0)
+            exact_scattered = tensor_model_parallel_reduce_scatter(
+                padded_partial.to(DTYPE), dim=0
+            )
+            assert torch.equal(gathered, exact_gathered[:num_tokens])
+            assert torch.equal(scattered, exact_scattered)
             assert got.orig_dtype == DTYPE and got.quant_key == kFp8DynamicTokenSym
             torch.testing.assert_close(
                 got.data.view(torch.uint8),
@@ -344,6 +395,7 @@ _CHECKS: dict[str, Callable[[torch.device, int, int], None]] = {
     "sharded_tail": _check_sharded_tail,
     "routing_gather": _check_routing_gather,
     "padded_gather_scatter": _check_padded_gather_scatter,
+    "int4_collectives": _check_int4_collectives,
     "shard_routed_moe": _check_shard_routed_moe,
     "shard_routed_moe_token_group": partial(
         _check_shard_routed_moe, kind="moe_token_group"
@@ -395,6 +447,25 @@ def test_padded_gather_scatter_tp4() -> None:
 @multi_gpu_test(num_gpus=8)
 def test_padded_gather_scatter_tp8() -> None:
     _run_ranks("padded_gather_scatter", 8)
+
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not _on_gfx950(), reason="AITER's INT4 collectives serve gfx950 TP2 only"
+)
+def test_int4_collectives_tp2(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("aiter.dist.device_communicators.sp_collectives")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "INT4")
+    _run_ranks("int4_collectives", 2)
 
 
 def _run_shard_routed_moe(

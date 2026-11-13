@@ -18,7 +18,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
     tensor_model_parallel_all_gather,
-    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
@@ -819,7 +818,7 @@ class KimiDecoderLayer(nn.Module):
         latent, topk_weights, topk_ids = runner.sp_route_shard(
             hidden_shard, router_logits
         )
-        hidden_states = tensor_model_parallel_all_gather(hidden_shard, dim=0)
+        hidden_states = sp.gather_tokens(hidden_shard)
         latent = tensor_model_parallel_all_gather(latent.contiguous(), dim=0)
         topk = sp.all_gather_routing(topk_weights, topk_ids)
         # Only read by select_experts, which returns the gathered top-k instead.
@@ -840,7 +839,7 @@ class KimiDecoderLayer(nn.Module):
             assert isinstance(hidden_shard, torch.Tensor)
             if self.mlp.use_latent_moe and self.mlp.experts.token_shardable:
                 return self._run_moe_sp_shard_routed(hidden_shard)
-            hidden_states = tensor_model_parallel_all_gather(hidden_shard, dim=0)
+            hidden_states = sp.gather_tokens(hidden_shard)
             out = self.mlp(hidden_states)
             # The MoE output is fully reduced; keep this rank's tokens.
             shard = hidden_shard.size(0)
@@ -848,7 +847,7 @@ class KimiDecoderLayer(nn.Module):
         hidden_states = sp.gather_activation(hidden_shard)
         with self._output_unreduced(self.mlp.down_proj):
             out = self.mlp(hidden_states)
-        return tensor_model_parallel_reduce_scatter(out, dim=0)
+        return sp.scatter_tokens(out)
 
     def forward(
         self,
@@ -963,6 +962,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             vllm_config.aux_output_config.enable_return_routed_experts
             or vllm_config.parallel_config.enable_eplb
         )
+        if sp.is_enabled():
+            # A collective that compiles kernels: at load, not in a prefill.
+            sp.int4_collectives()
 
         self.vocab_size = config.vocab_size
 
