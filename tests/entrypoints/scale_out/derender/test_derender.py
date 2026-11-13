@@ -16,7 +16,9 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
+    ParseContext,
 )
+from vllm.outputs import CompletionOutput
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
@@ -207,6 +209,11 @@ async def test_derender_chat_usage(client):
     assert usage["prompt_tokens"] == 10
     assert usage["completion_tokens"] == len(synthetic_ids)
     assert usage["total_tokens"] == 10 + len(synthetic_ids)
+    # No generate usage and no reasoning parser: no details, as on the
+    # coupled chat endpoint. A null `prompt_tokens_details` is omitted from
+    # the JSON entirely (#64177).
+    assert "prompt_tokens_details" not in usage
+    assert usage["completion_tokens_details"] is None
 
 
 @pytest.mark.asyncio
@@ -1433,6 +1440,45 @@ async def test_e2e_parsed_reasoning(parser_client, parser_tokenizer):
 
 
 @pytest.mark.asyncio
+async def test_e2e_parsed_usage_details(parser_client, parser_tokenizer):
+    """Batch usage reports `reasoning_tokens` counted by the reasoning parser and
+    passes `prompt_tokens_details` through from the generate usage, as the
+    coupled chat endpoint does."""
+    messages = [{"role": "user", "content": "What is 2+3?"}]
+    gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
+    output_ids = _require_markers_survive(
+        parser_tokenizer, "<think>Two plus three.</think>Five.", "<think>", "</think>"
+    )
+    think_start = parser_tokenizer.convert_tokens_to_ids("<think>")
+    think_end = parser_tokenizer.convert_tokens_to_ids("</think>")
+    reasoning_tokens = output_ids.index(think_end) - output_ids.index(think_start) - 1
+    assert reasoning_tokens > 0
+    prompt_tokens = len(gen_req["token_ids"])
+
+    generate_response = _e2e_generate_response(output_ids)
+    generate_response["usage"] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": len(output_ids),
+        "total_tokens": prompt_tokens + len(output_ids),
+        "prompt_tokens_details": {"cached_tokens": 4},
+    }
+    resp = await parser_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": PARSER_MODEL,
+            "generate_response": generate_response,
+            "prompt_tokens": prompt_tokens,
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    usage = resp.json()["usage"]
+    assert usage["completion_tokens"] == len(output_ids)
+    assert usage["completion_tokens_details"]["reasoning_tokens"] == reasoning_tokens
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 4
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("include_reasoning", [True, False])
 async def test_e2e_parsed_logprobs_follow_include_reasoning(
     parser_client, parser_tokenizer, include_reasoning
@@ -1940,7 +1986,7 @@ def _derender_hermes_chat(
         )
     )
 
-    (choice,), _ = derenderer._derender_chat(response, request)
+    (choice,), _, _ = derenderer._derender_chat(response, request)
     return choice
 
 
@@ -1997,8 +2043,8 @@ def test_derender_chat_keeps_parser_tool_call_id():
 
 
 @pytest.mark.parametrize("use_stub_parser", [False, True])
-def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
-    """/derender drops parsed tool calls for `tool_choice=None` and for a
+def test_derender_chat_drops_tool_calls_with_none_tool_choice(use_stub_parser):
+    """/derender drops parsed tool calls for `tool_choice="none"` and for a
     parser that ignores `tool_choice="none"` (Harmony), like coupled chat."""
 
     class _IgnoresToolChoiceParser:
@@ -2013,7 +2059,7 @@ def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
 
     choice = _derender_hermes_chat(
         _HERMES_TOOL_CALL_TEXT,
-        tool_choice="none" if use_stub_parser else None,
+        tool_choice="none",
         parser_cls=_IgnoresToolChoiceParser if use_stub_parser else None,
     )
 
@@ -2021,7 +2067,7 @@ def test_derender_chat_drops_tool_calls_without_tool_choice(use_stub_parser):
     assert choice.finish_reason == "stop"
 
 
-def _make_derenderer(tokenizer, generation_config: dict | None = None):
+def _make_derenderer(tokenizer, generation_config: dict | None = None, **kwargs):
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
     renderer.get_eos_token_id.return_value = tokenizer.eos_token_id
@@ -2036,6 +2082,7 @@ def _make_derenderer(tokenizer, generation_config: dict | None = None):
         request_logger=None,
         chat_template=None,
         chat_template_content_format="string",
+        **kwargs,
     )
 
 
@@ -2099,7 +2146,7 @@ def test_derender_batch_trims_stop_like_engine(
             messages=[{"role": "user", "content": "Count"}],
             **request_kwargs,
         )
-        (choice,), _ = derenderer._derender_chat(response, request)
+        (choice,), _, _ = derenderer._derender_chat(response, request)
         output_text = choice.message.content
     else:
         request = CompletionRequest(model=MODEL_NAME, prompt="Count", **request_kwargs)
@@ -2108,6 +2155,120 @@ def test_derender_batch_trims_stop_like_engine(
 
     assert output_text == text
     assert choice.stop_reason == reason
+
+
+@pytest.mark.parametrize("tool_parser", [None, "hermes"])
+@pytest.mark.parametrize(
+    ("add_generation_prompt", "echo", "role", "echoed"),
+    [
+        (True, True, "bot", ""),
+        (False, False, "assistant", ""),
+        (False, True, "assistant", "1, 2,"),
+    ],
+)
+def test_derender_chat_role_and_echo_match_chat_completion(
+    tokenizer, tool_parser, add_generation_prompt, echo, role, echoed
+):
+    """Batch /derender takes the role from `--response-role` or, when the
+    last message is continued, from that message, and prepends it on
+    `echo`, as `/v1/chat/completions` does."""
+    derenderer = _make_derenderer(
+        tokenizer,
+        response_role="bot",
+        tool_parser=tool_parser,
+        enable_auto_tools=tool_parser is not None,
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": "Count to five."},
+            {"role": "assistant", "content": "1, 2,"},
+        ],
+        add_generation_prompt=add_generation_prompt,
+        continue_final_message=not add_generation_prompt,
+        echo=echo,
+    )
+    response = GenerateTokensResponse.model_validate(
+        _make_generate_response(
+            tokenizer.encode(" 3, 4, 5", add_special_tokens=False),
+            finish_reason="length",
+        )
+    )
+
+    (choice,), _, _ = derenderer._derender_chat(response, request)
+    (plain,), _, _ = derenderer._derender_chat(
+        response, request.model_copy(update={"echo": False})
+    )
+
+    assert choice.message.role == role
+    assert choice.message.content == echoed + plain.message.content
+
+
+def test_derender_chat_empty_messages_uses_response_role(tokenizer):
+    """With no message to continue, the role falls back to `--response-role`
+    instead of failing on `messages[-1]`."""
+    derenderer = _make_derenderer(tokenizer, response_role="bot")
+    request = ChatCompletionRequest(
+        model=MODEL_NAME, messages=[], add_generation_prompt=False, echo=True
+    )
+    response = GenerateTokensResponse.model_validate(
+        _make_generate_response(tokenizer.encode("Hi", add_special_tokens=False))
+    )
+
+    (choice,), _, _ = derenderer._derender_chat(response, request)
+
+    assert choice.message.role == "bot"
+
+
+def test_derender_chat_echo_includes_refusal_parts(tokenizer):
+    """`echo` takes text from every text-like part, as chat parsing does, not
+    only parts with a `text` key."""
+    derenderer = _make_derenderer(tokenizer)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": "Count to five."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "refusal", "refusal": "No."},
+                    {"type": "text", "text": "1, 2,"},
+                ],
+            },
+        ],
+        add_generation_prompt=False,
+        continue_final_message=True,
+        echo=True,
+    )
+    response = GenerateTokensResponse.model_validate(
+        _make_generate_response(
+            tokenizer.encode(" 3", add_special_tokens=False),
+            finish_reason="length",
+        )
+    )
+
+    (choice,), _, _ = derenderer._derender_chat(response, request)
+
+    assert choice.message.content.startswith("No.\n1, 2,")
+
+
+def test_generate_derender_role_is_response_role(tokenizer):
+    """Generate `output_mode: "derender"` returns `--response-role`."""
+    derenderer = _make_derenderer(tokenizer, response_role="bot")
+    output = CompletionOutput(
+        index=0,
+        text="Hello",
+        token_ids=[1],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="stop",
+    )
+
+    ((message, _),) = derenderer._derender_text_choices(
+        [output], ParseContext().to_chat_request(), 0, None
+    )
+
+    assert message.role == "bot"
 
 
 @pytest.mark.asyncio

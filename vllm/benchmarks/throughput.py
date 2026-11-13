@@ -580,6 +580,8 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     d.setdefault("no_oversample", False)
     d.setdefault("request_id_prefix", "")
     d.setdefault("chat_template_kwargs", None)
+    d.setdefault("blazedit_min_distance", 0.0)
+    d.setdefault("blazedit_max_distance", 1.0)
     return argparse.Namespace(**d)
 
 

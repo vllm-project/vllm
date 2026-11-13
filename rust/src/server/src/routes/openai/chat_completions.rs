@@ -5,7 +5,6 @@ pub(crate) mod convert;
 mod types;
 mod validate;
 
-use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -13,12 +12,11 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, future, pin_mut};
+use futures::{StreamExt as _, future};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info};
 use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
@@ -51,7 +49,11 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
-use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::npy_base64;
+use crate::utils::{
+    ResolvedRequestContext, openai_sse_stream, resolve_request_context, sse_response,
+    unix_timestamp,
+};
 
 pub(crate) fn lower_chat_request(
     request: ChatCompletionRequest,
@@ -131,8 +133,8 @@ pub async fn chat_completions(
                 )
             })
             .collect();
-        let sse_stream = chat_completion_sse_stream(merge_choice_chunk_streams(chunk_streams))
-            .instrument(request_span);
+        let sse_stream =
+            openai_sse_stream(merge_choice_chunk_streams(chunk_streams)).instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
@@ -247,7 +249,9 @@ async fn collect_chat_completion(
         kv_transfer_params,
         ec_transfer_params,
         weight_versions,
+        routed_experts,
     } = collected;
+    let routed_experts = routed_experts.as_ref().map(npy_base64).transpose()?;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
     let reasoning = message.reasoning();
@@ -355,7 +359,7 @@ async fn collect_chat_completion(
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
-            routed_experts: None,
+            routed_experts,
             weight_versions: weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
@@ -921,55 +925,6 @@ fn append_delta_text(slot: &mut Option<String>, delta: String) {
     }
 }
 
-/// Convert one chunk stream into OpenAI-style SSE events.
-///
-/// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
-/// events followed by `data: [DONE]`, so the transport stream itself stays
-/// infallible even when generation fails after the HTTP response has started.
-#[try_stream]
-async fn chat_completion_sse_stream(
-    stream: impl Stream<Item = Result<ChatCompletionStreamResponse, ApiError>>,
-    mut y: TryYielder<Event, Infallible>,
-) -> Result<(), Infallible> {
-    pin_mut!(stream);
-
-    while let Some(next) = stream.next().await {
-        match next {
-            Ok(chunk) => y.yield_ok(to_sse_event(&chunk)).await,
-            Err(error) => {
-                y.yield_ok(to_error_sse_event(&error)).await;
-                break;
-            }
-        }
-    }
-
-    y.yield_ok(done_sse_event()).await;
-    Ok(())
-}
-
-/// Serialize one OpenAI chunk payload into one SSE `data:` event.
-fn to_sse_event(chunk: &ChatCompletionStreamResponse) -> Event {
-    trace!(?chunk, "chat completion emitting chunk");
-    Event::default()
-        .json_data(chunk)
-        .expect("ChatCompletionStreamResponse must serialize to JSON")
-}
-
-/// Serialize one OpenAI error payload into one SSE `data:` event.
-fn to_error_sse_event(error: &ApiError) -> Event {
-    let response = error.to_error_response();
-    trace!(?response, "chat completion emitting error");
-    Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
-}
-
-/// Build the terminal OpenAI SSE sentinel event.
-fn done_sse_event() -> Event {
-    trace!("chat completion emitting done");
-    Event::default().data("[DONE]")
-}
-
 /// Build the initial assistant-role SSE chunk required by the OpenAI streaming
 /// protocol.
 fn start_chunk(envelope: &Arc<StreamResponseEnvelope>) -> ChatCompletionStreamResponse {
@@ -1327,6 +1282,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1425,6 +1381,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1476,6 +1433,7 @@ mod tests {
                 timestamps: Default::default(),
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: Some(Box::new(json!({"remote_block_ids": [1, 2]}))),
                 ec_transfer_params: None,
@@ -1546,6 +1504,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1632,6 +1591,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1770,6 +1730,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1854,6 +1815,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1921,6 +1883,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2006,6 +1969,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2083,6 +2047,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2149,6 +2114,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 }),
             ]);
 

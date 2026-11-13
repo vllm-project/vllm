@@ -10,8 +10,9 @@ the weights the next kernels read into L2, so that they start warm.
 
 Prefetch points (`fork(point, layer, batch)`), each with its batches per TP:
 
-- `oproj_down`: after the o-projection (B3-8), the MoE front's packed
-  router + latent-down rows.
+- `oproj_down`: after the o-projection (B3-7), the MoE front's packed
+  router + latent-down rows. Not at B8 (TP8 and TP16), where an A/B of the front
+  favored running without it.
 - `attention_moe`: at TP8 only, after the KDA input projection (B5-8) or the MLA
   core (B8), this layer's o-projection, the same front rows, the shared expert's
   weights and this rank's shard of the latent up projection (the MoE tail's weights,
@@ -171,7 +172,7 @@ class PrefetchController:
             up: tuple = ()
             # The front GEMM reads [router shard; down shard] from the packed copy.
             ranges = urgent((packed[index],), grid=8)
-            self._add("oproj_down", index, range(3, 9), ranges)
+            self._add("oproj_down", index, range(3, 8), ranges)
             if tp == 8:
                 shared = moe.shared_experts
                 shared = shared.gate_up_proj.weight, shared.down_proj.weight
