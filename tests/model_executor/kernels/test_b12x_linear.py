@@ -30,6 +30,9 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferCuteDslNvFp4W4A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
@@ -40,6 +43,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
 from vllm.platforms import PlatformEnum
+from vllm.platforms.interface import DeviceCapability
 
 
 @pytest.mark.parametrize(
@@ -804,6 +808,64 @@ def test_b12x_backend_selects_w4a16(monkeypatch) -> None:
     kernel = init_nvfp4_linear_kernel(use_a16=True)
 
     assert isinstance(kernel, B12xNvFp4W4A16LinearKernel)
+
+
+@pytest.mark.parametrize(
+    ("act_dtype", "expected"),
+    [
+        (torch.bfloat16, FlashInferCuteDslNvFp4W4A16LinearKernel),
+        (torch.float16, MarlinNvFp4LinearKernel),
+    ],
+)
+def test_nvfp4_w4a16_auto_selection_follows_act_dtype(
+    monkeypatch, act_dtype, expected
+) -> None:
+    """The SM100 W4A16 default only takes BF16 inputs, so FP16 gets Marlin."""
+    import vllm.model_executor.kernels.linear as linear_mod
+
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "auto"
+    )
+    monkeypatch.setattr(
+        linear_mod.current_platform,
+        "get_device_capability",
+        lambda device_id=0: DeviceCapability(10, 0),
+    )
+    for kernel_cls in (
+        FlashInferCuteDslNvFp4W4A16LinearKernel,
+        MarlinNvFp4LinearKernel,
+    ):
+        monkeypatch.setattr(
+            kernel_cls,
+            "is_supported",
+            classmethod(lambda cls, compute_capability=None: (True, None)),
+        )
+
+    kernel = init_nvfp4_linear_kernel(use_a16=True, act_dtype=act_dtype)
+
+    assert type(kernel) is expected
+
+
+def test_nvfp4_w4a16_forced_bf16_only_backend_rejects_fp16(monkeypatch) -> None:
+    import vllm.model_executor.kernels.linear as linear_mod
+
+    monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
+    monkeypatch.setattr(
+        linear_mod, "_get_linear_backend", lambda *, quantization: "b12x"
+    )
+    monkeypatch.setitem(
+        linear_mod._POSSIBLE_NVFP4_KERNELS,
+        PlatformEnum.CUDA,
+        [B12xNvFp4LinearKernel, B12xNvFp4W4A16LinearKernel, MarlinNvFp4LinearKernel],
+    )
+    monkeypatch.setattr(
+        B12xNvFp4W4A16LinearKernel,
+        "is_supported",
+        classmethod(lambda cls, compute_capability=None: (True, None)),
+    )
+
+    with pytest.raises(ValueError, match="requires BF16 activations"):
+        init_nvfp4_linear_kernel(use_a16=True, act_dtype=torch.float16)
 
 
 def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
