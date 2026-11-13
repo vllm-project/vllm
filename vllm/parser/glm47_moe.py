@@ -52,14 +52,18 @@ GLM_TURN_BOUNDARIES = frozenset(
     ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")
 )
 
+# The opening <arg_value> tag is optional: under load GLM-4.7-family models
+# occasionally skip it, emitting
+# ``<arg_key>key</arg_key>value</arg_value>`` with the value fully intact.
+# Requiring the tag would silently drop such arguments (yielding ``{}``).
 _ARG_RE = re.compile(
     r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*?)</arg_value>",
+    r"(?:<arg_value>)?(?P<value>.*?)</arg_value>",
     re.DOTALL,
 )
 _PARTIAL_ARG_RE = re.compile(
     r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*)$",
+    r"(?P<open_tag><arg_value>)?(?P<value>.*)$",
     re.DOTALL,
 )
 
@@ -108,8 +112,12 @@ def _glm47_parse_args(
         match = _PARTIAL_ARG_RE.search(remaining)
         if match:
             key = match.group("key").strip()
-            if key:
-                params[key] = match.group("value")
+            value = match.group("value")
+            # Text that can still become the opening tag is not a value yet.
+            if key and (
+                match.group("open_tag") or not ARG_VALUE_START.startswith(value)
+            ):
+                params[key] = value
                 open_key = key
 
     return params, open_key
