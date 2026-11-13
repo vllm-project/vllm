@@ -23,6 +23,7 @@ if os.path.islink(_cute_dir) and "flash_attn" not in sys.modules:
 from vllm.vllm_flash_attn.flash_attn_interface import (  # noqa: E402
     FA2_AVAILABLE,
     FA3_AVAILABLE,
+    FA4_AVAILABLE,
     compile_flash_attn_varlen_func_from_specs,
     fa_version_unsupported_reason,
     flash_attn_varlen_func,
@@ -30,10 +31,11 @@ from vllm.vllm_flash_attn.flash_attn_interface import (  # noqa: E402
     is_fa_version_supported,
 )
 
-if not (FA2_AVAILABLE or FA3_AVAILABLE):
+if not (FA2_AVAILABLE or FA3_AVAILABLE or FA4_AVAILABLE):
     raise ImportError(
         "vllm.vllm_flash_attn requires the CUDA flash attention extensions "
-        "(_vllm_fa2_C or _vllm_fa3_C). On ROCm, use upstream flash_attn."
+        "(_vllm_fa2_C or _vllm_fa3_C) or the FA4 CuTe DSL sources. "
+        "On ROCm, use upstream flash_attn."
     )
 
 __all__ = [
