@@ -515,6 +515,9 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     instantiating and calling this class is bit-identical to calling
     the standalone functions. Follow-up PRs may move logic from the
     module-level functions into these methods.
+
+    Priority and selection methods use `self.moe_config` by default. Legacy
+    callers can pass `moe_config` explicitly to override it for one call.
     """
 
     name = "Unquantized"
@@ -523,8 +526,10 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         return UnquantizedMoeBackend
 
     def get_priority_backends(
-        self, moe_config: FusedMoEConfig
+        self, moe_config: FusedMoEConfig | None = None
     ) -> list[UnquantizedMoeBackend]:
+        if moe_config is None:
+            moe_config = self.moe_config
         return _get_priority_backends(moe_config)
 
     def backend_to_kernel_cls(
@@ -532,12 +537,13 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 
-    def map_backend(self, runner_backend: MoEBackend) -> UnquantizedMoeBackend:
+    @classmethod
+    def map_backend(cls, runner_backend: MoEBackend) -> UnquantizedMoeBackend:
         return map_unquantized_backend(runner_backend)
 
     def select_backend(
         self,
-        moe_config: FusedMoEConfig,
+        moe_config: FusedMoEConfig | None = None,
         weight_key: "QuantKey | None" = None,
         activation_key: "QuantKey | None" = None,
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
@@ -545,6 +551,8 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
             "Weights and activations will never be quantized for "
             "UnquantizedMoEKernelOracle"
         )
+        if moe_config is None:
+            moe_config = self.moe_config
         return select_unquantized_moe_backend(moe_config)
 
     def convert_to_kernel_format(

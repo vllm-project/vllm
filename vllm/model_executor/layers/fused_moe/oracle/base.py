@@ -4,6 +4,7 @@
 """Abstract base class for MoE kernel oracles."""
 
 from abc import ABC
+from collections.abc import Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
 
@@ -19,11 +20,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
+
+MOE_EXPERTS_MODULE = "vllm.model_executor.layers.fused_moe.experts"
 
 # Sentinel for the per-call `activation_key` override: `None` is a legitimate
 # key (BF16 activations), so absence needs its own value. Same idiom as
@@ -37,13 +41,22 @@ Rejection = tuple[type[mk.FusedMoEExperts], str | None]
 class MoEKernelOracle(ABC, Generic[BackendT]):
     """Abstract base for MoE kernel-selection oracles.
 
-    Concrete oracles provide `name` and `backend_to_kernel_cls` today; the
-    remaining methods below are the #37753 migration target and are still
-    implemented per module, so they are declared but not enforced.
+    Concrete oracles can declare backend priorities and mappings to use the
+    default selection flow, or override methods for their selection policy.
+    Kernel construction and weight conversion remain per-oracle operations.
+    A `None` declaration leaves the corresponding default method unimplemented;
+    empty declarations are valid.
+
+    Deployment inputs are supplied at construction and stored as
+    `self.moe_config`, `self.weight_key`, and `self.activation_key`. Priority
+    and selection overrides can read these attributes without per-call inputs.
     """
 
     # Display name for the shared log helpers below; subclasses must set it.
     name: ClassVar[str]
+    priority_backends: tuple[BackendT, ...] | None = None
+    backend_mapping: Mapping[MoEBackend, BackendT] | None = None
+    experts_mapping: Mapping[BackendT, tuple[str, ...]] | None = None
 
     def __init__(
         self,
@@ -61,10 +74,18 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         backends (e.g. `UnquantizedMoeBackend`, `Fp8MoeBackend`)."""
         raise NotImplementedError
 
-    def get_priority_backends(self, moe_config: FusedMoEConfig) -> list[BackendT]:
-        """Return platform-appropriate backends in priority order for
-        this `moe_config`."""
-        raise NotImplementedError
+    def get_priority_backends(self) -> list[BackendT]:
+        """Return backends in priority order.
+
+        The default returns a copy of `priority_backends`. Override this method
+        to compute priorities from the instance's deployment inputs.
+        """
+        if self.priority_backends is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must define priority_backends "
+                "or override get_priority_backends()."
+            )
+        return list(self.priority_backends)
 
     def backend_to_kernel_cls(
         self, backend: BackendT
@@ -72,35 +93,60 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         """Map a backend enum value to its concrete `FusedMoEExperts`
         subclasses, in selection priority order.
 
-        Implementations must forward to the module-level function at call time,
-        not alias it with `= staticmethod(fn)`, which snapshots it at import.
+        The default resolves `experts_mapping` at call time. Subclasses that
+        support replacing their module-level lookup should override this method
+        to call that function.
         """
-        raise NotImplementedError
+        if self.experts_mapping is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must define experts_mapping "
+                "or override backend_to_kernel_cls()."
+            )
+        return resolve_moe_experts(backend, self.experts_mapping, self.name)
 
-    def map_backend(self, runner_backend: MoEBackend) -> BackendT:
+    @classmethod
+    def map_backend(cls, runner_backend: MoEBackend) -> BackendT:
         """Map a user-facing `MoEBackend` (from the runner config) to
         this oracle's enum."""
-        raise NotImplementedError
+        if cls.backend_mapping is None:
+            raise NotImplementedError(
+                f"{cls.__name__} must define backend_mapping or override map_backend()."
+            )
+        backend = cls.backend_mapping.get(runner_backend)
+        if backend is not None:
+            return backend
+        raise ValueError(
+            f"moe_backend='{runner_backend}' is not supported for {cls.name} MoE. "
+            f"Expected one of {list(cls.backend_mapping)}."
+        )
 
-    def select_backend(
-        self,
-        moe_config: FusedMoEConfig,
-        weight_key: "QuantKey | None" = None,
-        activation_key: "QuantKey | None" = None,
-    ) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:
-        """Primary entry point: choose the best supported backend for
-        the given `moe_config`.
+    def select_backend(self) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:
+        """Choose a supported backend for this instance's deployment.
 
-        `weight_key` / `activation_key` carry the quantization scheme of
-        the weights and activations and are consumed by quantized oracles
-        (fp8, nvfp4, int8, ...) to disambiguate backends. The unquantized
-        oracle ignores them. Subclasses with additional selection inputs
-        (e.g. int_wna16 needs `weight_bits`, fp8 needs
-        `allow_vllm_cutlass`) widen the signature in their override; a
-        per-oracle config object is the longer-term target tracked in
-        the #37753 follow-up PRs.
+        The requested backend comes from `self.moe_config.moe_backend`;
+        candidate support is checked with `self.weight_key` and
+        `self.activation_key`. Automatic selection follows the order returned
+        by `get_priority_backends()`.
         """
-        raise NotImplementedError
+        available_backends = self.get_priority_backends()
+        requested = self.moe_config.moe_backend
+        if requested != "auto":
+            return self.return_or_raise(self.map_backend(requested), available_backends)
+
+        selection_logger = init_logger(type(self).__module__)
+        for backend in available_backends:
+            experts_cls, _ = self.try_backend(backend)
+            if experts_cls is not None:
+                selection_logger.info_once(
+                    self.make_log_backend(backend, available_backends)
+                )
+                return backend, experts_cls
+
+        raise NotImplementedError(
+            f"No {self.name} MoE backend supports the deployment configuration "
+            f"(weight_key={self.weight_key}, activation_key={self.activation_key}). "
+            "Set `VLLM_LOGGING_LEVEL=DEBUG` to see per-backend unsupported reasons."
+        )
 
     def make_kernel(
         self,
@@ -236,6 +282,24 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
             raise ValueError(self.make_log_unsupported(backend, reason, is_lora))
         logger.info_once(self.make_log_backend(backend, available_backends, is_lora))
         return backend, kernel_cls
+
+
+def resolve_moe_experts(
+    backend: BackendT,
+    experts_mapping: Mapping[BackendT, tuple[str, ...]],
+    name: str,
+) -> list[type[mk.FusedMoEExperts]]:
+    paths = experts_mapping.get(backend)
+    if paths is None:
+        raise ValueError(f"Unknown {name} MoE backend: {backend.value}")
+    experts: list[type[mk.FusedMoEExperts]] = []
+    for path in paths:
+        experts_cls = resolve_obj_by_qualname(path)
+        assert isinstance(experts_cls, type) and issubclass(
+            experts_cls, mk.FusedMoEExperts
+        ), f"{path!r} must resolve to a FusedMoEExperts subclass"
+        experts.append(experts_cls)
+    return experts
 
 
 def make_moe_kernel(
