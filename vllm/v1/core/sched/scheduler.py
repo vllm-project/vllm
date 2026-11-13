@@ -366,6 +366,7 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+            session_ttl=self.cache_config.session_cache_ttl,
         )
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
@@ -3261,6 +3262,9 @@ class Scheduler(SchedulerInterface):
                 and self.ec_connector.has_pending_push_work()
             )
         )
+
+    def close_session(self, session_id: str) -> None:
+        self.kv_cache_manager.close_session(session_id)
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

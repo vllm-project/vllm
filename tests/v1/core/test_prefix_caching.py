@@ -4,7 +4,10 @@
 
 import copy
 import gc
+import random
+import time
 import weakref
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -57,6 +60,7 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
     make_block_hash_with_group_id,
+    resolve_block_hashes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -7008,3 +7012,526 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+# Session-scoped retention (`session_ttl`).
+
+SESSION_TTL = 60.0
+
+
+def _full32_sw_hash16_config() -> KVCacheConfig:
+    config = _make_hybrid_kv_cache_config(16, 800, ["full", "sliding_window"])
+    config.kv_cache_groups[0] = new_kv_cache_group(
+        ["layer0"],
+        AttentionSpec(block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32),
+    )
+    return config
+
+
+_SESSION_CONFIGS = {
+    "full": lambda: (make_kv_cache_config(16, 400), 16),
+    "full32+sw-hash16": lambda: (_full32_sw_hash16_config(), 16),
+    "full+sw": lambda: (make_kv_cache_config_hybrid_model(16, 800, 2), 16),
+    "full+mamba": lambda: (
+        _make_hybrid_kv_cache_config(16, 800, ["full", "mamba"]),
+        16,
+    ),
+    "2full+sw": lambda: (
+        _make_hybrid_kv_cache_config(16, 800, ["full", "full", "sliding_window"]),
+        16,
+    ),
+}
+
+
+def _make_session_manager(
+    kv_cache_config: KVCacheConfig,
+    hash_block_size: int = 16,
+    session_ttl: float | None = SESSION_TTL,
+    **kwargs,
+) -> KVCacheManager:
+    return make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=1 << 16,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        session_ttl=session_ttl,
+        **kwargs,
+    )
+
+
+def _run_turn(manager: KVCacheManager, request: Request) -> tuple[list, int]:
+    """Prefill `request` in one chunk; return its prefix hit."""
+    computed, num_computed, _ = manager.get_computed_blocks(request)
+    assert (
+        manager.allocate_slots(
+            request, request.num_tokens - num_computed, num_computed, computed
+        )
+        is not None
+    )
+    request.num_computed_tokens = request.num_tokens
+    manager.new_step_starts()
+    return computed.get_block_ids(), num_computed
+
+
+def _lookup(manager: KVCacheManager, request: Request) -> tuple[tuple, int]:
+    computed, num_computed, _ = manager.get_computed_blocks(request)
+    return computed.get_block_ids(), num_computed
+
+
+def _hit_hashes(manager: KVCacheManager, hit: tuple[tuple, int]) -> tuple:
+    """A hit as its blocks' hashes: equal-content duplicates compare equal."""
+    block_ids, num_computed = hit
+    blocks = manager.block_pool.blocks
+    return tuple(
+        [blocks[i].block_hash if i else None for i in ids] for ids in block_ids
+    ), num_computed
+
+
+def _unseeded_lookup(
+    manager: KVCacheManager, token_ids: list[int], hash_block_size: int = 16
+) -> tuple[tuple, int]:
+    plain = make_request("unseeded", token_ids, hash_block_size, sha256)
+    return _lookup(manager, plain)
+
+
+def _retained_list(manager: KVCacheManager) -> list[KVCacheBlock]:
+    queue = manager.block_pool.free_block_queue
+    blocks = []
+    block = queue.fake_retained_list_head.next_free_block
+    while block is not queue.fake_retained_list_tail:
+        blocks.append(block)
+        block = block.next_free_block
+    return blocks
+
+
+def _session_refs(manager: KVCacheManager) -> list[int]:
+    return [block.session_ref for block in manager.block_pool.blocks]
+
+
+def _turn_tokens() -> list[list[int]]:
+    """Prompts of one session: extend, extend, diverge, shorten, re-extend."""
+    t1 = list(range(5 * 16 + 3))
+    t2 = t1 + list(range(1000, 1000 + 3 * 16 + 5))
+    t3 = t2 + list(range(2000, 2000 + 4 * 16))
+    t4 = t2[: 2 * 16 + 7] + list(range(3000, 3000 + 2 * 16))
+    t5 = t3[: 3 * 16]
+    t6 = t3 + list(range(4000, 4000 + 2 * 16 + 1))
+    return [t1, t2, t3, t4, t5, t6]
+
+
+@pytest.mark.parametrize("config_name", list(_SESSION_CONFIGS))
+def test_session_seeded_lookup_matches_disabled(config_name):
+    """A session's seeded lookups return what the flag-off lookups return."""
+    config, hash_block_size = _SESSION_CONFIGS[config_name]()
+    seeded = _make_session_manager(config, hash_block_size)
+    reference = _make_session_manager(
+        copy.deepcopy(config), hash_block_size, session_ttl=None
+    )
+    num_seeded_turns = 0
+    for turn, token_ids in enumerate(_turn_tokens()):
+        requests = [
+            make_request(f"{turn}", token_ids, hash_block_size, sha256, session_id="s")
+            for _ in range(2)
+        ]
+        prefix = seeded.sessions.get_prefix("s")
+        if prefix is not None and any(prefix.num_lookup_blocks.values()):
+            num_seeded_turns += 1
+        assert _hit_hashes(seeded, _run_turn(seeded, requests[0])) == _hit_hashes(
+            reference, _run_turn(reference, requests[1])
+        )
+        seeded.free(requests[0])
+        reference.free(requests[1])
+    assert num_seeded_turns >= 4
+
+
+@pytest.mark.parametrize(
+    "session_ttl,session_id,session_blocks_survive",
+    [(None, "s", False), (SESSION_TTL, None, False), (SESSION_TTL, "s", True)],
+    ids=["disabled", "no-session-id", "session"],
+)
+def test_session_blocks_evicted_after_unreferenced_blocks(
+    session_ttl, session_id, session_blocks_survive
+):
+    """Pressure evicts a later-freed non-session prefix before an older
+    session prefix; without retention it is plain LRU."""
+    manager = _make_session_manager(
+        make_kv_cache_config(16, 11), session_ttl=session_ttl
+    )
+    session_tokens = list(range(2 * 16))
+    other_tokens = list(range(100, 100 + 2 * 16))
+    for request in (
+        make_request("a", session_tokens, 16, sha256, session_id=session_id),
+        make_request("b", other_tokens, 16, sha256),
+    ):
+        _run_turn(manager, request)
+        manager.free(request)
+
+    # 6 never-used blocks + 2 cached ones.
+    _run_turn(manager, make_request("p", list(range(500, 500 + 8 * 16)), 16, sha256))
+
+    _, session_hit = _unseeded_lookup(manager, session_tokens + [0])
+    _, other_hit = _unseeded_lookup(manager, other_tokens + [0])
+    assert session_hit == (2 * 16 if session_blocks_survive else 0)
+    assert other_hit == (0 if session_blocks_survive else 2 * 16)
+
+
+def test_session_lookup_after_pressure_eviction_matches_unseeded():
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    t1 = list(range(4 * 16))
+    first = make_request("t1", t1, 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    manager.free(first)
+
+    # Takes the 6 normal blocks, then the session's 2 tail blocks.
+    other = make_request("x", list(range(500, 500 + 8 * 16)), 16, sha256)
+    _run_turn(manager, other)
+    manager.free(other)
+
+    t2 = t1 + list(range(1000, 1000 + 16))
+    seeded = _lookup(manager, make_request("t2", t2, 16, sha256, session_id="s"))
+    assert seeded == _unseeded_lookup(manager, t2)
+    assert seeded[1] == 2 * 16
+
+
+def test_session_lookup_after_evict_blocks_matches_unseeded():
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    t1 = list(range(4 * 16))
+    first = make_request("t1", t1, 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    block_ids = manager.get_block_ids("t1")[0]
+    manager.free(first)
+
+    manager.evict_blocks({block_ids[1]})
+
+    t2 = t1 + list(range(1000, 1000 + 16))
+    seeded = _lookup(manager, make_request("t2", t2, 16, sha256, session_id="s"))
+    assert seeded == _unseeded_lookup(manager, t2)
+    assert seeded[1] == 16
+
+
+def test_session_lookup_after_reset_prefix_cache():
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    t1 = list(range(4 * 16))
+    first = make_request("t1", t1, 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    manager.free(first)
+
+    assert manager.reset_prefix_cache()
+
+    assert set(_session_refs(manager)) == {0}
+    t2 = t1 + list(range(1000, 1000 + 16))
+    assert _lookup(manager, make_request("t2", t2, 16, sha256, session_id="s")) == (
+        ([],),
+        0,
+    )
+
+
+def test_session_reset_prefix_cache_leaves_no_retained_blocks():
+    """Uncached free blocks must not sit behind cached ones."""
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    first = make_request("t1", list(range(4 * 16)), 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    manager.free(first)
+
+    assert manager.reset_prefix_cache()
+
+    assert _retained_list(manager) == []
+
+
+def test_evicted_session_block_closed_session_is_not_retained():
+    """A session block evicted from the cache and closed must be reused before
+    cached blocks."""
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    first = make_request("t1", list(range(4 * 16)), 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    evicted_id = manager.get_block_ids("t1")[0][0]
+    manager.free(first)
+
+    manager.evict_blocks({evicted_id})
+    manager.close_session("s")
+
+    assert _retained_list(manager) == []
+    free_ids = [
+        b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    assert free_ids[0] == evicted_id
+
+
+def test_reused_session_block_does_not_retain_new_content():
+    """A session block evicted and reused for other content must not keep the
+    session's retention priority."""
+    manager = _make_session_manager(make_kv_cache_config(16, 9))
+    first = make_request("t1", list(range(4 * 16)), 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    manager.free(first)
+
+    # Takes every block, including the session's 4.
+    other = make_request("x", list(range(500, 500 + 8 * 16)), 16, sha256)
+    _run_turn(manager, other)
+    manager.free(other)
+
+    assert _retained_list(manager) == []
+    assert set(_session_refs(manager)) == {0}
+
+
+def test_session_id_reused_with_another_cache_salt():
+    """A request under another salt shares no blocks with the session and
+    replaces it."""
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    tokens = list(range(2 * 16))
+    first = make_request("a", tokens, 16, sha256, cache_salt="a", session_id="s")
+    _run_turn(manager, first)
+    manager.free(first)
+    second = make_request("b", tokens, 16, sha256, cache_salt="b", session_id="s")
+
+    assert manager.get_computed_blocks(second)[1] == 0
+    _run_turn(manager, second)
+    manager.free(second)
+
+    assert len(_retained_list(manager)) == 2
+    assert set(_session_refs(manager)) == {0, 1}
+
+
+def test_close_session_demotes_blocks():
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    tokens = list(range(4 * 16))
+    first = make_request("t1", tokens, 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    manager.free(first)
+    assert len(_retained_list(manager)) == 4
+
+    manager.close_session("s")
+
+    assert _retained_list(manager) == []
+    assert set(_session_refs(manager)) == {0}
+    assert manager.block_pool.get_num_free_blocks() == 10
+    assert _unseeded_lookup(manager, tokens + [0])[1] == 4 * 16
+
+
+def test_session_ttl_expiry_demotes_blocks(monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    first = make_request("t1", list(range(4 * 16)), 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    manager.free(first)
+
+    now += SESSION_TTL - 1
+    manager.new_step_starts()
+    assert len(_retained_list(manager)) == 4
+
+    now += 1
+    manager.new_step_starts()
+    assert _retained_list(manager) == []
+    assert set(_session_refs(manager)) == {0}
+    assert manager.sessions.get_prefix("s") is None
+
+
+def test_max_sessions_drops_oldest_session():
+    manager = _make_session_manager(make_kv_cache_config(16, 11), max_sessions=1)
+    for i, session_id in enumerate(("s0", "s1")):
+        request = make_request(
+            session_id,
+            list(range(100 * i, 100 * i + 2 * 16)),
+            16,
+            sha256,
+            session_id=session_id,
+        )
+        _run_turn(manager, request)
+        session_block_ids = manager.get_block_ids(session_id)[0]
+        manager.free(request)
+
+    assert sorted(b.block_id for b in _retained_list(manager)) == sorted(
+        session_block_ids
+    )
+    assert sum(_session_refs(manager)) == 2
+
+
+def test_session_turns_do_not_accumulate_refs():
+    manager = _make_session_manager(make_kv_cache_config(16, 400))
+    for turn, token_ids in enumerate(_turn_tokens()):
+        request = make_request(f"{turn}", token_ids, 16, sha256, session_id="s")
+        _run_turn(manager, request)
+        hashed_ids = {
+            b.block_id
+            for b in manager.coordinator.get_blocks(request.request_id)[0]
+            if b.block_hash is not None
+        }
+        manager.free(request)
+        assert {
+            b.block_id for b in manager.block_pool.blocks if b.session_ref
+        } == hashed_ids
+        assert max(_session_refs(manager)) == 1
+
+    manager.close_session("s")
+    assert set(_session_refs(manager)) == {0}
+    assert _retained_list(manager) == []
+
+
+def test_close_session_while_blocks_in_use():
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    tokens = list(range(4 * 16))
+    first = make_request("t1", tokens, 16, sha256, session_id="s")
+    _run_turn(manager, first)
+    manager.free(first)
+    reader = make_request("r", tokens + [7], 16, sha256)
+    assert _run_turn(manager, reader)[1] == 4 * 16
+
+    manager.close_session("s")
+    assert set(_session_refs(manager)) == {0}
+    manager.free(reader)
+
+    assert _retained_list(manager) == []
+    assert manager.block_pool.get_num_free_blocks() == 10
+
+
+def test_shared_prefix_retained_until_last_session_closes():
+    manager = _make_session_manager(make_kv_cache_config(16, 11))
+    tokens = list(range(2 * 16))
+    for session_id, suffix in (("s0", []), ("s1", [7])):
+        request = make_request(
+            session_id, tokens + suffix, 16, sha256, session_id=session_id
+        )
+        _run_turn(manager, request)
+        manager.free(request)
+    assert [b.session_ref for b in _retained_list(manager)] == [2, 2]
+
+    manager.close_session("s0")
+    assert sorted(b.session_ref for b in _retained_list(manager)) == [1, 1]
+    manager.close_session("s1")
+    assert _retained_list(manager) == []
+
+
+def _check_session_invariants(manager: KVCacheManager) -> None:
+    pool = manager.block_pool
+    queue = pool.free_block_queue
+    listed: list[KVCacheBlock] = []
+    for head, tail in (
+        (queue.fake_free_list_head, queue.fake_free_list_tail),
+        (queue.fake_retained_list_head, queue.fake_retained_list_tail),
+    ):
+        prev, block = head, head.next_free_block
+        while block is not tail:
+            assert block is not None and block.prev_free_block is prev
+            listed.append(block)
+            prev, block = block, block.next_free_block
+        assert tail.prev_free_block is prev
+    listed_ids = [b.block_id for b in listed]
+    assert len(listed_ids) == len(set(listed_ids)) == queue.num_free_blocks
+    assert set(listed_ids) == {
+        b.block_id for b in pool.blocks if b.ref_cnt == 0 and not b.is_null
+    }
+
+    expected = Counter()
+    if manager.sessions is not None:
+        for session in manager.sessions._sessions.values():
+            expected.update(
+                b.block_id
+                for blocks, keys in zip(session.blocks, session.keys)
+                for b, key in zip(blocks, keys)
+                if b.block_hash is key
+            )
+    assert [b.session_ref for b in pool.blocks] == [
+        expected[b.block_id] for b in pool.blocks
+    ]
+
+
+def _check_hit_hashes(
+    manager: KVCacheManager, request: Request, block_ids: tuple
+) -> None:
+    for group_id, ids in enumerate(block_ids):
+        block_size = manager.kv_cache_config.kv_cache_groups[group_id].block_size
+        hashes = resolve_block_hashes(request.block_hashes, 16, block_size)
+        for i, block_id in enumerate(ids):
+            block = manager.block_pool.blocks[block_id]
+            if block.is_null:
+                continue
+            assert block.block_hash == make_block_hash_with_group_id(
+                hashes[i], group_id
+            )
+
+
+@pytest.mark.parametrize("session_ttl", [None, 5.0])
+@pytest.mark.parametrize("config_name", ["full", "full+sw"])
+@pytest.mark.parametrize("seed", range(6))
+def test_session_retention_random_ops_keep_invariants(
+    monkeypatch, session_ttl, config_name, seed
+):
+    """Random session/non-session traffic under pressure: seeded lookups equal
+    unseeded ones, hits carry their position's hash, and the free queue and
+    session refs stay consistent."""
+    rng = random.Random(seed)
+    now = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    config = {
+        "full": lambda: make_kv_cache_config(16, 40),
+        "full+sw": lambda: make_kv_cache_config_hybrid_model(16, 90, 2),
+    }[config_name]()
+    manager = _make_session_manager(config, session_ttl=session_ttl, max_sessions=3)
+    system_prompt = list(range(3 * 16))
+    last_prompt: dict[str, list[int]] = {}
+    running: list[Request] = []
+    num_seeded = 0
+
+    def random_tokens(n: int) -> list[int]:
+        return [rng.randrange(10000) for _ in range(n)]
+
+    for step in range(300):
+        op = rng.choices(
+            ["turn", "plain", "finish", "close", "tick", "evict", "reset"],
+            weights=[6, 3, 6, 1, 2, 1, 1],
+        )[0]
+        if op in ("turn", "plain"):
+            session_id = f"s{rng.randrange(5)}" if op == "turn" else None
+            prev = last_prompt.get(session_id or rng.choice(["s0", "s1", "s2"]))
+            if not prev:
+                prev = system_prompt if rng.random() < 0.5 else []
+            mode = rng.choice(["extend", "diverge", "shorten"])
+            cut = rng.randrange(len(prev) + 1)
+            if mode == "extend":
+                token_ids = prev + random_tokens(rng.randrange(1, 48))
+            elif mode == "diverge":
+                token_ids = prev[:cut] + random_tokens(rng.randrange(1, 48))
+            else:
+                token_ids = prev[:cut] or random_tokens(rng.randrange(1, 48))
+            request = make_request(
+                f"r{step}", token_ids, 16, sha256, session_id=session_id
+            )
+            if session_id is not None and manager.sessions is not None:
+                prefix = manager.sessions.get_prefix(session_id)
+                num_seeded += prefix is not None and any(
+                    prefix.num_lookup_blocks.values()
+                )
+            seeded = _lookup(manager, request)
+            assert _hit_hashes(manager, seeded) == _hit_hashes(
+                manager, _unseeded_lookup(manager, token_ids)
+            )
+            _check_hit_hashes(manager, request, seeded[0])
+            computed, num_computed, _ = manager.get_computed_blocks(request)
+            if (
+                manager.allocate_slots(
+                    request, request.num_tokens - num_computed, num_computed, computed
+                )
+                is not None
+            ):
+                request.num_computed_tokens = request.num_tokens
+                running.append(request)
+        elif op == "finish" and running:
+            request = running.pop(rng.randrange(len(running)))
+            if request.session_id is not None:
+                last_prompt[request.session_id] = list(request.all_token_ids)
+            manager.free(request)
+        elif op == "close":
+            manager.close_session(f"s{rng.randrange(5)}")
+        elif op == "tick":
+            now += rng.uniform(0, 3)
+        elif op == "evict":
+            manager.evict_blocks(
+                set(rng.sample(range(1, config.num_blocks), k=rng.randrange(1, 4)))
+            )
+        elif op == "reset" and not running:
+            assert manager.reset_prefix_cache()
+        manager.new_step_starts()
+        _check_session_invariants(manager)
+    if session_ttl is not None:
+        assert num_seeded >= 5

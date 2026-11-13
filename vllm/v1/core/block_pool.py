@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_sessions import KVCacheSessions
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -171,6 +172,8 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # Set by KVCacheManager when session retention is enabled.
+        self.sessions: KVCacheSessions | None = None
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -610,6 +613,14 @@ class BlockPool:
         if block.block_hash is None:
             return []
 
+        if block.session_ref:
+            if self.sessions is not None:
+                self.sessions.epoch += 1
+            # The cached content is gone; so is every session's claim on it.
+            block.session_ref = 0
+            if block.ref_cnt == 0 and block.prev_free_block is not None:
+                self.free_block_queue.remove(block)
+                self.free_block_queue.prepend_n([block])
         block_hashes = [block.block_hash]
         block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
 
@@ -812,6 +823,7 @@ class BlockPool:
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
         blocks_to_evict_first = []
+        blocks_to_retain = []
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in ordered_blocks:
             if block.is_null:  # never pooled; its ref_cnt is not maintained
@@ -827,6 +839,9 @@ class BlockPool:
                     # LIFO reuse of non-cached blocks for better GPU locality,
                     # and of cached ones when asked to evict them first.
                     blocks_to_evict_first.append(block)
+                elif block.session_ref:
+                    # Referenced by a live session: evict after all others.
+                    blocks_to_retain.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
                     blocks_to_evict_last.append(block)
@@ -835,6 +850,7 @@ class BlockPool:
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
+        self.free_block_queue.append_n(blocks_to_retain, retained=True)
         for pool, blocks in other_pools.items():
             pool.free_blocks(blocks, evict_first=evict_first)
 
@@ -889,6 +905,8 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+            block.session_ref = 0
+        self.free_block_queue.release_retained()
 
         if self.metrics_collector:
             self.metrics_collector.reset()

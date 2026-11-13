@@ -12,6 +12,7 @@ from vllm.utils.gc_utils import untracked_list
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_sessions import SessionPrefix
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
@@ -57,6 +58,8 @@ class SingleTypeKVCacheManager(ABC):
     block_table_token_alignment: ClassVar[int | None] = 128
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+    # Whether `find_longest_cache_hit` accepts a `session_prefix`.
+    supports_session_prefix: ClassVar[bool] = False
 
     # Whether worker-side KV cache zeroing applies to this manager's blocks.
     zeroes_new_blocks: ClassVar[bool] = True
@@ -847,6 +850,7 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    supports_session_prefix: ClassVar[bool] = True
 
     @classmethod
     def find_longest_cache_hit(
@@ -861,6 +865,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        session_prefix: SessionPrefix | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         if dcp_world_size > 1:
             # DCP shards each block's KV across ranks; hashes must be viewed at
@@ -892,9 +897,19 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
+        max_num_blocks = max_length // block_size
+        num_session_blocks = 0
+        if session_prefix is not None:
+            num_session_blocks = session_prefix.lookup(
+                computed_blocks, full_block_hashes, kv_cache_group_ids, max_num_blocks
+            )
         # Phase 1: longest run of cached full blocks from the start. A missing
         # block implies every later block misses too (chained hashes).
-        for block_hash in itertools.islice(full_block_hashes, max_length // block_size):
+        for block_hash in (
+            full_block_hashes[num_session_blocks:max_num_blocks]
+            if num_session_blocks
+            else itertools.islice(full_block_hashes, max_num_blocks)
+        ):
             cached_block = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
             if not cached_block:
                 break

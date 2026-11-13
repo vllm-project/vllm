@@ -207,6 +207,23 @@ When the head block (least recently used block) of the free queue is cached, we 
 2. Remove the block ID from the cache block.  
 3. Remove the block hash.
 
+## Session Retention
+
+Session retention keeps a conversation's cached blocks longer and makes its next prefix lookup cheaper. It is off by default. Enable it with `--session-cache-ttl <seconds>`; requests opt in by sending a `session_id` (request body field or the `X-Session-ID` header). Requests without a `session_id` are unaffected.
+
+When a request with a `session_id` finishes, its cached blocks are marked as belonging to that session:
+
+- **Eviction order.** Free blocks that belong to a live session are evicted only after every other free block. Nothing is pinned, so the cache capacity is unchanged and a session's blocks can still be evicted under memory pressure.
+- **Lookup.** The session remembers the blocks of its latest request. The next request with the same `session_id` reuses the shared prefix directly instead of looking up every block hash, which matters for very long contexts.
+
+A session ends, and its blocks return to the normal LRU order, when any of the following happens:
+
+- No request has used the `session_id` for `--session-cache-ttl` seconds.
+- A client calls `POST /close_session` with `{"session_id": "<id>"}`. Use this when the end of a conversation is known, for example at the end of an RL episode. Closing does not evict the blocks.
+- The prefix cache is reset.
+
+A session is one conversation, so its requests should use one `cache_salt`; a request with a different salt shares no blocks with the session and replaces it. With data parallel deployments, a session only helps when its requests reach the same engine.
+
 ## Example
 
 In this example, we assume the block size is 4 (each block can cache 4 tokens), and we have 10 blocks in the KV-cache manager in total.
