@@ -173,6 +173,9 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler._reqs_need_pending_save = {}
     scheduler._req_kv_params = {}
     scheduler._reqs_need_send = {}
+    scheduler._write_recv_timer_enabled = False
+    scheduler._write_recv_timed_out = set()
+    scheduler._write_recv_held = set()
     return scheduler
 
 

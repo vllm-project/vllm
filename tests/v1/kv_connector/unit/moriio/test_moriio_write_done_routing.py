@@ -635,16 +635,18 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
             wrapper._handle_structured_message(
                 {"type": "write_failed", "transfer_id": tid}
             )
-    worker = SimpleNamespace(
-        mode=MoRIIOMode.WRITE,
-        is_producer=False,
-        moriio_wrapper=wrapper,
-        transfer_id_to_request_id={"tA": "req-1"},
-        _unmatched_write_failures=OrderedDict(),
-        get_finished=lambda: (set(), set()),
-    )
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.mode = MoRIIOMode.WRITE
+    worker.is_producer = False
+    worker.moriio_wrapper = wrapper
+    worker.transfer_id_to_request_id = {"tA": "req-1"}
+    worker._unmatched_write_failures = OrderedDict()
+    worker._write_recv_timed_out = set()
+    worker._write_recv_reported = set()
+    worker._write_recv_unreleased = set()
+    worker.get_finished = lambda: (set(), set())  # type: ignore[method-assign]
 
-    results = MoRIIOConnectorWorker.get_transfer_results(worker)
+    results = worker.get_transfer_results()
 
     assert results.finished_recving == {"req-1"}
     assert results.failed_recving == {"req-1"}

@@ -362,6 +362,11 @@ class MoRIIOConfig:
         #                     READ release notification (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
         #                     completion never arrived is aborted (sec).
+        # write_recv_timeout -> Timeout before a WRITE-mode consumer request
+        #                     still waiting for write_done is failed, unless
+        #                     its prefill still answers (sec).
+        # write_recv_max_timeout -> Timeout after which it fails even then
+        #                     (sec, default 3 x write_recv_timeout).
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -484,6 +489,8 @@ class MoRIIOConstants:
     # is aborted, so the decode worker does not hang on it forever.
     # Overridable via kv_connector_extra_config["recv_abort_timeout"].
     DEFAULT_RECV_ABORT_TIMEOUT = 120.0
+    # Overridable via kv_connector_extra_config["write_recv_timeout"].
+    DEFAULT_WRITE_RECV_TIMEOUT = 540.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -580,6 +587,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.write_recv_timed_out_req_ids: set[ReqId] = set()
 
     def __repr__(self):
         return (
