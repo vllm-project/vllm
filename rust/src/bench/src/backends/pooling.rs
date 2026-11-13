@@ -80,23 +80,29 @@ impl PoolingBackend {
         };
 
         if response.status().is_success() {
+            // Stop the clock after the body, as Python does: a large embedding
+            // response takes a while to transfer.
+            let body = match response.bytes().await {
+                Ok(body) => body,
+                Err(e) => {
+                    output.error = format!("Failed to read response body: {e}");
+                    return Ok(output);
+                }
+            };
             let latency = st.elapsed().as_secs_f64();
             output.latency = latency;
             output.ttft = latency;
             output.success = true;
 
-            // Parse usage from response; keep client-side prompt_len as fallback.
-            match response.json::<PoolingResponse>().await {
-                Ok(data) => {
-                    if let Some(usage) = data.usage
-                        && let Some(tokens) = usage.prompt_tokens
-                    {
-                        output.prompt_len = tokens as usize;
-                    }
-                }
-                Err(_) => {
-                    // Response parsed but no usage — keep client-side prompt_len
-                }
+            // Keep the client-side prompt_len when the server reports no usage.
+            if let Ok(PoolingResponse {
+                usage:
+                    Some(PoolingUsage {
+                        prompt_tokens: Some(tokens),
+                    }),
+            }) = serde_json::from_slice(&body)
+            {
+                output.prompt_len = tokens as usize;
             }
         } else {
             let status = response.status();
@@ -123,23 +129,13 @@ impl PoolingBackend {
             serde_json::json!(input.prompt.as_ref())
         };
 
-        let is_vllm_backend = matches!(
-            self.kind,
-            BackendKind::VllmPooling | BackendKind::VllmRerank
-        );
-
         let mut payload = match self.kind {
             BackendKind::OpenaiEmbeddings => {
-                let mut p = serde_json::json!({
+                serde_json::json!({
                     "model": model,
                     "input": input_value,
-                });
-                // truncate_prompt_tokens is vLLM-specific; only include for vLLM backends
-                // to avoid breaking standard OpenAI providers.
-                if is_vllm_backend {
-                    p["truncate_prompt_tokens"] = serde_json::json!(-1);
-                }
-                p
+                    "truncate_prompt_tokens": -1,
+                })
             }
             BackendKind::OpenaiEmbeddingsChat => {
                 // Chat format: uses text prompt in messages array (for multimodal support).
@@ -148,14 +144,11 @@ impl PoolingBackend {
                 // avoids re-parsing ~200KB+ base64 per image).
                 let content_json = build_chat_content_json(input);
 
-                let mut p = serde_json::json!({
+                serde_json::json!({
                     "model": model,
                     "messages": [{"role": "user", "content": content_json}],
-                });
-                if is_vllm_backend {
-                    p["truncate_prompt_tokens"] = serde_json::json!(-1);
-                }
-                p
+                    "truncate_prompt_tokens": -1,
+                })
             }
             BackendKind::VllmPooling => {
                 serde_json::json!({
@@ -299,9 +292,9 @@ mod tests {
         let payload = backend.build_payload(&input);
         assert_eq!(payload["input"], serde_json::json!(["t1", "t2", "t3"]));
         assert_eq!(payload["model"], "bge");
-        // truncate_prompt_tokens is vLLM-specific and deliberately omitted for
-        // the plain OpenAI embeddings backend.
-        assert!(payload.get("truncate_prompt_tokens").is_none());
+        // Python sends this on every embeddings backend so that long inputs are
+        // truncated instead of rejected.
+        assert_eq!(payload["truncate_prompt_tokens"], -1);
     }
 
     #[test]
