@@ -6,12 +6,11 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -24,8 +23,15 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    get_fused_shared_expert_layers,
+    maybe_prefix,
+)
 from vllm.models.glm5next.nvidia.ops.fused_eh_norm import fused_eh_norm
+from vllm.models.glm5next.nvidia.specialized_decode.runtime import (
+    specialized_decode_config,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -40,6 +46,9 @@ from .model import (
     get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
 )
+
+if typing.TYPE_CHECKING:
+    from ..nvidia.specialized_decode.runtime.draft import SpecializedDraft
 
 
 class Glm5NextMultiTokenPredictorLayer(nn.Module):
@@ -137,6 +146,29 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             assert isinstance(self_attn, Glm5NextMLAAttention)
             self._mtp_mla_attns.append(self_attn.mla_attn)
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        # decode_backend=latency_specialized: the draft layer's specialized decode,
+        # built on the first eager forward (after the weights are processed).
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDraft | None = None
+        self.prefill_rows: torch.Tensor | None = None
+
+    def _specialized_draft(self) -> "SpecializedDraft | None":
+        if self.specialized_decode_config is None:
+            return None
+        if (
+            self.specialized_decode is None
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from ..nvidia.specialized_decode.runtime.draft import SpecializedDraft
+
+            self.specialized_decode = SpecializedDraft(
+                self, self.specialized_decode_config
+            )
+        return self.specialized_decode
+
+    def set_prefill_rows(self, rows: torch.Tensor) -> None:
+        """The speculator's [max_num_reqs] last-token rows of a draft prefill."""
+        self.prefill_rows = rows
 
     def set_skip_topk(self, skip: bool):
         # index_share_for_mtp_iteration: step 0 computes top-k, steps 1+ reuse.
@@ -144,7 +176,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             mla_attn.skip_topk = skip
 
     def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        """Gather the top-k index rows at `slot_ids` to the front of the buffer."""
         num_slots = slot_ids.numel()
         for mla_attn in self._mtp_mla_attns:
             topk_indices_buffer = mla_attn.topk_indices_buffer
@@ -162,9 +194,21 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        decode = self._specialized_draft()
+        if decode is not None:
+            step = decode.plan(positions)
+            if step is not None:
+                return decode.run(
+                    self._mtp_layers[current_step_idx],
+                    step,
+                    input_ids,
+                    inputs_embeds,
+                    previous_hidden_states,
+                    self.prefill_rows,
+                )
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        current_step_idx = spec_step_idx % self.num_mtp_layers
         return self._mtp_layers[current_step_idx](
             input_ids,
             positions,
@@ -206,14 +250,19 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.model.layers.values(), Glm5NextMoE, "mtp_block.mlp"
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            Glm5NextMoE,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
     def set_moe_parameters(self):
@@ -296,16 +345,20 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        fused_shared_expert_layers = self.fused_shared_expert_layers
         num_fused_shared = _num_fused_shared_experts(
-            self.config.n_shared_experts, self.is_fused_shared_expert_enabled
+            self.config.n_shared_experts,
+            bool(fused_shared_expert_layers),
         )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
+            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
 
         params_dict = dict(self.named_parameters())
@@ -329,7 +382,18 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
-            if self.is_fused_shared_expert_enabled:
+            if self.use_mega_moe and ".shared_experts." in name:
+                mlp = self.get_submodule(name.partition(".shared_experts.")[0])
+                loaded_params.add(
+                    mlp.experts.load_shared_expert_weight(name, loaded_weight)
+                )
+                continue
+            # Only parse the layer index when FSE is enabled.
+            if (
+                "mlp.shared_experts." in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in fused_shared_expert_layers
+            ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             if _try_load_fp8_indexer_wk(
@@ -416,19 +480,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
-        for layer_idx in range(
-            self.model.mtp_start_layer_idx,
-            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
-        ):
-            if layer_idx not in loaded_layers:
-                raise ValueError(
-                    f"MTP speculative decoding layer {layer_idx} weights "
-                    f"missing from checkpoint."
-                )
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        for mlp in self.moe_mlp_layers:
+            mlp.finalize_mega_moe_weights()
