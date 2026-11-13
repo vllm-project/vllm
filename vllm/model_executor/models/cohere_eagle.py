@@ -151,9 +151,7 @@ class EagleCohereForCausalLM(CohereForCausalLM):
             self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
                 orig_to_new_prefix={"model.embed_tokens.": None}
             )
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
         self.model = CohereEagleModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),

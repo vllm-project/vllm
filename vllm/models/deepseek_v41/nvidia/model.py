@@ -78,6 +78,7 @@ from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MixtureOfExperts,
     MegaGateRoutingMetadata,
+    _use_mega_gate,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
 )
@@ -769,6 +770,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.use_native_mega_moe = (
             vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
         )
+        self.use_mega_gate = _use_mega_gate(vllm_config)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if (
             self.use_native_mega_moe
@@ -1213,7 +1215,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def _mega_gate_metadata(
         self, input_ids: torch.Tensor | None
     ) -> MegaGateRoutingMetadata | None:
-        if not self.use_native_mega_moe:
+        if not self.use_mega_gate:
             return None
         assert input_ids is not None
         return prepare_mega_gate_routing_metadata(
