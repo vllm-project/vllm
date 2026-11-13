@@ -38,6 +38,22 @@ from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import next_power_of_2
+from vllm.v1.attention.ops.fp8e4nv import (
+    FP8E4NV_EXTERN_LIBS,
+    convert_from_fp8e4m3,
+    convert_to_fp8e4m3,
+)
+
+
+def _can_use_cutedsl() -> bool:
+    """Return whether CUDA capability and installed CuTeDSL support this kernel."""
+    capability = current_platform.get_device_capability()
+    return (
+        current_platform.is_cuda()
+        and has_cutedsl()
+        and capability is not None
+        and capability.major >= 9
+    )
 
 
 @triton.jit
@@ -60,6 +76,7 @@ def quantize_and_insert_k_kernel(
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
     use_fnuz: tl.constexpr = False,
+    fp8_software_conv: tl.constexpr = False,
 ):
     """Quantize K tensor and insert into paged K cache.
 
@@ -71,7 +88,9 @@ def quantize_and_insert_k_kernel(
     One program per token.
 
     `use_fnuz=True` selects FNUZ (`tl.float8e4b8`); default OCP
-    (`tl.float8e4nv`) matches every production caller.
+    (`tl.float8e4nv`) matches every production caller. Pre-SM89 CUDA uses
+    software conversion, preserving finite subnormals and signed zeros, with
+    NaN propagation disabled.
     """
     pid = tl.program_id(0)
 
@@ -136,11 +155,12 @@ def quantize_and_insert_k_kernel(
             x_clamped = tl.clamp(x_scaled, -fp8_max, fp8_max)
 
             # Convert to fp8 (FNUZ on gfx942, OCP elsewhere), then bitcast to uint8.
-            if use_fnuz:
-                x_fp8 = x_clamped.to(tl.float8e4b8)
+            if fp8_software_conv:
+                x_uint8 = convert_to_fp8e4m3(x_clamped)
+            elif use_fnuz:
+                x_uint8 = x_clamped.to(tl.float8e4b8).to(tl.uint8, bitcast=True)
             else:
-                x_fp8 = x_clamped.to(tl.float8e4nv)
-            x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
+                x_uint8 = x_clamped.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
 
             # Store as uint8 (1 byte each)
             tl.store(token_fp8_ptr + offsets, x_uint8, mask=mask)
@@ -209,6 +229,9 @@ def quantize_and_insert_k_cache(
         FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
     TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
 
+    fp8_software_conv = (
+        current_platform.is_cuda() and not current_platform.has_device_capability(89)
+    )
     grid = (num_tokens,)
 
     quantize_and_insert_k_kernel[grid](
@@ -227,6 +250,8 @@ def quantize_and_insert_k_cache(
         fp8_max=FP8_MAX,
         n_quant_blocks=8,
         use_fnuz=use_fnuz,
+        fp8_software_conv=fp8_software_conv,
+        **({"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}),
     )
 
 
@@ -240,6 +265,7 @@ class DequantizeAndGatherKCacheKernel(
         max_blocks_per_seq: int
         cache_block_size: int
         block_stride: int
+        fp8_software_conv: bool
         use_fnuz: bool
         has_gather_lens: bool
         offset: int
@@ -267,8 +293,10 @@ class DequantizeAndGatherKCacheKernel(
         output_dim: tl.constexpr,  # 512
         fp8_max: tl.constexpr,
         n_quant_blocks: tl.constexpr,  # 7 real blocks
+        fp8_software_conv: tl.constexpr = False,
         use_fnuz: tl.constexpr = False,
     ):
+        """Gather paged cache rows and dequantize their FP8 portions into BF16."""
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
         num_workers = tl.num_programs(1)
@@ -332,11 +360,12 @@ class DequantizeAndGatherKCacheKernel(
                     # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP elsewhere).
                     if use_fnuz:
                         x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+                        x_float = x_fp8.to(tl.float32)
+                    elif fp8_software_conv:
+                        x_float = convert_from_fp8e4m3(x_uint8, tl.float32)
                     else:
                         x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-
-                    # Convert fp8 to float32 for computation
-                    x_float = x_fp8.to(tl.float32)
+                        x_float = x_fp8.to(tl.float32)
 
                     # Load and decode UE8M0 scale
                     # UE8M0: scale = 2^(stored_value - 127)
@@ -387,6 +416,7 @@ class DequantizeAndGatherKCacheKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        """Enumerate cache gather specializations for the model compression ratios."""
         max_model_len = vllm_config.model_config.max_model_len
         block_size = vllm_config.cache_config.block_size
         if max_model_len <= 0 or block_size <= 0:
@@ -398,11 +428,17 @@ class DequantizeAndGatherKCacheKernel(
                 vllm_config.model_config.hf_config
             )
         )
+        fp8_software_conv = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability(75)
+            and not current_platform.has_device_capability(89)
+        )
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
                     cache_block_size=block_size,
                     has_gather_lens=True,
+                    fp8_software_conv=fp8_software_conv,
                     use_fnuz=current_platform.is_fp8_fnuz(),
                     offset=1,
                     enabled=True,
@@ -410,6 +446,7 @@ class DequantizeAndGatherKCacheKernel(
                 dict(
                     cache_block_size=block_size,
                     has_gather_lens=True,
+                    fp8_software_conv=fp8_software_conv,
                     use_fnuz=current_platform.is_fp8_fnuz(),
                     offset=2,
                     enabled=True,
@@ -417,6 +454,7 @@ class DequantizeAndGatherKCacheKernel(
                 dict(
                     cache_block_size=block_size,
                     has_gather_lens=True,
+                    fp8_software_conv=fp8_software_conv,
                     use_fnuz=current_platform.is_fp8_fnuz(),
                     offset=16,
                     enabled=True,
@@ -424,6 +462,7 @@ class DequantizeAndGatherKCacheKernel(
                 dict(
                     cache_block_size=max(block_size // 4, 1),
                     has_gather_lens=False,
+                    fp8_software_conv=fp8_software_conv,
                     use_fnuz=False,
                     offset=16,
                     enabled=4 in compress_ratios,
@@ -431,6 +470,7 @@ class DequantizeAndGatherKCacheKernel(
                 dict(
                     cache_block_size=max(block_size // 128, 1),
                     has_gather_lens=False,
+                    fp8_software_conv=fp8_software_conv,
                     use_fnuz=False,
                     offset=16,
                     enabled=128 in compress_ratios,
@@ -478,7 +518,13 @@ class DequantizeAndGatherKCacheKernel(
         *,
         use_fnuz: bool = False,
     ) -> LaunchSpec:
+        """Build the gather launch from the actual cache and block-table strides."""
         num_reqs = seq_lens.shape[0]
+        fp8_software_conv = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability(75)
+            and not current_platform.has_device_capability(89)
+        )
         return (num_reqs, self.NUM_WORKERS), dict(
             out_stride0=out.stride(0),
             out_stride1=out.stride(1),
@@ -493,6 +539,8 @@ class DequantizeAndGatherKCacheKernel(
             output_dim=512,
             fp8_max=448.0,
             n_quant_blocks=7,
+            fp8_software_conv=fp8_software_conv,
+            **({"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}),
         )
 
 
@@ -518,7 +566,7 @@ def dequantize_and_gather_k_cache(
     `current_platform.is_fp8_fnuz()` for `swa_k_cache` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
-    if has_cutedsl():
+    if _can_use_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,

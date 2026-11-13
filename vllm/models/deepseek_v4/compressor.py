@@ -21,6 +21,7 @@ from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     _SAVE_PARTIAL_STATES_KERNEL,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -333,7 +334,15 @@ class DeepseekCompressor(nn.Module):
                 head_dim=self.head_dim,
                 compress_ratio=self.compress_ratio,
             )
-            if current_platform.is_cuda() and self.head_dim == 512:
+            # Warm up the same implementation selected in forward.
+            if (
+                current_platform.is_cuda()
+                and self.head_dim == 512
+                and (
+                    vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+                    or (current_platform.has_device_capability(90) and has_cutedsl())
+                )
+            ):
                 from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
                     _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
                     _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
@@ -376,6 +385,7 @@ class DeepseekCompressor(nn.Module):
     ) -> None:
         # Each of shape [num_tokens, coff * self.head_dim]
         # input bf16, output are fp32
+        """Compress projected keys and scores into the rotary-encoded key cache."""
         kv, score = kv_score.split(
             [self.coff * self.head_dim, self.coff * self.head_dim], dim=-1
         )
@@ -484,14 +494,18 @@ class DeepseekCompressor(nn.Module):
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
-        if current_platform.is_cuda() and self.head_dim == 512:
+        if (
+            current_platform.is_cuda()
+            and self.head_dim == 512
+            and (
+                store_full_kv
+                or (current_platform.has_device_capability(90) and has_cutedsl())
+            )
+        ):
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
             )
 
-            # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
-            # layout and the plain full-cache layout. The full-cache flags
-            # are consumed only here.
             compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL
             extra_kwargs: dict[str, Any] = dict(
                 store_full_kv=store_full_kv,
@@ -509,7 +523,14 @@ class DeepseekCompressor(nn.Module):
                 "fp8_scale": fp8_scale,
             }
         else:
-            # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
+            # Indexer path, non-CUDA GPUs, or pre-SM90 CUDA. The latter uses
+            # the portable Triton sparse compressor for fp8_ds_mla.
+            if current_platform.is_cuda() and self.head_dim == 512 and store_full_kv:
+                raise NotImplementedError(
+                    "DeepSeek V4 full-row KV cache on CUDA requires the "
+                    "CuTeDSL sparse compressor; install cutlass or use fp8_ds_mla "
+                    "KV cache"
+                )
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {"fp8_scale": fp8_scale}
 

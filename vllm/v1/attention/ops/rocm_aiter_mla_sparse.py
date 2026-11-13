@@ -23,6 +23,10 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.mxfp4_mla.read import load_mxfp4_rows
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
+from vllm.v1.attention.ops.fp8e4nv import (
+    FP8E4NV_EXTERN_LIBS,
+    convert_from_fp8e4m3,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -2788,9 +2792,11 @@ def _sparse_attn_decode_ragged_kernel(
     # Compressed K-cache (extra): Triton encoder writes OCP everywhere.
     IS_FNUZ_MAIN: tl.constexpr,
     IS_FNUZ_EXTRA: tl.constexpr,
+    FP8_SOFTWARE_CONV: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
+    """Compute ragged sparse attention over main and extra key caches."""
     query_idx = tl.program_id(0)
     pid_h = tl.program_id(1)
 
@@ -2846,6 +2852,8 @@ def _sparse_attn_decode_ragged_kernel(
         )
         if IS_FNUZ_MAIN:
             x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+        elif FP8_SOFTWARE_CONV:
+            x_fp8 = convert_from_fp8e4m3(x_uint8, tl.bfloat16)
         else:
             x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
         encoded_scales = tl.load(
@@ -2914,6 +2922,8 @@ def _sparse_attn_decode_ragged_kernel(
             )
             if IS_FNUZ_EXTRA:
                 x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+            elif FP8_SOFTWARE_CONV:
+                x_fp8 = convert_from_fp8e4m3(x_uint8, tl.bfloat16)
             else:
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
             encoded_scales = tl.load(
@@ -4471,6 +4481,14 @@ def _rocm_sparse_attn_decode_ragged_triton(
 
     if not (_ON_GFX942 or _ON_GFX950):  # Fallback path for un-tuned architectures.
         block_k = 16 if head_dim >= 256 else 32
+        fp8_software_conv = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability(75)
+            and not current_platform.has_device_capability(89)
+        )
+        launch_kwargs = (
+            {"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}
+        )
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,
             main_cache,
@@ -4500,9 +4518,11 @@ def _rocm_sparse_attn_decode_ragged_triton(
             ROPE_DIM=rope_head_dim,
             IS_FNUZ_MAIN=is_fnuz,
             IS_FNUZ_EXTRA=False,
+            FP8_SOFTWARE_CONV=fp8_software_conv,
             BLOCK_H=block_h,
             BLOCK_K=block_k,
             num_warps=8,
+            **launch_kwargs,
         )
         return out
 
