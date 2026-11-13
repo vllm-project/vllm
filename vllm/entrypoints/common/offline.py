@@ -463,18 +463,18 @@ class OfflineInferenceMixin:
     def _adjust_params_for_parsing(
         self, params: Sequence[SamplingParams | PoolingParams]
     ) -> None:
-        """Set ``skip_special_tokens=False`` when the model encodes
+        """Set `skip_special_tokens=False` when the model encodes
         structured output syntax as special tokens.
 
         Models like Gemma4 register thinking delimiters
-        (``<|channel>``/``<channel|>``) and tool call tokens
-        (``<|tool_call>``/``<tool_call|>``/``<|"|>``) as special tokens.
-        The default ``skip_special_tokens=True`` strips them from
-        ``output.text``, breaking parsing of both reasoning blocks and
+        (`<|channel>`/`<channel|>`) and tool call tokens
+        (`<|tool_call>`/`<tool_call|>`/`<|"|>`) as special tokens.
+        The default `skip_special_tokens=True` strips them from
+        `output.text`, breaking parsing of both reasoning blocks and
         tool calls.
 
         This is a no-op for models whose structured tokens are regular
-        text tokens (e.g. DeepSeek's ``<think>``/``</think>``).
+        text tokens (e.g. DeepSeek's `<think>`/`</think>`).
         """
         # The offline API currently lacks a unified rendering pipeline.
         # Until the planned Renderer refactor is complete, we hardcode

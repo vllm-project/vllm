@@ -227,9 +227,9 @@ class BlockPool:
             block_size: Number of tokens in each block.
             kv_cache_group_id: The id of the KV cache group.
             block_mask: Optional mask aligned with
-                ``blocks[num_cached_blocks:num_full_blocks]``. When provided,
+                `blocks[num_cached_blocks:num_full_blocks]`. When provided,
                 blocks where the mask is False are skipped (treated like null
-                blocks). Used by groups whose ``find_longest_cache_hit`` only
+                blocks). Used by groups whose `find_longest_cache_hit` only
                 consults a subset of blocks (e.g. SWA tail-window), so blocks
                 that can never serve a hit stay out of the prefix-cache hash
                 map.
@@ -355,10 +355,10 @@ class BlockPool:
         extra_keys_list: list[tuple[Any, ...] | None],
         lookahead_token_ids: list[list[int]] | None,
     ) -> BlockStored:
-        """Build a ``BlockStored`` KV event for ``request``.
+        """Build a `BlockStored` KV event for `request`.
 
-        Shared by ``cache_full_blocks`` (newly cached blocks) and
-        ``emit_cached_block_events`` (prefix-cache-reused blocks) so both emit
+        Shared by `cache_full_blocks` (newly cached blocks) and
+        `emit_cached_block_events` (prefix-cache-reused blocks) so both emit
         identical event shapes for downstream consumers.
         """
         return BlockStored(
@@ -470,12 +470,12 @@ class BlockPool:
         Prefix-cache keys normally identify full cache blocks. A partial entry
         makes an existing cache block reachable from a fine-grained prefix
         boundary inside that block without allocating or copying a new
-        ``KVCacheBlock``.
+        `KVCacheBlock`.
 
-        The partial entry is lookup metadata owned by ``block``. If ``block``
+        The partial entry is lookup metadata owned by `block`. If `block`
         has no primary hash, the key becomes its primary hash. If the block
         already has a primary hash, the partial entry is tracked in
-        ``cached_block_hashes_by_block`` so eviction, reset, and promotion can
+        `cached_block_hashes_by_block` so eviction, reset, and promotion can
         remove every hash key that points to the block.
 
         Args:
@@ -484,12 +484,12 @@ class BlockPool:
             block: Existing cache block to make reachable from the partial
                 prefix boundary.
             num_tokens: Prefix length represented by the partial entry. It
-                must be a positive multiple of ``self.hash_block_size`` and
+                must be a positive multiple of `self.hash_block_size` and
                 cannot exceed the request's computed block hashes.
             kv_cache_group_id: KV cache group that owns the partial entry.
             block_size: Cache block size for the owning group. The partial
                 entry hash itself is always the prefix-chain hash at
-                ``num_tokens``; ``block_size`` must be a multiple of the hash
+                `num_tokens`; `block_size` must be a multiple of the hash
                 block size.
             replace_existing_hashes: Whether the block contents were replaced
                 and all existing cache entries must be removed before the new
@@ -497,7 +497,7 @@ class BlockPool:
 
         Returns:
             The hash key with group ID if a partial entry can be registered;
-            otherwise ``None`` for null blocks.
+            otherwise `None` for null blocks.
 
         """
         if block.is_null:
@@ -665,10 +665,10 @@ class BlockPool:
         src_block: KVCacheBlock,
         dst_block: KVCacheBlock,
     ) -> None:
-        """Re-point ``src_block``'s prefix-cache entries to ``dst_block``.
+        """Re-point `src_block`'s prefix-cache entries to `dst_block`.
 
-        Used when the request owning ``src_block`` keeps writing into it
-        : the prefix cache holds a private copy (``dst_block``)
+        Used when the request owning `src_block` keeps writing into it
+        : the prefix cache holds a private copy (`dst_block`)
         under the same hashes instead. Entries stay live; no events emitted.
         """
         assert dst_block.block_hash is None
@@ -736,7 +736,7 @@ class BlockPool:
 
         The blocks become last-resort eviction candidates regardless of prefix
         caching: they join the tail of the free queue and count as free.
-        ``on_reuse`` fires when ``get_new_blocks`` hands a block out (or the
+        `on_reuse` fires when `get_new_blocks` hands a block out (or the
         cache is reset), so the caller can stop reading it.
         """
         released: list[KVCacheBlock] = []

@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tracing a model's weight loaders on zero-storage checkpoint tensors.
 
-A ``TraceTensor`` stands in for one checkpoint tensor while ``load_weights``
-runs. View ops (``VIEW_OPS``) return a child that knows, as a meta view over
+A `TraceTensor` stands in for one checkpoint tensor while `load_weights`
+runs. View ops (`VIEW_OPS`) return a child that knows, as a meta view over
 the checkpoint tensor, where each of its elements sits in that tensor.
-What a trace cannot settle by itself (``copy_`` from it, ops outside
-``VIEW_OPS``, value reads) it hands to the bake's ``_PlanSink`` (``bake.py``),
+What a trace cannot settle by itself (`copy_` from it, ops outside
+`VIEW_OPS`, value reads) it hands to the bake's `_PlanSink` (`bake.py`),
 which decides what each means for the plan; nothing moves data.
 """
 
@@ -60,10 +60,10 @@ class TraceTensor(torch.Tensor):
     """Zero-storage meta tensor that records how a loader slices a checkpoint
     tensor.
 
-    ``_geom`` is a meta view over a contiguous meta tensor of the checkpoint
+    `_geom` is a meta view over a contiguous meta tensor of the checkpoint
     shape: its offset and strides say which checkpoint element each element of
-    this tensor is. It is ``None`` (and ``_lost`` says why) once this tensor
-    is no longer a view of the checkpoint tensor. ``_sink`` is the bake that
+    this tensor is. It is `None` (and `_lost` says why) once this tensor
+    is no longer a view of the checkpoint tensor. `_sink` is the bake that
     owns the trace.
     """
 
@@ -97,7 +97,7 @@ class TraceTensor(torch.Tensor):
     def checkpoint(
         cls, name: str, shape: torch.Size, dtype: torch.dtype, sink: "_PlanSink"
     ) -> "TraceTensor":
-        """The whole checkpoint tensor ``name``."""
+        """The whole checkpoint tensor `name`."""
         return cls(
             name, shape, dtype, sink, torch.empty(shape, dtype=dtype, device="meta")
         )
@@ -123,7 +123,7 @@ class TraceTensor(torch.Tensor):
             return func(*args, **kwargs)
 
     def _is_noop_to(self, args: tuple, kwargs: dict) -> bool:
-        """``.to()`` that keeps the dtype, such as ``.to(param.device)``: a
+        """`.to()` that keeps the dtype, such as `.to(param.device)`: a
         device move keeps every byte, and a trace has no device to move
         from."""
         kwargs = {k: v for k, v in kwargs.items() if k != "copy"}
@@ -134,7 +134,7 @@ class TraceTensor(torch.Tensor):
         return dtype is None or dtype == self.dtype
 
     def _view(self, func: Callable, args: tuple, kwargs: dict) -> Any:
-        """Run the view op on ``_geom`` for the children's shapes and
+        """Run the view op on `_geom` for the children's shapes and
         geometry; on a plain meta tensor when that is lost or fails."""
         name = func.__name__
         with torch._C.DisableTorchFunctionSubclass():

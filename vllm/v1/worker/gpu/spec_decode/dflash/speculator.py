@@ -6,16 +6,17 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -46,13 +47,14 @@ class DFlashSpeculator(DraftModelSpeculator):
         vllm_config.parallel_config = replace(
             parallel_config,
             prefill_context_parallel_size=1,
-            decode_context_parallel_size=(
-                parallel_config.decode_context_parallel_size
-                if speculative_config.draft_model_config.use_mla
-                else 1
-            ),
+            decode_context_parallel_size=speculative_config.draft_decode_context_parallel_size,
         )
         super().__init__(vllm_config, device)
+
+        # See SpeculativeConfig.prefill_context_kv_only.
+        self.context_kv_only = speculative_config.prefill_context_kv_only
+        if self.context_kv_only:
+            self.use_draft_logits = False
 
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
@@ -99,7 +101,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         self._num_rejected: torch.Tensor | None = None
         aux_layers = get_eagle3_aux_layers_from_config(speculative_config)
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if aux_layers and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+        if (
+            aux_layers
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and not self.context_kv_only
+        ):
             self._aux_staging = torch.zeros(
                 self._num_graph_context_tokens(self.max_num_reqs),
                 len(aux_layers) * vllm_config.model_config.get_hidden_size(),
@@ -141,7 +147,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         return config
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        wants_full = (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and not self.context_kv_only
+        )
         supports_full = (
             self.attn_cg_support.min_cg_support.value
             >= AttentionCGSupport.UNIFORM_BATCH.value
@@ -243,6 +252,49 @@ class DFlashSpeculator(DraftModelSpeculator):
     ) -> nn.Module:
         return load_dflash_model(target_model, self.vllm_config)
 
+    def free_unused_weights(self, target_model: nn.Module) -> None:
+        """With context_kv_only, keep only the weights of the modules that store
+        the context K/V and those shared with the target. A draft model without
+        `context_kv_modules` keeps all of its weights."""
+        if not self.context_kv_only or not hasattr(self.model, "context_kv_modules"):
+            return
+        keep = {id(p) for m in self.model.context_kv_modules() for p in m.parameters()}
+        keep.update(id(p) for p in target_model.parameters())
+        freed_bytes = 0
+        for param in self.model.parameters():
+            if id(param) not in keep:
+                freed_bytes += param.nbytes
+                param.data = param.data.new_empty(0)
+        logger.info(
+            "%s drafter only stores its context K/V (prefill_context_kv_only); "
+            "freed %.2f GiB of its weights.",
+            self._speculator_name,
+            freed_bytes / (1 << 30),
+        )
+
+    def load_model(self, target_model: nn.Module) -> None:
+        super().load_model(target_model)
+        if self.dcp_size == 1:
+            return
+        # The default draft DCP is resolved from config; catch drafts whose built
+        # layers disagree instead of failing inside the attention kernel.
+        draft_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            self.draft_attn_layer_names,
+        )
+        windowed = sorted(
+            name
+            for name, layer in draft_layers.items()
+            if getattr(layer, "sliding_window", None) is not None
+        )
+        if windowed:
+            raise ValueError(
+                f"{self._speculator_name} draft layers {windowed} use sliding-window "
+                f"attention, which cannot run at decode_context_parallel_size="
+                f"{self.dcp_size}. Set draft_decode_context_parallel_size=1."
+            )
+
     def set_attn(
         self,
         model_state: ModelState,
@@ -265,9 +317,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         for groups in self.attn_groups:
             for group in groups:
                 builder = group.get_metadata_builder()
-                if getattr(
-                    builder, "aot_schedule", False
-                ) and get_kv_cache_spec_sliding_window(builder.kv_cache_spec):
+                kv_group = kv_cache_config.kv_cache_groups[group.kv_cache_group_id]
+                if getattr(builder, "aot_schedule", False) and issubclass(
+                    kv_group.manager_cls, SlidingWindowManager
+                ):
                     # `aot_schedule` belongs to FlashAttention's builder, not
                     # to the base class this loop is typed against.
                     builder.aot_schedule = False  # type: ignore[attr-defined]
@@ -464,6 +517,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        if self.context_kv_only:
+            num_speculative_tokens = 0
         num_reqs = input_batch.num_reqs
         if dummy_run and dp_sync_state is not None:
             num_reqs = min(num_reqs, dp_sync_state.num_reqs)
@@ -492,6 +547,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.hidden_states[:num_target_tokens],
                 self.context_positions[:num_target_tokens],
             )
+            if num_speculative_tokens == 0:
+                return self.draft_tokens[:num_reqs]
             # DFlash processes all speculative tokens in one forward pass,
             # so the real token count is num_query_tokens.
             self._prepare_eplb_forward(num_query_tokens)
@@ -515,6 +572,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         assert self.draft_kv_cache_group_id >= 0
         # Support multiple draft KV cache groups by preparing inputs once for each
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
+            block_stride = self.block_tables.block_sizes[gid]
+            group = self.attn_groups[gid][0]
+            if group.kernel_block_stride:
+                assert group.kernel_block_size is not None
+                block_stride = group.kernel_block_stride * group.kernel_block_size
             prepare_dflash_inputs(
                 self.input_buffers,
                 self.block_tables.slot_mappings[gid],
@@ -534,6 +596,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 seeds,
                 self.block_tables.input_block_tables[gid],
                 self.block_tables.block_sizes[gid],
+                block_stride,
                 self.block_tables.cp_rank,
                 self.dcp_size,
                 self.block_tables.cp_interleave,
@@ -735,6 +798,7 @@ def _prepare_dflash_inputs_kernel(
     # Scalars
     parallel_drafting_token_id,
     block_size,
+    block_stride,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
@@ -815,7 +879,14 @@ def _prepare_dflash_inputs_kernel(
     # Neither kind of row may write draft KV into physical block 0.
     ctx_resident = is_valid_ctx & (ctx_block_id != 0)
     local_ctx_slot = cp_local_slot(
-        ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
+        ctx_pos,
+        ctx_block_id,
+        block_size,
+        block_stride,
+        cp_rank,
+        CP_SIZE,
+        CP_INTERLEAVE,
+        PAD_SLOT_ID,
     )
     ctx_slot = tl.where(
         ctx_resident,
@@ -850,6 +921,7 @@ def _prepare_dflash_inputs_kernel(
         query_pos,
         q_block_id,
         block_size,
+        block_stride,
         cp_rank,
         CP_SIZE,
         CP_INTERLEAVE,
@@ -923,6 +995,7 @@ def prepare_dflash_inputs(
     # [max_num_reqs, max_num_blocks]
     block_table: torch.Tensor,
     block_size: int,
+    block_stride: int,
     cp_rank: int,
     cp_size: int,
     cp_interleave: int,
@@ -971,6 +1044,7 @@ def prepare_dflash_inputs(
         block_table.stride(0),
         parallel_drafting_token_id,
         block_size,
+        block_stride,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,

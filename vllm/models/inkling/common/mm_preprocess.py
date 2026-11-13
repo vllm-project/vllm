@@ -245,8 +245,8 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
     ) -> list[int]:
         """Tokenize `prompt`, emitting the block-start marker id per media item.
 
-        Each marker (kept verbatim) is later expanded by ``_get_prompt_updates``
-        into ``<marker> + <placeholder> * N``.
+        Each marker (kept verbatim) is later expanded by `_get_prompt_updates`
+        into `<marker> + <placeholder> * N`.
         """
         image_marker = "<|content_image|>"
         audio_marker = "<|content_audio_input|>"

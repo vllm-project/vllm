@@ -4,8 +4,8 @@ vLLM provides an HTTP server that implements OpenAI's [Completions API](https://
 
 !!! warning "API key authentication does not protect every endpoint"
     The `--api-key` option (or `VLLM_API_KEY` environment variable) only
-    authenticates requests to endpoints under the `/v1`, `/v2`, and
-    `/inference` path prefixes. Other endpoints on the same HTTP server are
+    authenticates requests to endpoints under the `/v1`, `/v2`, `/inference`, and
+    `/cohere` path prefixes. Other endpoints on the same HTTP server are
     **not** authenticated — most notably `/invocations`, which exposes the same
     inference capabilities as the `/v1` endpoints. Do not rely on `--api-key`
     alone to secure vLLM. See
@@ -123,8 +123,11 @@ The `X-Request-Id` HTTP request header can be enabled with
 
 The Completions, Chat Completions, and Responses APIs also support the
 `X-Vllm-Priority` request header. Its value must be an integer and overrides
-the `priority` value in the JSON request body. Non-zero priorities require the
-server to use priority scheduling.
+the `priority` value in the JSON request body. The header and the body
+`priority` share the range `[-2**31, 2**31 - 1]`, and a body `priority` outside
+it is rejected. The Python frontend also rejects a header value outside it; the
+Rust frontend ignores such a header value and uses the body `priority`.
+Non-zero priorities require the server to use priority scheduling.
 
 ```python
 completion = client.chat.completions.create(

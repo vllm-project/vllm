@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash MegaMoE: block-FP8 checkpoint shards requantized to the
-MXFP8 MegaMoE kernel layout."""
+"""GLM-5.3 MegaMoE: block-FP8 checkpoint shards requantized to the MXFP8
+MegaMoE kernel layout, and BF16 shards loaded as they are."""
 
 from types import SimpleNamespace
 
@@ -39,7 +39,7 @@ def sm100_mega_moe_layout(monkeypatch):
 
 
 def _block_fp8(real: torch.Tensor, power_of_two: bool = False):
-    """Quantize ``(..., mn, k)`` to E4M3 with one float32 scale per 128x128."""
+    """Quantize `(..., mn, k)` to E4M3 with one float32 scale per 128x128."""
     *lead, mn, k = real.shape
     blocks = real.reshape(*lead, mn // 128, 128, k // 128, 128)
     scale = blocks.abs().amax(dim=(-3, -1)) / 448.0
@@ -68,7 +68,7 @@ def test_requant_is_exact_for_power_of_two_block_scales():
     assert torch.equal(_dequant_ue8m0(requant, sf), _dequant_block(weight, scale))
 
 
-def _experts() -> Glm5NextMegaMoEExperts:
+def _experts(weight_block_size=BLOCK) -> Glm5NextMegaMoEExperts:
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
         compilation_config=SimpleNamespace(static_forward_context={}),
@@ -81,7 +81,7 @@ def _experts() -> Glm5NextMegaMoEExperts:
         top_k=2,
         hidden_size=HIDDEN,
         intermediate_size=INTER,
-        weight_block_size=BLOCK,
+        weight_block_size=weight_block_size,
         activation=MegaMoEActivation("swiglu", clamp=10.0),
         num_shared_experts=1,
         prefix="model.layers.3.mlp.experts",
@@ -106,7 +106,7 @@ def _checkpoint(seed: int) -> dict[str, torch.Tensor]:
 
 
 def _load_shuffled(experts, ckpt, seed, suffix="") -> None:
-    """Load the checkpoint tensors whose names end in ``suffix``, shuffled."""
+    """Load the checkpoint tensors whose names end in `suffix`, shuffled."""
     shards = []
     for expert_id in range(NUM_EXPERTS):
         for name, tensor in ckpt.items():
@@ -134,21 +134,23 @@ def _load_shuffled(experts, ckpt, seed, suffix="") -> None:
         assert loaded == (expert_id >= 2)
 
 
+def _interleave(t):
+    """Gate and up rows interleaved by 8, as DeepGEMM's MegaMoE L1 takes them."""
+    g, n, k = t.shape
+    halves = t.view(g, 2, n // 16, 8, k)
+    return torch.stack([halves[:, 0], halves[:, 1]], dim=2).reshape(g, n, k)
+
+
 def _reference_mega_moe_layout(w13, s13, w2, s2):
     """CPU copy of DeepGEMM's transform_weights_for_mega_moe on packed scales."""
-
-    def interleave(t):
-        g, n, k = t.shape
-        halves = t.view(g, 2, n // 16, 8, k)
-        return torch.stack([halves[:, 0], halves[:, 1]], dim=2).reshape(g, n, k)
 
     def utccp(sf):
         g, mn, k = sf.shape
         return sf.reshape(g, -1, 4, 32, k).transpose(2, 3).reshape(g, mn, k)
 
     return (
-        interleave(w13.view(torch.uint8)),
-        utccp(interleave(s13.view(torch.int32))),
+        _interleave(w13.view(torch.uint8)),
+        utccp(_interleave(s13.view(torch.int32))),
         w2.view(torch.uint8),
         utccp(s2.view(torch.int32)),
     )
@@ -275,3 +277,29 @@ def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode):
     _assert_layout(_routed(experts), _expected_routed(ckpt))
     _assert_layout(_shared(experts), _expected_shared(shared_ckpt))
     assert {n: p.data_ptr() for n, p in experts.named_parameters()} == storage
+
+
+def test_bf16_checkpoint_loads_as_is():
+    """Without a weight block size the experts take BF16 shards straight into
+    the BF16 kernel layout, the shared expert included, and stage no scales."""
+    experts = _experts(weight_block_size=None)
+    generator = torch.Generator().manual_seed(0)
+
+    def rand(*shape):
+        return torch.randn(*shape, generator=generator).bfloat16()
+
+    w13, w2 = rand(NUM_EXPERTS, 2 * INTER, HIDDEN), rand(NUM_EXPERTS, HIDDEN, INTER)
+    _load_shuffled(experts, {"w13_weight": w13, "w2_weight": w2}, seed=0)
+    shared13, shared2 = rand(1, 2 * INTER, HIDDEN), rand(HIDDEN, INTER)
+    for name, data in [
+        ("down_proj.weight", shared2),
+        ("up_proj.weight", shared13[0, INTER:]),
+        ("gate_proj.weight", shared13[0, :INTER]),
+    ]:
+        experts.load_shared_expert_weight(f"mlp.shared_experts.{name}", data)
+
+    assert not [n for n, _ in experts.named_parameters() if "scale" in n]
+    assert torch.equal(experts.w13_weight, _interleave(w13[LOCAL_EXPERTS]))
+    assert torch.equal(experts.w2_weight, w2[LOCAL_EXPERTS])
+    assert torch.equal(experts.shared_l1_weight, _interleave(shared13)[0])
+    assert torch.equal(experts.shared_l2_weight, shared2)

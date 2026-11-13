@@ -9,15 +9,15 @@ from vllm.tokenizers.hf import HfTokenizer
 class KimiK3Processor(ProcessorMixin):
     """HF-style processor wrapper for the image-only Kimi-K3 model.
 
-    K3 exposes the standard ``image`` modality, so vLLM calls this processor
-    with ``images=[PIL, ...]``. The underlying checkpoint image processor
-    (``KimiK3VisionProcessor``) works on ``{"type": "image", "image": PIL}``
+    K3 exposes the standard `image` modality, so vLLM calls this processor
+    with `images=[PIL, ...]`. The underlying checkpoint image processor
+    (`KimiK3VisionProcessor`) works on `{"type": "image", "image": PIL}`
     media dicts, so this wrapper adapts bare PIL images into that shape before
-    delegating to ``preprocess``.
+    delegating to `preprocess`.
 
-    Text is only tokenized here; the single ``<|kimi_image_placeholder|>``
+    Text is only tokenized here; the single `<|kimi_image_placeholder|>`
     token per image is expanded into the resolution-aware media block by the
-    model's ``_get_prompt_updates`` on the vLLM side.
+    model's `_get_prompt_updates` on the vLLM side.
     """
 
     attributes = ["image_processor", "tokenizer"]

@@ -1,29 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer task-scheduled (``prims_ts``) paged decode.
+"""FlashInfer task-scheduled (`prims_ts`) paged decode.
 
-Wraps ``flashinfer.attention.prims_ts.BatchDecodePagedTSWrapper`` for uniform
-query-block decode: every request contributes exactly ``max_query_len`` query
+Wraps `flashinfer.attention.prims_ts.BatchDecodePagedTSWrapper` for uniform
+query-block decode: every request contributes exactly `max_query_len` query
 tokens over a paged KV cache. That is the DFlash/DSpark drafter shape, and the
-reason this backend exists is that ``mask_type="dense"`` expresses a
+reason this backend exists is that `mask_type="dense"` expresses a
 *non-causal* draft block directly -- the trtllm-gen paged decode kernel is
 bottom-right causal and silently ignores a supplied mask.
 
 Layout. No KV cache change: K and V are the two halves of vLLM's ordinary
-``[pages, Hkv, page_size, 2 * D]`` page, so their token stride is ``2 * D``.
+`[pages, Hkv, page_size, 2 * D]` page, so their token stride is `2 * D`.
 The kernel builds its TMA descriptors from the tensors' own strides
-(``_validate_native_hnd_tma_strides``), so the only requirement is a
+(`_validate_native_hnd_tma_strides`), so the only requirement is a
 contiguous head_dim. Verified numerically equal to the same data repacked
 into compact planes.
 
-Sliding window. ``prims_ts`` rejects ``window_left >= 0`` unless the mask is
+Sliding window. `prims_ts` rejects `window_left >= 0` unless the mask is
 causal, so a non-causal windowed layer cannot be expressed directly. The query
 block always sits at the end of the sequence, so the symmetric window reduces
 to a suffix, and we hand the kernel a block table restricted to the window's
-pages (see :func:`_restrict_to_window`). Because the restriction is page
-aligned, each query token sees up to ``page_size - 1`` extra tokens at the old
+pages (see `_restrict_to_window`). Because the restriction is page
+aligned, each query token sees up to `page_size - 1` extra tokens at the old
 edge, and all query tokens share one window start rather than each having its
-own (``max_query_len - 1`` tokens of drift).
+own (`max_query_len - 1` tokens of drift).
 """
 
 from dataclasses import dataclass
@@ -31,8 +31,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
@@ -68,24 +69,23 @@ _TS_MAX_HEAD_RATIO = 128
 def _require_prims_ts():
     """Import the prims_ts wrapper, or explain which flashinfer is needed.
 
-    0.7.0.post1 ships prims_ts but calls ``Task._run_task_body_impl`` with a
-    ``context`` kwarg that cutlass-dsl 4.8.0 removed, so it raises TypeError
-    deep inside kernel codegen.
+    0.7.4 renamed the plan and run arguments vLLM passes (e.g. `q_dtype`,
+    `softmax_scale`); earlier builds reject them with a TypeError.
     """
     try:
         from flashinfer.attention.prims_ts import BatchDecodePagedTSWrapper
     except ImportError as exc:
         raise RuntimeError(
-            "FLASHINFER_TS needs flashinfer-python>=0.7.1 "
+            "FLASHINFER_TS needs flashinfer-python>=0.7.4 "
             "(flashinfer.attention.prims_ts is missing)."
         ) from exc
     import flashinfer
 
-    if tuple(int(p) for p in flashinfer.__version__.split(".")[:3]) < (0, 7, 1):
+    if tuple(int(p) for p in flashinfer.__version__.split(".")[:3]) < (0, 7, 4):
         raise RuntimeError(
-            f"FLASHINFER_TS needs flashinfer-python>=0.7.1, found "
-            f"{flashinfer.__version__}: earlier builds of prims_ts are "
-            "incompatible with cutlass-dsl>=4.8."
+            f"FLASHINFER_TS needs flashinfer-python>=0.7.4, found "
+            f"{flashinfer.__version__}: earlier builds of prims_ts take "
+            "different plan and run arguments."
         )
     return BatchDecodePagedTSWrapper
 
@@ -148,9 +148,13 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
         self.num_qo_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        # FullAttentionSpec records the window when the hybrid KV cache manager
-        # is disabled; SlidingWindowSpec carries it directly.
-        self.sliding_window: int | None = getattr(kv_cache_spec, "sliding_window", None)
+        layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        sliding_windows = {
+            getattr(layer.impl, "sliding_window", None) for layer in layers.values()
+        }
+        self.sliding_window: int | None = (
+            sliding_windows.pop() if len(sliding_windows) == 1 else None
+        )
         self.query_len = max_decode_query_len(vllm_config)
         self._plans: dict[tuple[int, int, bool], Any] = {}
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
@@ -182,7 +186,7 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
         """Constant K/V capacity every plan compiles for.
 
         Keeping it constant is what makes one plan per (batch size, query
-        length) safe to replay from a CUDA graph: ``build()`` can never pick a
+        length) safe to replay from a CUDA graph: `build()` can never pick a
         differently-compiled plan for a batch the graph already captured.
         """
         if self.sliding_window is not None:
@@ -209,11 +213,11 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
             head_dim=self.head_size,
             page_size=self.page_size,
             max_kv_len=self._max_kv_len(),
-            max_seq_len_q=query_len,
+            max_q_len=query_len,
             packed_query=False,
-            q_data_type=self.q_dtype,
-            kv_data_type=self.kv_dtype,
-            o_data_type=_ts_output_dtype(self.q_dtype, self.out_dtype),
+            q_dtype=self.q_dtype,
+            kv_dtype=self.kv_dtype,
+            out_dtype=_ts_output_dtype(self.q_dtype, self.out_dtype),
             # A dense plan is what makes a non-causal draft block expressible;
             # it cannot carry a window, which _restrict_to_window applies to
             # the page table instead.
@@ -229,7 +233,7 @@ class FlashInferTSMetadataBuilder(AttentionMetadataBuilder[FlashInferTSMetadata]
         """Cut the page table down to the pages the window can reach.
 
         The query block ends the sequence, so a symmetric window around it is
-        the suffix ``[L - w - query_len + 1, L)``. Round that start down to a
+        the suffix `[L - w - query_len + 1, L)`. Round that start down to a
         page so the slice is expressible as a page table, then renumber the
         lengths relative to the new first page.
         """
@@ -362,9 +366,9 @@ class FlashInferTSImpl(AttentionImpl[FlashInferTSMetadata]):
         self.supports_quant_query_input = kv_cache_dtype.startswith("fp8")
 
     def _kv_views(self, kv_cache: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """HND K/V views of vLLM's ``[pages, Hkv, page, 2 * D]`` page.
+        """HND K/V views of vLLM's `[pages, Hkv, page, 2 * D]` page.
 
-        Their token stride is ``2 * D`` rather than ``D``; the kernel builds its
+        Their token stride is `2 * D` rather than `D`; the kernel builds its
         TMA descriptors from the tensor's own strides, so no repacking and no
         layout change are needed.
         """
@@ -429,10 +433,10 @@ class FlashInferTSImpl(AttentionImpl[FlashInferTSMetadata]):
         attn_metadata.wrapper.run(
             q=q,
             paged_kv_cache=(k_cache, v_cache),
-            seq_lens=attn_metadata.seq_lens,
+            seq_lens_kv=attn_metadata.seq_lens,
             block_tables=attn_metadata.block_table,
-            bmm1_scale=self.scale * layer._q_scale_float * layer._k_scale_float,
-            bmm2_scale=layer._v_scale_float,
+            softmax_scale=self.scale * layer._q_scale_float * layer._k_scale_float,
+            output_scale=layer._v_scale_float,
             out=kernel_out,
             validate=False,
         )
