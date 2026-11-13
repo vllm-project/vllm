@@ -62,12 +62,16 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadataBuilder,
 )
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -110,20 +114,16 @@ GDN_SPEC = MambaSpec(
     block_size=MAMBA_BLOCK,
     shapes=((4, 64), (2, 16, 16)),
     dtypes=(torch.bfloat16, torch.float32),
-    mamba_cache_mode="align",
-    num_speculative_blocks=NUM_SPEC,
 )
 PLE_SPEC = MambaSpec(
     block_size=MAMBA_BLOCK,
     shapes=((8, 64),),
     dtypes=(torch.bfloat16,),
-    mamba_cache_mode="align",
-    num_speculative_blocks=NUM_SPEC,
 )
-QSA_SPEC = FullAttentionSpec(
+QSA_SPEC = AttentionSpec(
     block_size=ATTN_BLOCK, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
 )
-RAW_SPEC = CircularBufferSpec(
+RAW_SPEC = AttentionSpec(
     block_size=RING_CAPACITY,
     num_kv_heads=1,
     head_size=128,
@@ -144,27 +144,58 @@ UNCOMPRESSED_SPEC = MLAAttentionSpec(
     dtype=torch.bfloat16,
     tokens_per_state=1,
 )
-# (name, backend, builder, spec) by KV cache group, mamba groups first. The QSA
-# main cache's backend (None) is imported once the model module is: importing
-# the NVIDIA QSA module first is circular.
+# The mamba groups' allocation policy: prefix caching (align) with a state
+# block per draft token.
+GDN_CONFIG = MambaManager.layer_config(
+    GDN_SPEC, mamba_cache_mode="align", num_speculative_blocks=NUM_SPEC
+)
+PLE_CONFIG = MambaManager.layer_config(
+    PLE_SPEC, mamba_cache_mode="align", num_speculative_blocks=NUM_SPEC
+)
+# (name, backend, builder, layer config) by KV cache group, mamba groups first.
+# The QSA main cache's backend (None) is imported once the model module is:
+# importing the NVIDIA QSA module first is circular.
 GROUPS: list[
     tuple[
-        str, type[AttentionBackend] | None, type[AttentionMetadataBuilder], KVCacheSpec
+        str,
+        type[AttentionBackend] | None,
+        type[AttentionMetadataBuilder],
+        KVCacheLayerConfig,
     ]
 ] = [
-    ("gdn0", GDNAttentionBackend, GDNAttentionMetadataBuilder, GDN_SPEC),
-    ("gdn1", GDNAttentionBackend, GDNAttentionMetadataBuilder, GDN_SPEC),
-    ("gdn2", GDNAttentionBackend, GDNAttentionMetadataBuilder, GDN_SPEC),
+    ("gdn0", GDNAttentionBackend, GDNAttentionMetadataBuilder, GDN_CONFIG),
+    ("gdn1", GDNAttentionBackend, GDNAttentionMetadataBuilder, GDN_CONFIG),
+    ("gdn2", GDNAttentionBackend, GDNAttentionMetadataBuilder, GDN_CONFIG),
     (
         "ple",
         PleShortConvAttentionBackend,
         PleShortConvAttentionMetadataBuilder,
-        PLE_SPEC,
+        PLE_CONFIG,
     ),
-    ("qsa", None, Qwen4ExpQSAMetadataBuilder, QSA_SPEC),
-    ("raw", QSAIndexerBackend, QSAIndexerMetadataBuilder, RAW_SPEC),
-    ("compressed", QSAIndexerBackend, QSAIndexerMetadataBuilder, COMPRESSED_SPEC),
-    ("uncompressed", QSAIndexerBackend, QSAIndexerMetadataBuilder, UNCOMPRESSED_SPEC),
+    (
+        "qsa",
+        None,
+        Qwen4ExpQSAMetadataBuilder,
+        FullAttentionManager.layer_config(QSA_SPEC),
+    ),
+    (
+        "raw",
+        QSAIndexerBackend,
+        QSAIndexerMetadataBuilder,
+        CircularBufferManager.layer_config(RAW_SPEC),
+    ),
+    (
+        "compressed",
+        QSAIndexerBackend,
+        QSAIndexerMetadataBuilder,
+        FullAttentionManager.layer_config(COMPRESSED_SPEC),
+    ),
+    (
+        "uncompressed",
+        QSAIndexerBackend,
+        QSAIndexerMetadataBuilder,
+        FullAttentionManager.layer_config(UNCOMPRESSED_SPEC),
+    ),
 ]
 NUM_MAMBA_GROUPS = 4
 
@@ -326,12 +357,15 @@ def _scenario(
     kv_cache_groups = []
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSABackend
 
-    for index, (name, backend, builder_cls, spec) in enumerate(GROUPS):
+    for index, (name, backend, builder_cls, layer_config) in enumerate(GROUPS):
         layers = [f"{name}.0", f"{name}.1"]
+        spec = layer_config.spec
         group = AttentionGroup(backend or Qwen4ExpQSABackend, layers, spec, index)
         group.metadata_builders = [builder_cls(spec, layers, config, device)]
         attn_groups.append([group])
-        kv_cache_groups.append(KVCacheGroupSpec(layers, spec))
+        kv_cache_groups.append(
+            KVCacheGroup.from_layers({layer: layer_config for layer in layers})
+        )
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
     )
@@ -352,6 +386,7 @@ def _scenario(
     # The mamba context's aligned-index kernel over the mamba groups' tables.
     ctx = object.__new__(MambaSpecDecodeGPUContext)
     ctx.block_size = MAMBA_BLOCK
+    ctx.mamba_group_ids = list(range(NUM_MAMBA_GROUPS))
     ctx.num_groups = NUM_MAMBA_GROUPS
     ctx.is_initialized = True
     ctx.block_table_stride_req = block_tables[0].stride(0)
@@ -376,11 +411,9 @@ def _scenario(
         max_num_seqs, dtype=torch.int32, device=device
     )
     state._align_mode = True
-    state._use_flashinfer_replayssm = False
+    state._use_replayssm_trackers = False
     state.recoverssm = None
     state._mamba_ctx = ctx
-    state._mamba_spec = GDN_SPEC
-    state._mamba_group_ids = list(range(NUM_MAMBA_GROUPS))
     state.uses_ngram_embedding = True
     state.ngram_context_len = NGRAM_CONTEXT
     state.ngram_eos_token_id = EOS

@@ -178,7 +178,7 @@ class Qwen4ExpSpecializedDecodeModelState(Qwen4ExpModelState):
         reasons = []
         if not supported():
             reasons.append("needs CUDA and Triton")
-        if self._use_flashinfer_replayssm or self.recoverssm is not None:
+        if self._use_replayssm_trackers or self.recoverssm is not None:
             reasons.append("ReplaySSM and RecoverSSM keep per-step host state")
         if self.uses_ngram_embedding and self.disk_offload_modules:
             reasons.append("PLE disk offload stages rows on the host")
@@ -197,7 +197,8 @@ class Qwen4ExpSpecializedDecodeModelState(Qwen4ExpModelState):
         if self.gdn_records is not None:
             block_size = 0
             if self._align_mode:
-                block_size = self._get_mamba_group_info(kv_cache_config)[1].block_size
+                assert self._mamba_ctx is not None
+                block_size = self._mamba_ctx.block_size
             self.gdn_records.bind_caches(block_size)
 
     def capture_inner_cudagraphs(

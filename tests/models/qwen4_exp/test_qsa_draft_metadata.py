@@ -31,7 +31,7 @@ from vllm.models.qwen4_exp.common.qsa_indexer import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
@@ -63,9 +63,9 @@ ROW_FIELDS = (
 )
 
 
-def _make_spec(kind: str) -> CircularBufferSpec | MLAAttentionSpec:
+def _make_spec(kind: str) -> AttentionSpec:
     if kind == "raw":
-        return CircularBufferSpec(
+        return AttentionSpec(
             block_size=RING_CAPACITY,
             num_kv_heads=1,
             head_size=128,

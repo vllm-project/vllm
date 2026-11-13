@@ -148,7 +148,6 @@ def test_spec_rows_lead_matches_index_path(backend: str, batch_name: str) -> Non
             block_size=BLOCK_SIZE,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            num_speculative_blocks=NUM_SPEC,
         ),
         layer_names=[PREFIX],
         vllm_config=vllm_config,
