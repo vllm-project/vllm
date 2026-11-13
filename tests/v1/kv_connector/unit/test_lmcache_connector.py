@@ -820,6 +820,10 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
     assert connector._lmcache_engine.layerwise_storers == []
 
 
+@pytest.mark.skip(
+    reason="LMCacheConnectorV1.shutdown() is not forwarded to LMCache until its "
+    "shutdown no longer aborts in libzmq (#67121)"
+)
 def test_engine_shutdown_stops_lmcache_threads(monkeypatch):
     """LMCache starts non-daemon threads. If engine shutdown does not stop
     them, the EngineCore process cannot exit and is force-killed."""
