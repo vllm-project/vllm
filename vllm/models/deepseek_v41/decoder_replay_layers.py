@@ -102,8 +102,13 @@ class DecoderReplayLayers:
     ) -> tuple[torch.Tensor, ...]:
         """A graph break: the outputs land in fixed buffers the next segment reads."""
         outputs = self._run(hidden_states, *states)
-        if self._break_outputs is None:
-            # Sized by the first call: the largest model graph is captured first.
+        if (
+            self._break_outputs is None
+            or self._break_outputs[0].shape[0] < outputs[0].shape[0]
+        ):
+            # Sized by the largest call. Serving captures its largest model graph
+            # first, so this allocates once; graphs captured in another order
+            # (e.g. `vllm bench forward`) grow it before capturing a larger one.
             self._break_outputs = [torch.empty_like(out) for out in outputs]
         return tuple(
             buf[: out.shape[0]].copy_(out)
