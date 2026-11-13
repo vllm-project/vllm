@@ -13,6 +13,7 @@ import torch.nn as nn
 from einops import rearrange
 from transformers.video_utils import VideoMetadata
 
+from vllm import _custom_ops as ops
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     parallel_state,
@@ -31,7 +32,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.glm4_1v import (
     Glm4vMultiModalProcessor,
     Glm4vProcessingInfo,
@@ -44,7 +44,6 @@ from vllm.model_executor.models.vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
-from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -172,7 +171,6 @@ class Glm5NextVisionAttention(nn.Module):
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
         )
-        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         seq_len, bs, _ = qkv.shape
@@ -190,39 +188,31 @@ class Glm5NextVisionAttention(nn.Module):
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb_cos: torch.Tensor,
-        rotary_pos_emb_sin: torch.Tensor,
+        rotary_pos_emb_cos_sin: torch.Tensor,
+        rotary_positions: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
         sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         x, _ = self.qkv(x)
-        q, k, v = self.split_qkv(x)
-
-        # P1: fused q/k RMSNorm (two distinct weights, one launch; fp32, bit-identical).
-        q_shape, k_shape = q.shape, k.shape
-        q_flat = q.reshape(-1, self.head_dim)
-        k_flat = k.reshape(-1, self.head_dim)
-        q, k = fused_q_kv_rmsnorm(
-            q_flat,
-            k_flat,
+        num_heads = self.num_attention_heads_per_partition
+        # q/k RMSNorm and RoPE in place in qkv, in fp32 with one rounding.
+        ops.fused_qk_norm_rope(
+            x.view(-1, x.shape[-1]),
+            num_heads,
+            num_heads,
+            num_heads,
+            self.head_dim,
+            self.q_norm.variance_epsilon,
             self.q_norm.weight,
             self.k_norm.weight,
-            self.q_norm.variance_epsilon,
+            rotary_pos_emb_cos_sin,
+            is_neox=True,
+            position_ids=rotary_positions,
         )
-        q = q.view(q_shape)
-        k = k.view(k_shape)
-
-        q, k = (rearrange(t, "s b ... -> b s ...").contiguous() for t in (q, k))
-        # Keep v a view into qkv, as FlashInfer's cu_seqlens expect.
-        v = rearrange(v, "s b ... -> b s ...")
-        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
-            qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = self.apply_rotary_emb(
-                qk_concat,
-                rotary_pos_emb_cos,
-                rotary_pos_emb_sin,
-            )
-            q, k = torch.chunk(qk_rotated, 2, dim=0)
+        q, k, v = (rearrange(t, "s b ... -> b s ...") for t in self.split_qkv(x))
+        if self.attn.attn_backend == AttentionBackendEnum.FLASHINFER:
+            # FlashInfer's cu_seqlens expect contiguous q/k and v as a view into qkv.
+            q, k = q.contiguous(), k.contiguous()
 
         context_layer = self.attn(
             query=q,
@@ -273,23 +263,28 @@ class Glm5NextVisionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        residual: torch.Tensor | None,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb_cos: torch.Tensor,
-        rotary_pos_emb_sin: torch.Tensor,
+        rotary_pos_emb_cos_sin: torch.Tensor,
+        rotary_positions: torch.Tensor,
         max_seqlen: int | None = None,
         sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
-    ) -> torch.Tensor:
-        x_attn = self.attn(
-            self.norm1(x),
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            residual = x
+            x = self.norm1(x)
+        else:
+            x, residual = self.norm1(x, residual)
+        x = self.attn(
+            x,
             cu_seqlens=cu_seqlens,
-            rotary_pos_emb_cos=rotary_pos_emb_cos,
-            rotary_pos_emb_sin=rotary_pos_emb_sin,
+            rotary_pos_emb_cos_sin=rotary_pos_emb_cos_sin,
+            rotary_positions=rotary_positions,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
         )
-        x_fused_norm, residual = self.norm2(x, residual=x_attn)
-        x = residual + self.mlp(x_fused_norm)
-        return x
+        x, residual = self.norm2(x, residual)
+        return self.mlp(x), residual
 
 
 class Glm5NextPatchMerger(nn.Module):
@@ -612,20 +607,27 @@ class Glm5NextVisionTransformer(nn.Module):
             cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
+        rotary_pos_emb_cos_sin = torch.cat(
+            [rotary_pos_emb_cos, rotary_pos_emb_sin], dim=-1
+        )
+        rotary_positions = torch.arange(x.shape[0], device=x.device)
+
         # transformers
         x = x.unsqueeze(1)
+        residual = None
         for blk in self.blocks:
-            x = blk(
+            x, residual = blk(
                 x,
+                residual,
                 cu_seqlens=cu_seqlens,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
+                rotary_pos_emb_cos_sin=rotary_pos_emb_cos_sin,
+                rotary_positions=rotary_positions,
                 max_seqlen=max_seqlen,
                 sequence_lengths=sequence_lengths,
             )
 
         # adapter
-        x = self.post_layernorm(x)
+        x, _ = self.post_layernorm(x, residual)
         x = x.view(-1, self.spatial_merge_size, self.spatial_merge_size, x.shape[-1])
         x = x.permute(0, 3, 1, 2)
         x = self.downsample(x).view(-1, self.out_hidden_size)
