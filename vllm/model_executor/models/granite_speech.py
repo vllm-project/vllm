@@ -94,9 +94,14 @@ ISO639_1_SUPPORTED_LANGS = {
 _MAX_AUDIO_TOKENS = 8190
 
 
-def get_encoder_batch_size(config: PreTrainedConfig, num_features: int) -> int:
+def get_encoder_batch_size(
+    config: PreTrainedConfig, num_features: int, max_num_encoder_input_tokens: int
+) -> int:
     tokens_per_window = config.window_size // config.downsample_rate
-    max_features = _MAX_AUDIO_TOKENS // tokens_per_window * config.window_size
+    num_clips = max(1, max_num_encoder_input_tokens // _MAX_AUDIO_TOKENS)
+    max_features = (
+        num_clips * _MAX_AUDIO_TOKENS // tokens_per_window * config.window_size
+    )
     context_size = config.encoder_config.context_size
     return max(
         1,
@@ -608,6 +613,9 @@ class GraniteSpeechForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.cache_config = cache_config
+        self.max_num_encoder_input_tokens = (
+            vllm_config.scheduler_config.max_num_encoder_input_tokens
+        )
 
         # Check for OOV tokens to see if offsets need to be preserved
         self.configure_mm_token_handling(
@@ -704,43 +712,6 @@ class GraniteSpeechForConditionalGeneration(
             audio_embed_sizes=audio_embed_sizes.flatten().tolist(),
         )
 
-    def _pad_and_stack_input_features(
-        self,
-        input_features: list[torch.Tensor],
-    ) -> torch.Tensor:
-        """Given a list of input features of varying length, pad them to the
-        same length and stack them into a torch.Tensor.
-
-        NOTE: Usually, padding is done in the input processor/feature extractor
-        and zero padded prior to the computation of the Mel features; the
-        resulting values are only constant within a batch and generally nonzero
-        (i.e., slightly negative nums); we should validate that this is okay
-        since we don't use a feature attention mask, but the more important
-        thing is that we apply the input_features_mask with variable len
-        batches.
-
-        Args:
-            input_features: list[torch.Tensor]
-                3D Input features to be coerced into a tensor.
-
-        Returns:
-            torch.Tensor: Tensor of shape [bsz, num_features, 160], where
-            num_features is the max number of features of any entry in the
-            batch.
-
-        """
-        feat_lens = [feats.shape[1] for feats in input_features]
-        padding = [max(feat_lens) - length for length in feat_lens]
-        # TODO (Alex) - Validate that it's okay to zero pad like this;
-        # in transformers we zero pad prior to calculating the speech features,
-        # so the value is not zero and is dependent on the batched features.
-        padded = [
-            torch.nn.functional.pad(feats, (0, 0, 0, pad, 0, 0))
-            for feats, pad in zip(input_features, padding)
-        ]
-        stacked_features = torch.cat(padded, dim=0).to(input_features[0])
-        return stacked_features
-
     def _process_audio_input(
         self,
         audio_input: GraniteSpeechAudioInputs,
@@ -768,17 +739,20 @@ class GraniteSpeechForConditionalGeneration(
         start = 0
         while start < len(order):
             num_features = input_features[order[start]].shape[0]
-            batch_size = get_encoder_batch_size(self.config, num_features)
+            batch_size = get_encoder_batch_size(
+                self.config, num_features, self.max_num_encoder_input_tokens
+            )
             group = order[start : start + batch_size]
             start += len(group)
-            features = self._pad_and_stack_input_features(
-                [input_features[i].unsqueeze(0) for i in group]
+            features = torch.nn.utils.rnn.pad_sequence(
+                [input_features[i] for i in group], batch_first=True
             )
             projected_embeds = self.projector(self.encoder(features))
             sizes = [audio_embed_sizes[i] for i in group]
             group_embeds = torch.cat(
                 [embeds[:size] for embeds, size in zip(projected_embeds, sizes)]
             ).split(sizes)
+            del features, projected_embeds
             audio_embeds.update(zip(group, group_embeds))
         return tuple(audio_embeds[i] for i in range(len(order)))
 
