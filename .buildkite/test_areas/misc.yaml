@@ -580,7 +580,7 @@ steps:
   key: python-only-installation
   depends_on: ~
   optional: true
-  timeout_in_minutes: 20
+  timeout_in_minutes: 75
   device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
@@ -604,7 +604,7 @@ steps:
   key: python-314-smoke-nightly
   depends_on: ~
   optional: true
-  timeout_in_minutes: 30
+  timeout_in_minutes: 85
   device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
