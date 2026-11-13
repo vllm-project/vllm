@@ -63,8 +63,12 @@ logger = init_logger(__name__)
 
 _CONFIG_KEY = "audio_bucket_seconds"
 _CONFIG_PATH = f"additional_config.{_CONFIG_KEY}"
-_CONFIG_KEY_MIN_SIZE = "audio_bucket_min_size"
-_CONFIG_PATH_MIN_SIZE = f"additional_config.{_CONFIG_KEY_MIN_SIZE}"
+_CONFIG_KEY_BUDGET = "audio_bucket_budget"
+_CONFIG_PATH_BUDGET = f"additional_config.{_CONFIG_KEY_BUDGET}"
+_CONFIG_KEY_FILL_FLOOR = "audio_bucket_fill_floor"
+_CONFIG_PATH_FILL_FLOOR = f"additional_config.{_CONFIG_KEY_FILL_FLOOR}"
+# Retired in favor of the compute-budget band; still recognized to warn.
+_LEGACY_KEY_MIN_SIZE = "audio_bucket_min_size"
 
 # Losslessness levels a whitelisted model may guarantee for its crop (see the
 # module docstring): bit-exact for mask-aware encoders, output-lossless-within-
@@ -210,24 +214,30 @@ def _ladder_seconds(
     return tuple(seconds) if seconds else None
 
 
-def _min_bucket_size(
+def _compute_budget(
     additional_config: Mapping[str, object] | None,
-) -> int | None:
-    """Read `additional_config.audio_bucket_min_size`, or `None` to disable
-    adjacent-rung merging.
+) -> tuple[int, int] | None:
+    """Read the compute-budget band, or `None` for plain rung bucketing.
+
+    `additional_config.audio_bucket_budget` bounds one encoder call's compute
+    (items x padded frames): oversized groups are split into balanced chunks,
+    each near the budget. `additional_config.audio_bucket_fill_floor` is the
+    under-full line below which a call merges with its larger neighbor
+    (default `budget // 6`). The retired `audio_bucket_min_size` threshold is
+    ignored (a warning is logged when it is still present).
 
     Args:
         additional_config: The `VllmConfig.additional_config` mapping in effect.
 
     Returns:
-        The min items a rung must hold before it is split out on its own, or
-        `None` when adjacent-rung merging is not requested.
+        `(budget, fill_floor)`, or `None` when compute-budget batching is off.
 
     Raises:
-        ValueError: If the config value is not a positive integer.
+        ValueError: If the budget is not a positive int, or the floor is not a
+            positive int within the budget.
     """
     raw = (
-        additional_config.get(_CONFIG_KEY_MIN_SIZE)
+        additional_config.get(_CONFIG_KEY_BUDGET)
         if isinstance(additional_config, Mapping)
         else None
     )
@@ -235,14 +245,26 @@ def _min_bucket_size(
         return None
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ValueError(
-            f"{_CONFIG_PATH_MIN_SIZE} must be a positive int, "
-            f"got {raw!r}"
+            f"{_CONFIG_PATH_BUDGET} must be a positive int, got {raw!r}"
         )
     if raw <= 0:
+        raise ValueError(f"{_CONFIG_PATH_BUDGET} must be > 0, got {raw!r}")
+    floor_raw = (
+        additional_config.get(_CONFIG_KEY_FILL_FLOOR)
+        if isinstance(additional_config, Mapping)
+        else None
+    )
+    if floor_raw is None:
+        return raw, max(1, raw // 6)
+    if isinstance(floor_raw, bool) or not isinstance(floor_raw, int):
         raise ValueError(
-            f"{_CONFIG_PATH_MIN_SIZE} must be > 0, got {raw!r}"
+            f"{_CONFIG_PATH_FILL_FLOOR} must be a positive int, got {floor_raw!r}"
         )
-    return raw
+    if floor_raw <= 0 or floor_raw > raw:
+        raise ValueError(
+            f"{_CONFIG_PATH_FILL_FLOOR} must be in (0, {raw}], got {floor_raw!r}"
+        )
+    return raw, floor_raw
 
 
 def _rungs_from_seconds(
@@ -346,17 +368,28 @@ class EncoderBucketing:
     Args:
         spec: The model's length/crop semantics.
         ladder: Rung ladder, or `None` to disable bucketing.
+        compute_budget: Compute-budget batching: the per-call compute bound
+            (items x padded frames). Oversized groups split into balanced
+            chunks; under-full groups merge up toward `fill_floor`. `None`
+            emits one call per rung (plain bucketing).
+        fill_floor: The under-full line for compute-budget merging, or `None`
+            for `compute_budget // 6`. Only meaningful with `compute_budget`.
     """
 
     def __init__(
         self,
         spec: EncoderBucketingSpec,
         ladder: LengthBucketingConfig | None,
-        min_bucket_size: int | None = None,
+        compute_budget: int | None = None,
+        fill_floor: int | None = None,
     ):
         self.spec = spec
         self.ladder = ladder
-        self.min_bucket_size = min_bucket_size
+        self.compute_budget = compute_budget
+        self.fill_floor = (
+            fill_floor if fill_floor is not None
+            else (max(1, compute_budget // 6) if compute_budget else None)
+        )
 
     @property
     def active(self) -> bool:
@@ -406,40 +439,86 @@ class EncoderBucketing:
         # untouched forward -- the feature is never slower than off.
         if sum(windows) >= num_items * time_extent:
             return full
+        if self.compute_budget is not None and (
+            num_items * max(windows) <= self.compute_budget
+        ):
+            # Low-concurrency collapse: when the whole batch fits one call
+            # within the budget, compute it as a single sub-batch (the
+            # unbucketed behavior) -- splitting tiny batches only adds calls.
+            rung = max(windows)
+            indices = list(range(num_items))
+            return [(indices, self.spec.crop(mm_kwargs_batch, indices, rung))]
         groups: dict[int, list[int]] = {}
         for index, window in enumerate(windows):
             groups.setdefault(window, []).append(index)
-        if self.min_bucket_size is not None:
-            groups = self._merge_rungs(groups)
+        if self.compute_budget is not None:
+            groups = self._fold_rungs_to_floor(groups)
+            calls: list[tuple[int, list[int]]] = self._split_oversized(groups)
+        else:
+            calls = list(groups.items())
         return [
             (indices, self.spec.crop(mm_kwargs_batch, indices, rung))
-            for rung, indices in groups.items()
+            for rung, indices in calls
         ]
 
-    def _merge_rungs(
+    def _fold_rungs_to_floor(
         self, groups: dict[int, list[int]]
     ) -> dict[int, list[int]]:
-        """Merge under-filled adjacent rungs into the larger neighbor.
+        """Fold under-full rungs up until each call reaches the fill floor.
 
-        A rung holding fewer than `min_bucket_size` items is folded into the
-        next (larger) rung, so the encoder keeps a larger batch instead of
-        running many tiny ones. Short items then pad to the larger rung,
-        trading a little padding for batch parallelism.
+        A group whose call compute (items x rung) is below `fill_floor` is
+        folded into the next (larger) rung, but only while the folded group
+        stays within `compute_budget` -- the pad inflation of a fold is capped
+        at the budget instead of gated on a raw item count. Groups already at
+        or above the floor never fold, so healthy batches are not over-merged.
         """
+        budget, floor = self.compute_budget, self.fill_floor
         rungs = sorted(groups)
-        merged: dict[int, list[int]] = {}
+        folded: dict[int, list[int]] = {}
         i = 0
         while i < len(rungs):
             rung = rungs[i]
             indices = list(groups[rung])
+            compute = len(indices) * rung
             j = i + 1
-            while j < len(rungs) and len(indices) < self.min_bucket_size:
-                rung = rungs[j]
-                indices.extend(groups[rungs[j]])
+            while j < len(rungs) and compute < floor:
+                next_rung = rungs[j]
+                merged_compute = (
+                    len(indices) + len(groups[next_rung])
+                ) * next_rung
+                if merged_compute > budget:
+                    break
+                indices.extend(groups[next_rung])
+                rung = next_rung
+                compute = merged_compute
                 j += 1
-            merged[rung] = indices
+            folded[rung] = indices
             i = j
-        return merged
+        return folded
+
+    def _split_oversized(
+        self, groups: dict[int, list[int]]
+    ) -> list[tuple[int, list[int]]]:
+        """Split rung groups whose call compute exceeds the budget.
+
+        A group of `n` items at rung `T` with `n * T > compute_budget` is cut
+        into `ceil(n / (budget // T))` balanced chunks, so long rungs get a
+        small per-call batch and short rungs a large one: every call computes
+        about the same `items x frames`, bounding call latency and activation
+        memory.
+        """
+        calls: list[tuple[int, list[int]]] = []
+        for rung, indices in groups.items():
+            n = len(indices)
+            max_bs = max(1, self.compute_budget // rung)
+            if n <= max_bs:
+                calls.append((rung, indices))
+                continue
+            num_calls = math.ceil(n / max_bs)
+            chunk = math.ceil(n / num_calls)
+            for start in range(0, n, chunk):
+                calls.append((rung, indices[start : start + chunk]))
+        return calls
 
 
 # -------------------------------------------------------------- install
@@ -510,7 +589,16 @@ def install_encoder_bucketing(
 
     ladder = None
     lossless = None
-    min_bucket_size = _min_bucket_size(additional_config)
+    compute_budget = _compute_budget(additional_config)
+    if isinstance(additional_config, Mapping) and (
+        additional_config.get(_LEGACY_KEY_MIN_SIZE) is not None
+    ):
+        logger.warning(
+            "additional_config.%s is no longer supported and is ignored; "
+            "use additional_config.%s instead.",
+            _LEGACY_KEY_MIN_SIZE,
+            _CONFIG_KEY_BUDGET,
+        )
     seconds = _ladder_seconds(additional_config)
     if seconds is not None and not _gpu_execution_supported():
         logger.warning(
@@ -558,7 +646,12 @@ def install_encoder_bucketing(
                     label,
                 )
 
-    model._encoder_bucketing = EncoderBucketing(spec, ladder, min_bucket_size)
+    model._encoder_bucketing = EncoderBucketing(
+        spec,
+        ladder,
+        compute_budget=compute_budget[0] if compute_budget else None,
+        fill_floor=compute_budget[1] if compute_budget else None,
+    )
     model._encoder_bucketing_manifest = manifest
     if ladder is not None:
         logger.info(
