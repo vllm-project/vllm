@@ -89,29 +89,29 @@ class ProfilerConfig:
     separate rank-qualified file."""
 
     proton_context: ProtonContext = "shadow"
-    """Proton context source. ``shadow`` records explicit scopes with low
-    overhead; ``python`` records Python call stacks."""
+    """Proton context source. `shadow` records explicit scopes with low
+    overhead; `python` records Python call stacks."""
 
     proton_data: ProtonData = "tree"
-    """Proton output type. ``tree`` produces Hatchet data and ``trace``
+    """Proton output type. `tree` produces Hatchet data and `trace`
     produces a Chrome trace."""
 
     proton_backend: ProtonBackend | None = None
-    """Proton GPU backend. ``None`` lets Proton select CUPTI automatically."""
+    """Proton GPU backend. `None` lets Proton select CUPTI automatically."""
 
     proton_mode: str | None = None
-    """Optional backend-specific Proton mode string, such as ``pcsampling``."""
+    """Optional backend-specific Proton mode string, such as `pcsampling`."""
 
     proton_hook: ProtonHook | None = None
-    """Optional Proton hook. Use ``triton`` to add Triton launch metadata."""
+    """Optional Proton hook. Use `triton` to add Triton launch metadata."""
 
     proton_output_format: ProtonOutputFormat | None = None
-    """Optional format passed to Proton when finalizing a profile. ``None``
-    uses the default format for ``proton_data``."""
+    """Optional format passed to Proton when finalizing a profile. `None`
+    uses the default format for `proton_data`."""
 
     proton_graph_attribution: bool = False
     """Observe CUDA graph capture so replayed kernels can be attributed.
-    Requires Triton >= 3.7 and ``proton_data='tree'``."""
+    Requires Triton >= 3.7 and `proton_data='tree'`."""
 
     torch_profiler_with_stack: bool = True
     """If `True`, enables stack tracing in the torch profiler. Enabled by default
@@ -135,9 +135,8 @@ class ProfilerConfig:
     Disabled by default."""
 
     capture_torch_profiler: bool = False
-    """If `True`, enables a torch profiler during CUDA graph capture on rank 0.
-    Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.
-    Requires `profiler` to be set to 'torch'."""
+    """Deprecated and has no effect: only the removed Model Runner V1 profiled CUDA
+    graph capture. It will be removed in a future release."""
 
     detailed_trace_annotation: bool = False
     """If `True`, uses detailed annotations with roofline metrics (sk, sqsq,
@@ -293,6 +292,11 @@ class ProfilerConfig:
             raise ValueError(
                 "capture_torch_profiler is only applicable when profiler is "
                 "set to 'torch'"
+            )
+        if self.capture_torch_profiler:
+            logger.warning_once(
+                "capture_torch_profiler is deprecated and has no effect. It will "
+                "be removed in a future release."
             )
 
         return self

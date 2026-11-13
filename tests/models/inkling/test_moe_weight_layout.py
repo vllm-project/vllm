@@ -8,6 +8,7 @@ import torch
 
 from vllm.lora.utils import get_supported_lora_modules
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.models.inkling.amd import moe as amd_moe
 from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
@@ -225,11 +226,14 @@ def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:
     torch.testing.assert_close(sink.w2_weight, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 def test_sink_packed_weight_forward_matches_expert_sum(monkeypatch) -> None:
-    monkeypatch.setattr(moe, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(moe, "get_tensor_model_parallel_rank", lambda: 1)
-    sink = moe.InklingSinkExperts(n_experts=2, d_model=3, d_mlp=8).to(
+    sink_moe = amd_moe if current_platform.is_rocm() else moe
+    monkeypatch.setattr(sink_moe, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(sink_moe, "get_tensor_model_parallel_rank", lambda: 1)
+    sink = sink_moe.InklingSinkExperts(n_experts=2, d_model=3, d_mlp=8).to(
         device="cuda", dtype=torch.bfloat16
     )
     torch.manual_seed(1)

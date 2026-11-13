@@ -141,9 +141,9 @@ def process_weights_after_loading(
 ) -> None:
     """Post-process loaded weights into runtime format.
 
-    Under ``weights_already_processed`` (weight cache IPC loader), quant
+    Under `weights_already_processed` (weight cache IPC loader), quant
     methods skip tensor transforms and must declare
-    ``supports_pre_processed_weights``, otherwise this raises ``RuntimeError``.
+    `supports_pre_processed_weights`, otherwise this raises `RuntimeError`.
     """
     # Reclaim memory when an explicit lm_head has been
     # loaded, but it is identical to the input embeddings.
@@ -266,7 +266,7 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device 
 def online_quantization_timing_context(
     layer: nn.Module, quant_method: QuantizeMethodBase
 ):
-    """Accumulate online quantization processing time for ``quant_method``."""
+    """Accumulate online quantization processing time for `quant_method`."""
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )

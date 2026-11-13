@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for FlexKVConnectorV1.
 
-These tests mock the ``flexkv`` package so they can run without a real FlexKV
+These tests mock the `flexkv` package so they can run without a real FlexKV
 installation.  They verify:
 
-1. That ``FlexKVConnectorV1`` raises a helpful ``ImportError`` when FlexKV is
+1. That `FlexKVConnectorV1` raises a helpful `ImportError` when FlexKV is
    not installed.
 2. That all public methods are correctly delegated to the underlying
-   ``FlexKVConnectorV1Impl``.
+   `FlexKVConnectorV1Impl`.
 """
 
 import sys
@@ -50,8 +50,8 @@ def _make_kv_cache_config() -> KVCacheConfig:
 def _make_flexkv_module(
     impl_mock: MagicMock,
 ) -> tuple[types.ModuleType, types.ModuleType]:
-    """Build a fake ``flexkv`` package hierarchy that returns *impl_mock*
-    when ``FlexKVConnectorV1Impl`` is instantiated."""
+    """Build a fake `flexkv` package hierarchy that returns *impl_mock*
+    when `FlexKVConnectorV1Impl` is instantiated."""
     flexkv_mod = types.ModuleType("flexkv")
     integration_mod = types.ModuleType("flexkv.integration")
     vllm_mod = types.ModuleType("flexkv.integration.vllm")

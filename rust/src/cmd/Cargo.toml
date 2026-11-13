@@ -21,6 +21,7 @@ mimalloc.workspace = true
 native-tls-vendored = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
 serde_with.workspace = true
 thiserror-ext.workspace = true
 tokio = { workspace = true, features = ["signal"] }

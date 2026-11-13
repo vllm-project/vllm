@@ -13,8 +13,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_humming_input_quant_compiles_fullgraph():
-    """Humming's forward helpers look up ``DeviceInfo`` on every call; vLLM
-    traces them with ``fullgraph=True`` (vllm-project/humming#147)."""
+    """Humming's forward helpers look up `DeviceInfo` on every call; vLLM
+    traces them with `fullgraph=True` (vllm-project/humming#147)."""
     import vllm.utils.humming as hm
 
     weight_schema = hm.HummingWeightSchema(b_dtype="int4", weight_scale_group_size=128)

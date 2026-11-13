@@ -4,8 +4,8 @@
 
 seed_oss is Qwen3 with four overridden wrapper tokens, so the shared grammar
 (arg types, multiline values, parallel calls, streaming mechanics, …) is
-already covered by ``test_qwen3.py``/``test_qwen3_reasoning.py``. These tests
-cover only what is seed_oss-specific: that the ``seed:`` token overrides are
+already covered by `test_qwen3.py`/`test_qwen3_reasoning.py`. These tests
+cover only what is seed_oss-specific: that the `seed:` token overrides are
 wired through, the reasoning→tool boundary holds with them, the malformed
 header from #46314 no longer drops sibling calls, and the registered adapters
 resolve. Seed-specific budget-reflect tags inside reasoning are also covered
@@ -81,9 +81,9 @@ def test_token_overrides_wired(parser):
 
 
 class TestSeedTurnBoundaries:
-    """The Seed-OSS chat template wraps every message in ``<seed:bos>role`` /
-    ``<seed:eos>`` and replays prior-turn ``reasoning_content`` inside
-    ``<seed:think>...</seed:think>``, so a stale ``</seed:think>`` in history
+    """The Seed-OSS chat template wraps every message in `<seed:bos>role` /
+    `<seed:eos>` and replays prior-turn `reasoning_content` inside
+    `<seed:think>...</seed:think>`, so a stale `</seed:think>` in history
     is the normal multi-turn case. The backward walk must stop at the Seed
     boundary tokens; the inherited ChatML tokens are absent from the Seed
     vocab and would disable the scoping entirely.
@@ -128,7 +128,7 @@ def test_single_tool_call(tool_parser, mock_request):
 
 
 def test_malformed_function_end_does_not_drop_siblings(tool_parser, mock_request):
-    """Regression for #46314: a malformed ``</function>`` with no closing ``>``
+    """Regression for #46314: a malformed `</function>` with no closing `>`
     on the header must not discard the other, well-formed calls."""
     text = (
         f"{TOOL_CALL_START}\n<function=broken</function>\n{TOOL_CALL_END}"
@@ -170,7 +170,7 @@ def test_reasoning_then_tool_call(parser):
 
 
 def test_streaming_think_end_and_tool_call_same_delta(parser):
-    """``</seed:think>`` and ``<seed:tool_call>`` arriving in one delta must
+    """`</seed:think>` and `<seed:tool_call>` arriving in one delta must
     not leak the terminal tokens into the reasoning text."""
     reasoning, content = simulate_reasoning_streaming(
         parser,

@@ -100,8 +100,8 @@ async def test_stream_text_offset_matches_non_stream_with_stop_holdback():
 
 
 def test_non_stream_response_omits_null_prompt_tokens_details():
-    """The OpenAI spec types ``usage.prompt_tokens_details`` as an object, not
-    nullable, so it is omitted when ``--enable-prompt-tokens-details`` is off."""
+    """The OpenAI spec types `usage.prompt_tokens_details` as an object, not
+    nullable, so it is omitted when `--enable-prompt-tokens-details` is off."""
     response = _serving().request_output_to_completion_response(
         [_output("abc", [0], finished=True)],
         _request(stream=False),
