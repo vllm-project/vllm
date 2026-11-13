@@ -88,13 +88,18 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
         else:
             thinking = thinking_block
 
-        # Strip the "thought\n" channel role label the model emits inside
-        # <|channel>thought\n...<channel|> (analogous to "user\n" in
-        # <|turn>user\n...<turn|>).
-        thinking = _strip_thought_label(thinking.strip())
-        thinking = thinking.strip()
+        return {"thinking": _clean_thinking(thinking), "answer": answer}
 
-        return {"thinking": thinking, "answer": answer}
+    if _THINKING_START_TAG in text:
+        # Unfinished thought (e.g. output truncated by max_tokens before
+        # `<channel|>`): keep any prefix before `<|channel>` as the answer and
+        # extract the partial thought instead of leaking control tags into
+        # `answer`.
+        before_start, thinking = text.split(_THINKING_START_TAG, 1)
+        return {
+            "thinking": _clean_thinking(thinking),
+            "answer": _clean_answer(before_start),
+        }
 
     # No thinking delimiters found.
     # Strip spurious "thought\n" role label that some Gemma4 models sometimes
@@ -102,6 +107,15 @@ def parse_thinking_output(text: str) -> dict[str, str | None]:
     answer = _strip_thought_label(text)
     answer = _clean_answer(answer)
     return {"thinking": None, "answer": answer}
+
+
+def _clean_thinking(text: str) -> str:
+    """Strip the `thought\\n` channel role label and surrounding whitespace."""
+    # Gemma4 emits `thought\n` inside `<|channel>thought\n...<channel|>`
+    # (analogous to `user\n` in `<|turn>user\n...<turn|>`). Only strip leading
+    # whitespace before checking the label so `<|channel>thought\n` keeps its
+    # trailing newline intact for `_strip_thought_label`.
+    return _strip_thought_label(text.lstrip()).strip()
 
 
 def _strip_thought_label(text: str) -> str:
