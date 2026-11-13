@@ -65,13 +65,13 @@ def extract_named_tool_call_streaming(
 
 @dataclass
 class _RequiredToolCallSpan:
-    """Where one element of a ``tool_choice="required"`` array sits in the text.
+    """Where one element of a `tool_choice="required"` array sits in the text.
 
-    The model output for ``tool_choice="required"`` is a JSON array of
-    ``{"name": ..., "parameters": ...}`` objects. ``name`` is only set once
-    its string value is closed and decodes as JSON; ``name_end`` is the
-    offset just past that closing quote. ``args_start``/``args_end`` are the
-    character offsets of the ``parameters`` value (``args_end`` is ``None``
+    The model output for `tool_choice="required"` is a JSON array of
+    `{"name": ..., "parameters": ...}` objects. `name` is only set once
+    its string value is closed and decodes as JSON; `name_end` is the
+    offset just past that closing quote. `args_start`/`args_end` are the
+    character offsets of the `parameters` value (`args_end` is `None`
     while the value is still being generated).
 
     All offsets are prefix-stable: scanning any prefix of the text yields the
@@ -85,7 +85,7 @@ class _RequiredToolCallSpan:
     args_end: int | None = None
 
     def ready_at(self, length: int) -> bool:
-        """Whether the first ``length`` characters of the text already made
+        """Whether the first `length` characters of the text already made
         this call streamable: its name was complete and its parameters value
         had started."""
         return (

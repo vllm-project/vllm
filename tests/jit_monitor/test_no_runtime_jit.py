@@ -93,10 +93,10 @@ def _run_shape_battery(llm: LLM) -> None:
 
 @create_new_process_for_each_test("spawn")
 def can_run_without_jit(spec: JitModel):
-    """Boot ``spec`` with the monitor armed and run the shape battery.
+    """Boot `spec` with the monitor armed and run the shape battery.
 
     A subprocess per model is required: the monitor's hooks are process-global
-    and, once armed in ``error`` mode, stay armed. It must be spawned rather
+    and, once armed in `error` mode, stay armed. It must be spawned rather
     than forked, since forking a pytest process that already initialized CUDA
     poisons the child.
     """

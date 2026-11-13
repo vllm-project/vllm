@@ -237,7 +237,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         num_local_experts = test_config.num_local_experts
         num_global_experts = test_config.num_experts
         for lidx, fml in enumerate(fml_layers):
-            for name, w in fml.named_parameters():
+            for _, w in fml.named_parameters():
                 for e in range(num_local_experts):
                     g_e = shuffled_indices[lidx][ep_rank * num_local_experts + e]
                     ref = make_expert_weights(

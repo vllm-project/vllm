@@ -89,7 +89,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
         y = x * rrms * w
         tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

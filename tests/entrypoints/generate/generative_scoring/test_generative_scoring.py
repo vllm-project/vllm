@@ -207,7 +207,7 @@ class TestProbabilityComputation:
             max_lp = max(label_logprobs.values())
             exp_vals = {k: math.exp(v - max_lp) for k, v in label_logprobs.items()}
             sum_exp = sum(exp_vals.values())
-            for tid, lp in label_logprobs.items():
+            for tid in label_logprobs:
                 assert abs(probs[tid] - exp_vals[tid] / sum_exp) < 1e-9
         else:
             for tid, lp in label_logprobs.items():

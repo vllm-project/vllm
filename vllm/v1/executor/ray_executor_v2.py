@@ -165,7 +165,7 @@ class RayWorkerProc(WorkerProc):
     ) -> None:
         """Complete initialization after GPU assignment is known.
 
-        *driver_env_vars* are applied with ``setdefault`` — they fill
+        *driver_env_vars* are applied with `setdefault` — they fill
         in missing vars but never overwrite node-local values.
         *env_vars* always overwrite.
         *assigned_physical_gpu_ids* maps local_rank to physical CUDA device ID.

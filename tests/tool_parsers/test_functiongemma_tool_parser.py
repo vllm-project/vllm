@@ -145,7 +145,7 @@ _TAG_RE = re.compile(f"({_START}|{_END})")
 
 
 def _chunks(text: str, size: int) -> list[str]:
-    """Split ``text`` into ``size``-character chunks, keeping the tags whole.
+    """Split `text` into `size`-character chunks, keeping the tags whole.
 
     The tags are single special tokens, so a delta never splits them.
     """

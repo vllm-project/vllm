@@ -12,6 +12,7 @@ from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from ....conftest import HfRunner, ImageTestAssets, VllmRunner
+from ....utils import multi_gpu_test
 from .vlm_utils import model_utils
 
 MODEL = "google/gemma-3-4b-it"
@@ -104,11 +105,13 @@ def _get_vllm_prefill_hidden(
 @pytest.mark.skipif(
     current_platform.is_rocm(), reason="ROCm attention has accuracy issue for this test"
 )
+@pytest.mark.parametrize("attention_backend", [None, "FLASHINFER"])
 def test_mm_prefix_lm_e2e(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     image_assets: ImageTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    attention_backend: str | None,
 ):
     """Regression: Gemma3 native prefill must apply image prefix-LM mask."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -117,6 +120,7 @@ def test_mm_prefix_lm_e2e(
     vllm_runner_kwargs: dict[str, Any] = {
         "mm_processor_cache_gb": 0,
         "mm_processor_kwargs": {"do_pan_and_scan": True},
+        "attention_backend": attention_backend,
     }
     vllm_hidden = _get_vllm_prefill_hidden(vllm_runner, image, vllm_runner_kwargs)
 
@@ -199,3 +203,41 @@ def test_mm_prefix_lm_cache_hit_inside_image(
         assert output.num_cached_tokens == 256
 
         torch.testing.assert_close(image_after_hit(vllm_model), expected)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_mm_prefix_lm_pipeline_parallel(
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+):
+    """Regression: every PP stage must attend bidirectionally over image
+    tokens, not only the first one (which owns the encoder cache)."""
+    prompt = {
+        "prompt": PROMPT,
+        "multi_modal_data": {"image": image_assets[0].pil_image},
+    }
+    params = SamplingParams(max_tokens=1, prompt_logprobs=0)
+    prompt_logprobs = {}
+    for pp_size in (1, 2):
+        with vllm_runner(
+            MODEL,
+            max_model_len=4096,
+            enforce_eager=True,
+            limit_mm_per_prompt={"image": 1},
+            pipeline_parallel_size=pp_size,
+            distributed_executor_backend="mp",
+        ) as vllm_model:
+            output = vllm_model.get_llm().generate([prompt], params)[0]
+        prompt_logprobs[pp_size] = torch.tensor(
+            [
+                position[token_id].logprob
+                for token_id, position in zip(
+                    output.prompt_token_ids[1:], output.prompt_logprobs[1:]
+                )
+            ]
+        )
+
+    # A single request keeps the batch identical across PP sizes. Without the
+    # image ranges on the second stage the mean difference is about 10.
+    mean_diff = (prompt_logprobs[1] - prompt_logprobs[2]).abs().mean().item()
+    assert mean_diff < 0.5, f"PP=2 prompt logprobs differ from PP=1: {mean_diff=}"

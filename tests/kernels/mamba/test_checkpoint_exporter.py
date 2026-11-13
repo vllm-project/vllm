@@ -199,7 +199,7 @@ def test_exporter_stores_each_callers_checkpoints(
 def test_exporter_int64_token_offset():
     """Conv windows of rows past 2^31 // row stride need int64 input offsets.
 
-    Qwen3.5 passes ``raw_qkv`` as the qkv slice of the packed qkvz projection,
+    Qwen3.5 passes `raw_qkv` as the qkv slice of the packed qkvz projection,
     so its row stride is wider than its width.
     """
     width, row_stride, state_len, slot = 8192, 12288, 3, 5

@@ -2,22 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Small-M BF16 x NVFP4 (W4A16) and BF16 x BF16 GEMM for SM100 in CuTe DSL.
 
-``out[M, N] = (x[M, K] @ dequant(W)[N, K]^T) * global_scale`` with the weight in
-the ModelOpt layout used by the FlashInfer CuTe-DSL W4A16 kernel: ``weight``
-uint8 ``[N, K / 2]`` (two E2M1 codes per byte, low nibble first) and
-``weight_scale`` the 128x4-swizzled E4M3 block scales (one per 16 values), so
+`out[M, N] = (x[M, K] @ dequant(W)[N, K]^T) * global_scale` with the weight in
+the ModelOpt layout used by the FlashInfer CuTe-DSL W4A16 kernel: `weight`
+uint8 `[N, K / 2]` (two E2M1 codes per byte, low nibble first) and
+`weight_scale` the 128x4-swizzled E4M3 block scales (one per 16 values), so
 both kernels share the same tensors.
 
-Numerics: every weight is dequantized exactly to BF16 (``e2m1 * e4m3`` via
-``cvt.rn.bf16x2.e2m1x2`` and ``mul.rn.bf16x2``), multiplied with the BF16
-activations on tensor cores (``mma.sync`` m16n8k16, FP32 accumulate), and the
+Numerics: every weight is dequantized exactly to BF16 (`e2m1 * e4m3` via
+`cvt.rn.bf16x2.e2m1x2` and `mul.rn.bf16x2`), multiplied with the BF16
+activations on tensor cores (`mma.sync` m16n8k16, FP32 accumulate), and the
 FP32 global scale is applied to the FP32 accumulator before the single output
 rounding to BF16.
 
-Each CTA owns 16 output features (the MMA M dimension, swap-AB) and ``8 * nt``
-tokens (``nt`` = 1, 2 or 4, i.e. up to 32); its warps (and, with ``split > 1``,
+Each CTA owns 16 output features (the MMA M dimension, swap-AB) and `8 * nt`
+tokens (`nt` = 1, 2 or 4, i.e. up to 32); its warps (and, with `split > 1`,
 the CTAs of a cluster) split K and reduce through shared memory / DSMEM. All
-weight loads are issued before ``griddepcontrol.wait`` so they overlap the
+weight loads are issued before `griddepcontrol.wait` so they overlap the
 previous kernel under PDL.
 """
 
@@ -82,7 +82,7 @@ def tuned(n: int, k: int, silu_mul: bool = False, bf16: bool = False) -> bool:
 def pick_nt(
     n: int, k: int, m: int, silu_mul: bool = False, bf16: bool = False
 ) -> int | None:
-    """Smallest tuned token tile count covering ``m``, or None if the GEMV
+    """Smallest tuned token tile count covering `m`, or None if the GEMV
     is not the fastest choice for this shape and M."""
     nts = [nt for nt in _table(silu_mul, bf16).get((n, k), ()) if 8 * nt >= m]
     return min(nts) if nts else None
@@ -359,16 +359,16 @@ def nvfp4_gemv(
     silu_mul: bool = False,
     pdl: bool = True,
 ) -> torch.Tensor:
-    """Small-M W4A16 GEMM: ``x @ dequant(weight).T * global_scale``.
+    """Small-M W4A16 GEMM: `x @ dequant(weight).T * global_scale`.
 
     Args:
-        x: BF16 ``[M, K]`` activations with unit inner stride; ``(N, K)``
-            and M must be covered by the tuned tables (``pick_nt``).
-        weight: uint8 ``[N, K / 2]`` packed E2M1 codes (ModelOpt layout).
-        weight_scale: 128x4-swizzled E4M3 block scales (``swizzle_blockscale``).
+        x: BF16 `[M, K]` activations with unit inner stride; `(N, K)`
+            and M must be covered by the tuned tables (`pick_nt`).
+        weight: uint8 `[N, K / 2]` packed E2M1 codes (ModelOpt layout).
+        weight_scale: 128x4-swizzled E4M3 block scales (`swizzle_blockscale`).
         global_scale: FP32 scalar tensor (one element).
-        silu_mul: Treat the output as ``[gate | up]`` halves and return the
-            BF16 ``silu(gate) * up`` (``[M, N / 2]``) of the BF16 gate / up
+        silu_mul: Treat the output as `[gate | up]` halves and return the
+            BF16 `silu(gate) * up` (`[M, N / 2]`) of the BF16 gate / up
             outputs (exact SiLU, one BF16 rounding).
         pdl: Launch with programmatic dependent launch: weight loads start
             while the previous kernel drains. Disable after kernels that need
@@ -376,7 +376,7 @@ def nvfp4_gemv(
             CTAs the early, waiting GEMV CTAs would starve.
 
     Returns:
-        The BF16 ``[M, N]`` (``[M, N / 2]`` with ``silu_mul``) output.
+        The BF16 `[M, N]` (`[M, N / 2]` with `silu_mul`) output.
 
     """
     assert weight.shape[1] * 2 == x.shape[1]
@@ -398,8 +398,8 @@ def bf16_gemv(
     silu_mul: bool = False,
     pdl: bool = True,
 ) -> torch.Tensor:
-    """Small-M BF16 GEMM ``x @ weight.T`` (FP32 accumulate); same kernel and
-    arguments as ``nvfp4_gemv`` with a row-major BF16 ``[N, K]`` weight."""
+    """Small-M BF16 GEMM `x @ weight.T` (FP32 accumulate); same kernel and
+    arguments as `nvfp4_gemv` with a row-major BF16 `[N, K]` weight."""
     assert weight.dtype == torch.bfloat16 and weight.is_contiguous()
     assert weight.shape[1] == x.shape[1]
     return _launch(
@@ -472,8 +472,8 @@ _dequant = None
 
 
 def dequantize_rows(weight: torch.Tensor, weight_scale: torch.Tensor) -> torch.Tensor:
-    """Exact BF16 ``e2m1 * e4m3`` of all weight rows (global scale not
-    applied); ``weight_scale`` is 128x4-swizzled."""
+    """Exact BF16 `e2m1 * e4m3` of all weight rows (global scale not
+    applied); `weight_scale` is 128x4-swizzled."""
     global _dequant
     if _dequant is None:
         _dequant = _dequant_kernel()

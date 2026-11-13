@@ -70,7 +70,7 @@ class ECExampleConnector(ECConnectorBase):
         """Start loading the cache from the connector into vLLM's encoder cache.
 
         This method loads the encoder cache based on metadata provided by the scheduler.
-        It is called before `_gather_mm_embeddings` for the EC Connector. For EC,
+        It is called before `gather_mm_embeddings` for the EC Connector. For EC,
         the `encoder_cache` and `mm_hash` are stored in `kwargs`.
 
         Args:

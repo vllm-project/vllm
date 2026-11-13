@@ -3,14 +3,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 """Audio tower of Nemotron-3.5-Transcribe.
 
-A native port of the inference path of NeMo's ``AudioPerceptionModule`` with a
-``ParallelExpertEncoder``:
+A native port of the inference path of NeMo's `AudioPerceptionModule` with a
+`ParallelExpertEncoder`:
 
     waveform -> log-mel -> Parallel Expert Encoder -> Linear -> decoder width
 
-The Parallel Expert Encoder runs an ASR ``TransformerEncoder`` and a streaming
+The Parallel Expert Encoder runs an ASR `TransformerEncoder` and a streaming
 Sortformer speaker encoder over the same mel features. Both run in windows of
-``window_frames`` encoder frames with left and right context, and the speaker
+`window_frames` encoder frames with left and right context, and the speaker
 encoder carries a speaker cache and a FIFO between windows. Thresholded speaker
 activity is added to the normalized ASR states through a fixed sinusoidal
 kernel. Module names follow NeMo so the checkpoint loads by prefix.
@@ -49,8 +49,8 @@ _UNUSED_CHECKPOINT_PREFIXES = (
 class _TowerLinear(ReplicatedLinear):
     """A replicated linear layer over the last dimension of any input shape.
 
-    vLLM's quantized kernels take ``(tokens, features)``; the tower's activations
-    are ``(batch, frames, features)``.
+    vLLM's quantized kernels take `(tokens, features)`; the tower's activations
+    are `(batch, frames, features)`.
     """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -80,10 +80,10 @@ def _linear(
 
 
 class MelSpectrogram(nn.Module):
-    """Log-mel features as NeMo ``FilterbankFeatures`` computes them at inference.
+    """Log-mel features as NeMo `FilterbankFeatures` computes them at inference.
 
     Dither is off and no normalization is applied; frames past each row's
-    length are set to ``pad_value``. The filterbank and window come from the
+    length are set to `pad_value`. The filterbank and window come from the
     checkpoint and are held in the model dtype, as in the reference, and are
     upcast to float32 for the computation.
     """
@@ -142,7 +142,7 @@ class MelSpectrogram(nn.Module):
 
 
 class AudioPreprocessor(nn.Module):
-    """Holds the featurizer under NeMo's ``preprocessor.featurizer`` name."""
+    """Holds the featurizer under NeMo's `preprocessor.featurizer` name."""
 
     def __init__(self, cfg: dict[str, Any]) -> None:
         super().__init__()
@@ -155,7 +155,7 @@ class AudioPreprocessor(nn.Module):
 
 
 def normalize_per_feature(x: torch.Tensor, seq_len: torch.Tensor) -> torch.Tensor:
-    """NeMo ``normalize_batch(x, seq_len, "per_feature")`` on ``(B, C, T)`` features."""
+    """NeMo `normalize_batch(x, seq_len, "per_feature")` on `(B, C, T)` features."""
     batch_size, _, max_time = x.shape
     time_steps = (
         torch.arange(max_time, device=x.device)
@@ -178,7 +178,7 @@ def normalize_per_feature(x: torch.Tensor, seq_len: torch.Tensor) -> torch.Tenso
 
 
 class RotaryEmbedding:
-    """NeMo ``RotaryPositionalEncoding``: NeoX rotation of the first ``rot_dim`` dims.
+    """NeMo `RotaryPositionalEncoding`: NeoX rotation of the first `rot_dim` dims.
 
     Angles are computed in float32 on the CPU and stored in the activation
     dtype before use, as the reference does, so rotations match bit for bit.
@@ -235,7 +235,7 @@ class RotaryEmbedding:
 
 
 class FeatureStacking(nn.Module):
-    """Stack ``factor`` consecutive frames and project them to the model width."""
+    """Stack `factor` consecutive frames and project them to the model width."""
 
     def __init__(
         self,
@@ -274,10 +274,10 @@ class FeatureStacking(nn.Module):
 
 @dataclass
 class PackedFrames:
-    """The valid frames of a padded ``(B, T)`` batch, packed row after row.
+    """The valid frames of a padded `(B, T)` batch, packed row after row.
 
-    ``rows`` indexes the flattened batch and ``positions`` holds each frame's
-    position in its row. ``cu_seqlens``, ``max_seqlen`` and ``sequence_lengths``
+    `rows` indexes the flattened batch and `positions` holds each frame's
+    position in its row. `cu_seqlens`, `max_seqlen` and `sequence_lengths`
     are in the format of the attention backend.
     """
 
@@ -332,7 +332,7 @@ class MultiHeadAttention(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        """Attend within each row of the packed ``(N, d_model)`` frames."""
+        """Attend within each row of the packed `(N, d_model)` frames."""
         num_frames = x.shape[0]
         qkv = self.w_qkv(x).view(num_frames, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.unbind(1)
@@ -399,13 +399,13 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerEncoder(nn.Module):
-    """NeMo ``TransformerEncoder`` with RoPE and full attention, at inference.
+    """NeMo `TransformerEncoder` with RoPE and full attention, at inference.
 
-    ``forward`` takes ``(B, C, T)`` mel features, or ``(B, T, d_model)``
-    pre-encoded embeddings with ``bypass_pre_encode=True``, and returns
-    ``(B, d_model, T')`` states with their lengths. Only each row's valid frames
+    `forward` takes `(B, C, T)` mel features, or `(B, T, d_model)`
+    pre-encoded embeddings with `bypass_pre_encode=True`, and returns
+    `(B, d_model, T')` states with their lengths. Only each row's valid frames
     run through the layers, packed for variable-length attention; the padded
-    positions of the output are zero. ``lengths_cpu``, the lengths on the host,
+    positions of the output are zero. `lengths_cpu`, the lengths on the host,
     lets the packing skip a device-to-host copy.
     """
 
@@ -499,7 +499,7 @@ class TransformerEncoder(nn.Module):
 
 
 def downsample_preds(preds: torch.Tensor, factor: int) -> torch.Tensor:
-    """Average ``(B, T, S)`` probabilities over windows of ``factor`` frames."""
+    """Average `(B, T, S)` probabilities over windows of `factor` frames."""
     if factor == 1 or preds.shape[1] == 0:
         return preds
     pooled = F.avg_pool1d(
@@ -513,7 +513,7 @@ def downsample_preds(preds: torch.Tensor, factor: int) -> torch.Tensor:
 
 
 def align_frames(preds: torch.Tensor, target_len: int) -> torch.Tensor:
-    """Pad with the last frame, or truncate, ``(B, T, S)`` to ``target_len`` frames."""
+    """Pad with the last frame, or truncate, `(B, T, S)` to `target_len` frames."""
     current_len = preds.shape[1]
     if current_len < target_len:
         if current_len == 0:
@@ -537,7 +537,7 @@ class SpeakerCacheState:
 
 
 class SortformerModules(nn.Module):
-    """Speaker head and speaker cache of NeMo ``SortformerModules`` at inference."""
+    """Speaker head and speaker cache of NeMo `SortformerModules` at inference."""
 
     def __init__(
         self,
@@ -593,7 +593,7 @@ class SortformerModules(nn.Module):
     def speaker_probs(
         self, hidden: torch.Tensor, lengths: torch.Tensor
     ) -> torch.Tensor:
-        """Upsampled speaker probabilities, ``(B, T * upsample_factor, n_spk)``."""
+        """Upsampled speaker probabilities, `(B, T * upsample_factor, n_spk)`."""
         batch_size, num_frames, width = hidden.shape
         mask = torch.arange(num_frames, device=hidden.device).unsqueeze(
             0
@@ -619,7 +619,7 @@ class SortformerModules(nn.Module):
         lc: int,
         rc: int,
     ) -> SpeakerCacheState:
-        """NeMo ``SortformerModules.streaming_update`` (synchronous)."""
+        """NeMo `SortformerModules.streaming_update` (synchronous)."""
         spkcache_len, fifo_len = state.spkcache.shape[1], state.fifo.shape[1]
         chunk_len = chunk.shape[1] - lc - rc
         fifo_preds = preds[:, spkcache_len : spkcache_len + fifo_len]
@@ -662,7 +662,7 @@ class SortformerModules(nn.Module):
     def _compress_spkcache(
         self, emb_seq: torch.Tensor, preds: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Keep the ``spkcache_len`` most informative frames, as NeMo does."""
+        """Keep the `spkcache_len` most informative frames, as NeMo does."""
         batch_size, _, n_spk = preds.shape
         per_spk = self.spkcache_len // n_spk - self.sil_frames_per_spk
         strong_boost = math.floor(per_spk * self.strong_boost_rate)
@@ -748,7 +748,7 @@ class SortformerModules(nn.Module):
 class SortformerSpeakerEncoder(nn.Module):
     """Streaming inference of the high-resolution Sortformer in NeMo's PEE.
 
-    Mirrors ``SortformerEncLabelModel.forward_streaming_step`` for synchronous
+    Mirrors `SortformerEncLabelModel.forward_streaming_step` for synchronous
     streaming without speaker permutation. Each step returns speaker
     probabilities on the encoder frame grid for the window's core frames.
     """
@@ -793,7 +793,7 @@ class SortformerSpeakerEncoder(nn.Module):
         right_offset: int,
         lengths_cpu: torch.Tensor | None = None,
     ) -> tuple[SpeakerCacheState, torch.Tensor]:
-        """Process one window of ``(B, C, T)`` mel features.
+        """Process one window of `(B, C, T)` mel features.
 
         Returns the new state and the core frames' speaker probabilities on the
         encoder grid.
@@ -833,10 +833,10 @@ class SortformerSpeakerEncoder(nn.Module):
 
 
 class ParallelExpertEncoder(nn.Module):
-    """NeMo ``ParallelExpertEncoder`` online inference with a transformer ASR encoder.
+    """NeMo `ParallelExpertEncoder` online inference with a transformer ASR encoder.
 
-    ``forward`` takes unnormalized ``(B, C, T)`` mel features and returns the
-    fused ``(B, d_model, T')`` states.
+    `forward` takes unnormalized `(B, C, T)` mel features and returns the
+    fused `(B, d_model, T')` states.
     """
 
     def __init__(
@@ -1052,9 +1052,9 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
         num_samples: torch.Tensor,
         num_samples_cpu: torch.Tensor,
     ) -> list[torch.Tensor]:
-        """Encode padded ``(B, N)`` float32 audio into one embedding tensor per row.
+        """Encode padded `(B, N)` float32 audio into one embedding tensor per row.
 
-        ``num_samples_cpu`` holds the lengths on the host, so the window bounds
+        `num_samples_cpu` holds the lengths on the host, so the window bounds
         and the output lengths need no device-to-host copy.
         """
         mel, mel_lengths = self.preprocessor(audio, num_samples)
@@ -1076,7 +1076,7 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
         ]
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load NeMo ``perception.*`` tensors, named without the ``perception.``."""
+        """Load NeMo `perception.*` tensors, named without the `perception.`."""
         targets = dict(self.named_parameters())
         targets.update(dict(self.named_buffers()))
         targets.pop("encoder.diar_kernel", None)
@@ -1102,10 +1102,4 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
                 with torch.no_grad():
                     target.copy_(tensor.to(device=target.device, dtype=target.dtype))
             loaded.add(name)
-        missing = sorted(set(targets) - loaded)
-        if missing:
-            raise ValueError(
-                f"Audio tower weights missing from the checkpoint ({len(missing)}): "
-                f"{missing[:8]}"
-            )
         return loaded

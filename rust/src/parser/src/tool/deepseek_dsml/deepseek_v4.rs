@@ -23,7 +23,7 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 /// </｜DSML｜tool_calls>
 /// ```
 ///
-/// Arguments are emitted only after a full `invoke` block is parsed.
+/// Arguments stream as their parameter values arrive.
 ///
 /// V4 reuses the V3.2 DSML invoke/parameter grammar but wraps calls in
 /// `<｜DSML｜tool_calls>` instead of `<｜DSML｜function_calls>`.
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn deepseek_v4_ordinary_block_closers_inside_parameter_value_stay_value() {
         let opener = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n<｜DSML｜parameter name=\"location\" string=\"true\">";
-        let quoted = "</｜DSML｜invoke></｜DSML｜tool_calls>";
+        let quoted = "</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>";
         let closer = "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
         let ids = [
             dedicated(opener),
@@ -294,7 +294,8 @@ mod tests {
         let mut output = ToolParserOutput::default();
         parser.parse_into(decode_ids(&tokenizer, &ids), &mut output).unwrap();
         output.append(parser.finish().unwrap());
+        let output = output.coalesce();
         assert_eq!(output.calls().len(), 1);
-        assert_eq!(location(&output.coalesce()), json!("SF"));
+        assert_eq!(location(&output), json!("SF"));
     }
 }

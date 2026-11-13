@@ -66,7 +66,7 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind],
         ),
-        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr ) # noqa
+        # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr )
         Function(
             "cudaIpcGetMemHandle",
             cudaError_t,
@@ -92,7 +92,7 @@ class CudaRTLibrary:
         Function("cudaGetLastError", cudaError_t, []),
     ]
 
-    # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html # noqa
+    # https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Runtime_API_functions_supported_by_HIP.html
     cuda_to_hip_mapping = {
         "cudaSetDevice": "hipSetDevice",
         "cudaDeviceSynchronize": "hipDeviceSynchronize",
@@ -160,6 +160,21 @@ class CudaRTLibrary:
 
     def cudaSetDevice(self, device: int) -> None:
         self.CUDART_CHECK(self.funcs["cudaSetDevice"](device))
+
+    def cudaStreamCreateWithFlags(self, flags: int) -> int:
+        """Create a stream on the current device; returns its raw handle.
+
+        Only used under NVIDIA Confidential Computing, so unlike
+        `exported_functions` it is resolved on use: ROCm and non-CC processes
+        never look it up.
+        """
+        create = self.lib.cudaStreamCreateWithFlags
+        create.restype = cudaError_t
+        create.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint]
+        stream = ctypes.c_void_p()
+        self.CUDART_CHECK(create(ctypes.byref(stream), flags))
+        assert stream.value is not None
+        return stream.value
 
     def cudaDeviceSynchronize(self) -> None:
         self.CUDART_CHECK(self.funcs["cudaDeviceSynchronize"]())

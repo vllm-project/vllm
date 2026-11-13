@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Routed-expert capture on the monolithic (fused router + experts) MoE path.
 
-A monolithic kernel that ``supports_routing_replay_capture`` must write, into
-the leading rows of ``routing_replay_out``, exactly the experts it routed each
+A monolithic kernel that `supports_routing_replay_capture` must write, into
+the leading rows of `routing_replay_out`, exactly the experts it routed each
 token to. The router logits plant an unambiguous top-k per token, so the test
 checks the reported experts against that answer and not just their range.
 """
@@ -71,7 +71,7 @@ Kernel = tuple[FusedMoEExpertsMonolithic, Callable[[torch.Tensor, torch.Tensor],
 def _planted_routing(num_tokens: int, top_k: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Router logits with one unambiguous answer under every routing method.
 
-    Each token gives +4 to ``top_k`` experts drawn from at most two expert
+    Each token gives +4 to `top_k` experts drawn from at most two expert
     groups and -4 to the rest, so softmax top-k, sigmoid top-k and DeepSeekV3
     grouped top-k all pick the same experts, with margins no rounding can flip.
     Returns the logits and the planted experts of each token, sorted.
@@ -122,7 +122,7 @@ def _bf16_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     from flashinfer.fused_moe import convert_to_block_layout
 
     def block_major_k(w: torch.Tensor) -> torch.Tensor:
-        """(E, M, K) -> the BlockMajorK layout ``trtllm_bf16_moe`` expects."""
+        """(E, M, K) -> the BlockMajorK layout `trtllm_bf16_moe` expects."""
         return torch.stack(
             [
                 convert_to_block_layout(shuffle_matrix_a(e.view(torch.uint8), 64), 128)

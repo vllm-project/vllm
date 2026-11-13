@@ -104,7 +104,7 @@ def test_wvsplitk_blockscale_m6_graph_replay_changes_inputs(n: int, pad_cols: in
     with torch.cuda.stream(warmup):
         ops.wvSplitKQBlockScale(w, a_buf, as_buf, w_scale, cu)
     torch.cuda.current_stream().wait_stream(warmup)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     with torch.cuda.graph(graph):
         out = ops.wvSplitKQBlockScale(w, a_buf, as_buf, w_scale, cu)
 

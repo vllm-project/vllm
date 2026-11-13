@@ -39,14 +39,14 @@ class GateLinear(ReplicatedLinear):
        routes low M through the tier 2 kernel
     7. F.linear via ReplicatedLinear (ultimate fallback)
 
-    The ``out_dtype`` attribute is mutable and can be set after init
+    The `out_dtype` attribute is mutable and can be set after init
     (e.g. when the required dtype depends on the expert quantization
     method which is only known later).
 
-    A ``quant_config`` that actually quantizes the gate disables every
-    specialized tier, leaving plain ``ReplicatedLinear`` behavior.
+    A `quant_config` that actually quantizes the gate disables every
+    specialized tier, leaving plain `ReplicatedLinear` behavior.
 
-    ``VLLM_BATCH_INVARIANT`` also disables tiers 1-5: they pick kernels and
+    `VLLM_BATCH_INVARIANT` also disables tiers 1-5: they pick kernels and
     split-K from the token count and skip the batch-invariant linear path.
     """
 
@@ -405,12 +405,12 @@ class _GateLinearMethod(UnquantizedLinearMethod):
 
     Building the split here rather than lazily in forward() charges it to the
     weights memory pool ahead of KV cache profiling, and rebuilds it on weight
-    reload. The latter matters because an in-place ``param.data.copy_()``
-    leaves both ``data_ptr()`` and ``_version`` untouched, so a stale split
+    reload. The latter matters because an in-place `param.data.copy_()`
+    leaves both `data_ptr()` and `_version` untouched, so a stale split
     cannot be detected from inside forward().
 
-    ``allow_rocm_bf16x3_router_gemm`` is final by the time this runs: the only
-    caller of ``set_out_dtype`` does so during model construction.
+    `allow_rocm_bf16x3_router_gemm` is final by the time this runs: the only
+    caller of `set_out_dtype` does so during model construction.
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -454,7 +454,7 @@ def bf16x3_router_gemm_module():
     """The CuteDSL bf16x3 router GEMM module for this device (SM90 or SM100).
 
     Only for code that Dynamo does not trace, such as custom op bodies: Dynamo
-    ignores ``@cache`` and would trace the device query.
+    ignores `@cache` and would trace the device query.
     """
     if _is_hopper():
         from vllm.model_executor.layers.fused_moe.router import (
@@ -479,8 +479,8 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
     This must be a custom op because our torch.compile integration does not
     support runtime dispatching on num_tokens: models carrying fp32 router
     weights (MiniMax-M2, HunYuan-V3) call the gate from
-    ``@support_torch_compile`` model code and vLLM drops all Dynamo guards, so
-    a plain Python branch on ``x.shape[0]`` would be frozen at first trace.
+    `@support_torch_compile` model code and vLLM drops all Dynamo guards, so
+    a plain Python branch on `x.shape[0]` would be frozen at first trace.
     """
     from vllm.model_executor.layers.fused_moe.router import (
         bf16x3_router_gemm_rocm,

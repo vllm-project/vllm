@@ -12,7 +12,6 @@ from .deepseek_scaling_rope import (
     DeepseekScalingRotaryEmbedding,
     DeepseekV4ScalingRotaryEmbedding,
 )
-from .dual_chunk_rope import DualChunkRotaryEmbedding
 from .dynamic_ntk_alpha_rope import DynamicNTKAlphaRotaryEmbedding
 from .dynamic_ntk_scaling_rope import DynamicNTKScalingRotaryEmbedding
 from .fope import FourierRotaryEmbedding
@@ -35,7 +34,6 @@ def get_rope(
     is_neox_style: bool = True,
     rope_parameters: dict[str, Any] | None = None,
     dtype: torch.dtype | None = None,
-    dual_chunk_attention_config: dict[str, Any] | None = None,
     mrope_positions_factor: int = 4,
 ) -> RotaryEmbedding:
     if dtype is None:
@@ -49,16 +47,6 @@ def get_rope(
         rope_parameters_args = tuple(rope_parameters_tuple.items())
     else:
         rope_parameters_args = None
-
-    if dual_chunk_attention_config is not None:
-        dual_chunk_attention_tuple = {
-            k: tuple(v) if isinstance(v, list) else v
-            for k, v in dual_chunk_attention_config.items()
-            if k != "sparse_attention_config"
-        }
-        dual_chunk_attention_args = tuple(dual_chunk_attention_tuple.items())
-    else:
-        dual_chunk_attention_args = None
 
     rope_parameters = rope_parameters or {}
     base = rope_parameters.get("rope_theta", 10000)
@@ -77,29 +65,13 @@ def get_rope(
         max_position,
         is_neox_style,
         rope_parameters_args,
-        dual_chunk_attention_args,
         dtype,
         mrope_positions_factor,
     )
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
 
-    if dual_chunk_attention_config is not None:
-        extra_kwargs = {
-            k: v
-            for k, v in dual_chunk_attention_config.items()
-            if k in ("chunk_size", "local_size")
-        }
-        rotary_emb = DualChunkRotaryEmbedding(
-            head_size,
-            rotary_dim,
-            max_position,
-            base,
-            is_neox_style,
-            dtype,
-            **extra_kwargs,
-        )
-    elif scaling_type == "bailing_mrope":
+    if scaling_type == "bailing_mrope":
         rotary_emb = BailingMRotaryEmbedding(
             head_size,
             rotary_dim,
@@ -240,7 +212,7 @@ def get_rope(
             raise ValueError(
                 "Dynamic rope scaling must contain either 'alpha' or 'factor' field"
             )
-    elif scaling_type == "yarn":
+    elif scaling_type in ("yarn", "bailing_mrope_yarn"):
         scaling_factor = rope_parameters["factor"]
         original_max_position = rope_parameters["original_max_position_embeddings"]
         extra_kwargs = {
@@ -257,7 +229,18 @@ def get_rope(
             )
         }
         if "mrope_section" in rope_parameters:
-            rotary_emb = MRotaryEmbedding(
+            mrope_cls: type[MRotaryEmbedding] | type[BailingMRotaryEmbedding] = (
+                MRotaryEmbedding
+            )
+            mrope_kwargs = {}
+            if scaling_type == "bailing_mrope_yarn":
+                mrope_cls = BailingMRotaryEmbedding
+            else:
+                mrope_kwargs = dict(
+                    mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
+                    positions_factor=mrope_positions_factor,
+                )
+            rotary_emb = mrope_cls(
                 head_size,
                 rotary_dim,
                 original_max_position,
@@ -265,9 +248,8 @@ def get_rope(
                 is_neox_style,
                 dtype,
                 mrope_section=rope_parameters["mrope_section"],
-                mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
-                positions_factor=mrope_positions_factor,
                 scaling_factor=scaling_factor,
+                **mrope_kwargs,
                 **extra_kwargs,
             )
         else:

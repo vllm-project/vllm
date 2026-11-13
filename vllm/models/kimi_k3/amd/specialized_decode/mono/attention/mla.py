@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""M1a ``mla_pre``: one Kimi-K3 MLA layer from the AttnRes seam to AITER's
+"""M1a `mla_pre`: one Kimi-K3 MLA layer from the AttnRes seam to AITER's
 decode input, for a spec-verify step (S rows) at TP8 + DCP8 (the DCP group the
 TP group: rank r's 12 heads are heads 12 r .. of the gathered query) or TP8 +
-DCP1 (``ranks`` 1: the query is this rank's 12 heads, no gather).
+DCP1 (`ranks` 1: the query is this rank's 12 heads, no gather).
 
-One launch a layer, ``BLOCKS`` CTAs x ``THREADS`` threads:
+One launch a layer, `BLOCKS` CTAs x `THREADS` threads:
 
     attn CTAs 0 .. 55   AttnRes + input_layernorm as K1 (``kda.stage_*``) ->
                         bf16 x rows, an XRDY flag a slice
@@ -239,8 +239,8 @@ def qg_pair(c, src, t, h, w):
 
 
 def put_qg(c, t, h, w, word):
-    """fp8 word ``w`` of (token t, local head h) -> every rank's QG; at DCP1
-    straight to ``q_out`` (nothing in this launch reads it)."""
+    """fp8 word `w` of (token t, local head h) -> every rank's QG; at DCP1
+    straight to `q_out` (nothing in this launch reads it)."""
     if const_expr(c["R"] == 1):
         bo.buffer_store(word, rsrc(c["args"]["q_out"]), (t * NH + h) * QW + w)
     if const_expr(c["R"] > 1):
@@ -250,8 +250,8 @@ def put_qg(c, t, h, w, word):
 
 
 def put_q(c, t, h, w, v):
-    """Query values ``4 w ..`` (four f32, bf16-exact) of (token t, local head h):
-    fp8 -> QG / ``q_out``, or with ``qbf16`` bf16 pairs -> ``q_out``."""
+    """Query values `4 w ..` (four f32, bf16-exact) of (token t, local head h):
+    fp8 -> QG / `q_out`, or with `qbf16` bf16 pairs -> `q_out`."""
     if const_expr(c["qbf16"]):
         pair = fx.Vector.from_elements(
             [bf16_pair(v[0], v[1]), bf16_pair(v[2], v[3])], fx.Float32
@@ -267,7 +267,7 @@ def fp8_word(v):
 
 
 def bf_words(ptr, i, n):
-    """``n`` dwords of a bf16 row at word ``i`` (device scope)."""
+    """`n` dwords of a bf16 row at word `i` (device scope)."""
     return fx.Vector(
         bo.buffer_load(rsrc(ptr), i, vec_width=n, dtype=T.i32, cache_modifier=CM_DEV)
     )
@@ -275,7 +275,7 @@ def bf_words(ptr, i, n):
 
 # ---------------------------------------------------------------- gemv CTAs
 def proj_loads(c, task):
-    """Task ``task``'s 16 weight rows (fused_qkv_a, then g_proj) for this wave;
+    """Task `task`'s 16 weight rows (fused_qkv_a, then g_proj) for this wave;
     a task past the last loads the last."""
     a = c["args"]
     task = fx.min(task, GEMV_TASKS - 1)
@@ -287,7 +287,7 @@ def proj_loads(c, task):
 
 @traced
 def stage_proj(c, task, ops, t0, n):
-    """Task ``task`` against the LDS x (tokens t0 .. t0 + n): q_c | kv_c | k_pe
+    """Task `task` against the LDS x (tokens t0 .. t0 + n): q_c | kv_c | k_pe
     rows -> QA, g rows -> the gate."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     acc = gemv.mfmas(lane, wave, c["xl"], HIDDEN + LDS_PAD, HIDDEN, n, ops)
@@ -310,7 +310,7 @@ def stage_proj(c, task, ops, t0, n):
 
 @traced
 def gemv_tasks(c, gi):
-    """Gemv CTA ``gi``: task gi (weights issued before x lands), then gi + 200."""
+    """Gemv CTA `gi`: task gi (weights issued before x lands), then gi + 200."""
     s, on, tls, tid = c["S"], c["on"], c["tls"], c["tid"]
     ops0 = proj_loads(c, gi)
     kda.wait_x(c)
@@ -330,7 +330,7 @@ def gemv_tasks(c, gi):
 # ---------------------------------------------------------------- norm
 @traced
 def block_sum2(c, v):
-    """Waves 0 .. 5's sum and waves 6, 7's sum of ``v`` (q / kv threads)."""
+    """Waves 0 .. 5's sum and waves 6, 7's sum of `v` (q / kv threads)."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     v = butterfly(v, (32, 16, 8, 4, 2, 1))
     gpu.barrier()
@@ -428,7 +428,7 @@ def stage_qb(c, task):
 
 # ---------------------------------------------------------------- W_UK
 def even_code(am):
-    """Aiter's ``_mxfp4_scale_from_amax`` code from |bf16| bits ``am``: the
+    """Aiter's `_mxfp4_scale_from_amax` code from |bf16| bits `am`: the
     exponent of amax rounded at mantissa bit 21, minus 2, clamped at 0."""
     e = (((am << 16) + fx.Int32(0x200000)) >> 23) & 0xFF
     return fx.max(e - 2, fx.Int32(0))
@@ -496,7 +496,7 @@ def uk_tasks(c):
 # ---------------------------------------------------------------- unpack
 @traced
 def stage_unpack(c):
-    """This rank's QG -> ``q_out`` [S, QH, 576]: a thread 2 words a round (QG
+    """This rank's QG -> `q_out` [S, QH, 576]: a thread 2 words a round (QG
     pair 2 u, u = global thread + round x grid). Gathered head g also lands
     at R x 12 + g while that is a pad head (g < QH - R x 12)."""
     s, R, tid, bid, QH = c["S"], c["R"], c["tid"], c["bid"], c["QH"]
@@ -815,14 +815,14 @@ def mla_pre(
     alarm,
     tl=None,
 ):
-    """Host launcher. ``w_k`` (12, 512, 64) u8 MXFP4 and ``w_k_scale`` (12, 512,
-    4) e8m0, any strides but W_K's last; ``kv_cache`` [blocks, block_size, 576]
-    one-byte, entries dense; ``slots`` [S] int64 (-1: another rank's token);
-    ``gate_out`` [S, 1536] bf16; ``q_out`` [S, q_heads(key), 576] fp8 (dense; bf16 with
-    ``qbf16``);
-    ``peers`` every rank's peer buffer base (i64 a rank; unread at ranks 1,
-    may be None); ``layer`` a slot below
-    ``kda.TAG_SLOTS``."""
+    """Host launcher. `w_k` (12, 512, 64) u8 MXFP4 and `w_k_scale` (12, 512,
+    4) e8m0, any strides but W_K's last; `kv_cache` [blocks, block_size, 576]
+    one-byte, entries dense; `slots` [S] int64 (-1: another rank's token);
+    `gate_out` [S, 1536] bf16; `q_out` [S, q_heads(key), 576] fp8 (dense; bf16 with
+    `qbf16`);
+    `peers` every rank's peer buffer base (i64 a rank; unread at ranks 1,
+    may be None); `layer` a slot below
+    `kda.TAG_SLOTS`."""
     assert w_k.stride(-1) == 1 and kv_cache.stride(-1) == 1
     assert slots.dtype == torch.int64 and slots.size(0) == key.tokens
     assert q_out.is_contiguous() and gate_out.is_contiguous()

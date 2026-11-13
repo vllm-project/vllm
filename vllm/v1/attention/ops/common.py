@@ -80,7 +80,7 @@ class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"])
         x_vals = tl.load(x_row_ptr, mask=valid_row[:, None] & d_mask)
         tl.store(out_row_ptr, x_vals, mask=valid_row[:, None] & d_mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -170,15 +170,15 @@ def pack_seq_triton(
 ) -> torch.Tensor:
     """Pack sequences of different lengths into a batched tensor.
 
-    Supports float dtypes (any, via fp32 pad) and ``torch.uint8`` (exact-byte
+    Supports float dtypes (any, via fp32 pad) and `torch.uint8` (exact-byte
     pad — e.g. MXFP4 packed nibbles or ue8m0 scale bytes). For uint8 inputs
-    ``pad_value`` must be an integer in ``[0, 255]``.
+    `pad_value` must be an integer in `[0, 255]`.
 
     Args:
         x: [N, ...] — input tensor where N is total number of tokens.
         lengths: [B] — sequence lengths for each batch.
-        pad_value: value to use for padding. Defaults to ``-inf`` which is
-            only sensible for float dtypes; pass ``0`` (or any byte) for
+        pad_value: value to use for padding. Defaults to `-inf` which is
+            only sensible for float dtypes; pass `0` (or any byte) for
             uint8 inputs.
         block_t: block size for time dimension.
         block_d: block size for feature dimension.
@@ -285,7 +285,7 @@ class UnpackSeqTritonKernel(VllmTritonJitKernel["UnpackSeqTritonKernel.CompileKe
         packed_vals = tl.load(packed_row_ptr, mask=valid_row[:, None] & d_mask)
         tl.store(out_row_ptr, packed_vals, mask=valid_row[:, None] & d_mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

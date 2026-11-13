@@ -79,7 +79,7 @@ def _fused_post_pre_single_pass_supported() -> bool:
 def mhc_fused_post_pre_split_config(
     num_tokens: int, hidden_size: int, hc_mult: int
 ) -> tuple[int, int, int] | None:
-    """Pick ``(tile_n, n_splits, n_thr)`` for the fused post + pre-norm GEMM.
+    """Pick `(tile_n, n_splits, n_thr)` for the fused post + pre-norm GEMM.
 
     Returns None when a separate post kernel followed by a split-k GEMM is the
     better choice, or when the hidden size does not divide evenly across the
@@ -1159,7 +1159,7 @@ class HcPrenormGemmTileLangKernel(
             return hc_prenorm_gemm_block_m_tilelang
         return hc_prenorm_gemm_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
@@ -1370,7 +1370,7 @@ class MhcPreBigFuseTileLangKernel(
             compile_key.hc_mult,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         hidden_size: int,
@@ -1616,7 +1616,7 @@ class MhcPostTileLangKernel(VllmTileLangJitKernel["MhcPostTileLangKernel.Compile
     def kernel() -> Any:
         return mhc_post_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:
@@ -1697,7 +1697,7 @@ class MhcFusedTileLangKernel(
     def kernel() -> Any:
         return mhc_fused_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
@@ -1819,7 +1819,7 @@ class HcHeadFusedTileLangKernel(
     def kernel() -> Any:
         return hc_head_fuse_tilelang
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         hidden_size: int,

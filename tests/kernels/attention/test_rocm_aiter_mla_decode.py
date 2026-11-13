@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ROCm kernel correctness tests for AITER MLA decode.
 
-Compares ``rocm_aiter_ops.mla_decode_fwd`` against a pure PyTorch reference
+Compares `rocm_aiter_ops.mla_decode_fwd` against a pure PyTorch reference
 under the absorbed MLA formulation (DeepSeek-V3/V4) with varied batch sizes,
 head counts, and sequence lengths.
 """

@@ -7,11 +7,11 @@ then the top-k blocks (plus forced init/local blocks) are selected per query
 token. Adapted to vLLM's paged KV cache: the KV page size is forced to equal the
 sparse block size (128), so one sparse block maps to exactly one page.
 
-Index-K cache layout (vLLM): ``(num_blocks, 128, idx_head_dim)`` (single head).
+Index-K cache layout (vLLM): `(num_blocks, 128, idx_head_dim)` (single head).
 
 Only the paths MiniMax M3 uses are implemented: score_type="max", index value
 disabled (score-only indexer), single shared index head. The selected block ids
-feed the block-sparse attention kernels in ``sparse_attn``.
+feed the block-sparse attention kernels in `sparse_attn`.
 """
 
 import torch
@@ -757,8 +757,8 @@ def minimax_m3_index_topk(
 ) -> torch.Tensor:
     """Select index top-k from a precomputed score tensor.
 
-    When ``out`` is provided (a ``[num_idx_heads, >=total_q, topk]`` buffer), the
-    result is written into ``out[:, :total_q, :]`` instead of a fresh tensor --
+    When `out` is provided (a `[num_idx_heads, >=total_q, topk]` buffer), the
+    result is written into `out[:, :total_q, :]` instead of a fresh tensor --
     used to keep the top-k output at a stable address for cudagraph capture.
     """
     num_idx_heads = score.shape[0]
@@ -814,7 +814,7 @@ def minimax_m3_index_decode_score(
     """Decode index block-score (split-K, cudagraph-safe); no top-k.
 
     Returns score [num_kv_heads, total_q, >=max_block] (fp32; init/local blocks
-    forced to 1e30/1e29). When ``score_out`` is given the scores are written into
+    forced to 1e30/1e29). When `score_out` is given the scores are written into
     it (read/written by strides, so a transposed view of a unified buffer is
     accepted) instead of a fresh tensor -- used to share a unified score buffer
     with the prefill side and run a single top-k over both.
@@ -914,9 +914,9 @@ def minimax_m3_index_decode(
     """Decode index block-score + top-k, both split-K (cudagraph-safe).
 
     Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
-    When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
-    ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
-    When ``score_out`` ([num_kv_heads, total_q, >=max_block]) is given, the block
+    When `out` ([num_kv_heads, >=total_q, topk]) is given, writes into
+    `out[:, :total_q, :]` (stable address for cudagraph) instead of allocating.
+    When `score_out` ([num_kv_heads, total_q, >=max_block]) is given, the block
     scores are written into it (read back by the top-k) instead of a fresh
     tensor -- used to share a unified score buffer with the prefill side. Reads
     via strides, so a transposed view of a block-major buffer is accepted.

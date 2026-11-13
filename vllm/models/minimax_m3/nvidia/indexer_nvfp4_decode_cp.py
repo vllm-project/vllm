@@ -4,29 +4,29 @@
 
 At TP4 each rank owns one of the 4 index heads, but the index-K cache is
 replicated, so every rank reads the whole cache per sparse layer. With
-``--attention-config '{"indexer_decode_cp": true}'``, rank ``r``
+`--attention-config '{"indexer_decode_cp": true}'`, rank `r`
 instead:
 
-1. exchanges index-q heads so it holds all 4 (``_q_exchange_kernel``);
-2. scores all 4 heads over pages ``j * CP + r`` with the stock Q8KV4 kernel
+1. exchanges index-q heads so it holds all 4 (`_q_exchange_kernel`);
+2. scores all 4 heads over pages `j * CP + r` with the stock Q8KV4 kernel
    on a compact block table, reading 1/CP of the index-K;
 3. takes the exact local top 16 per (query, head) and sends it to the head's
-   owner (``_local_topk_push_kernel``);
-4. merges the owner's ``16 * CP`` candidates into the indexer output: 15
-   pages by (score desc, page asc), then the own page (``_merge_kernel``).
+   owner (`_local_topk_push_kernel`);
+4. merges the owner's `16 * CP` candidates into the indexer output: 15
+   pages by (score desc, page asc), then the own page (`_merge_kernel`).
 
 The merge is exact: the global top 16 lies in the union of per-rank top 16s.
 The stock decode ranks 16-bit quantized scores, so the two may differ at ties.
 
 The chunking is written against one contract, the MSA Q8KV4 decode scorer's:
-eight query slots per request, ``(seq_len - 1) / 128`` pages scored, and only
+eight query slots per request, `(seq_len - 1) / 128` pages scored, and only
 the pages below a query's own page stored. The three places that depend on it
-are ``_compact_block_table_kernel`` (the length it is handed),
-``_local_topk_push_kernel`` (the cut that length drops) and ``_set_width``
+are `_compact_block_table_kernel` (the length it is handed),
+`_local_topk_push_kernel` (the cut that length drops) and `_set_width`
 (room for the page that length invents).
 
 Both exchanges are NVLink stores into symmetric buffers whose payload is the
-flag (``0xFF`` E4M3 NaN for queries, ``-1`` for keys); consumers restore it.
+flag (`0xFF` E4M3 NaN for queries, `-1` for keys); consumers restore it.
 Buffers are per layer, shapes are fixed per batch size, and nothing syncs with
 the host, so the path is CUDA-graph safe. It needs symmetric memory across the
 tensor-parallel ranks and falls back to the stock decode without it.
@@ -95,13 +95,13 @@ def _compact_block_table_kernel(
     RANK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Compact page j = global page ``j * CP + RANK``, and the length the score
+    """Compact page j = global page `j * CP + RANK`, and the length the score
     kernel is handed for it.
 
     That length is a lie: the scorer stores only the pages below a query's own
-    page, so ``n_local * 128 + 8`` puts all eight query slots one page past
+    page, so `n_local * 128 + 8` puts all eight query slots one page past
     the chunk and stores every owned page, uncausally. The real cut comes back
-    in ``_local_topk_push_kernel``. ``W`` keeps the invented page addressable,
+    in `_local_topk_push_kernel`. `W` keeps the invented page addressable,
     since a scorer that clamps the own page to its last score column would
     drop the chunk's last page."""
     b = tl.program_id(0)
@@ -162,7 +162,7 @@ def _q_exchange_kernel(
 
 @triton.jit
 def _page_keys(row_ptr, j, n, CP: tl.constexpr, RANK: tl.constexpr):
-    """Key ``1 << 48 | ordered(score) << 16 | (0xFFFF - page)`` for ``j < n``,
+    """Key `1 << 48 | ordered(score) << 16 | (0xFFFF - page)` for `j < n`,
     else 0. Unique; orders by score desc, then page asc."""
     valid = j < n
     page = j * CP + RANK
@@ -348,7 +348,7 @@ class Nvfp4IndexerDecodeCP:
 
         One column past the pages a rank can own, so the page the compact
         length invents stays inside the score buffer and the chunk's last page
-        is stored (see ``_compact_block_table_kernel``). Both levels of the
+        is stored (see `_compact_block_table_kernel`). Both levels of the
         top-k select over power-of-two tiles that cover the width.
         """
         width = cdiv(min(max_pages, MAX_PAGES), self.cp) + 1
@@ -480,7 +480,7 @@ def get_nvfp4_indexer_decode_cp(
         return None
     tp = get_tensor_model_parallel_world_size()
     text_config = vllm_config.model_config.hf_text_config
-    total_heads = text_config.sparse_attention_config["sparse_num_index_heads"]
+    total_heads = text_config.index_n_heads
     why = None
     if tp not in SUPPORTED_TP_SIZES:
         why = f"tensor parallel size {tp} (needs one of {SUPPORTED_TP_SIZES})"

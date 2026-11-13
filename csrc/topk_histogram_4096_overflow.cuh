@@ -171,7 +171,7 @@ __device__ void exact_topk_rescan(const InT* __restrict__ scores,
     const uint32_t warp_total = smem->warp_sum[lane];
     uint32_t count_above =
         warp_reduce_sum_full(lane > warp ? warp_total : 0) +
-        __shfl_sync(0xFFFFFFFFu, warp_inclusive, kWarpSize - 1) -
+        VLLM_SHFL_SYNC_WIDTH(warp_inclusive, kWarpSize - 1, kWarpSize) -
         warp_inclusive;
 #pragma unroll
     for (int i = static_cast<int>(kBinsPerThread) - 1; i >= 0; --i) {
@@ -290,7 +290,7 @@ __device__ __forceinline__ uint32_t warp_reduce_min_full(uint32_t v) {
 #else
   #pragma unroll
   for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
-    v = min(v, __shfl_xor_sync(0xFFFFFFFFu, v, mask));
+    v = min(v, VLLM_SHFL_XOR_SYNC_WIDTH(v, mask, kWarpSize));
   }
   return v;
 #endif
@@ -302,7 +302,7 @@ __device__ __forceinline__ uint32_t warp_reduce_max_full(uint32_t v) {
 #else
   #pragma unroll
   for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
-    v = max(v, __shfl_xor_sync(0xFFFFFFFFu, v, mask));
+    v = max(v, VLLM_SHFL_XOR_SYNC_WIDTH(v, mask, kWarpSize));
   }
   return v;
 #endif

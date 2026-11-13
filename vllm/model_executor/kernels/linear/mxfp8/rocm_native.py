@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton ``tl.dot_scaled``.
+"""Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton `tl.dot_scaled`.
 
 Consumes the FP8 E4M3 weights + E8M0 block scales directly (no dequant-to-BF16);
 activations are MXFP8-quantized per token (inside the GEMM for small M), or
-arrive pre-quantized as a ``QuantizedActivation`` with row-major (not swizzled)
-E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. ``dot_scaled``
+arrive pre-quantized as a `QuantizedActivation` with row-major (not swizzled)
+E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. `dot_scaled`
 tiles K by 128; a weight whose K is not a multiple of that is dequantized to
-BF16 once at load and served by a plain linear instead, since ``can_implement``
+BF16 once at load and served by a plain linear instead, since `can_implement`
 does not filter on K.
 """
 
@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 from .rocm_block32_gemm import (
@@ -47,7 +48,7 @@ _TINY = float(torch.finfo(torch.float32).tiny)
 @triton.jit
 def _quant_mxfp8_tile(x, FP8_MAX: tl.constexpr, TINY: tl.constexpr):
     """MXFP8-quantize a [BLOCK_M, BLOCK_K] tile: bit-exact with
-    ``mxfp8_e4m3_quantize`` (see ``_mxfp8_quant_triton_kernel`` for why the
+    `mxfp8_e4m3_quantize` (see `_mxfp8_quant_triton_kernel` for why the
     scale is applied as a reciprocal)."""
     BM: tl.constexpr = x.shape[0]
     BK: tl.constexpr = x.shape[1]
@@ -156,7 +157,7 @@ def _launch(
     num_warps: int,
     num_stages: int,
 ) -> None:
-    """``out = x @ w.T``. ``x_scale`` None means ``x`` is the unquantized
+    """`out = x @ w.T`. `x_scale` None means `x` is the unquantized
     activation and is MXFP8-quantized inside the kernel."""
     M, K = x.shape
     N = w.shape[0]
@@ -342,6 +343,14 @@ _M31_TILES = {
 }
 
 
+def _wide_prefill_tile_pays(M, N):
+    """Whether the 256x256x128 large-prefill tile beats the 128x128 one."""
+    cus = num_compute_units()
+    waves_128 = triton.cdiv(triton.cdiv(M, 128) * triton.cdiv(N, 128), cus)
+    waves_256 = triton.cdiv(triton.cdiv(M, 256) * triton.cdiv(N, 256), cus)
+    return 3 * waves_128 >= 10 * waves_256
+
+
 def _select_m31_cfg(M, N, K):
     for max_m, cfg in _M31_TILES.get((N, K), ()):
         if max_m >= M:
@@ -411,6 +420,9 @@ def _select_cfg(M, N, K):
         return (64, 64, 256, 8, 2) if K % 256 == 0 else (64, 64, 128, 8, 2)
     if M <= 1024:  # medium prefill chunk: BN=64 keeps small-N occupied
         return (128, 64, 256, 8, 3) if K % 256 == 0 else (128, 64, 128, 8, 3)
+    # BLOCK_K=128 keeps the 256x256 tile within the LDS footprint of 128x128x256.
+    if _ON_GFX950 and N > 1024 and _wide_prefill_tile_pays(M, N):
+        return 256, 256, 128, 4, 2
     # large prefill (M > 1024). The previously graph-tuned tall 256x128x256 and deep
     # 128x128x512 tiles won only on triton 3.6; on triton 3.7 their larger BLOCK_M /
     # BLOCK_K register+LDS footprint spills (or hits "out of resources" on stricter
@@ -443,7 +455,7 @@ def _as_block32_scale(weight_scale: torch.Tensor) -> torch.Tensor | None:
 
 
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
-    """Native CDNA4 (gfx950) MXFP8 linear via Triton ``tl.dot_scaled``."""
+    """Native CDNA4 (gfx950) MXFP8 linear via Triton `tl.dot_scaled`."""
 
     supports_pre_processed_weights = True
 
@@ -490,8 +502,8 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @staticmethod
     def supports_quantized_input(layer: torch.nn.Module) -> bool:
-        """Whether ``apply_weights`` reads a ``QuantizedActivation`` for
-        ``layer`` as is (fp8 weights), rather than dequantizing it back."""
+        """Whether `apply_weights` reads a `QuantizedActivation` for
+        `layer` as is (fp8 weights), rather than dequantizing it back."""
         return layer.weight.element_size() == 1 and (
             layer.weight_scale.shape[0] != layer.weight.shape[0]
             or layer.weight.shape[1] % _DOT_SCALED_K_ALIGN == 0

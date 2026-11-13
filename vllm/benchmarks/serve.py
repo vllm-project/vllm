@@ -205,6 +205,7 @@ class SpecDecodeMetrics:
     num_draft_tokens: int
     num_accepted_tokens: int
     accepted_per_pos: dict[int, int]
+    num_verified_tokens: int
 
 
 async def fetch_spec_decode_metrics(
@@ -225,6 +226,7 @@ async def fetch_spec_decode_metrics(
             num_draft_tokens = 0
             num_accepted_tokens = 0
             accepted_per_pos: dict[int, int] = {}
+            num_verified_tokens = 0
             found_spec_decode = False
 
             for line in text.split("\n"):
@@ -257,6 +259,8 @@ async def fetch_spec_decode_metrics(
                                 )
                         elif "num_accepted_tokens" in metric_name:
                             num_accepted_tokens += int(float(parts[-1]))
+                        elif "num_verified_tokens_total" in metric_name:
+                            num_verified_tokens += int(float(parts[-1]))
 
             if not found_spec_decode:
                 return None
@@ -266,6 +270,7 @@ async def fetch_spec_decode_metrics(
                 num_draft_tokens=num_draft_tokens,
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
+                num_verified_tokens=num_verified_tokens,
             )
     except (TimeoutError, aiohttp.ClientError):
         return None
@@ -481,7 +486,7 @@ async def get_request(
 
     # if the traces have timing info then:
     if not self_timed:
-        for request_index, request in enumerate(input_requests):
+        for request_index in range(len(input_requests)):
             current_request_rate = _get_current_request_rate(
                 ramp_up_strategy,
                 ramp_up_start_rps,
@@ -525,7 +530,7 @@ async def get_request(
             normalize_factor = target_total_delay_s / delay_ts[-1]
             delay_ts = [delay * normalize_factor for delay in delay_ts]
     else:
-        for request_index, request in enumerate(input_requests):
+        for request in input_requests:
             # this is cumulative running ts, from which sleep is calculated later
             if request.timestamp is not None:
                 delay_ts.append(request.timestamp)
@@ -722,7 +727,7 @@ def calculate_metrics(
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
 
-        for i, output in enumerate(successful_outputs):
+        for output in successful_outputs:
             # Calculate token generation timestamp using
             # start_time, ttft, and itl
             token_times = [output.start_time + output.ttft]
@@ -1142,6 +1147,10 @@ async def benchmark(
             spec_decode_metrics_after.num_accepted_tokens
             - spec_decode_metrics_before.num_accepted_tokens
         )
+        delta_verified = (
+            spec_decode_metrics_after.num_verified_tokens
+            - spec_decode_metrics_before.num_verified_tokens
+        )
         per_pos_rates: list[float] = []
         if delta_drafts > 0:
             positions = sorted(
@@ -1165,6 +1174,7 @@ async def benchmark(
                 "num_drafts": delta_drafts,
                 "draft_tokens": delta_draft_tokens,
                 "accepted_tokens": delta_accepted,
+                "verified_tokens": delta_verified,
                 "acceptance_rate": acceptance_rate,
                 "acceptance_length": acceptance_length,
                 "per_position_acceptance_rates": per_pos_rates,
@@ -1381,6 +1391,9 @@ async def benchmark(
         result["spec_decode_accepted_tokens"] = int(
             spec_decode_stats["accepted_tokens"]
         )
+        result["spec_decode_verified_tokens"] = int(
+            spec_decode_stats["verified_tokens"]
+        )
         result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
             "per_position_acceptance_rates", []
         )
@@ -1464,7 +1477,7 @@ async def benchmark(
             value = diffusion_stats[key]
             if value_fmt.endswith("d}"):
                 value = int(value)
-            print("{:<40} ".format(label) + value_fmt.format(value))
+            print(f"{label:<40} " + value_fmt.format(value))
 
     if spec_decode_stats is not None and diffusion_stats is None:
         print("{s:{c}^{n}}".format(s="Speculative Decoding", n=50, c="-"))
@@ -1487,6 +1500,11 @@ async def benchmark(
         print(
             "{:<40} {:<10}".format(
                 "Accepted tokens:", int(spec_decode_stats["accepted_tokens"])
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Verified tokens:", int(spec_decode_stats["verified_tokens"])
             )
         )
         per_pos = spec_decode_stats.get("per_position_acceptance_rates", [])

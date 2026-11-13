@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 
 
 class PassThroughAll2AllManager(All2AllManagerBase):
-    """Placeholder for ``all2all_backend="passthrough"``.
+    """Placeholder for `all2all_backend="passthrough"`.
 
     The MoE backend dispatches and combines itself, so there is no all2all to
     manage.
@@ -334,12 +334,16 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: int,
         num_local_experts: int,
     ) -> dict[Any, Any]:
-        """max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
-          can dispatch all the ranks must hold the same value.
-        token_hidden_size: the hidden dimension of each token.
-        num_ep_ranks: the number of EP group ranks.
-        num_global_experts: Number of experts in the model.
-        num_local_experts: Number of experts in an EP rank.
+        """Build the kwargs for the DeepEP low-latency buffer.
+
+        Args:
+            max_num_tokens_per_dp_rank: The maximum number of tokens a DP rank can
+                dispatch. All the ranks must hold the same value.
+            token_hidden_size: The hidden dimension of each token.
+            num_ep_ranks: The number of EP group ranks.
+            num_global_experts: Number of experts in the model.
+            num_local_experts: Number of experts in an EP rank.
+
         """
         import deep_ep  # type: ignore[import-not-found]
 
@@ -570,7 +574,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             self._unmask_connected_ranks(target_ep_size)
 
     @contextmanager
-    def mask_remote_ranks(self) -> Iterator[None]:
+    def mask_remote_ranks(self) -> Generator[None]:
         peers = [rank for rank in range(self.world_size) if rank != self.rank]
         assert NixlEPAll2AllManager._buffer is not None
         buffer = NixlEPAll2AllManager._buffer.buffer
