@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
 
@@ -8,6 +9,8 @@ from typing_extensions import override
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -18,6 +21,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    get_offload_block_hash,
 )
 from vllm.v1.kv_offload.cpu.common import (
     CPULoadStoreSpec,
@@ -25,6 +29,9 @@ from vllm.v1.kv_offload.cpu.common import (
 )
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
+from vllm.v1.kv_offload.ttl import OffloadTTLTracker, TTLEntry
+
+logger = init_logger(__name__)
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -72,6 +79,37 @@ class CPUOffloadingManager(OffloadingManager):
             OrderedDict() if store_threshold >= 2 else None
         )
 
+        # Prefix-cache TTL of offloaded blocks, mirroring the GPU prefix cache.
+        self._ttl_tracker = OffloadTTLTracker()
+        # req_id -> offloaded blocks the request uses (TTL is paused)
+        self._req_ttl_entries: dict[str, dict[OffloadKey, TTLEntry]] = {}
+        # blocks with an in-flight store (TTL is paused until complete_store)
+        self._store_ttl_entries: dict[OffloadKey, TTLEntry] = {}
+        # blocks with in-flight loads (TTL is paused until complete_load)
+        self._load_ttl_entries: dict[OffloadKey, list[TTLEntry]] = {}
+
+    def _acquire_req_ttl(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> None:
+        held = self._req_ttl_entries.get(req_context.req_id)
+        tracker = self._ttl_tracker
+        seen: set[OffloadKey] = set()
+        to_acquire: list[OffloadKey] = []
+        for key in keys:
+            if key in seen:
+                continue
+            seen.add(key)
+            entry = tracker.get(key)
+            if entry is not None and (held is None or held.get(key) is not entry):
+                to_acquire.append(key)
+        if not to_acquire:
+            return
+        acquired = tracker.acquire(to_acquire, req_context.prompt_cache_ttl_s)
+        if held is not None:
+            held.update(acquired)
+        else:
+            tracker.release(acquired, time.monotonic())
+
     # --- block pool ---
 
     def _get_num_free_blocks(self) -> int:
@@ -107,7 +145,14 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        self._req_ttl_entries.setdefault(req_context.req_id, {})
         return RequestOffloadingContext()
+
+    @override
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        acquired = self._req_ttl_entries.pop(req_context.req_id, None)
+        if acquired:
+            self._ttl_tracker.release(list(acquired.items()), time.monotonic())
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -143,16 +188,23 @@ class CPUOffloadingManager(OffloadingManager):
                 assert self._num_evictable_cache_blocks >= 0
             block.ref_cnt += 1
             blocks.append(block)
+        self._acquire_req_ttl(keys, req_context)
+        for key, entry in self._ttl_tracker.acquire(
+            keys, req_context.prompt_cache_ttl_s
+        ):
+            self._load_ttl_entries.setdefault(key, []).append(entry)
         return self._get_load_store_spec(keys, blocks)
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
         self._policy.touch(keys, req_context)
+        self._acquire_req_ttl(keys, req_context)
 
     @override
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> None:
+        to_release: list[tuple[OffloadKey, TTLEntry]] = []
         for key in keys:
             block = self._policy.get(key)
             assert block is not None, f"Block {key!r} not found"
@@ -161,6 +213,13 @@ class CPUOffloadingManager(OffloadingManager):
             if block.ref_cnt == 0:
                 self._num_evictable_cache_blocks += 1  # ref_cnt 1 -> 0
                 self._policy.mark_evictable(key)
+            entries = self._load_ttl_entries.get(key)
+            if entries:
+                to_release.append((key, entries.pop()))
+                if not entries:
+                    del self._load_ttl_entries[key]
+        if to_release:
+            self._ttl_tracker.release(to_release, time.monotonic())
 
     @override
     def prepare_store(
@@ -168,6 +227,9 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
+        # Blocks of this range that are already offloaded are in use by the
+        # request, even if storing the rest fails below.
+        self._acquire_req_ttl(keys, req_context)
         if self.counts is not None:
             num_keys = len(keys)
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
@@ -208,14 +270,16 @@ class CPUOffloadingManager(OffloadingManager):
                 self._free_block(block)
                 to_evict.append(key)
 
-        if to_evict and self.events is not None:
-            self.events.append(
-                OffloadingEvent(
-                    keys=to_evict,
-                    medium=self.medium,
-                    removed=True,
+        if to_evict:
+            self._ttl_tracker.remove(to_evict)
+            if self.events is not None:
+                self.events.append(
+                    OffloadingEvent(
+                        keys=to_evict,
+                        medium=self.medium,
+                        removed=True,
+                    )
                 )
-            )
 
         blocks = self._allocate_blocks(keys_to_store)
         assert len(blocks) == len(keys_to_store), (
@@ -225,6 +289,13 @@ class CPUOffloadingManager(OffloadingManager):
         for key, block in zip(keys_to_store, blocks):
             self._policy.insert(key, block)
         self._num_write_pending_blocks += len(keys_to_store)
+
+        self._ttl_tracker.add(keys_to_store)
+        self._acquire_req_ttl(keys_to_store, req_context)
+        for key, entry in self._ttl_tracker.acquire(
+            keys_to_store, req_context.prompt_cache_ttl_s
+        ):
+            self._store_ttl_entries[key] = entry
 
         # build store specs for allocated blocks
         store_spec = self._get_load_store_spec(keys_to_store, blocks)
@@ -245,6 +316,7 @@ class CPUOffloadingManager(OffloadingManager):
         stored_keys: list[OffloadKey] = []
 
         if success:
+            to_release: list[tuple[OffloadKey, TTLEntry]] = []
             for key in keys:
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
@@ -253,13 +325,22 @@ class CPUOffloadingManager(OffloadingManager):
                     self._num_evictable_cache_blocks += 1
                     self._policy.mark_evictable(key)
                     stored_keys.append(key)
+                    if (entry := self._store_ttl_entries.pop(key, None)) is not None:
+                        to_release.append((key, entry))
+            if to_release:
+                self._ttl_tracker.release(to_release, time.monotonic())
         else:
+            removed_keys: list[OffloadKey] = []
             for key in keys:
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
                     self._num_write_pending_blocks -= 1
                     self._policy.remove(key)
                     self._free_block(block)
+                    self._store_ttl_entries.pop(key, None)
+                    removed_keys.append(key)
+            if removed_keys:
+                self._ttl_tracker.remove(removed_keys)
 
         if stored_keys and self.events is not None:
             self.events.append(
@@ -269,6 +350,57 @@ class CPUOffloadingManager(OffloadingManager):
                     removed=False,
                 )
             )
+
+    @override
+    def evict(self, keys: Iterable[OffloadKey]) -> list[OffloadKey]:
+        evicted: list[OffloadKey] = []
+        for key in keys:
+            block = self._policy.get(key)
+            if block is None or block.ref_cnt != 0:
+                continue
+            self._policy.remove(key)
+            self._free_block(block)
+            self._num_evictable_cache_blocks -= 1
+            assert self._num_evictable_cache_blocks >= 0
+            evicted.append(key)
+
+        if evicted:
+            self._ttl_tracker.remove(evicted)
+            if self.events is not None:
+                self.events.append(
+                    OffloadingEvent(
+                        keys=evicted,
+                        medium=self.medium,
+                        removed=True,
+                    )
+                )
+        return evicted
+
+    @override
+    def evict_expired_blocks(self) -> list[OffloadKey]:
+        now = time.monotonic()
+        expired = self._ttl_tracker.pop_expired(now)
+        if not expired:
+            return []
+        evicted = self.evict(expired)
+        if len(evicted) < len(expired):
+            evicted_set = set(evicted)
+            self._ttl_tracker.requeue(
+                [key for key in expired if key not in evicted_set], now
+            )
+        if evicted:
+            logged_hashes = [
+                maybe_convert_block_hash(
+                    BlockHash(get_offload_block_hash(k) if len(k) > 4 else bytes(k))
+                )
+                for k in evicted
+            ]
+            logger.info(
+                "Evicted %d expired blocks from the CPU offload cache (TTL): %s",
+                len(evicted),
+                logged_hashes,
+            )
+        return evicted
 
     @override
     def reset_cache(self) -> None:
@@ -283,6 +415,12 @@ class CPUOffloadingManager(OffloadingManager):
 
         self._free_list.clear()
         self._num_allocated_blocks = 0
+
+        self._ttl_tracker.clear()
+        for held in self._req_ttl_entries.values():
+            held.clear()
+        self._store_ttl_entries.clear()
+        self._load_ttl_entries.clear()
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:

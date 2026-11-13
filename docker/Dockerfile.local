@@ -1,0 +1,11 @@
+FROM vllm/vllm-openai:v0.27.1
+
+# Overlay modified Python files while preserving pre-compiled .so / vllm-rs binaries
+COPY vllm /tmp/vllm-src
+RUN VLLM_PKG_DIR=$(python3 -c "import vllm, pathlib; print(pathlib.Path(vllm.__file__).parent)") && \
+    cp -r /tmp/vllm-src/* "$VLLM_PKG_DIR"/ && \
+    rm -rf /tmp/vllm-src
+
+# Install exact_metrics plugin
+COPY exact_metrics /tmp/exact_metrics
+RUN uv pip install --system --no-deps /tmp/exact_metrics && rm -rf /tmp/exact_metrics

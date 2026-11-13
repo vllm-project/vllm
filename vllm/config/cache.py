@@ -92,6 +92,13 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    prefix_cache_ttl_seconds: float | None = Field(default=None, gt=0)
+    """Default time-to-live, in seconds, of prefix cache entries. Every use of
+    a cached block renews its TTL. Requests can override it with
+    `vllm_xargs={"prompt_cache_ttl_s": ...}`; a block uses the largest TTL of
+    the requests that used it.
+    If `None`, cached blocks never expire and are only evicted under memory
+    pressure."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:
 
@@ -226,6 +233,7 @@ class CacheConfig:
             "user_specified_block_size",
             "user_specified_mamba_block_size",
             "_block_size_resolved",
+            "prefix_cache_ttl_seconds",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",

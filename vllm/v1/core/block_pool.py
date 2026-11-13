@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import heapq
+import time
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -183,6 +185,10 @@ class BlockPool:
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+        # Min-heap of (expires_at, block_id) for cached blocks with finite TTL.
+        # Entries may be stale if a block was re-cached, had its TTL extended,
+        # or was already evicted; stale entries are skipped on pop.
+        self._expiry_heap: list[tuple[float, int]] = []
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -209,6 +215,7 @@ class BlockPool:
         Returns:
             The cached blocks if exists, or None.
         """
+        now = time.monotonic()
         cached_blocks = []
         for group_id in kv_cache_group_ids:
             block_hash_with_group_id = make_block_hash_with_group_id(
@@ -218,6 +225,9 @@ class BlockPool:
                 block_hash_with_group_id
             )
             if not block:
+                return None
+            if block.ref_cnt == 0 and block.expires_at <= now:
+                self._maybe_evict_cached_block(block)
                 return None
             cached_blocks.append(block)
         return cached_blocks
@@ -268,6 +278,7 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+        now = time.monotonic()
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -281,6 +292,7 @@ class BlockPool:
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, kv_cache_group_id
             )
+            ttl_s = self._effective_ttl(blk, request.prompt_cache_ttl_s)
             if blk.block_hash is not None:
                 # The only valid case where a "new full block" already has a
                 # hash is partial->full promotion of the same cache block.
@@ -295,6 +307,7 @@ class BlockPool:
                 blk,
                 num_tokens=num_hash_tokens,
             )
+            self._set_expiry(blk, ttl_s, now)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -497,6 +510,7 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
+        ttl_s = self._effective_ttl(block, request.prompt_cache_ttl_s)
         if (
             not already_cached
             and block.block_hash is not None
@@ -510,6 +524,7 @@ class BlockPool:
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
         )
+        self._set_expiry(block, ttl_s, time.monotonic())
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
@@ -640,9 +655,16 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
+        ttl_s = src_block.ttl_s
+        expires_at = src_block.expires_at
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+        if dst_block.block_hash is not None:
+            dst_block.ttl_s = ttl_s
+            dst_block.expires_at = expires_at
+            if expires_at < dst_block.expiry_heap_at:
+                self._push_expiry(dst_block)
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -675,6 +697,79 @@ class BlockPool:
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
+
+    @staticmethod
+    def _effective_ttl(block: KVCacheBlock, ttl_s: float | None) -> float:
+        resolved = float("inf") if ttl_s is None else ttl_s
+        if block.block_hash is not None:
+            return max(block.ttl_s, resolved)
+        return resolved
+
+    def _set_expiry(
+        self, block: KVCacheBlock, ttl_s: float | None, now: float
+    ) -> None:
+        if ttl_s is None:
+            ttl_s = float("inf")
+        block.ttl_s = ttl_s
+        block.expires_at = now + ttl_s
+        if block.expires_at < block.expiry_heap_at:
+            self._push_expiry(block)
+
+    def _push_expiry(self, block: KVCacheBlock) -> None:
+        block.expiry_heap_at = block.expires_at
+        heapq.heappush(self._expiry_heap, (block.expires_at, block.block_id))
+
+    def extend_ttl(
+        self,
+        blocks_by_group: Sequence[Sequence[KVCacheBlock]],
+        ttl_s: float | None,
+    ) -> None:
+        """Apply a request's TTL to blocks it hit in the prefix cache."""
+        if ttl_s is None:
+            ttl_s = float("inf")
+        now = time.monotonic()
+        for blocks in blocks_by_group:
+            for block in blocks:
+                if block.is_null:
+                    continue
+                if ttl_s > block.ttl_s:
+                    block.ttl_s = ttl_s
+                new_exp = now + block.ttl_s
+                if new_exp > block.expires_at:
+                    block.expires_at = new_exp
+
+    def evict_expired_blocks(self) -> int:
+        """Evict cached blocks whose TTL has elapsed (and are not in use)."""
+        if not self._expiry_heap:
+            return 0
+        now = time.monotonic()
+        evicted_ids: list[int] = []
+        heap = self._expiry_heap
+        blocks = self.blocks
+        while heap and heap[0][0] <= now:
+            exp, block_id = heapq.heappop(heap)
+            block = blocks[block_id]
+            if block.expiry_heap_at == exp:
+                block.expiry_heap_at = float("inf")
+            if block.block_hash is None:
+                continue
+            if block.expires_at > now:
+                if block.expires_at < block.expiry_heap_at:
+                    self._push_expiry(block)
+                continue
+            if block.ref_cnt > 0:
+                continue
+            if self._maybe_evict_cached_block(block):
+                evicted_ids.append(block_id)
+                self.free_block_queue.remove(block)
+                self.free_block_queue.prepend_n([block])
+        if evicted_ids:
+            logger.info(
+                "Evicted %d expired blocks from the prefix cache (TTL): %s",
+                len(evicted_ids),
+                evicted_ids,
+            )
+        return len(evicted_ids)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
@@ -725,6 +820,7 @@ class BlockPool:
                 priority.
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
+        now = time.monotonic()
         blocks_with_hash = []
         blocks_without_hash = []
         for block in ordered_blocks:
@@ -735,6 +831,8 @@ class BlockPool:
                 if block.block_hash is None and self.enable_caching:
                     blocks_without_hash.append(block)
                 else:
+                    if block.block_hash is not None:
+                        self._set_expiry(block, block.ttl_s, now)
                     blocks_with_hash.append(block)
 
         # Blocks without hash get evicted first - prepend them last to the tail
@@ -781,10 +879,12 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        self._expiry_heap.clear()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+            block.expiry_heap_at = float("inf")
 
         if self.metrics_collector:
             self.metrics_collector.reset()

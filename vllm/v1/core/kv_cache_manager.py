@@ -530,6 +530,9 @@ class KVCacheManager:
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
         ):
+            self.block_pool.extend_ttl(
+                new_computed_block_list, request.prompt_cache_ttl_s
+            )
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.allocate_new_computed_blocks(
@@ -872,6 +875,9 @@ class KVCacheManager:
                     (group_id, block.block_id, boundary_tokens)
                 )
         return offloads
+
+    def evict_expired_blocks(self) -> int:
+        return self.block_pool.evict_expired_blocks()
 
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
