@@ -61,7 +61,15 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.is_producer = False
     worker.mode = MoRIIOMode.WRITE
-    worker.moriio_wrapper = SimpleNamespace(pop_failed_write_req_ids=list)
+    worker.write_failed = set()  # transfer ids of producer write_failed messages
+
+    def pop_failed_write_req_ids():
+        failed, worker.write_failed = worker.write_failed, set()
+        return list(failed)
+
+    worker.moriio_wrapper = SimpleNamespace(
+        pop_failed_write_req_ids=pop_failed_write_req_ids, shutdown=lambda: None
+    )
     worker._unmatched_write_failures = OrderedDict()
     worker._write_recv_timed_out = set()
     worker._write_recv_reported = set()
@@ -106,17 +114,19 @@ class _Engine:
             else None
         )
 
-    def step(self, write_done: frozenset[str] = frozenset(), ranks=None):
-        self.finish(self.scheduler.schedule(), write_done, ranks)
+    def step(self, write_done=frozenset(), ranks=None, write_failed=frozenset()):
+        self.finish(self.scheduler.schedule(), write_done, ranks, write_failed)
 
-    def finish(self, out, write_done: frozenset[str] = frozenset(), ranks=None):
-        """Runs one step's workers; `write_done` reaches the TP `ranks` (all)."""
+    def finish(self, out, write_done=frozenset(), ranks=None, write_failed=frozenset()):
+        """Runs one step's workers. `write_done` (request ids) and `write_failed`
+        (transfer ids) reach the TP `ranks` (all)."""
         scheduled = [self.scheduler.requests[i] for i in out.num_scheduled_tokens]
         outputs = []
         for rank, worker in enumerate(self.workers):
             worker.start_load_kv(out.kv_connector_metadata)
             if ranks is None or rank in ranks:
                 worker.write_done |= write_done
+                worker.write_failed |= write_failed
             results = worker.get_transfer_results()
             outputs.append(
                 create_model_runner_output(
@@ -273,3 +283,40 @@ def test_peer_listening_tells_a_listening_socket_from_a_closed_port():
         port = server.getsockname()[1]
         assert moriio_connector._peer_listening("127.0.0.1", port)
     assert not moriio_connector._peer_listening("127.0.0.1", port)
+
+
+def test_rank_that_reported_write_failed_releases_at_the_timeout(engine):
+    """A rank whose producer reported write_failed has reported the receive; at
+    the timeout it releases it instead of reporting it a second time."""
+    if len(engine.workers) < 2:
+        pytest.skip("needs more than one TP rank")
+    free_before = engine.pool.get_num_free_blocks()
+    request = engine.add_waiting_request()
+    held = engine.pool.get_num_free_blocks()
+    transfer_id = request.kv_transfer_params["transfer_id"]
+
+    engine.step(write_failed=frozenset({transfer_id}), ranks={0})
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert engine.pool.get_num_free_blocks() == held
+
+    late_ranks = set(range(1, len(engine.workers)))
+    engine.step(write_done=frozenset({request.request_id}), ranks=late_ranks)
+    assert request.request_id not in engine.scheduler.requests
+    assert engine.pool.get_num_free_blocks() == free_before
+
+
+def test_request_aborted_before_its_deadline_stops_its_timer(engine):
+    request = engine.add_waiting_request()
+    engine.scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    engine.clock.now += TIMEOUT_S + 1
+    out = engine.scheduler.schedule()
+    assert not out.kv_connector_metadata.write_recv_timed_out_req_ids
+    engine.finish(out)
+
+
+def test_peer_listening_treats_a_malformed_host_as_not_listening():
+    # IDNA rejects a label over 63 characters with UnicodeError, not OSError.
+    assert not moriio_connector._peer_listening("a" * 64 + ".invalid", 1)
