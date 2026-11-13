@@ -31,13 +31,13 @@ def compute_mamba_prefill_checkpoints(
     """Per-row internal prefill checkpoint offsets and cache block columns.
 
     Backends call this instead of re-deriving the rules, so they decline in
-    lockstep with the scheduler and ``MambaManager``: allocating a checkpoint
+    lockstep with the scheduler and `MambaManager`: allocating a checkpoint
     block without writing it leaves the prefix cache serving uninitialized
     state.
 
     Returns:
-        ``(offsets, cols)``: the checkpoint's offset into each row's query and
-        its block-table column. ``0`` and ``-1`` mean the row has none.
+        `(offsets, cols)`: the checkpoint's offset into each row's query and
+        its block-table column. `0` and `-1` mean the row has none.
 
     """
     offsets: list[int] = []
@@ -100,9 +100,15 @@ class MambaPrefillCheckpointMetadata:
 class MambaPrefillCheckpointBuilder:
     """Build backend-neutral prefill checkpoint locations."""
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_spec: MambaSpec) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_spec: MambaSpec,
+        checkpoint_alignment: int | None,
+    ) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
+        self.checkpoint_alignment = checkpoint_alignment
         speculative_config = vllm_config.speculative_config
         self.drop_eagle_block = (
             speculative_config is not None
@@ -117,7 +123,7 @@ class MambaPrefillCheckpointBuilder:
     ) -> MambaPrefillCheckpointMetadata | None:
         if self.vllm_config.cache_config.mamba_cache_mode != "align":
             return None
-        if self.kv_cache_spec.num_prefill_checkpoint_blocks == 0:
+        if self.checkpoint_alignment is None:
             return None
         cache_config = self.vllm_config.cache_config
         hash_block_size = cache_config.hash_block_size
@@ -135,7 +141,7 @@ class MambaPrefillCheckpointBuilder:
             query_lens,
             hash_block_size=hash_block_size,
             mamba_block_size=block_size,
-            checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
+            checkpoint_alignment=self.checkpoint_alignment,
             drop_eagle_block=self.drop_eagle_block,
             cache_hit_alignment_tokens=cache_hit_alignment_tokens,
             num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
@@ -170,10 +176,10 @@ class MambaPrefillCheckpointExporter:
     """Store each checkpoint's pre-convolution window and recurrent state.
 
     The recurrent states are rows of a buffer the prefill kernel emitted;
-    ``recurrent_rows`` picks each checkpoint row's state out of it, and by
-    default row ``i`` holds checkpoint ``i``'s. Layers with only a conv state
-    pass no recurrent buffers. ``token_indices`` maps the rows' tokens, laid out
-    by ``cu_seqlens``, to their rows of ``raw_qkv``.
+    `recurrent_rows` picks each checkpoint row's state out of it, and by
+    default row `i` holds checkpoint `i`'s. Layers with only a conv state
+    pass no recurrent buffers. `token_indices` maps the rows' tokens, laid out
+    by `cu_seqlens`, to their rows of `raw_qkv`.
     """
 
     state_len: int | None = None

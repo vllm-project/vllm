@@ -3,12 +3,12 @@
 """Prefill == decode equivalence for the Mamba2 ReplaySSM kernels.
 
 The SSM recurrence is path-independent: vLLM's chunked prefill (the SSD kernel
-``mamba_chunk_scan_combined_varlen``) and step-by-step decode must produce the
+`mamba_chunk_scan_combined_varlen`) and step-by-step decode must produce the
 same per-position outputs and final state over a sequence. This file feeds one
 set of inputs through the production dt flow (raw dt + softplus + a per-head
 dt_bias, applied inside each kernel) to:
 
-  * the exact fp32 step recurrence (``selective_state_update_ref``) -- the
+  * the exact fp32 step recurrence (`selective_state_update_ref`) -- the
     ground truth,
   * the chunked prefill kernel,
   * the baseline decode kernel,
@@ -18,7 +18,7 @@ and checks all of them agree. Prefill (a chunked scan) and decode (a step
 recurrence) are different code paths, so they differ numerically: the chunked
 scan carries ~2e-2 (fp32) / ~4e-2 (bf16) vs the exact recurrence, far above the
 near-exact decode. We therefore anchor every path on the exact recurrence at
-SSD-level tolerances (the same regime as ``test_mamba_ssm_ssd.py``), which the
+SSD-level tolerances (the same regime as `test_mamba_ssm_ssd.py`), which the
 chunked scan sets, keyed off the activation dtype.
 
 State and activation/buffer precision are swept independently, including the
@@ -67,8 +67,8 @@ def _run_prefill_decode_equivalence(
     """Prefill the whole sequence and decode it step by step; check both match
     the exact fp32 recurrence (and each other). All paths use the production dt
     flow (raw dt + softplus + a per-head dt_bias), so this also checks prefill
-    and decode apply the softplus/bias preprocessing consistently. ``state_dtype``
-    is the recurrent-state precision; ``act_dtype`` the activation/buffer one."""
+    and decode apply the softplus/bias preprocessing consistently. `state_dtype`
+    is the recurrent-state precision; `act_dtype` the activation/buffer one."""
     device = current_platform.device_type
     rtol, atol = _prefill_tolerances(act_dtype)
     set_random_seed(seed)

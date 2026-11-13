@@ -8,12 +8,6 @@ A "custom" logits processor is written by a user of vLLM and is loaded into vLLM
 
 This document shows how to write, load and use a custom logits processor.
 
-!!! note
-    This document covers the Model Runner V2 (MRV2) interface. The legacy V1
-    model runner (`VLLM_USE_V2_MODEL_RUNNER=0`) uses a different interface,
-    `vllm.v1.sample.logits_processor.LogitsProcessor`, which is not covered
-    here.
-
 ## Logits Processors Background
 
 A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior.

@@ -38,6 +38,7 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         EngineCore, "preprocess_add_request", conditional_failing_preprocess
     )
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     llm = LLM(model=MODEL_NAME)
 

@@ -16,15 +16,15 @@ tests assert the two agree within tolerance:
   * Native MXFP8 MoE (dot_scaled grouped GEMM)   -> dequant-to-bf16 MoE math
   * Strided K/V sparse-PA cache insert           -> contiguous-copy insert
 
-The native MXFP8 GEMMs also guard the ``dot_scaled`` rhs-scale orientation: the
-scale is loaded ``[N, K//32]`` and passed WITHOUT transpose; a stray ``.T``
-makes the shape ``[K//32, N]`` and Triton raises before producing output, so any
+The native MXFP8 GEMMs also guard the `dot_scaled` rhs-scale orientation: the
+scale is loaded `[N, K//32]` and passed WITHOUT transpose; a stray `.T`
+makes the shape `[K//32, N]` and Triton raises before producing output, so any
 regression there fails these tests loudly.
 
 Hardware scope: the whole module is ROCm-only (these are the AMD path; NVIDIA
 uses the FlashInfer kernels). The norm/activation/quant kernels run on any ROCm
-arch; the native MXFP8 ``dot_scaled`` linear/MoE tests are additionally gated to
-CDNA4 gfx95x (``@requires_gfx950``) since gfx942 uses the BF16 emulation path.
+arch; the native MXFP8 `dot_scaled` linear/MoE tests are additionally gated to
+CDNA4 gfx95x (`@requires_gfx950`) since gfx942 uses the BF16 emulation path.
 
 Run:  pytest tests/kernels/test_minimax_m3_amd_ops.py -v
 """
@@ -141,7 +141,7 @@ def test_gemma_fused_add_rmsnorm(shape, dtype):
 
 @torch.inference_mode()
 def test_gemma_rmsnorm_per_head_strided():
-    """q_norm/k_norm normalize a non-contiguous ``qkv.split`` slice over head_dim."""
+    """q_norm/k_norm normalize a non-contiguous `qkv.split` slice over head_dim."""
     torch.manual_seed(0)
     T, H, D, kv = 7, 48, 128, 8
     total = (H + 2 * kv) * D
@@ -164,7 +164,7 @@ def _mxfp8_edge_case_inputs(n: int, dtype: torch.dtype):
     """(x, residual, weight) whose normed output covers the MXFP8 block cases.
 
     Through the weight, every row gets a huge block (scale above 1.0), an
-    all-zero block, and a tiny block (``1 + w == 2**-8``). Rows: 32 ordinary
+    all-zero block, and a tiny block (`1 + w == 2**-8`). Rows: 32 ordinary
     rows with a residual, then an all-zero row, a row of tiny values, a row
     whose first block dwarfs the rest, and a row of partly-zero blocks.
     """
@@ -194,7 +194,7 @@ def _mxfp8_edge_case_inputs(n: int, dtype: torch.dtype):
 @torch.inference_mode()
 def test_gemma_fused_add_rmsnorm_mxfp8_bitwise_eq_unfused(n, dtype):
     """The MXFP8 epilogue writes the same values, E8M0 scales and residual as
-    ``gemma_fused_add_rmsnorm`` followed by ``mxfp8_e4m3_quantize``."""
+    `gemma_fused_add_rmsnorm` followed by `mxfp8_e4m3_quantize`."""
     x, res, w = _mxfp8_edge_case_inputs(n, dtype)
     m = x.shape[0]
     # A leading batch dim is flattened into the quantized rows.
@@ -220,7 +220,7 @@ def test_gemma_fused_add_rmsnorm_mxfp8_bitwise_eq_unfused(n, dtype):
 @torch.inference_mode()
 def test_gemma_fused_add_rmsnorm_mxfp8_and_bf16_bitwise_eq_unfused(n, dtype):
     """The variant that also stores the normed rows matches the unfused norm
-    (bf16 output) and norm + ``mxfp8_e4m3_quantize`` (values, scales)."""
+    (bf16 output) and norm + `mxfp8_e4m3_quantize` (values, scales)."""
     x, res, w = _mxfp8_edge_case_inputs(n, dtype)
     m = x.shape[0]
 
@@ -313,7 +313,7 @@ def test_shared_expert_gate_up_on_post_norm_quant(dist_init):
 
 @torch.inference_mode()
 def test_mlp_prequant_handoff():
-    """``set_prequant`` replaces gate_up_proj's input only when the shared
+    """`set_prequant` replaces gate_up_proj's input only when the shared
     expert is called with the very tensor that was quantized, and only once."""
     from vllm.model_executor.layers.fusion.quant_activation import (
         QuantizedActivation,
@@ -450,8 +450,13 @@ def test_mlp_down_proj_on_swiglu_quant(dist_init, m, n, k):
     mlp = object.__new__(MiniMaxM3MLP)
     torch.nn.Module.__init__(mlp)
     mlp.down_proj = layer
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+
     in_gemm = mlp._down_proj_quantizes_in_gemm(m)
-    assert in_gemm == (m <= 16 and k <= 1024)
+    triton = isinstance(scheme.ocp_mx_linear, RocmDotScaledMxfp8LinearKernel)
+    assert in_gemm == (triton and m <= 16 and k <= 1024)
 
     gate_up = (torch.randn(m, 2 * k, device=DEVICE) * 4).to(torch.bfloat16)
     act = swiglu_oai_split(gate_up, 1.702, 1.0, 7.0)
@@ -584,14 +589,14 @@ def test_mxfp8_native_moe(T, H, inter, E, top_k):
 # Native MXFP8 grouped GEMM (dot_scaled) vs pure-PyTorch grouped matmul
 # --------------------------------------------------------------------------- #
 def _ref_grouped_gemm(a_deq, w_deq, topk_ids, a_div, num_valid, mul_weight=None):
-    """Pure-PyTorch reference for ``_grouped_gemm_mxfp8``.
+    """Pure-PyTorch reference for `_grouped_gemm_mxfp8`.
 
-    For each routed (expanded) token ``tid in [0, num_valid)`` the kernel writes
-    ``out[tid] = a[tid // a_div] @ w[expert(tid)].T`` (fp32 accumulate), optionally
-    scaled by ``mul_weight[tid]``. The expert for ``tid`` is ``topk_ids.flatten()
-    [tid]`` (row-major expansion: ``tid = token*top_k + slot``). This is computed
-    here with plain ``torch.matmul`` on the dequantized operands — independent of
-    the Triton ``dot_scaled`` path and of the (separate) aiter backend.
+    For each routed (expanded) token `tid in [0, num_valid)` the kernel writes
+    `out[tid] = a[tid // a_div] @ w[expert(tid)].T` (fp32 accumulate), optionally
+    scaled by `mul_weight[tid]`. The expert for `tid` is `topk_ids.flatten()
+    [tid]` (row-major expansion: `tid = token*top_k + slot`). This is computed
+    here with plain `torch.matmul` on the dequantized operands — independent of
+    the Triton `dot_scaled` path and of the (separate) aiter backend.
     """
     eids = topk_ids.reshape(-1)
     n = w_deq.shape[1]
@@ -609,13 +614,13 @@ def _ref_grouped_gemm(a_deq, w_deq, topk_ids, a_div, num_valid, mul_weight=None)
 @pytest.mark.parametrize("weighted", [False, True])
 @torch.inference_mode()
 def test_mxfp8_grouped_gemm_native(T, N, K, E, top_k, weighted):
-    """Directly exercise ``_grouped_gemm_mxfp8`` against a non-Triton reference.
+    """Directly exercise `_grouped_gemm_mxfp8` against a non-Triton reference.
 
-    Covers both call modes used by ``fused_moe_mxfp8_native``:
-      * ``weighted=False`` -> g1: ``a_div=top_k`` (a-row shared across the top_k
+    Covers both call modes used by `fused_moe_mxfp8_native`:
+      * `weighted=False` -> g1: `a_div=top_k` (a-row shared across the top_k
         expansions of a token), no per-token weight.
-      * ``weighted=True``  -> g2: ``a_div=1`` (one a-row per expansion), output
-        scaled by ``topk_weights``.
+      * `weighted=True`  -> g2: `a_div=1` (one a-row per expansion), output
+        scaled by `topk_weights`.
     """
     from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
         _grouped_gemm_mxfp8,
@@ -678,7 +683,7 @@ def test_mxfp8_linear_emulation_bf16_at_load(
     shape, act_dtype, dequant_at_load, monkeypatch
 ):
     """EmulationMxfp8LinearKernel load-time BF16 dequant (default) and the
-    ``VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0`` per-step fallback must produce the
+    `VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0` per-step fallback must produce the
     same result; the dtype-match (BF16/FP16 activations) must also hold."""
     from vllm.model_executor.kernels.linear.mxfp8.emulation import (
         EmulationMxfp8LinearKernel,
@@ -728,9 +733,9 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 @pytest.mark.parametrize("shape", [(5120, 576), (5120, 288), (256, 2048)])
 @torch.inference_mode()
 def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
-    """``dot_scaled`` tiles K by 128, so an unaligned weight must not reach it.
+    """`dot_scaled` tiles K by 128, so an unaligned weight must not reach it.
 
-    ``process_weights_after_loading`` converts those to BF16 once; a weight that
+    `process_weights_after_loading` converts those to BF16 once; a weight that
     never went through it has to fall back per step rather than take the
     invalid path, which is what keying the dispatch on the weight dtype alone
     would do.
@@ -866,6 +871,127 @@ def test_fused_input_norm_mxfp8_qkv_proj(dist_init, n, k, block32, m):
         assert _relerr(got, ref) < 5e-2
 
 
+@pytest.fixture
+def aiter_flydsl_mxfp8_linear(monkeypatch):
+    """MXFP8 linears select `AiterFlyDSLMxfp8LinearKernel`: AITER linear on and
+    every shape treated as tuned (an untuned one runs AITER's heuristic)."""
+    pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: True
+    )
+    yield
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
+@requires_gfx950
+@pytest.mark.parametrize(
+    "n,k",
+    [(2560, 6144), (1536, 6144), (6144, 768), (6144, 3072)],  # qkv, shared, dense
+)
+@pytest.mark.parametrize("m", [1, 16, 37])
+@torch.inference_mode()
+def test_fused_mxfp8_inputs_on_aiter_flydsl_kernel(
+    dist_init, aiter_flydsl_mxfp8_linear, n, k, m
+):
+    """With the AITER kernel selected, the producers still fuse the MXFP8
+    quant and the linear on their output equals the unfused norm -> linear;
+    swiglu fuses at every M, since AITER does not quantize in the GEMM."""
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        AiterFlyDSLMxfp8LinearKernel,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    try:
+        layer, scheme = _quark_mxfp8_linear(n, k)
+    finally:
+        torch.set_default_dtype(prev_dtype)
+    assert isinstance(scheme.ocp_mx_linear, AiterFlyDSLMxfp8LinearKernel)
+    assert _can_fuse_input_norm_mxfp8(layer)
+    scheme.process_weights_after_loading(layer)
+    mlp = object.__new__(MiniMaxM3MLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.down_proj = layer
+    assert not mlp._down_proj_quantizes_in_gemm(m)
+
+    x = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    res = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    norm_w = torch.randn(k, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    normed, _ = gemma_fused_add_rmsnorm(x, res, norm_w, EPS)
+    x_q, x_scale, _ = gemma_fused_add_rmsnorm_mxfp8(x, res, norm_w, EPS)
+    qa = QuantizedActivation(x_q, x_scale, x.dtype, x.shape, kMxfp8Dynamic)
+    got = scheme.apply_weights(layer, qa)
+    ref = scheme.apply_weights(layer, normed)
+    assert got.shape == ref.shape == (m, n)
+    assert torch.equal(got, ref)
+
+
+@requires_gfx950
+@pytest.mark.parametrize("n,k", [(2560, 6144), (6144, 2048), (1536, 6144), (6144, 768)])
+@torch.inference_mode()
+def test_mono_weights_same_on_aiter_flydsl_kernel(dist_init, monkeypatch, n, k):
+    """The mono kernels' weight copies are the same whether the linear runs on
+    the Triton kernel (row-major weight) or the AITER FlyDSL one (preshuffled)."""
+    pytest.importorskip("aiter.ops.flydsl.batched_gemm_a8w8")
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import (
+        AiterFlyDSLMxfp8LinearKernel,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+    from vllm.models.minimax_m3.amd.mono.weights import (
+        _ptpc_fp8_from_mxfp8,
+        mxfp8_a_tiles,
+    )
+
+    def _processed(aiter: bool):
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if aiter else "0")
+        rocm_aiter_ops.refresh_env_variables()
+        monkeypatch.setattr(
+            rocm_aiter_ops, "is_mxfp8_bpreshuffle_gemm_tuned", lambda n, k: aiter
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            layer, scheme = _quark_mxfp8_linear(n, k)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+        scheme.process_weights_after_loading(layer)
+        return layer, scheme.ocp_mx_linear
+
+    try:
+        aiter_layer, aiter_kernel = _processed(True)
+        triton_layer, triton_kernel = _processed(False)
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+    assert isinstance(aiter_kernel, AiterFlyDSLMxfp8LinearKernel)
+    assert isinstance(triton_kernel, RocmDotScaledMxfp8LinearKernel)
+
+    def _bytes(ts):
+        return [t.contiguous().view(torch.uint8) for t in ts]
+
+    got = _ptpc_fp8_from_mxfp8(aiter_layer, n, k, "aiter")
+    ref = _ptpc_fp8_from_mxfp8(triton_layer, n, k, "triton")
+    assert all(torch.equal(a, b) for a, b in zip(_bytes(got), _bytes(ref)))
+    if k % 256 == 0:
+        got = mxfp8_a_tiles(aiter_layer, n, k, "aiter")
+        ref = mxfp8_a_tiles(triton_layer, n, k, "triton")
+        assert all(torch.equal(a, b) for a, b in zip(_bytes(got), _bytes(ref)))
+
+
 @requires_gfx950
 def test_fused_input_norm_mxfp8_off_under_batch_invariance(dist_init, monkeypatch):
     import vllm.envs as envs
@@ -885,8 +1011,8 @@ def test_fused_input_norm_mxfp8_off_under_batch_invariance(dist_init, monkeypatc
 # ``(expert_map >= 0)``, which collapsed an already-0/1 mask to all-ones and
 # produced EP garbage).
 def _capture_expert_mask(expert_mask, *, global_num_experts):
-    """Drive the real ``AiterMxfp8Experts.apply`` mask branch and capture the
-    ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``."""
+    """Drive the real `AiterMxfp8Experts.apply` mask branch and capture the
+    `expert_mask` it forwards to `rocm_aiter_ops.fused_moe`."""
     from types import SimpleNamespace
     from unittest import mock
 
@@ -951,7 +1077,7 @@ def test_aiter_mxfp8_apply_forwards_expert_mask_unchanged():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_routed_experts_expert_map_delegates_to_kernel():
     """RoutedExperts.expert_map returns the 0/1 mask only for kernels that set
-    ``consumes_expert_mask`` (AITER), and the canonical -1 map otherwise -- keyed
+    `consumes_expert_mask` (AITER), and the canonical -1 map otherwise -- keyed
     on the resolved kernel, not the global aiter switch."""
     from types import SimpleNamespace
 
@@ -996,7 +1122,7 @@ def _fused_qkv_kv_slices(num_tokens, num_kv_heads, head_dim, num_q_heads=16):
 
 
 def _asm_kv_cache(pages, num_kv_heads, head_dim):
-    """Page-16 K/V cache views matching ``_ensure_aiter_sparse_pa_kv_cache``."""
+    """Page-16 K/V cache views matching `_ensure_aiter_sparse_pa_kv_cache`."""
     x = 16 // torch.tensor([], dtype=torch.bfloat16).element_size()
     key = torch.zeros(
         (pages, num_kv_heads, head_dim // x, 16, x),

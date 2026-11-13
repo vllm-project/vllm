@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One-round DCP decode top-k merge for the DSA indexer.
 
-The kernels live in ``kernels.py`` (imports CuTe DSL); this module only holds
+The kernels live in `kernels.py` (imports CuTe DSL); this module only holds
 the configuration helpers so model construction stays import-light.
 
-Packed candidate rows (the "B'" layout), int32 ``[T, N + N/32]`` per rank,
-N a multiple of 32, local index ``l`` = the token's position in this rank's
-shard (global id ``l * W + rank``, interleave 1), ``l < 2**17``:
+Packed candidate rows (the "B'" layout), int32 `[T, N + N/32]` per rank,
+N a multiple of 32, local index `l` = the token's position in this rank's
+shard (global id `l * W + rank`, interleave 1), `l < 2**17`:
 
-- word ``j < N``: ``(ord16(s) << 16) | (0xFFFF - (l & 0xFFFF))`` as uint32,
-  where ``s`` is the bf16 score bits and ``ord16(s) = s | 0x8000`` for
-  ``s >= 0`` (sign bit clear), ``~s & 0xFFFF`` otherwise (order-preserving:
-  a larger score gives a larger ``ord16``). ``0`` marks an empty slot; slots
+- word `j < N`: `(ord16(s) << 16) | (0xFFFF - (l & 0xFFFF))` as uint32,
+  where `s` is the bf16 score bits and `ord16(s) = s | 0x8000` for
+  `s >= 0` (sign bit clear), `~s & 0xFFFF` otherwise (order-preserving:
+  a larger score gives a larger `ord16`). `0` marks an empty slot; slots
   may be in any order and empty ones anywhere.
-- word ``N + j // 32``, bit ``j % 32``: bit 16 of ``l`` for candidate ``j``.
+- word `N + j // 32`, bit `j % 32`: bit 16 of `l` for candidate `j`.
 """
 
 from typing import Any
@@ -33,8 +33,8 @@ _WARP = 32
 
 
 def dcp_merge_local_topk(topk: int, world_size: int) -> int:
-    """Per-rank candidate count N: 1.5x the fair share ``topk / world_size``,
-    warp-aligned. 0 when it would not be smaller than ``topk``."""
+    """Per-rank candidate count N: 1.5x the fair share `topk / world_size`,
+    warp-aligned. 0 when it would not be smaller than `topk`."""
     fair_share = -(-topk // world_size)
     local_topk = -(-(3 * fair_share) // (2 * _WARP)) * _WARP
     return local_topk if local_topk < topk else 0
@@ -47,9 +47,9 @@ def packed_row_words(local_topk: int) -> int:
 
 def dcp_topk_merge_local_topk(vllm_config: Any, topk: int) -> int:
     """N for the one-round DCP decode top-k merge, or 0 when it is unavailable
-    (no DCP, more than ``MAX_WORLD_SIZE`` DCP ranks, PCP, a top-k backend
+    (no DCP, more than `MAX_WORLD_SIZE` DCP ranks, PCP, a top-k backend
     other than auto / deep_select, not SM100, no CuTe DSL / DeepSelect, or
-    local token indices that do not fit ``LOCAL_INDEX_BITS``)."""
+    local token indices that do not fit `LOCAL_INDEX_BITS`)."""
     parallel_config = vllm_config.parallel_config
     world_size = parallel_config.decode_context_parallel_size
     max_local_len = -(-vllm_config.model_config.max_model_len // world_size)
@@ -76,7 +76,7 @@ def rescue_slots(topk: int, local_topk: int) -> int:
     """Upper bound on the saturated ranks of one row in the exact merge.
 
     A saturated rank sent N words, all strictly above the K-th selected key,
-    so they are among the K - 1 keys above it: at most ``(K - 1) // N``."""
+    so they are among the K - 1 keys above it: at most `(K - 1) // N`."""
     return (topk - 1) // local_topk
 
 
@@ -94,7 +94,7 @@ def dcp_topk_merge_max_rows(topk: int, local_topk: int) -> int:
 
 
 def dcp_topk_merge_fits(num_rows: int, topk: int, local_topk: int) -> bool:
-    """Whether a decode step of ``num_rows`` rows can take the one-round merge
+    """Whether a decode step of `num_rows` rows can take the one-round merge
     (identical on every DCP rank): it was initialized and its rescue
     workspace holds the rows. Otherwise the generic merge runs."""
     return local_topk > 0 and num_rows <= dcp_topk_merge_max_rows(topk, local_topk)
@@ -105,7 +105,7 @@ def init_dcp_topk_merge(vllm_config: Any, topk: int) -> int:
     and return its N, or 0 to keep the generic (fp32 all-gather) merge.
 
     Collective: every DCP rank must call it, in the same order, outside CUDA
-    graph capture (only the first call per ``topk`` runs collectives). The
+    graph capture (only the first call per `topk` runs collectives). The
     merge is exact only with its rescue workspace (symmetric memory over the
     DCP group, sized by the decode rows of a step); without one the merge is
     disabled here (fail closed) rather than run lossy. The ranks agree on

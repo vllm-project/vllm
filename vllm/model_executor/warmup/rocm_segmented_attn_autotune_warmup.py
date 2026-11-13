@@ -36,6 +36,7 @@ from vllm.v1.attention.ops.segmented_attention import (
     segmented_workspace_shapes,
     select_segmented_config,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
@@ -842,7 +843,7 @@ def _workload_weight(workload, max_tokens, heads, kv_heads, dim, fp8):
 
 
 def _shard_workloads(workloads, world_size, max_tokens, heads, kv_heads, dim, fp8):
-    """Balance compile-affine ``(batch, query)`` groups across TP ranks."""
+    """Balance compile-affine `(batch, query)` groups across TP ranks."""
     assignments: list[list[tuple[int, tuple]]] = [[] for _ in range(world_size)]
     loads = [0] * world_size
     groups: dict[tuple, dict] = {}
@@ -1243,8 +1244,9 @@ def _warmup_segmented_attention(layer, device, **limits) -> None:
     impl = layer.impl
     config = impl._segmented_attention_config
     assert config is not None
-    spec = layer.get_kv_cache_spec(config)
-    assert spec is not None
+    layer_config = layer.get_kv_cache_config(config)
+    assert layer_config is not None
+    spec = layer_config.spec
     sliding_window = impl.sliding_window[0]
     query_limit = getattr(layer, "segmented_query_limit", None)
     if not isinstance(query_limit, int):
@@ -1289,7 +1291,6 @@ def rocm_segmented_attn_autotune_warmup(worker: Worker) -> None:
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
 
     if not on_gfx1x():
         return
@@ -1310,14 +1311,14 @@ def rocm_segmented_attn_autotune_warmup(worker: Worker) -> None:
     if not layers:
         return
 
-    specs = worker.get_kv_cache_spec()
+    layer_configs = worker.get_kv_cache_layer_configs()
     layouts = tuple(
         (
-            (spec.block_size, spec.page_size_bytes)
-            if isinstance(spec, FullAttentionSpec)
-            else (0, spec.max_memory_usage_bytes(worker.vllm_config))
+            (lc.spec.block_size, lc.spec.page_size_bytes)
+            if issubclass(lc.manager_cls, FullAttentionManager)
+            else (0, lc.max_memory_usage_bytes(worker.vllm_config))
         )
-        for spec in specs.values()
+        for lc in layer_configs.values()
     )
     cache_budget = sum(
         tensor.size

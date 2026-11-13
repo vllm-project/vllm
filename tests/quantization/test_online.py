@@ -57,6 +57,11 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.quantization import (
+    _CUSTOMIZED_METHOD_TO_QUANT_CONFIG,
+    QUANTIZATION_METHODS,
+    register_quantization_config,
+)
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
@@ -2604,9 +2609,11 @@ def test_log_online_quantization(
     log_online_quantization(default_vllm_config)
 
     assert logged_messages == [
-        "Quantizing 3 layers of types: block_sparse_moe.experts: 1 (from targets: "
-        f"*experts*, {expected_target_summary}); mlp.down_proj: 2 (from linear: "
-        "fp8_per_tensor)"
+        (
+            "Quantizing 3 layers of types: block_sparse_moe.experts: 1 (from "
+            f"targets: *experts*, {expected_target_summary}); mlp.down_proj: 2 "
+            "(from linear: fp8_per_tensor)"
+        )
     ]
 
 
@@ -3060,3 +3067,68 @@ def test_online_quant_load_format_dummy(
     ) as llm:
         outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
         print(outputs[0][1])
+
+
+class _OotOnlineConfig(OnlineQuantizationConfig):
+    """Stand-in for a backend-specific online quantization config."""
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 0
+
+
+def _register_online_config(name: str):
+    """Register `_OotOnlineConfig` for `name` and return a restore hook."""
+    previous = _CUSTOMIZED_METHOD_TO_QUANT_CONFIG.get(name)
+    added_to_methods = name not in QUANTIZATION_METHODS
+    supported = current_platform.supported_quantization
+    added_to_platform = bool(supported) and name not in supported
+
+    register_quantization_config(name)(_OotOnlineConfig)
+
+    def restore() -> None:
+        if previous is None:
+            _CUSTOMIZED_METHOD_TO_QUANT_CONFIG.pop(name, None)
+        else:
+            _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[name] = previous
+        if added_to_methods and name in QUANTIZATION_METHODS:
+            QUANTIZATION_METHODS.remove(name)
+        if (
+            added_to_platform
+            and current_platform.supported_quantization
+            and name in current_platform.supported_quantization
+        ):
+            current_platform.supported_quantization.remove(name)
+
+    return restore
+
+
+@pytest.mark.parametrize(
+    "quantization,quant_args",
+    [
+        pytest.param("test_oot_online_method", {"moe": "mxfp8"}, id="custom-method"),
+        pytest.param("online", {"moe": "mxfp4"}, id="online"),
+        pytest.param("fp8_per_block", None, id="shorthand"),
+    ],
+)
+def test_registered_online_config_is_instantiated(
+    tmp_path, quantization, quant_args
+) -> None:
+    """`get_quant_config` builds the class registered for the method name."""
+    restore = _register_online_config(quantization)
+    try:
+        _write_minimal_llama_config(tmp_path)
+        model_config = ModelConfig(
+            model=str(tmp_path),
+            quantization=quantization,
+            quantization_config=(
+                quant_config_args(**quant_args) if quant_args else None
+            ),
+        )
+
+        result = weight_utils.get_quant_config(model_config, LoadConfig())
+    finally:
+        restore()
+
+    assert type(result) is _OotOnlineConfig
+    assert result.args is not None

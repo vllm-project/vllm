@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode tests need SM100 multi-GPU nodes and real-rank setups
-that CI does not provide. They are collected only when ``specialized_decode`` (or
+that CI does not provide. They are collected only when `specialized_decode` (or
 a path inside it) is passed to pytest explicitly, e.g.
-``pytest tests/models/kimi_k3/nvidia/specialized_decode``; a run over
-``tests/models/kimi_k3`` skips them."""
+`pytest tests/models/kimi_k3/nvidia/specialized_decode`; a run over
+`tests/models/kimi_k3` skips them."""
 
 from pathlib import Path
 

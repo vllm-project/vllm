@@ -4,8 +4,8 @@
 
 A region summary is an online softmax over the region's eight index-key rows,
 accumulated in position order. Only closed regions are ever scored, so the raw
-``[key | z]`` rows of each request's open region wait in a circular buffer
-(``Step5CSATailRing``) and the summary is written once, by the row that closes
+`[key | z]` rows of each request's open region wait in a circular buffer
+(`Step5CSATailRing`) and the summary is written once, by the row that closes
 the region. A rejected draft that closed a region leaves a summary nobody
 reads; it is rewritten when the region closes again.
 """
@@ -44,8 +44,8 @@ def _store_summary(
     MEAN_BLOCK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Write the summary of the region holding KV ``slot``; blocks of ``Mean``
-    are ``MEAN_BLOCK`` bytes apart."""
+    """Write the summary of the region holding KV `slot`; blocks of `Mean`
+    are `MEAN_BLOCK` bytes apart."""
     summary = tl.div_rn(numerator, _maximum(denominator, 1e-20)).to(tl.bfloat16)
     summary_fp8 = summary.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
     address = slot // BLOCK_SIZE * MEAN_BLOCK + slot % BLOCK_SIZE // 8 * 256
@@ -54,7 +54,7 @@ def _store_summary(
 
 @triton.jit
 def _replay_ring(Ring, base, first, last, dim, RING_CAPACITY: tl.constexpr):
-    """Accumulate the ring rows at positions ``[first, last)`` in order."""
+    """Accumulate the ring rows at positions `[first, last)` in order."""
     numerator = tl.zeros((256,), tl.float32)
     denominator = tl.zeros((256,), tl.float32)
     maximum = tl.max(tl.full((256,), -float("inf"), tl.float32), 0)
@@ -135,7 +135,7 @@ def _update_decode(
 
 
 def summary_layout(mean: torch.Tensor) -> tuple[int, int]:
-    """(bytes between blocks, tokens per block) of a ``[B, R, 256]`` cache."""
+    """(bytes between blocks, tokens per block) of a `[B, R, 256]` cache."""
     assert mean.stride(1) == 256 and mean.stride(2) == 1
     return mean.stride(0), mean.shape[1] * 8
 
@@ -265,7 +265,7 @@ def _build_prefill_groups(
 def build_prefill_groups(slots, positions, owners, query_start_loc) -> torch.Tensor:
     """Summary update metadata on device, without host slots or a sync.
 
-    Returns ``[rows, 10]`` metadata ``[region, first offset, rows[8]]``;
+    Returns `[rows, 10]` metadata `[region, first offset, rows[8]]`;
     non-head rows have region -1.
     """
     rows = slots.shape[0]

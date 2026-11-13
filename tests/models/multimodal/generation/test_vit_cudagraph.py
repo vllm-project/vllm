@@ -679,7 +679,6 @@ def test_eonly_vit_cudagraph_outputs(
     from PIL import Image
     from transformers import AutoProcessor
 
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS[model_id]
     token_budgets = [64, 256, 2048]

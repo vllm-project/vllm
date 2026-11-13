@@ -1,22 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU byte-copy runtime for UMBP connector contract tests."""
+"""Shared fixtures for UMBP connector tests.
 
+Configs, request and scheduler-output builders, fake runtime handles, a CPU
+byte-copy runtime, and a `umbp_standalone_server` launcher.
+"""
+
+import contextlib
 import ctypes
 import multiprocessing as mp
+import os
+import signal
+import subprocess
 import threading
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVLayoutDescriptor,
     RankTopology,
+    StoreEventResult,
     TransferJobState,
     TransferJobStatus,
+    UMBPConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.base import (
     IUMBPRuntime,
@@ -26,13 +39,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
     UMBPRuntimeFactory,
 )
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
 
 
 class _EmbeddedStore:
@@ -239,6 +253,47 @@ def mori_has_umbp() -> bool:
     return True
 
 
+@dataclass
+class StandaloneServer:
+    address: str
+    process: subprocess.Popen
+
+    def kill(self) -> None:
+        self.process.kill()
+        self.process.wait(10)
+
+
+@contextlib.contextmanager
+def standalone_server(
+    log_dir: Path, socket_dir: str, capacity_bytes: int
+) -> Iterator[StandaloneServer]:
+    """Run a `umbp_standalone_server` with a DRAM pool of `capacity_bytes`."""
+    import mori
+
+    binary = Path(mori.__file__).with_name("umbp_standalone_server")
+    assert binary.is_file(), f"MORI was built without UMBP: no {binary}"
+    address = f"unix://{socket_dir}/umbp.grpc.sock"
+    env = dict(
+        os.environ,
+        UMBP_STANDALONE_ADDRESS=address,
+        UMBP_DRAM_CAPACITY=str(capacity_bytes),
+    )
+    with open(log_dir / "server.log", "w") as log:
+        process = subprocess.Popen(
+            [binary], env=env, stdout=log, stderr=subprocess.STDOUT
+        )
+        try:
+            yield StandaloneServer(address, process)
+        finally:
+            process.send_signal(signal.SIGCONT)
+            process.terminate()
+            try:
+                process.wait(10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(10)
+
+
 def _report(errors, target: Callable, *args) -> None:
     try:
         target(*args)
@@ -288,7 +343,7 @@ def handshake(scheduler_connector, worker_connector) -> None:
 
 
 def _kv_cache_config() -> KVCacheConfig:
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
     )
     return KVCacheConfig(
@@ -301,26 +356,24 @@ def _kv_cache_config() -> KVCacheConfig:
                 block_stride=1024,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer1", "layer2"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer1", "layer2"], spec)],
     )
 
 
 def _hybrid_kv_cache_config() -> KVCacheConfig:
-    full = FullAttentionSpec(
+    full = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
     )
-    mamba = MambaSpec(
-        block_size=16,
-        shapes=((4,),),
-        dtypes=(torch.float32,),
+    mamba = MambaManager.layer_config(
+        MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,)),
         mamba_cache_mode="align",
     )
     return KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["attention"], full),
-            KVCacheGroupSpec(["mamba"], mamba),
+            new_kv_cache_group(["attention"], full),
+            new_kv_cache_group(["mamba"], mamba),
         ],
     )
 
@@ -337,6 +390,8 @@ def _vllm_config(
     parallel.update(parallel_overrides)
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
+            kv_connector="UMBPStoreConnector",
+            kv_connector_module_path=None,
             kv_connector_extra_config=extra,
         ),
         cache_config=SimpleNamespace(
@@ -354,6 +409,7 @@ def _vllm_config(
         kv_events_config=None,
         max_in_flight_tokens=64,
         num_prefill_lookahead_tokens=0,
+        num_hash_lookahead_tokens=0,
         parallel_config=SimpleNamespace(**parallel),
     )
 
@@ -397,6 +453,30 @@ def make_scheduler_output(
         ),
         num_scheduled_tokens=dict(scheduled_tokens or {}),
         kv_connector_block_state=block_state,
+    )
+
+
+def complete_store(
+    scheduler,
+    event_id: int,
+    workers: int = 1,
+    failed: Iterable[tuple[int, bytes]] = (),
+) -> None:
+    """Report store event `event_id` done by `workers` workers.
+
+    Args:
+        scheduler: The `UMBPStoreConnectorScheduler` that planned the store.
+        event_id: The `store_event` of the step's connector metadata.
+        workers: How many workers report the event in this output.
+        failed: `(group_id, block_hash)` objects that failed to store.
+
+    """
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                store_events={event_id: StoreEventResult(workers, set(failed))}
+            )
+        )
     )
 
 

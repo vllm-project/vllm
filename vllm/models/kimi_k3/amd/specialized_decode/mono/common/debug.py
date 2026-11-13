@@ -4,12 +4,12 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/mono/device/stamps.py
 # atom/mono/runtime/debug.py
-"""A timeline build's per-CTA phase stamps (debug only; ``ATOM_MONO_TIMELINE``,
-saved by ``atom.mono.runtime.timeline``): the s_memrealtime (100 MHz) at which
+"""A timeline build's per-CTA phase stamps (debug only; `ATOM_MONO_TIMELINE`,
+saved by `atom.mono.runtime.timeline`): the s_memrealtime (100 MHz) at which
 the CTA passes point k, kept in LDS until the kernel ends -- a global store per
-stamp would sit on every later ``s_waitcnt vmcnt(0)``.
+stamp would sit on every later `s_waitcnt vmcnt(0)`.
 
-``on`` is the build's compile-time switch: off, every call traces to nothing.
+`on` is the build's compile-time switch: off, every call traces to nothing.
 """
 
 import zlib
@@ -45,7 +45,7 @@ def stamp(on, tls, tid, k):
 
 @traced
 def stamp_flush(on, tls, tl, tid, bid, points):
-    """The CTA's record -> ``tl`` ``[CTA][points]`` int64."""
+    """The CTA's record -> `tl` `[CTA][points]` int64."""
     if const_expr(on):  # noqa: SIM102
         if tid < points:
             fx.generic_store(
@@ -64,13 +64,13 @@ def region_id(name: str) -> int:
 
 
 def region_ids(names) -> dict[str, int]:
-    """Name -> ``region_id``: a ``Mailbox``'s table."""
+    """Name -> `region_id`: a `Mailbox`'s table."""
     return {n: region_id(n) for n in names}
 
 
 def given_up_waits(health: torch.Tensor, names) -> list[str]:
     """Each CTA's first wait that gave up, the earliest first, from a rank's
-    ``health`` words; ``names`` the regions a record may name."""
+    `health` words; `names` the regions a record may name."""
     by_id = {region_id(n): n for n in names}
     records = health.view(BLOCKS + 1, RECORD_WORDS)[1:]
     records = records[records[:, 0] != 0].tolist()
