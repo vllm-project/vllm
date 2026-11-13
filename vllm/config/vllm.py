@@ -696,7 +696,8 @@ class VllmConfig:
 
         Dynamic speculative decoding drafts as many tokens as its schedule gives
         the batch size, so a query length only runs up to the largest batch size
-        that drafts its number of tokens.
+        that drafts its number of tokens. `num_speculative_tokens_under_prefill_load`
+        adds the query length of its shortened drafts.
         """
         max_num_seqs = self.scheduler_config.max_num_seqs
         speculative_config = self.speculative_config
@@ -707,18 +708,19 @@ class VllmConfig:
             or num_new_sampled_tokens <= 0
         ):
             return {decode_query_len: max_num_seqs}
-        from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+        from vllm.v1.spec_decode.dynamic.utils import (
+            build_num_speculative_tokens_max_batch_sizes,
+        )
 
-        dense_schedule = build_dynamic_sd_schedule_lookup(
+        max_batch_sizes = build_num_speculative_tokens_max_batch_sizes(
             speculative_config.num_speculative_tokens_per_batch_size,
+            speculative_config.num_speculative_tokens_under_prefill_load,
             vllm_max_batch_size=max_num_seqs,
             vllm_num_speculative_tokens=self.num_speculative_tokens,
         )
-        # By ascending batch size, so each query length keeps its widest batch.
         return {
             k + num_new_sampled_tokens: batch_size
-            for batch_size, k in enumerate(dense_schedule)
-            if batch_size > 0
+            for k, batch_size in max_batch_sizes.items()
         }
 
     def get_draft_decode_cudagraph_request_sizes(self) -> list[int]:
@@ -1050,15 +1052,49 @@ class VllmConfig:
         ):
             return
 
+        disabled = []
+        if speculative_config.num_speculative_tokens_per_batch_size is not None:
+            disabled.append("num_speculative_tokens_per_batch_size")
+        if speculative_config.num_speculative_tokens_under_prefill_load is not None:
+            disabled.append("num_speculative_tokens_under_prefill_load")
         logger.warning_once(
             "Dynamic speculative decoding is not supported with data "
             "parallelism because data-parallel ranks can select different "
             "speculative-token counts, causing DP divergence and deadlocks. "
-            "Disabling num_speculative_tokens_per_batch_size and falling back "
-            "to static num_speculative_tokens=%d.",
+            "Disabling %s and falling back to static num_speculative_tokens=%d.",
+            " and ".join(disabled),
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
+        speculative_config.num_speculative_tokens_under_prefill_load = None
+
+    def _validate_spec_tokens_under_prefill_load(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or speculative_config.num_speculative_tokens_under_prefill_load is None
+        ):
+            return
+
+        scheduler_config = self.scheduler_config
+        if not scheduler_config.enable_chunked_prefill:
+            # Without chunking, a prefill runs only if it fits the leftover budget
+            # whole, which the draft-shortening rule does not account for.
+            raise ValueError(
+                "num_speculative_tokens_under_prefill_load requires chunked "
+                "prefill, which is disabled in this configuration. Enable chunked "
+                "prefill or unset num_speculative_tokens_under_prefill_load."
+            )
+        if scheduler_config.prefill_schedule_interval > 1:
+            # Drafts are sized a step ahead, but only the engine core knows
+            # which steps hold prefill.
+            raise ValueError(
+                "num_speculative_tokens_under_prefill_load is not supported with "
+                "prefill_schedule_interval > 1 (got "
+                f"{scheduler_config.prefill_schedule_interval}). Set "
+                "prefill_schedule_interval to 1 or unset "
+                "num_speculative_tokens_under_prefill_load."
+            )
 
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
@@ -2020,6 +2056,7 @@ class VllmConfig:
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
+        self._validate_spec_tokens_under_prefill_load()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)

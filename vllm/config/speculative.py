@@ -617,6 +617,14 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    num_speculative_tokens_under_prefill_load: int | None = Field(default=None, ge=0)
+    """Number of speculative tokens per request on steps where the prefills that
+    can run fill the batched-token budget even with this many drafts per
+    decode. On other steps decodes keep `num_speculative_tokens` drafts and
+    prefills are chunked to fit next to them. Requires chunked prefill and is
+    not supported with `prefill_schedule_interval` > 1. `None` disables the
+    reduction."""
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -1522,6 +1530,7 @@ class SpeculativeConfig:
                 )
                 self.enable_adaptive_verification = False
                 self.num_speculative_tokens_per_batch_size = None
+                self.num_speculative_tokens_under_prefill_load = None
 
         if (
             config_cls.adaptive_verification_uses_draft_logits
@@ -1784,6 +1793,17 @@ class SpeculativeConfig:
                 f"than zero ({self.num_speculative_tokens})."
             )
 
+        num_under_prefill_load = self.num_speculative_tokens_under_prefill_load
+        if (
+            num_under_prefill_load is not None
+            and num_under_prefill_load > self.num_speculative_tokens
+        ):
+            raise ValueError(
+                "num_speculative_tokens_under_prefill_load "
+                f"({num_under_prefill_load}) must not exceed "
+                f"num_speculative_tokens ({self.num_speculative_tokens})."
+            )
+
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates
             self.synthetic_acceptance_rates = self._resolve_synthetic_acceptance_rates(
@@ -1924,7 +1944,11 @@ class SpeculativeConfig:
         return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
-        return self.num_speculative_tokens_per_batch_size is not None
+        """Whether a step can verify fewer than num_speculative_tokens drafts."""
+        return (
+            self.num_speculative_tokens_per_batch_size is not None
+            or self.num_speculative_tokens_under_prefill_load is not None
+        )
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

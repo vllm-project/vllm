@@ -355,6 +355,7 @@ def _create_decode_vllm_config(
         speculative_config.uses_dynamic_speculative_decoding.return_value = True
         speculative_config.num_speculative_tokens_per_batch_size = dynamic_spec_schedule
         speculative_config.enable_adaptive_verification = False
+        speculative_config.num_speculative_tokens_under_prefill_load = None
         vllm_config.speculative_config = speculative_config
     _split_capture_sizes(vllm_config, legacy_sizes=decode_sizes is None)
     return vllm_config

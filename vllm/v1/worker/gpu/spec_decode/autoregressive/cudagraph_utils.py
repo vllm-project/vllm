@@ -7,7 +7,9 @@ import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+from vllm.v1.spec_decode.dynamic.utils import (
+    build_num_speculative_tokens_max_batch_sizes,
+)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -61,8 +63,9 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
         if specialize_spec_tokens:
             speculative_config = self.vllm_config.speculative_config
             assert speculative_config is not None
-            dense_schedule = build_dynamic_sd_schedule_lookup(
+            max_batch_sizes = build_num_speculative_tokens_max_batch_sizes(
                 speculative_config.num_speculative_tokens_per_batch_size,
+                speculative_config.num_speculative_tokens_under_prefill_load,
                 vllm_max_batch_size=self.max_num_reqs,
                 vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
             )
@@ -70,7 +73,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 mode: [
                     SpeculatorBatchDescriptor(**vars(desc), num_speculative_tokens=k)
                     for desc in descs
-                    for k in sorted(set(dense_schedule) - {0, 1}, reverse=True)
+                    for k in sorted(set(max_batch_sizes) - {0, 1}, reverse=True)
                 ]
                 for mode, descs in self._capture_descs.items()
             }

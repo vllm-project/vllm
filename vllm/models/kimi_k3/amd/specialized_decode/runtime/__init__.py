@@ -207,7 +207,7 @@ def unsupported(vllm_config) -> list[str]:
         ),
         (
             spec is not None and spec.uses_dynamic_speculative_decoding(),
-            "dynamic speculative decoding",
+            "dynamic speculative decoding or num_speculative_tokens_under_prefill_load",
         ),
         # K1 keeps a BF16 conv state and an FP32 recurrent state in place; it
         # maintains no ReplaySSM / RecoverSSM records
