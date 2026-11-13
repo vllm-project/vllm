@@ -325,8 +325,6 @@ class FlintAttention(nn.Module):
             )
             self.flint_decode = False
         else:
-            # Imported here so the module imports on platforms without
-            # FlashInfer.
             from vllm.v1.attention.backends.flashinfer import (
                 FlashInferImpl,
                 FlashInferMetadata,
