@@ -3,7 +3,7 @@
 """Attention layer with FlashInfer."""
 
 import inspect
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from enum import Enum
 from functools import partial
 from typing import ClassVar
