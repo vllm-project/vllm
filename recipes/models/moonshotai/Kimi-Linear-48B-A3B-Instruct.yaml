@@ -122,8 +122,7 @@ guide: |
     --trust-remote-code
   ```
 
-  If you see OOM, reduce `--max-model-len` (e.g. 65536) or increase
-  `--gpu-memory-utilization` (<= 0.95).
+  If you see OOM, reduce `--max-model-len` (e.g. 65536) or `--max-num-batched-tokens`.
 
   ## Client Usage
 
@@ -139,7 +138,7 @@ guide: |
 
   - **`MLAModules.__init__() missing 1 required positional argument: 'indexer_rotary_emb'`**:
     Known bug in vLLM 0.12.0 affecting Kimi-Linear. Pin to `vllm==0.11.2` instead.
-  - **OOM**: Reduce `--max-model-len` or increase `--gpu-memory-utilization` up to 0.95.
+  - **OOM**: Reduce `--max-model-len` or `--max-num-batched-tokens`.
 
   ## References
 

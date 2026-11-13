@@ -254,6 +254,7 @@ def make_hisparse_kv_cache_manager(
     max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
     num_prefill_lookahead: int = 0,
+    num_hash_lookahead_tokens: int = 0,
     vllm_config: VllmConfig | None = None,
     **config_kwargs,
 ) -> KVCacheManager:
@@ -266,6 +267,7 @@ def make_hisparse_kv_cache_manager(
         enable_caching=enable_caching,
         hash_block_size=HISPARSE_BLOCK_SIZE,
         num_prefill_lookahead=num_prefill_lookahead,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -1342,7 +1344,8 @@ def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     get_hisparse_coordinator(manager).update_spills(counts, counts)
 
 
-def test_hisparse_events_report_host_and_device_placement():
+@pytest.mark.parametrize("lookahead", [0, 1])
+def test_hisparse_events_report_host_and_device_placement(lookahead):
     """Host publication and eviction must not advertise GPU-resident KV."""
     manager = make_kv_cache_manager(
         make_hisparse_kv_cache_config(32, 16),
@@ -1350,8 +1353,16 @@ def test_hisparse_events_report_host_and_device_placement():
         enable_caching=True,
         hash_block_size=HISPARSE_BLOCK_SIZE,
         enable_kv_cache_events=True,
+        num_hash_lookahead_tokens=lookahead,
     )
-    request = make_request("request", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    tokens = list(range(64 + lookahead))
+    request = make_request(
+        "request",
+        tokens,
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
     assert _allocate_scheduled(manager, request, 64) is not None
     _publish_hisparse_pages(manager)
 
@@ -1362,6 +1373,16 @@ def test_hisparse_events_report_host_and_device_placement():
         (0, MEDIUM_CPU),
         (1, MEDIUM_GPU),
     }
+
+    for event in stored:
+        assert event.lookahead_token_ids == (
+            [
+                tokens[end : end + lookahead]
+                for end in range(HISPARSE_BLOCK_SIZE, 65, HISPARSE_BLOCK_SIZE)
+            ]
+            if lookahead
+            else None
+        )
 
     host_block = manager.get_blocks(request.request_id).blocks[0][0]
     get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
@@ -1509,6 +1530,70 @@ def test_hisparse_host_backed_request_accepts_local_prefix_hit():
     )
 
 
+def test_hisparse_clean_pages_unpin_in_write_completion_order():
+    """The pool reuses unpinned pages in the order their host writes completed."""
+    manager = make_hisparse_kv_cache_manager(
+        64, 32, enable_caching=True, num_resident_groups=2
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.max_spill_pages = 1
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    requests = [
+        make_request(name, list(range(i, i + num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+        for i, name in enumerate(("a", "b"))
+    ]
+    spills = []
+    for request in requests:
+        for hot in coordinator.hot_managers:
+            hot.require_hot(request.request_id)
+            hot.allocate_new_blocks(request.request_id, num_tokens, num_tokens)
+        assert _allocate_scheduled(manager, request, num_tokens) is not None
+        spills += coordinator.build_offload_command().page_transfers
+    for request in requests:
+        coordinator.plan_prefix_materialization(request.request_id, num_tokens)
+        spills += coordinator.build_offload_command().page_transfers
+    pages = [coordinator.pending_spills[spill.transfer_id].page for spill in spills]
+    assert pages == [("a", 0), ("b", 0), ("a", 1), ("b", 1)]
+
+    counts = {spill.transfer_id: 1 for spill in spills}
+    coordinator.update_spills(counts, counts)
+
+    expected = [
+        resident.req_to_blocks[request_id][page_idx].block_id
+        for request_id, page_idx in pages
+        for resident in coordinator.resident_managers
+    ]
+    free_ids = [
+        block.block_id
+        for block in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    assert free_ids[-len(expected) :] == expected
+
+
+def test_hisparse_freed_request_spills_are_reused_newest_first():
+    """Acked spills of a freed request free their blocks as if one at a time."""
+    manager = make_hisparse_kv_cache_manager(
+        64, 32, enable_caching=True, num_resident_groups=2
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    request = make_request("a", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_tokens) is not None
+    spills = coordinator.build_offload_command().page_transfers
+    assert len(spills) == 4
+    manager.free(request)
+
+    counts = {spill.transfer_id: 1 for spill in spills}
+    coordinator.update_spills(counts, counts)
+
+    spilled = [block_id for spill in spills for block_id in spill.resident_block_ids]
+    free_ids = [
+        block.block_id
+        for block in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    assert free_ids[: len(spilled)] == spilled[::-1]
+
+
 def test_hisparse_finished_request_leaves_free_copies():
     """Clean pages of a finished request are free-queue blocks, not pins."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
@@ -1538,13 +1623,25 @@ def test_hisparse_finished_request_leaves_free_copies():
     ],
     ids=["stopped", "aborted", "running"],
 )
+@pytest.mark.parametrize("lookahead", [0, 3])
 def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
-    status, expected_cached_pages
+    status, expected_cached_pages, lookahead
 ):
     """Only terminal cleanup may publish completed, finalized pages."""
-    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    manager = make_hisparse_kv_cache_manager(
+        32, 16, enable_caching=True, num_hash_lookahead_tokens=lookahead
+    )
     coordinator = get_hisparse_coordinator(manager)
-    request = make_request("terminal", list(range(33)), HISPARSE_BLOCK_SIZE, sha256)
+    request = make_request(
+        "terminal",
+        list(range(33)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    expected_cached_pages = min(
+        expected_cached_pages, (33 - lookahead) // HISPARSE_BLOCK_SIZE
+    )
     request.spec_token_ids = list(range(33, 49))
     assert (
         _allocate_scheduled(manager, request, 49, num_lookahead_tokens=16) is not None
@@ -4467,6 +4564,33 @@ def test_eagle_identical_prompt_hit(
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
     assert len(computed_blocks.blocks[0]) == expected_blocks
     assert num_tokens == expected_blocks * block_size
+
+
+@pytest.mark.parametrize("lookahead", [1, 3])
+def test_sparse_retention_keeps_the_lookahead_replay_boundary(lookahead: int):
+    """A resend reaches only the blocks whose lookahead tokens are known."""
+    block_size, num_tokens = 16, 66
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(block_size, 64, 2),
+        max_model_len=1024,
+        enable_caching=True,
+        hash_block_size=block_size,
+        num_hash_lookahead_tokens=lookahead,
+        retention_interval=0,
+    )
+    token_ids = list(range(num_tokens))
+    prime = make_request(
+        "prime", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    assert manager.allocate_slots(prime, num_tokens) is not None
+    manager.free(prime)
+
+    resend = make_request(
+        "resend", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    _, num_computed_tokens, _ = manager.get_computed_blocks(resend)
+    # With three lookahead tokens, the block ending at 64 has no hash.
+    assert num_computed_tokens == (64 if lookahead == 1 else 48)
 
 
 @pytest.mark.parametrize("lookahead", [1, 2])
