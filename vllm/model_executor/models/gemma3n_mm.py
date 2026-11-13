@@ -116,7 +116,7 @@ def batch_audio_features(
     """
     if isinstance(input_features, torch.Tensor):
         assert isinstance(input_features_mask, torch.Tensor)
-        return input_features.squeeze(1), input_features_mask.squeeze(1)
+        return input_features, input_features_mask
 
     assert isinstance(input_features_mask, list)
     max_len = max(features.shape[0] for features in input_features)
