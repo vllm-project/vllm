@@ -249,12 +249,12 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = inputs.pop("pixel_values")
+        pixel_values = values.pop("pixel_values")
         # Remaining keys are consumed as encoder_metadata.
-        return self.vision_tower(pixel_values, grid_thw=None, encoder_metadata=inputs)
+        return self.vision_tower(pixel_values, grid_thw=None, encoder_metadata=values)
 
     def encoder_eager_forward(
         self,

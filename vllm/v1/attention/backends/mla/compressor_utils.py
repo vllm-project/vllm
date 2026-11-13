@@ -106,7 +106,7 @@ class CompressedSlotMappingKernel(
                 compressed_slot_mapping_ptr + query_start + offset, slot_ids, mask=mask
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,

@@ -46,6 +46,7 @@ from vllm.model_executor.layers.attention import (
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -205,8 +206,7 @@ class OpenPanguMoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
-            divide_shared_output_in_fp16=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT_FP16_GUARD,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,

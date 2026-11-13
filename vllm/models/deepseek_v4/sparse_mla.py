@@ -447,7 +447,7 @@ class BuildC128ATopkMetadataKernel(
                     mask=mask,
                 )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:

@@ -147,6 +147,10 @@ def _bf16_mm_shape_supported(
     )
 
 
+# FlashInfer's cute-dsl BF16 mm only has low-M kernels; larger M goes to cuBLAS.
+_FLASHINFER_CUTEDSL_BF16_MAX_M = 32
+
+
 def _can_use_flashinfer_cutedsl_bf16(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -156,7 +160,10 @@ def _can_use_flashinfer_cutedsl_bf16(
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):
         return False
-    return _bf16_mm_shape_supported(x, weight, bias)
+    return (
+        _bf16_mm_shape_supported(x, weight, bias)
+        and x.numel() <= _FLASHINFER_CUTEDSL_BF16_MAX_M * x.shape[-1]
+    )
 
 
 # Output width below which flashinfer beats cuBLAS (swept on GB10, K=5120);

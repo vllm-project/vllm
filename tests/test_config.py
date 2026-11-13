@@ -158,6 +158,47 @@ def test_flashinfer_replayssm_validates_config(
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
+@pytest.mark.parametrize(
+    ("buffer_len", "stochastic_rounding", "pp_size", "error"),
+    [
+        (16, False, 1, None),
+        (3, False, 1, "--replayssm-buffer-len >= 1 \\+ num_speculative_tokens"),
+        (16, True, 1, "does not support --enable-mamba-cache-stochastic-rounding"),
+        (16, False, 2, "pipeline_parallel_size=1"),
+    ],
+    ids=["accepted", "short-buffer", "stochastic-rounding", "pp"],
+)
+def test_triton_replayssm_spec_decode_validates_config(
+    buffer_len, stochastic_rounding, pp_size, error
+):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode="align",
+            replayssm_buffer_len=buffer_len,
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="NemotronHForCausalLM",
+            dtype=torch.float16,
+        ),
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON,
+            enable_stochastic_rounding=stochastic_rounding,
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=pp_size, use_ubatching=False
+        ),
+        kv_transfer_config=None,
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig.validate_mamba_cached_kernel(config)
+    else:
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -509,7 +550,7 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
         kv_transfer_config=kv_transfer_config,
     )
 
-    kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    kv_cache_groups = [SimpleNamespace(block_size=16)]
     with caplog.at_level(logging.INFO):
         config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
 
@@ -533,7 +574,7 @@ def test_kv_offloading_does_not_adjust_dcp_interleave_size():
         ),
     )
 
-    kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    kv_cache_groups = [SimpleNamespace(block_size=16)]
     config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 1
@@ -2785,7 +2826,7 @@ def test_get_and_verify_max_len_with_nope_layers(
 @pytest.mark.parametrize(
     ("rope_type", "factor", "expected_max_len"),
     [
-        # TeleChat3-36B-Thinking: 32768 already scaled from 8192 by 4
+        # 32768 already scaled from 8192 by 4
         ("yarn", 4.0, 32768),
         # sarvam-105b: declares factor 40 but only serves 131072 of it
         ("deepseek_yarn", 40.0, 32768),
