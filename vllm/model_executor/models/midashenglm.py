@@ -47,7 +47,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -68,8 +67,8 @@ from vllm.transformers_utils.configs.midashenglm import DashengConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .qwen3 import Qwen3ForCausalLM, use_qwen2_attention
-from .utils import AutoWeightsLoader, maybe_prefix
+from .qwen3 import use_qwen2_attention
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 _Tuple2: TypeAlias = int | tuple[int, int] | Sequence[int]
 
@@ -716,12 +715,11 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         with self._mark_language_model(vllm_config):
             use_qwen2_attention(config.text_config)
-            self.decoder = initialize_model(
-                vllm_config=vllm_config.with_hf_config(
-                    config.text_config, ["Qwen2ForCausalLM"]
-                ),
+            self.decoder = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "decoder"),
-                model_class=Qwen3ForCausalLM,
+                architectures=["Qwen3ForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (

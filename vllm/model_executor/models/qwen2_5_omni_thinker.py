@@ -52,7 +52,6 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
-from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
@@ -113,10 +112,11 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .qwen3 import Qwen3ForCausalLM, use_qwen2_attention
+from .qwen3 import use_qwen2_attention
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    init_vllm_registered_model,
     maybe_prefix,
     split_list_into_ranges,
 )
@@ -1264,12 +1264,11 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             use_qwen2_attention(thinker_config.text_config)
-            self.language_model = initialize_model(
-                vllm_config=vllm_config.with_hf_config(
-                    thinker_config.text_config, ["Qwen2ForCausalLM"]
-                ),
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
-                model_class=Qwen3ForCausalLM,
+                hf_config=thinker_config.text_config,
+                architectures=["Qwen3ForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (
