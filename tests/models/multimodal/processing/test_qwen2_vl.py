@@ -546,7 +546,7 @@ def test_max_video_tokens_with_pruning_keeps_full_size_frames() -> None:
     ) == info.get_num_video_tokens(
         image_width=max_size.width,
         image_height=max_size.height,
-        num_frames=info.get_num_frames_with_most_features(max_model_len, {"video": 1}),
+        num_frames=info.get_num_frames_with_most_features(max_model_len, 1),
         image_processor=info.get_image_processor(),
         mm_kwargs={},
     )
