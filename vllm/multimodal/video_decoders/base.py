@@ -82,3 +82,15 @@ def charge_sampled_frames(num_frames: int, width: int, height: int) -> None:
     charge = _sampled_frames_charge.get()
     if charge is not None:
         charge(max(0, num_frames) * max(0, width) * max(0, height) * 3)
+
+
+def charge_frame_copies(num_copies: int, frame_bytes: int) -> None:
+    """Charge `num_copies` copies of a decoded frame of `frame_bytes` bytes.
+
+    Loaders that repeat decoded frames call this before allocating the
+    copies, so the copies count toward the per-request decoded-media budget
+    before they exist.
+    """
+    charge = _sampled_frames_charge.get()
+    if charge is not None:
+        charge(max(0, num_copies) * max(0, frame_bytes))

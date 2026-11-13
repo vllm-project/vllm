@@ -110,6 +110,61 @@ def test_video_request_budget_charges_decoded_frames_once(
     assert budget.used == frames.nbytes
 
 
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_rejects_repeated_frames_before_copying(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """EmbeddingGemma2 repeats decoded frames to fill the requested indices.
+
+    A 1 fps clip of two frames sampled at 60 fps decodes two frames and
+    repeats them 32 times. The copies are charged before they are allocated.
+    """
+    data = _write_opencv_test_video(tmp_path, side=512, num_frames=2)
+    frame_bytes = 512 * 512 * 3
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 4 * frame_bytes)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(
+        ImageMediaIO(decoded_budget=budget),
+        video_backend="embedding_gemma2",
+        fps=60,
+        max_frames=32,
+    )
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+            video_io.load_bytes(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Decoding the two frames needs a few frames of buffers. The copies would
+    # need 32 frames.
+    assert peak < 8 * frame_bytes
+
+
+@pytest.mark.skip_global_cleanup
+def test_video_request_budget_charges_repeated_frames_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    data = _write_opencv_test_video(tmp_path, side=32, num_frames=2)
+    frame_bytes = 32 * 32 * 3
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 32 * frame_bytes)
+    budget = MediaDecodedBudget()
+    video_io = VideoMediaIO(
+        ImageMediaIO(decoded_budget=budget),
+        video_backend="embedding_gemma2",
+        fps=60,
+        max_frames=32,
+    )
+
+    frames, metadata = video_io.load_bytes(data).media
+
+    assert frames.shape == (32, 32, 32, 3)
+    assert set(metadata["frames_indices"]) == {0, 1}
+    assert budget.used == frames.nbytes
+
+
 def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "assert_10_frames_1_fps")

@@ -14,6 +14,7 @@ from vllm.multimodal.video_decoders import (
     VideoDecoderBackend,
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_frame_copies,
     decode_video,
     resolve_video_backend_kwargs,
 )
@@ -31,6 +32,13 @@ logger = init_logger(__name__)
 DecodedFrames: TypeAlias = npt.NDArray | torch.Tensor
 """Decoded video frames: a host `np.ndarray`, or a device `torch.Tensor`
 when a GPU decoding codec is used (e.g. torchcodec with `device="cuda"`)."""
+
+
+def _frame_nbytes(frames: DecodedFrames) -> int:
+    """Size in bytes of one frame of `frames`."""
+    if isinstance(frames, torch.Tensor):
+        return frames[0].numel() * frames.element_size()
+    return frames[0].nbytes
 
 
 class VideoLoaderRegistry(ExtensionManager):
@@ -575,6 +583,8 @@ class EmbeddingGemma2VideoBackend(VideoBackend):
             idx_to_pos = {idx: pos for pos, idx in enumerate(valid_frame_indices)}
             if all(idx in idx_to_pos for idx in requested_indices):
                 positions = [idx_to_pos[idx] for idx in requested_indices]
+                # Charge the repeated frames before they are allocated.
+                charge_frame_copies(len(positions) - len(frames), _frame_nbytes(frames))
                 if isinstance(frames, np.ndarray):
                     frames = frames[positions]
                 else:
@@ -1165,6 +1175,7 @@ class GLMGAVideoBackend(VideoBackend):
         # Ensure even frame count — matches HF's sample_frames even-padding
         # and _preprocess temporal_patch_size divisibility check.
         if frames.shape[0] & 1:
+            charge_frame_copies(1, _frame_nbytes(frames))
             frames = np.concatenate([frames, frames[-1:]], axis=0)
         return frames, metadata
 
@@ -1633,6 +1644,7 @@ class ClefOmniVideoBackend(VideoBackend):
             **kwargs,
         )
         if len(frames) % 2:
+            charge_frame_copies(1, _frame_nbytes(frames))
             last = frames[-1:]
             if isinstance(frames, torch.Tensor):
                 frames = torch.cat([frames, last])
