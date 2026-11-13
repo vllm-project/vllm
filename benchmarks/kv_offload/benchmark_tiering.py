@@ -236,18 +236,13 @@ class Scenario:
         )
 
     def describe(self) -> None:
-        """Print what the scenario holds; unmaterialized fields show as '?'."""
-        print(self.describe_str(), end="")
-
-    def describe_str(self) -> str:
-        """describe() as a string; unmaterialized fields show as '?'."""
-
         def tier_str(t: Capacity) -> str:
             bytes_s = f"{t.bytes / 1024**3:.1f}G" if t.bytes is not None else "?"
             reqs_s = t.requests if t.requests is not None else "?"
             return f"{bytes_s} ({reqs_s} requests)"
 
-        s = f"{self.name}: {self.desc}\n"
+        s = f"==== {self.name} == \n"
+        s += f" description: {self.desc}\n"
         s += (
             f"  concurrency={self.concurrency} phase={self.phase} "
             f"offload_block_size={self.offload_block_size}\n"
@@ -258,9 +253,9 @@ class Scenario:
         if self.gpu.requests is not None:
             assert self.cpu.requests is not None
             fits = self.gpu.requests + self.cpu.requests
-            over = "OVER" if self.concurrency > fits else "under"
+            over = "OVER" if self.concurrency > fits else "Under"
             s += (
-                f" requests: need {self.concurrency} vs fits {fits} "
+                f"  requests: need {self.concurrency} vs fits {fits} "
                 f" (gpu {self.gpu.requests}, cpu {self.cpu.requests})"
                 f"  ({over})\n"
             )
@@ -269,12 +264,13 @@ class Scenario:
             assert self.cpu.bytes is not None
             roofline = self.kv_size_roofline()
             budget = self.gpu.bytes + self.cpu.bytes
-            over = "OVER" if roofline > budget else "under"
+            over = "OVER" if roofline > budget else "Under"
             s += (
                 f"  kv roofline={roofline / 1024**3:.1f}G"
-                f" vs budget={budget / 1024**3:.1f}G ({over})"
+                f" vs budget={budget / 1024**3:.1f}G ({over})\n"
             )
-        return s
+
+        print(s)
 
 
 QUICK = [
@@ -691,14 +687,17 @@ class BenchmarkSession:
 
     def run(self) -> list[dict]:
         print(f"Session dir: {self.session_dir}/")
+        max_gpu = max(spec.gpu.get_num_bytes() for spec in self.specs)
+        max_cpu = max(spec.cpu.get_num_bytes() for spec in self.specs)
         print(
-            f"{len(self.specs)} runs "
-            f"(~{len(self.specs) * (self.max_seconds + 120) // 60} min total):"
+            f"{len(self.specs)} runs : "
+            f"~{len(self.specs) * (self.max_seconds + 120) // 60} min total ; "
+            f" max gpu memory {gib(max_gpu)} GiB ; "
+            f" max cpu memory {gib(max_cpu)} GiB ; "
         )
-        for spec in self.specs:
-            spec.describe()
 
         for i, spec in enumerate(self.specs, 1):
+            spec.describe()
             print(f"\n[{i}/{len(self.specs)}]")
             result = BenchmarkRun(
                 spec,
