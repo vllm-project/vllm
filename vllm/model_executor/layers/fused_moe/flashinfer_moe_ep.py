@@ -352,7 +352,7 @@ class _FlashInferMoeEpApi:
         except ImportError as err:
             raise RuntimeError(
                 "FlashInfer MoE-EP requires the public API shipped with "
-                "FlashInfer 0.7.2 or newer"
+                "FlashInfer 0.7.3 or newer"
             ) from err
         try:
             from flashinfer.moe_ep import (
