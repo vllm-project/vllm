@@ -21,7 +21,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
@@ -432,13 +431,7 @@ def derive_canonical_mappings(
 
     mappings: dict[str, CanonicalPageMapping] = {}
     for kv_cache_group in kv_cache_config.kv_cache_groups:
-        group_kv_cache_spec = kv_cache_group.kv_cache_spec
-        if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
-            per_layer_specs = group_kv_cache_spec.kv_cache_specs
-        else:
-            per_layer_specs = {}
-        for layer_name in kv_cache_group.layer_names:
-            spec = per_layer_specs.get(layer_name, group_kv_cache_spec)
+        for layer_name, spec in kv_cache_group.kv_cache_specs.items():
             per_rank: list[CanonicalPageMapping] = []
             for rank in range(group_size):
                 mapping = _layer_mapping(

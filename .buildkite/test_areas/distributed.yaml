@@ -658,6 +658,7 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
+    - pytest -v -s tests/distributed/test_pp_cudagraph.py::test_pp_cudagraph_mode_differs_across_stages
   mirror:
     amd:
       automatic_shard: true
@@ -875,7 +876,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py
   commands:
-  - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
   mirror:
     amd:
       automatic_shard: true

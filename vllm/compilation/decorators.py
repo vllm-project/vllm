@@ -512,7 +512,8 @@ def _support_torch_compile(
                 else:
                     raise ValueError(
                         f"Unsupported dynamic dimensions {dims} "
-                        f"for argument {k} with type {type(arg)}."
+                        f"for argument {k} with type {type(arg)}. Check the type "
+                        f"hint of {k} in {type(mod).__name__}.forward."
                     )
 
         if mark_unbacked_dims:
