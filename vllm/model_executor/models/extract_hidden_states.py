@@ -32,10 +32,11 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiddenStateCacheSpec,
-    KVCacheSpec,
+    KVCacheLayerConfig,
     is_quantized_kv_cache,
 )
 
@@ -303,14 +304,15 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # Re-read block_size: hybrid models may bump it after __init__.
-        return HiddenStateCacheSpec(
+        spec = HiddenStateCacheSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
         )
+        return FullAttentionManager.layer_config(spec)
 
 
 ############ ExtractHiddenStatesModel definition ##########
