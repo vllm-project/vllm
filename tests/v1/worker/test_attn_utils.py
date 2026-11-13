@@ -1020,6 +1020,22 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
     caches = allocate_hisparse_kv_caches(
         config, torch.device("cpu"), KVCacheLayout.BLNHC, [2, 2, 2], host_pool
     )
+
+    def make_handle():
+        # Exercise the real bind methods on CPU without starting GPU streams.
+        runtime = object.__new__(HiSparseRuntime)
+        runtime.row_width = 8
+        runtime.kv_dtype = torch.bfloat16
+        runtime.backend = CUDAHiSparseBackend()
+        runtime.is_group_leader = True
+        runtime.index_group = SimpleNamespace(
+            followers=[],
+            device_global_indices=torch.full((1, 2), -1),
+            lru_slots=torch.arange(2),
+            swap_stats=torch.zeros(2),
+        )
+        return HiSparseCacheHandle(runtime)
+
     forward_context = {}
     expected_rows = []
     for index, name in enumerate(names):
@@ -1030,16 +1046,14 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
         ).to(torch.bfloat16)
         caches[name].copy_(tagged_rows.transpose(1, 2))
         expected_rows.append(tagged_rows.view(6, 8))
-        # Binding itself is CPU-capable. Leave CUDA streams, events and LRU
-        # execution state uninitialized: this test does not execute offloading.
-        runtime = object.__new__(HiSparseRuntime)
-        runtime.row_width = 8
-        runtime.kv_dtype = torch.bfloat16
-        runtime.backend = CUDAHiSparseBackend()
         forward_context[name] = SimpleNamespace(
-            hisparse_cache=HiSparseCacheHandle(runtime),
+            hisparse_cache=make_handle(),
             is_draft_layer=index == 1,
         )
+    reader = make_handle()
+    forward_context["reader"] = SimpleNamespace(
+        kv_sharing_target_layer_name=names[1], hisparse_cache=reader
+    )
     block_tables = SimpleNamespace(
         input_block_tables=[torch.tensor([[1, 2]], dtype=torch.int32)] * 3,
         slot_mappings=[torch.arange(2, dtype=torch.int64)] * 3,
@@ -1053,12 +1067,20 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
         host_pool=host_pool,
     )
 
-    assert len(handles) == 2
-    residency = handles[0].residency
+    owners = [forward_context[name].hisparse_cache for name in names]
+    assert set(handles) == {*owners, reader}
+    owner = owners[1]
+    assert reader.runtime.host_cache.data_ptr() == owner.runtime.host_cache.data_ptr()
+    torch.testing.assert_close(reader.runtime.host_cache, expected_rows[1])
+    assert reader.view is not None and owner.view is not None
+    assert reader.view.cache.data_ptr() == owner.view.cache.data_ptr()
+    assert reader.runtime.hot.cache.data_ptr() == owner.runtime.hot.cache.data_ptr()
+    assert reader.runtime.index_group.lru_slots is owner.runtime.index_group.lru_slots
+    residency = owners[0].residency
     assert isinstance(residency, torch.Tensor)
     assert residency.shape == (1, 1, 2)
     assert torch.count_nonzero(residency).item() == 0
-    for index, (name, handle) in enumerate(zip(names, handles)):
+    for index, (name, handle) in enumerate(zip(names, owners, strict=True)):
         assert handle.draft_layer == (index == 1)
         assert caches[name].shape == (3, 2, 2, 4)
         assert handle.runtime.host_cache.shape == (6, 8)

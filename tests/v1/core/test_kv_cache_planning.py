@@ -233,6 +233,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
     layer_stride,
     indexer_block_size,
 ):
+    from vllm.v1.hisparse.binding import resolve_hisparse_specs
     from vllm.v1.kv_cache_interface import SparseFullAttentionSpec
 
     monkeypatch.setattr(
@@ -333,6 +334,18 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
             kv_connector_extra_config={"host_pool_gib": 1 / 1024},
         ),
     )
+
+    # The worker derives resident/hot specs before EngineCore selects a layout.
+    worker_config = copy.copy(config)
+    worker_config.cache_config = CacheConfig(mamba_cache_mode="none")
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda _: [16])
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: backend)
+        for name in source_names | indexer_names
+    }
+    layer_configs = resolve_hisparse_specs(worker_config, layer_configs, layers)
+    assert worker_config.cache_config.kv_cache_layout is None
+    assert all(f"{name}.hisparse_hot" in layer_configs for name in source_names)
 
     groups = get_kv_cache_groups(config, layer_configs)
     # The shared pool is sized by a main-K/V page (2048 B, or 1024 B for FP8).

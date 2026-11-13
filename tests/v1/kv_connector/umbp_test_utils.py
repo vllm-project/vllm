@@ -1,12 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU byte-copy runtime for UMBP connector contract tests."""
+"""Shared fixtures for UMBP connector tests.
 
+Configs, request and scheduler-output builders, fake runtime handles, a CPU
+byte-copy runtime, and a `umbp_standalone_server` launcher.
+"""
+
+import contextlib
 import ctypes
 import multiprocessing as mp
+import os
+import signal
+import subprocess
 import threading
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -16,8 +26,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVLayoutDescriptor,
     RankTopology,
+    StoreEventResult,
     TransferJobState,
     TransferJobStatus,
+    UMBPConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.base import (
     IUMBPRuntime,
@@ -34,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
 
 
 class _EmbeddedStore:
@@ -240,6 +253,47 @@ def mori_has_umbp() -> bool:
     return True
 
 
+@dataclass
+class StandaloneServer:
+    address: str
+    process: subprocess.Popen
+
+    def kill(self) -> None:
+        self.process.kill()
+        self.process.wait(10)
+
+
+@contextlib.contextmanager
+def standalone_server(
+    log_dir: Path, socket_dir: str, capacity_bytes: int
+) -> Iterator[StandaloneServer]:
+    """Run a `umbp_standalone_server` with a DRAM pool of `capacity_bytes`."""
+    import mori
+
+    binary = Path(mori.__file__).with_name("umbp_standalone_server")
+    assert binary.is_file(), f"MORI was built without UMBP: no {binary}"
+    address = f"unix://{socket_dir}/umbp.grpc.sock"
+    env = dict(
+        os.environ,
+        UMBP_STANDALONE_ADDRESS=address,
+        UMBP_DRAM_CAPACITY=str(capacity_bytes),
+    )
+    with open(log_dir / "server.log", "w") as log:
+        process = subprocess.Popen(
+            [binary], env=env, stdout=log, stderr=subprocess.STDOUT
+        )
+        try:
+            yield StandaloneServer(address, process)
+        finally:
+            process.send_signal(signal.SIGCONT)
+            process.terminate()
+            try:
+                process.wait(10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(10)
+
+
 def _report(errors, target: Callable, *args) -> None:
     try:
         target(*args)
@@ -399,6 +453,30 @@ def make_scheduler_output(
         ),
         num_scheduled_tokens=dict(scheduled_tokens or {}),
         kv_connector_block_state=block_state,
+    )
+
+
+def complete_store(
+    scheduler,
+    event_id: int,
+    workers: int = 1,
+    failed: Iterable[tuple[int, bytes]] = (),
+) -> None:
+    """Report store event `event_id` done by `workers` workers.
+
+    Args:
+        scheduler: The `UMBPStoreConnectorScheduler` that planned the store.
+        event_id: The `store_event` of the step's connector metadata.
+        workers: How many workers report the event in this output.
+        failed: `(group_id, block_hash)` objects that failed to store.
+
+    """
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                store_events={event_id: StoreEventResult(workers, set(failed))}
+            )
+        )
     )
 
 
