@@ -723,8 +723,19 @@ class HiSparseRuntime:
         num_blocks: int,
         block_size: int,
         block_table: torch.Tensor,
+        owner: HiSparseRuntime | None = None,
     ) -> None:
-        """Bind this runtime's strided view into the shared GPU HMA slab."""
+        """Bind this runtime's strided view into the shared GPU HMA slab.
+
+        A cross-layer KV-sharing layer binds its target's hot rows and passes
+        the target as `owner`: both then track the rows in the owner's slot map.
+        """
+        if owner is not None:
+            assert self.is_group_leader and not self.index_group.followers
+            group, owner_group = self.index_group, owner.index_group
+            group.device_global_indices = owner_group.device_global_indices
+            group.lru_slots = owner_group.lru_slots
+            group.swap_stats = owner_group.swap_stats
         self.hot = PagedCacheView.bind(
             raw_tensor,
             dtype=self.kv_dtype,
