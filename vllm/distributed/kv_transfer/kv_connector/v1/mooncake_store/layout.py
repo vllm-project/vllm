@@ -6,8 +6,8 @@
 """Store keys and tensor layouts for MooncakeStoreConnector."""
 
 import hashlib
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import NamedTuple
 
@@ -18,7 +18,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     derive_mamba_conv_split,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -194,41 +193,53 @@ def split_layer_range(
 
 
 def layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> int:
-    """Index of the range holding `layer`. Layers past the last range (e.g. a
-    draft model's on the last PP stage) belong to the last range."""
-    if layer >= layer_ranges[-1][1]:
-        return len(layer_ranges) - 1
+    """Index of the range holding `layer`."""
     for index, (start, end) in enumerate(layer_ranges):
         if start <= layer < end:
             return index
     raise ValueError(f"Layer {layer} is not in the Store layer ranges {layer_ranges}")
 
 
-def _tensor_ranges(
-    layer_ranges: Sequence[tuple[int, int]] | None,
+@dataclass(frozen=True)
+class LayerRangeObjects:
+    """A cache group's blocks stored as one object per layer range.
+
+    `metadata[i]` keys the object of range `i`. `layers` maps each layer name
+    to the index of the range whose object holds it and to its position in the
+    Store object order, so every KV cache layout serializes an object the same
+    way.
+    """
+
+    metadata: tuple[KeyMetadata, ...]
+    layers: Mapping[str, tuple[int, int]]
+
+
+def _object_order(
+    range_objects: LayerRangeObjects | None,
     num_caches: int,
     layer_names: Sequence[str] | None,
-) -> list[int] | None:
-    """Layer range index of each KV cache tensor, or None without ranges."""
-    if layer_ranges is None:
+) -> list[tuple[int, int]] | None:
+    """(Cache index, range index) of each KV cache tensor in Store object
+    order, or None without layer ranges. The views of one layer keep their
+    order."""
+    if range_objects is None:
         return None
     if layer_names is None or len(layer_names) != num_caches:
         raise ValueError("Store layer ranges need the layer name of each KV cache")
-    ranges = [
-        layer_range_index(layer_ranges, extract_layer_index(name))
-        for name in layer_names
-    ]
-    if len(set(ranges)) != len(layer_ranges):
-        raise ValueError(f"No KV cache for some Store layer ranges {layer_ranges}")
-    return ranges
+    slots = [range_objects.layers[name] for name in layer_names]
+    if len({range_index for range_index, _ in slots}) != len(range_objects.metadata):
+        raise ValueError("No KV cache for some Store layer ranges")
+    order = sorted(range(num_caches), key=lambda index: slots[index])
+    return [(index, slots[index][0]) for index in order]
 
 
 class RankLocalStoreLayout(StoreLayout):
     """Historical rank-local Store payload layout.
 
-    With `layer_ranges`, each block is stored as one object per layer range
-    instead of one object holding all of this rank's layers. Instances whose
-    PP stages split the layers at the same points then share those objects.
+    With `range_objects`, each block is stored as one object per layer range
+    instead of one object holding all of this rank's layers. An object holds
+    its layers' bytes in Store object order whatever the KV cache layout, so
+    instances whose PP stages split the layers at the same points share it.
     """
 
     def __init__(
@@ -236,17 +247,15 @@ class RankLocalStoreLayout(StoreLayout):
         metadata: KeyMetadata,
         block_size: int,
         hash_block_size: int,
-        layer_ranges: Sequence[tuple[int, int]] | None = None,
+        range_objects: LayerRangeObjects | None = None,
     ) -> None:
         super().__init__(metadata, block_size, hash_block_size)
+        self.range_objects = range_objects
         # One store shard per layer range, or a single shard for all layers.
         self._shard_metadata = (
-            [replace(metadata, layer_range=r) for r in layer_ranges]
-            if layer_ranges
-            else [metadata]
+            list(range_objects.metadata) if range_objects is not None else [metadata]
         )
         self._key_prefixes = [PoolKey.build_prefix(m) for m in self._shard_metadata]
-        self.layer_ranges = tuple(layer_ranges) if layer_ranges else None
         # Regions each layer-range shard stores, in register order.
         self._shard_regions: list[np.ndarray] | None = None
         self.kv_caches_base_addr: list[int] = []
@@ -294,9 +303,12 @@ class RankLocalStoreLayout(StoreLayout):
     ) -> None:
         """Build descriptors from the local KV cache tensors. With layer
         ranges, every region must hold layers of a single range, and a range's
-        object is its layers' bytes in layer order whatever the buffer layout;
-        in a block-outermost buffer, adjacent layers share one segment."""
-        tensor_ranges = _tensor_ranges(self.layer_ranges, len(kv_caches), layer_names)
+        object is its layers' bytes in Store object order whatever the buffer
+        layout; in a block-outermost buffer, adjacent layers share one
+        segment."""
+        order = _object_order(self.range_objects, len(kv_caches), layer_names)
+        if order is None:
+            order = [(index, 0) for index in range(len(kv_caches))]
         # Map each region's base address to its entry in the parallel lists.
         region_index: dict[int, int] = {}
         # Last segment of each (buffer address, layer range) in a
@@ -338,10 +350,11 @@ class RankLocalStoreLayout(StoreLayout):
             block_lens.append(length)
             region_ranges.append({range_index})
 
-        for cache_index, cache in enumerate(kv_caches):
-            if tensor_ranges is not None:
-                range_index = tensor_ranges[cache_index]
-            cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
+        for cache_index, cache_range in order:
+            range_index = cache_range
+            cache, block_compact = group_compact_kernel_blocks(
+                kv_caches[cache_index], num_blocks
+            )
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             storage_len = storage.nbytes()
@@ -363,7 +376,7 @@ class RankLocalStoreLayout(StoreLayout):
                         head_cache[0].numel() * head_cache.element_size(),
                     )
             elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
-                if tensor_ranges is not None:
+                if self.range_objects is not None:
                     add_layer_segment(
                         storage_addr,
                         storage_len // num_blocks,
@@ -390,13 +403,12 @@ class RankLocalStoreLayout(StoreLayout):
         self.kv_caches_base_addr = base_addrs
         self.block_stride = block_strides
         self.block_len = block_lens
-        if self.layer_ranges is not None:
-            shard_regions: list[list[int]] = [[] for _ in self.layer_ranges]
+        if self.range_objects is not None:
+            shard_regions: list[list[int]] = [[] for _ in self._shard_metadata]
             for region, ranges in enumerate(region_ranges):
                 if len(ranges) != 1:
                     raise ValueError(
-                        "A KV cache region holds layers of several Store layer "
-                        f"ranges {self.layer_ranges}"
+                        "A KV cache region holds layers of several Store layer ranges"
                     )
                 shard_regions[ranges.pop()].append(region)
             self._shard_regions = [
@@ -473,7 +485,7 @@ class TPShardedStoreLayout(StoreLayout):
         store_tp_size: int,
         tp_rank: int,
         store_chunk_size: int | None = None,
-        layer_ranges: Sequence[tuple[int, int]] | None = None,
+        range_objects: LayerRangeObjects | None = None,
     ) -> None:
         super().__init__(metadata, block_size, hash_block_size)
         self.store_chunk_size = store_chunk_size or block_size
@@ -485,11 +497,9 @@ class TPShardedStoreLayout(StoreLayout):
         # With layer ranges, a Store shard is a (layer range, head shard) pair
         # numbered `range * store_tp_size + head shard`; a local slot numbers
         # the pairs this rank owns as `range * shards_per_rank + local shard`.
-        self.layer_ranges = tuple(layer_ranges) if layer_ranges else None
+        self.range_objects = range_objects
         self._range_metadata = (
-            [replace(metadata, layer_range=r) for r in self.layer_ranges]
-            if self.layer_ranges
-            else [metadata]
+            list(range_objects.metadata) if range_objects is not None else [metadata]
         )
         self.store_shard_ids = tuple(
             range_index * store_tp_size + shard
@@ -657,7 +667,7 @@ class AttentionStoreLayout(TPShardedStoreLayout):
         tp_rank: int,
         layer_specs: Sequence[AttentionSpec],
         store_chunk_size: int | None = None,
-        layer_ranges: Sequence[tuple[int, int]] | None = None,
+        range_objects: LayerRangeObjects | None = None,
     ) -> None:
         super().__init__(
             metadata,
@@ -667,7 +677,7 @@ class AttentionStoreLayout(TPShardedStoreLayout):
             store_tp_size,
             tp_rank,
             store_chunk_size,
-            layer_ranges,
+            range_objects,
         )
         self.layer_specs = tuple(layer_specs)
         self.chunks_per_block = block_size // self.store_chunk_size
@@ -797,10 +807,13 @@ class AttentionStoreLayout(TPShardedStoreLayout):
         layer_names: Sequence[str] | None = None,
     ) -> None:
         """Build descriptors from the local KV cache tensors, one per layer.
-        With layer ranges, a tensor's segments go to its range's slots."""
-        tensor_ranges = _tensor_ranges(
-            self.layer_ranges, len(kv_caches), layer_names
-        ) or [0] * len(kv_caches)
+        With layer ranges, a tensor's segments go to its range's slots in
+        Store object order."""
+        if len(kv_caches) != len(self.layer_specs):
+            raise ValueError("Store layout needs one KV cache tensor per layer spec")
+        order = _object_order(self.range_objects, len(kv_caches), layer_names)
+        if order is None:
+            order = [(index, 0) for index in range(len(kv_caches))]
         templates: list[list[tuple[list[int], list[int], list[int]]]] = [
             [
                 ([], [], [])
@@ -808,9 +821,8 @@ class AttentionStoreLayout(TPShardedStoreLayout):
             ]
             for _ in range(self.chunks_per_block)
         ]
-        for cache, spec, range_index in zip(
-            kv_caches, self.layer_specs, tensor_ranges, strict=True
-        ):
+        for cache_index, range_index in order:
+            cache, spec = kv_caches[cache_index], self.layer_specs[cache_index]
             first_slot = range_index * self.shards_per_rank
             strides = self._cache_strides(cache, spec, num_blocks)
             for chunk_index, chunk_templates in enumerate(templates):

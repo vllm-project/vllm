@@ -3798,6 +3798,94 @@ def test_pp_sizes_lists_a_custom_partition(tmp_path, monkeypatch):
         keys(2, 0, [1, 2])
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("store_config", "layout_cls"),
+    [({}, RankLocalStoreLayout), ({"store_tp_size": 2}, HeadMajorStoreLayout)],
+)
+def test_pp_sizes_store_draft_model_layers_with_the_last_range(
+    tmp_path, monkeypatch, store_config, layout_cls
+):
+    """A draft model runs whole on the last PP stage and numbers its layers
+    from 0. With pp_sizes its layers belong to the last layer range at every
+    PP size, and with Store TP that range's keys tell instances with and
+    without the draft model apart."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        output[:] = [local] * len(output)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    draft = [f"draft_model.model.layers.{i}.self_attn.attn" for i in range(2)]
+
+    def layout(pp_size: int, rank: int, with_draft: bool = True):
+        names = [
+            f"model.layers.{i}.self_attn.attn"
+            for i in range(rank * 2 // pp_size, (rank + 1) * 2 // pp_size)
+        ]
+        if with_draft and rank == pp_size - 1:
+            names += draft
+        monkeypatch.setattr(
+            worker,
+            "_draft_layer_names",
+            lambda _: frozenset(draft if with_draft else ()),
+        )
+        kv_config = KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[],
+            kv_cache_groups=[make_kv_cache_group(names, spec)],
+            prefix_cache_retention_interval=0,
+        )
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                rank=rank,
+                pipeline_parallel_size=pp_size,
+                extra_config={"pp_sizes": [1, 2], **store_config},
+            ),
+            kv_config,
+        )
+        store_layout = w.token_dbs[0].store_layout
+        assert type(store_layout) is layout_cls
+        return store_layout
+
+    def keys(store_layout) -> list[str]:
+        return [
+            store_layout.key_for(shard, BlockHash(b"h"))
+            for shard in store_layout.local_shard_ids
+        ]
+
+    pp1 = layout(1, 0)
+    stages = [layout(2, rank) for rank in (0, 1)]
+
+    last = len(pp1.range_objects.metadata) - 1
+    assert {
+        name for name, (r, _) in pp1.range_objects.layers.items() if r == last
+    } == set(stages[1].range_objects.layers)
+    assert keys(pp1) == keys(stages[0]) + keys(stages[1])
+    if store_config:
+        with_draft, without_draft = keys(pp1), keys(layout(1, 0, with_draft=False))
+        first_range = len(keys(stages[0]))
+        assert without_draft[:first_range] == with_draft[:first_range]
+        assert set(without_draft[first_range:]).isdisjoint(with_draft[first_range:])
+
+
 @pytest.mark.parametrize("tp_size", [2, 4])
 @pytest.mark.parametrize("missing_group", [None, 0, 1])
 def test_hybrid_lookup_uses_each_pp_stage_schema(

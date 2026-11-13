@@ -6,6 +6,7 @@ import ctypes
 import os
 import random
 from collections.abc import Iterable
+from dataclasses import replace
 
 import pytest
 import torch
@@ -17,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     AttentionStoreLayout,
     HeadMajorStoreLayout,
     KeyMetadata,
+    LayerRangeObjects,
     MambaStoreLayout,
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
@@ -382,23 +384,38 @@ def _layer_names(layers: Iterable[int]) -> list[str]:
     return [f"model.layers.{layer}.self_attn.attn" for layer in layers]
 
 
+def _range_objects(
+    metadata: KeyMetadata,
+    layer_ranges: tuple[tuple[int, int], ...],
+    layer_range_of: dict[str, int],
+) -> LayerRangeObjects:
+    """Objects keyed by `layer_ranges`, holding their layers in the order of
+    `layer_range_of`."""
+    return LayerRangeObjects(
+        tuple(replace(metadata, layer_range=r) for r in layer_ranges),
+        {
+            name: (range_index, position)
+            for position, (name, range_index) in enumerate(layer_range_of.items())
+        },
+    )
+
+
 def test_rank_local_layer_ranges_store_one_object_per_range():
     """A block is one object per layer range, holding only that range's
-    layers under a key naming the range. A layer past the last range, like a
-    draft model's on the last PP stage, belongs to the last range."""
+    layers under a key naming the range."""
     num_blocks = 3
     caches = [
         torch.zeros(num_blocks, 1, BLOCK_SIZE, 8, dtype=torch.uint8) for _ in range(5)
     ]
+    metadata = KeyMetadata("test-model", 0, 0, 0, 0)
+    names = [*_layer_names(range(4)), "draft_model.model.layers.0.self_attn.attn"]
     layout = RankLocalStoreLayout(
-        KeyMetadata("test-model", 0, 0, 0, 0),
+        metadata,
         BLOCK_SIZE,
         BLOCK_SIZE,
-        layer_ranges=((0, 2), (2, 4)),
+        _range_objects(metadata, ((0, 2), (2, 4)), dict(zip(names, [0, 0, 1, 1, 1]))),
     )
-    layout.register_kv_caches(
-        caches, num_blocks, layer_names=_layer_names([0, 1, 2, 3, 9])
-    )
+    layout.register_kv_caches(caches, num_blocks, layer_names=names)
 
     assert layout.local_shard_ids == (0, 1)
     assert "@layers:0-2@group:0@" in layout.key_for(0, BlockHash(b"h"))
@@ -455,12 +472,15 @@ def test_rank_local_layer_ranges_split_a_block_outermost_buffer(
         views.append((outer, inner))
 
     def objects(caches: list[torch.Tensor]) -> list[list[bytes]]:
+        metadata = KeyMetadata("test-model", 0, 0, 0, 0)
+        names = _layer_names(range(num_layers))
         layout = RankLocalStoreLayout(
-            KeyMetadata("test-model", 0, 0, 0, 0), 16, 16, layer_ranges=((0, 2), (2, 4))
+            metadata,
+            16,
+            16,
+            _range_objects(metadata, ((0, 2), (2, 4)), dict(zip(names, [0, 0, 1, 1]))),
         )
-        layout.register_kv_caches(
-            caches, num_blocks, layer_names=_layer_names(range(num_layers))
-        )
+        layout.register_kv_caches(caches, num_blocks, layer_names=names)
         addrs, sizes, _ = layout.prepare_values([(0, 16), (0, 16)], [1], [0, 1])
         return [
             [ctypes.string_at(a, s) for a, s in zip(row_addrs, row_sizes)]
@@ -641,19 +661,21 @@ def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes():
                 + layer_index * 300
             )
             written[layer_index] = layer
+        metadata = KeyMetadata("test-model", 0, 0, 0, pp_rank)
+        names = _layer_names(range(*layer_range))
         layout = HeadMajorStoreLayout(
-            KeyMetadata("test-model", 0, 0, 0, pp_rank),
+            metadata,
             block_size,
             block_size,
             local_tp_size=1,
             store_tp_size=2,
             tp_rank=0,
             layer_specs=_attention_specs(num_layers, block_size, 4),
-            layer_ranges=(layer_range,),
+            range_objects=_range_objects(
+                metadata, (layer_range,), dict.fromkeys(names, 0)
+            ),
         )
-        layout.register_kv_caches(
-            layers, 1, layer_names=_layer_names(range(*layer_range))
-        )
+        layout.register_kv_caches(layers, 1, layer_names=names)
         shard_ids = layout.local_shard_ids
         addrs, sizes, _ = layout.prepare_values(
             [(0, block_size)] * len(shard_ids), [0], shard_ids
@@ -671,17 +693,21 @@ def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes():
             KVCacheLayout.LBHNC, 3, 1, 2, block_size, 4
         )
         physical.zero_()
+        metadata = KeyMetadata("test-model", tp_rank, 0, 0, 0)
+        names = _layer_names(range(3))
         layout = HeadMajorStoreLayout(
-            KeyMetadata("test-model", tp_rank, 0, 0, 0),
+            metadata,
             block_size,
             block_size,
             local_tp_size=2,
             store_tp_size=2,
             tp_rank=tp_rank,
             layer_specs=_attention_specs(3, block_size, 2),
-            layer_ranges=layer_ranges,
+            range_objects=_range_objects(
+                metadata, layer_ranges, dict(zip(names, [0, 1, 1]))
+            ),
         )
-        layout.register_kv_caches(layers, 1, layer_names=_layer_names(range(3)))
+        layout.register_kv_caches(layers, 1, layer_names=names)
         shard_ids = layout.local_shard_ids
         addrs, sizes, _ = layout.prepare_values(
             [(0, block_size)] * len(shard_ids), [0], shard_ids
