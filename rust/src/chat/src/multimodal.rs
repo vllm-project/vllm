@@ -843,6 +843,62 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
+    /// Prepare raw media placed after already-expanded `features` and append
+    /// its features.
+    ///
+    /// Only the prompt tokens after the last range in `features` are expanded,
+    /// so the runs before it are left as they are, like Python's `/generate`
+    /// with both `features` and `content_parts`. `features` must lie within
+    /// `prompt_token_ids`, as [`Self::prepare_preprocessed`] checks.
+    pub(crate) async fn append_multimodal(
+        &self,
+        features: &mut MmFeatures,
+        media_parts: Vec<MediaContentPart>,
+        prompt_token_ids: &mut Vec<u32>,
+        model_dtype: ModelDtype,
+        max_model_len: Option<usize>,
+    ) -> Result<()> {
+        let start = features
+            .iter()
+            .map(|feature| feature.mm_position.offset + feature.mm_position.length)
+            .max()
+            .unwrap_or(0);
+        // Item limits count every item of the prompt, not each input kind alone.
+        self.validate_modality_limits(
+            features
+                .iter()
+                .map(|feature| feature.modality)
+                .chain(media_parts.iter().filter_map(media_part_limit_modality)),
+        )?;
+
+        let mut tail = prompt_token_ids.split_off(start);
+        // The expanded prefix takes up context the new media cannot use.
+        let prepared = self
+            .prepare_multimodal(
+                media_parts,
+                &mut tail,
+                model_dtype,
+                max_model_len.map(|limit| limit.saturating_sub(start)),
+            )
+            .await;
+        prompt_token_ids.append(&mut tail);
+        let appended = prepared.map_err(|source| match start {
+            0 => source,
+            offset => Error::MediaAfterPreprocessed {
+                offset,
+                source: Box::new(source),
+            },
+        })?;
+
+        preprocessed::validate_batching(features.iter().chain(&appended))?;
+
+        features.extend(appended.into_iter().map(|mut feature| {
+            feature.mm_position.offset += start;
+            feature
+        }));
+        Ok(())
+    }
+
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
     ///
@@ -1456,6 +1512,17 @@ mod tests {
         ));
     }
 
+    /// A 640x480 image, which keeps a 30x40 patch grid (300 tokens inside
+    /// `<img>`) on Nemotron-H Omni when the token budget allows.
+    fn png_640x480() -> MediaContentPart {
+        MediaContentPart::ImageUrl {
+            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
+            detail: None,
+            uuid: None,
+            max_long_side_pixel: None,
+        }
+    }
+
     #[tokio::test]
     async fn nemotron_image_grid_fits_the_vision_token_budget() {
         use vllm_engine_core_client::protocol::multimodal::MmKwargValue;
@@ -1466,16 +1533,15 @@ mod tests {
             info: &MultimodalModelInfo,
             max_model_len: Option<usize>,
         ) -> (usize, usize) {
-            let media = MediaContentPart::ImageUrl {
-                url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgAQAAAAAdquFJAAAAPUlEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgzwCX4AABS8wbSgAAAABJRU5ErkJggg==".to_string(),
-                detail: None,
-                uuid: None,
-                max_long_side_pixel: None,
-            };
             let mut tokens = vec![11; 100];
             tokens.push(1018);
             let features = info
-                .prepare_multimodal(vec![media], &mut tokens, ModelDtype::Float32, max_model_len)
+                .prepare_multimodal(
+                    vec![png_640x480()],
+                    &mut tokens,
+                    ModelDtype::Float32,
+                    max_model_len,
+                )
                 .await
                 .unwrap();
             let feature = &features[0];
@@ -1499,6 +1565,77 @@ mod tests {
         // Python's tiler does, and the length check refuses the prompt
         // downstream.
         assert_eq!(prepare(&info, Some(100)).await, (254, 1008));
+    }
+
+    /// Prepare a full-size 640x480 image after 100 text tokens, then append
+    /// one more image placeholder: the prompt a later turn sends with the
+    /// first image as preprocessed features.
+    async fn nemotron_prompt_with_preprocessed_image(
+        info: &MultimodalModelInfo,
+    ) -> (Vec<u32>, MmFeatures) {
+        let mut tokens = vec![11; 100];
+        tokens.push(1018);
+        let features = info
+            .prepare_multimodal(vec![png_640x480()], &mut tokens, ModelDtype::Float32, None)
+            .await
+            .unwrap();
+        assert_eq!(tokens.len(), 402);
+        tokens.push(1018);
+        (tokens, features)
+    }
+
+    #[tokio::test]
+    async fn append_multimodal_budgets_new_media_after_the_preprocessed_prefix() {
+        let info = nemotron_omni_info();
+        let (mut tokens, mut features) = nemotron_prompt_with_preprocessed_image(&info).await;
+
+        // 303 tokens left after the 402-token prefix, one short of the full
+        // grid plus the tiler's reserve: the new image shrinks to 30x38.
+        info.append_multimodal(
+            &mut features,
+            vec![png_640x480()],
+            &mut tokens,
+            ModelDtype::Float32,
+            Some(402 + 303),
+        )
+        .await
+        .unwrap();
+
+        let positions: Vec<_> = features
+            .iter()
+            .map(|feature| (feature.mm_position.offset, feature.mm_position.length))
+            .collect();
+        assert_eq!(positions, [(100, 302), (402, 287)]);
+        assert_eq!(tokens.len(), 402 + 287);
+    }
+
+    #[tokio::test]
+    async fn append_multimodal_rejects_media_batched_unlike_the_preprocessed_features() {
+        use vllm_engine_core_client::protocol::multimodal::MmField;
+
+        let info = nemotron_omni_info();
+        let (mut tokens, mut features) = nemotron_prompt_with_preprocessed_image(&info).await;
+        let data = features[0].data.as_mut().unwrap();
+        match &mut data.get_mut("pixel_values").unwrap().field {
+            MmField::Flat(field) => field.dim = 1,
+            other => panic!("unexpected pixel_values batching: {other:?}"),
+        }
+
+        let error = info
+            .append_multimodal(
+                &mut features,
+                vec![png_640x480()],
+                &mut tokens,
+                ModelDtype::Float32,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_report_string(),
+            r#"invalid inline multimodal features: incompatible batching for image field "pixel_values""#
+        );
     }
 
     #[test]

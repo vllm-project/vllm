@@ -20,6 +20,7 @@ use futures::{StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
 use tracing::{error, info};
 use tracing_futures::Instrument as _;
+use vllm_chat::multimodal::MultimodalInput;
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_llm::FinishReason;
 use vllm_text::{
@@ -61,53 +62,31 @@ pub async fn generate(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
-    if body.content_parts.is_some() && body.features.is_some() {
-        return ApiError::invalid_request(
-            "content_parts and features are mutually exclusive.",
-            Some("features"),
-        )
-        .into_response();
-    }
-    let mm_features = if let Some(parts) = body.content_parts.take() {
-        match state
-            .chat
-            .prepare_media(parts, &mut body.token_ids)
-            .instrument(vllm_chat::mm_request_span(&request_context.request_id))
-            .await
-        {
-            Ok(features) => features,
-            Err(e) => {
-                return ApiError::invalid_request(
-                    format!("failed to resolve content_parts: {}", e.as_report()),
-                    Some("content_parts"),
-                )
-                .into_response();
-            }
-        }
-    } else if let Some(features) = body.features.take() {
-        let features = match features.into_prepared() {
+    let mut media = MultimodalInput::default();
+    if let Some(features) = body.features.take() {
+        media.preprocessed = match features.into_prepared() {
             Ok(features) => features,
             Err(error) => return error.into_response(),
         };
-        match state
-            .chat
-            .prepare_media(
-                vllm_chat::multimodal::MultimodalInput::Preprocessed(features),
-                &mut body.token_ids,
-            )
-            .await
-        {
-            Ok(features) => features,
-            Err(e) => {
-                return ApiError::invalid_request(
-                    format!("invalid features: {}", e.as_report()),
-                    Some("features"),
-                )
+    }
+    media.raw = body.content_parts.take().unwrap_or_default();
+    let has_content_parts = !media.raw.is_empty();
+    let mm_features = match state
+        .chat
+        .prepare_media(media, &mut body.token_ids)
+        .instrument(vllm_chat::mm_request_span(&request_context.request_id))
+        .await
+    {
+        Ok(features) => features,
+        Err(e) => {
+            let (context, param) = if has_content_parts {
+                ("failed to resolve content_parts", "content_parts")
+            } else {
+                ("invalid features", "features")
+            };
+            return ApiError::invalid_request(format!("{context}: {}", e.as_report()), Some(param))
                 .into_response();
-            }
         }
-    } else {
-        None
     };
     let mm_placeholders = body
         .return_token_ids

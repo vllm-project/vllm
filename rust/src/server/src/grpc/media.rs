@@ -32,7 +32,7 @@ pub(super) fn from_proto(
         .iter()
         .any(|item| matches!(item.source, Some(pb::media_item::Source::Features(_))))
     {
-        return raw_parts_from_proto(media, video_fps).map(MultimodalInput::Raw);
+        return raw_parts_from_proto(media, video_fps).map(MultimodalInput::from);
     }
     if video_fps.is_some() {
         return Err(Status::invalid_argument(
@@ -60,7 +60,7 @@ pub(super) fn from_proto(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(MultimodalInput::Preprocessed(features))
+    Ok(MultimodalInput::from(features))
 }
 
 fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
@@ -314,9 +314,7 @@ mod tests {
             "https://example.com/clip.mp4".to_owned(),
         ));
         let kwargs = json_to_proto_struct(&serde_json::json!({"video": {"fps": 1}}));
-        let MultimodalInput::Raw(parts) = from_proto(vec![url], kwargs.as_ref()).unwrap() else {
-            unreachable!()
-        };
+        let parts = from_proto(vec![url], kwargs.as_ref()).unwrap().raw;
         expect_test::expect![[r#"
             [
                 VideoUrl {

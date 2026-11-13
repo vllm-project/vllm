@@ -50,6 +50,14 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    #[error(
+        "failed to prepare media after the last preprocessed feature range, ending at offset {offset}"
+    )]
+    MediaAfterPreprocessed {
+        offset: usize,
+        #[source]
+        source: Box<Error>,
+    },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
@@ -140,6 +148,7 @@ impl Error {
             | Self::UnsupportedRequestChatTemplate
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
+            Self::MediaAfterPreprocessed { source, .. } => source.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedContentPart(_)

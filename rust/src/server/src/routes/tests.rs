@@ -1104,39 +1104,6 @@ async fn scale_out_generate_route_can_be_enabled() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn generate_rejects_content_parts_with_features() {
-    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-        b"engine-generate-mm-exclusive",
-        default_stream_output_specs(),
-        Arc::new(FakeChatBackend::new()),
-    )
-    .await;
-    let mut app = build_router_with_gates(
-        Arc::new(AppState::new(vec!["model".to_string()], chat)),
-        RouteGates {
-            scale_out: true,
-            ..RouteGates::default()
-        },
-    );
-
-    let (status, json) = post_json(
-        &mut app,
-        "/inference/v1/generate",
-        json!({
-            "token_ids": [1, 2],
-            "sampling_params": {},
-            "content_parts": [],
-            "features": {"mm_hashes": {}, "mm_placeholders": {}},
-        }),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
-    assert_eq!(json["error"]["param"], "features");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
     const ROUTES: [&str; 7] = [
         "/inference/v1/abort_requests",
@@ -4813,15 +4780,20 @@ fn multimodal_render_app() -> axum::Router {
 }
 
 async fn render_image_chat(mm_payload: Option<&str>) -> axum::body::Bytes {
+    render_chat(
+        json!([
+            {"type": "text", "text": "describe "},
+            {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "image-1"}
+        ]),
+        mm_payload,
+    )
+    .await
+}
+
+async fn render_chat(content: serde_json::Value, mm_payload: Option<&str>) -> axum::body::Bytes {
     let mut body = json!({
         "model": "render-model",
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "describe "},
-                {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "image-1"}
-            ]
-        }],
+        "messages": [{"role": "user", "content": content}],
         "max_completion_tokens": 8
     });
     if let Some(mm_payload) = mm_payload {
@@ -4908,6 +4880,173 @@ async fn render_chat_multimodal_features_can_be_submitted_to_generate_unchanged(
 
     assert_eq!(generate_response.status(), StatusCode::OK);
     engine_task.finish().await;
+}
+
+/// Render a chat with two images, `image-1` then `image-2`.
+async fn render_two_image_chat() -> serde_json::Value {
+    let body = render_chat(
+        json!([
+            {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "image-1"},
+            {"type": "text", "text": "then "},
+            {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "image-2"}
+        ]),
+        None,
+    )
+    .await;
+    serde_json::from_slice(&body).expect("decode render response")
+}
+
+/// The render `features` of only the image at `index`.
+fn render_image_feature(features: &serde_json::Value, index: usize) -> serde_json::Value {
+    json!({
+        "mm_hashes": {"image": [features["mm_hashes"]["image"][index]]},
+        "mm_placeholders": {"image": [features["mm_placeholders"]["image"][index]]},
+        "kwargs_data": {"image": [features["kwargs_data"]["image"][index]]},
+    })
+}
+
+fn multimodal_generate_app(chat: ChatLlm) -> axum::Router {
+    build_router_with_gates(
+        Arc::new(AppState::new(vec!["render-model".to_string()], chat)),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    )
+}
+
+/// An earlier image sent as `features` with a new image in `content_parts`
+/// gives the prompt and placeholders of rendering both images at once: only
+/// the new image's placeholder, after the features range, is expanded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_expands_content_parts_after_features() {
+    let rendered = render_two_image_chat().await;
+    let features = &rendered["features"];
+    let expanded: Vec<u32> =
+        serde_json::from_value(rendered["token_ids"].clone()).expect("decode token IDs");
+    let new_image = &features["mm_placeholders"]["image"][1];
+    let offset = new_image["offset"].as_u64().unwrap() as usize;
+    let length = new_image["length"].as_u64().unwrap() as usize;
+    let mut token_ids = expanded.clone();
+    token_ids.splice(offset..offset + length, [151655]);
+
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-generate-features-with-content-parts",
+        |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
+        move |request| {
+            assert_eq!(
+                decode_prompt_token_ids(request).as_deref(),
+                Some(expanded.as_slice())
+            );
+            let features = request.mm_features.as_ref().expect("multimodal features");
+            let identifiers: Vec<_> =
+                features.iter().map(|feature| feature.identifier.as_str()).collect();
+            assert_eq!(identifiers, ["image-1", "image-2"]);
+            assert!(features.iter().all(|feature| feature.data.is_some()));
+        },
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+    )
+    .await;
+    let (status, json) = post_json(
+        &mut multimodal_generate_app(chat),
+        "/inference/v1/generate",
+        json!({
+            "token_ids": token_ids,
+            "features": render_image_feature(features, 0),
+            "content_parts": [{"type": "image_url", "url": TINY_PNG_DATA_URI, "uuid": "image-2"}],
+            "sampling_params": {},
+            "return_token_ids": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["prompt_token_ids"], rendered["token_ids"]);
+    assert_eq!(json["mm_placeholders"], features["mm_placeholders"]);
+    engine_task.finish().await;
+}
+
+/// A `content_parts` placeholder before the last `features` range is left
+/// unexpanded, so its image finds no placeholder: a 400, as in Python.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_content_parts_before_features() {
+    let rendered = render_two_image_chat().await;
+    let features = &rendered["features"];
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-content-parts-before-features",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+    )
+    .await;
+
+    let (status, json) = post_json(
+        &mut multimodal_generate_app(chat),
+        "/inference/v1/generate",
+        json!({
+            "token_ids": rendered["token_ids"],
+            "features": render_image_feature(features, 1),
+            "content_parts": [{"type": "image_url", "url": TINY_PNG_DATA_URI}],
+            "sampling_params": {},
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["param"], "content_parts");
+    let new_image = &features["mm_placeholders"]["image"][1];
+    let end = new_image["offset"].as_u64().unwrap() + new_image["length"].as_u64().unwrap();
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!(
+            "after the last preprocessed feature range, ending at offset {end}"
+        )),
+        "{message}"
+    );
+    assert!(message.contains("was not found"), "{message}");
+}
+
+/// `--limit-mm-per-prompt` counts the `features` and `content_parts` items of
+/// one prompt together.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_limits_features_and_content_parts_together() {
+    let rendered = render_two_image_chat().await;
+    let features = &rendered["features"];
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-mm-limit-features-content-parts",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
+                vllm_chat::multimodal::MmModality::Image,
+                vllm_chat::multimodal::MmLimitSpec::Count(1),
+            )])),
+        )),
+    )
+    .await;
+
+    let (status, json) = post_json(
+        &mut multimodal_generate_app(chat),
+        "/inference/v1/generate",
+        json!({
+            "token_ids": rendered["token_ids"],
+            "features": render_image_feature(features, 0),
+            "content_parts": [{"type": "image_url", "url": TINY_PNG_DATA_URI}],
+            "sampling_params": {},
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(
+        json["error"]["message"],
+        "failed to resolve content_parts: At most 1 image(s) may be provided in one prompt."
+    );
 }
 
 #[tokio::test]
