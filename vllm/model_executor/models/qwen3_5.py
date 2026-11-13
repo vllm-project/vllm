@@ -58,6 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -74,7 +75,6 @@ from .interfaces import (
     SupportsPP,
     _require_is_multimodal,
 )
-from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from .qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,

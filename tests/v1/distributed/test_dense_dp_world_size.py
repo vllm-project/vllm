@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 from typing import TYPE_CHECKING
 
@@ -7,6 +8,7 @@ import pytest
 import requests
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
+from tests.v1.utils import get_prometheus_metrics
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -113,6 +115,47 @@ def test_dense_dp_world_size():
         )
         response.raise_for_status()
         assert response.json() == {"world_size": TP_SIZE}
+
+
+def test_dense_dp_ranks_follow_dynamic_sd_schedule():
+    """The DP ranks of a dense model draft as their dynamic speculative
+    decoding schedule says instead of falling back to the static K."""
+    model = "vllm-project/tiny-random-LlamaForCausalLM"
+    # The schedule drafts no tokens at any batch size; the static K is 3.
+    speculative_config = {
+        "method": "draft_model",
+        "model": model,
+        "num_speculative_tokens": 3,
+        "num_speculative_tokens_per_batch_size": [[1, 128, 0]],
+    }
+    server_args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "128",
+        "--enforce-eager",
+        "--data-parallel-size",
+        str(DP_SIZE),
+        "--tensor-parallel-size",
+        str(TP_SIZE),
+        "--speculative-config",
+        json.dumps(speculative_config),
+    ]
+
+    with RemoteOpenAIServer(model, server_args) as server:
+        for _ in range(4):
+            response = requests.post(
+                server.url_for("v1/completions"),
+                json={"model": model, "prompt": "Hello", "max_tokens": 8},
+            )
+            response.raise_for_status()
+
+        draft_tokens = get_prometheus_metrics(server)[
+            "vllm:spec_decode_num_draft_tokens_total"
+        ]
+        assert sum(draft_tokens.values()) == 0, draft_tokens
 
 
 @pytest.mark.slow_test

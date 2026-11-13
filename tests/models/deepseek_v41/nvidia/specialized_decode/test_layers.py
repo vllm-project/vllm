@@ -5,8 +5,9 @@ DeepSeek-V4.1-Flash on random weights at TP4 with DSpark, served with
 `decode_backend` `latency_specialized` and `auto`. Unlike
 `test_kernels.py` and `test_numerics.py` next to it, which
 check each path against the op it replaces, this runs the engine: the
-executor and its per-step gates, the CUDA graphs, the recorded metadata builds
-and the weights the executor takes off the layers.
+target's and the DSpark draft's executors and their per-step gates, the CUDA
+graphs, the recorded metadata builds and the weights the executors take off
+the layers.
 
 The layers hold each variant: 0 sliding window only, 1 ratio-2 KV and index
 source, 2 a ratio-2 consumer with an Engram, 3 ratio-1 KV, index and
@@ -14,7 +15,10 @@ candidate source, 4 a ratio-1 index source over 3's candidates. Twelve
 requests decode together once the last prefill is done, finish one by one
 and leave the last on its own: FULL decode graphs of 12 down to 1 requests
 (6 rows each), above 48 rows (the pinned projections), padded,
-row-sharded (from two requests) and low-batch (one request).
+row-sharded (from two requests) and low-batch (one request). The draft samples
+probabilistically (the requests at temperature 0), so the specialized-decode
+run samples on the vocabulary-sharded Markov chain and, above its batch limit,
+the fused loop.
 
 Every decoder layer's residual streams and FFN input and the model's output
 are kept for every decode token and every 16th prefill position, and the two
@@ -152,11 +156,16 @@ class _Probe:
         # Executor boundaries traced (the executor runs only in captures):
         # proves that the CUDA graphs hold the executor, not the stock layers.
         self.executor_sublayers = 0
+        # The same for the DSpark draft's executor (layers outside ``index``).
+        self.draft_sublayers = 0
 
         def sublayer_and_keep(boundaries, layer, ffn, state, **kwargs):
-            self.executor_sublayers += 1
-            out = sublayer(boundaries, layer, ffn, state, **kwargs)
             i = index.get(layer)
+            if i is None:
+                self.draft_sublayers += 1
+            else:
+                self.executor_sublayers += 1
+            out = sublayer(boundaries, layer, ffn, state, **kwargs)
             if ffn and i is not None:
                 residual = out[0].residual
                 self.residual[i][: residual.shape[0]].copy_(residual)
@@ -275,6 +284,7 @@ class StepRecorder:
             else target
         )
         decode = language_model.specialized_decode
+        draft_decode = draft.specialized_decode
         model_state = self.model_runner.model_state
         graphs = getattr(model_state, "graphs", None)
         return {
@@ -282,7 +292,8 @@ class StepRecorder:
             "decoder_replay_start": core.decoder_replay_start,
             "decode": type(decode).__name__,
             "executor_sublayers": target._layer_probe.executor_sublayers,
-            "draft_decode": getattr(draft, "specialized_decode", None) is not None,
+            "draft_sublayers": target._layer_probe.draft_sublayers,
+            "draft_decode": type(draft_decode).__name__,
             "model_state": type(model_state).__name__,
             "attention": [type(m.attn).__name__ for m in layers(target)],
             "ffn": [type(m.ffn).__name__ for m in layers(target)],
@@ -296,6 +307,11 @@ class StepRecorder:
             ),
             "stock_fused_mhc_max_rows": getattr(mhc._all_reduce_mhc, "capacity", None),
             "draft_attention": [type(m.attn).__name__ for m in layers(draft)],
+            "draft_routed_experts": [
+                plan.moe.gemm is not None for plan in getattr(draft_decode, "plans", ())
+            ],
+            "draft_logits": type(draft.logits_processor).__name__,
+            "markov_sampling": type(getattr(draft, "sample_sequential", None)).__name__,
             "embedding": type(getattr(decode, "embedding", None)).__name__,
         }
 
@@ -390,6 +406,7 @@ def _serve(vllm_runner, specialized_decode: bool, prompts, max_tokens, path: str
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": DRAFTS,
+            "draft_sample_method": "probabilistic",
             "enable_adaptive_verification": False,
         },
         attention_config={
@@ -493,15 +510,20 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
     on, paths_on = _serve(vllm_runner, True, prompts, max_tokens, f"{tmp_path}/on")
     off, paths_off = _serve(vllm_runner, False, prompts, max_tokens, f"{tmp_path}/off")
 
-    # The executor runs the target model only, over its stock layers, with
-    # every MoE layer deferring onto the low-batch GEMMs.
+    # The executors run the target and DSpark draft models over their stock
+    # layers, with every MoE layer on the low-batch GEMMs (the target's
+    # deferring), and the draft samples on the sharded Markov chain.
     for rank in paths_on:
         assert rank["decode"] == "SpecializedDecode", rank
         assert rank["executor_sublayers"] > 0, "no step ran the executor"
-        assert not rank["draft_decode"], rank
+        assert rank["draft_sublayers"] > 0, "no draft step ran the executor"
+        assert rank["draft_decode"] == "DraftDecode", rank
         assert rank["model_state"] == "DeepseekV41SpecializedDecodeModelState", rank
         assert rank["routed_experts"] == [True] * len(LAYERS), rank
+        assert rank["draft_routed_experts"] == [True] * len(rank["draft_attention"])
         assert rank["logits"] == ["SpecializedDecodeLogitsProcessor"], rank
+        assert rank["draft_logits"] == "SpecializedDecodeLogitsProcessor", rank
+        assert rank["markov_sampling"] == "ShardedMarkovSampling", rank
         assert rank["metadata_graphs"] > 0, rank
         assert rank["fused_mhc_max_rows"] == FUSED_MHC_MAX_ROWS, rank
         # The executor embeds from the replicated table.
@@ -509,8 +531,12 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
     for rank in paths_off:
         assert rank["decode"] == "NoneType", rank
         assert rank["executor_sublayers"] == 0, rank
+        assert rank["draft_sublayers"] == 0, rank
+        assert rank["draft_decode"] == "NoneType", rank
         assert rank["model_state"] == "DeepseekV41ModelState", rank
         assert rank["logits"] == ["LogitsProcessor"], rank
+        assert rank["draft_logits"] == "LogitsProcessor", rank
+        assert rank["markov_sampling"] == "NoneType", rank
         assert rank["metadata_graphs"] == 0, rank
     stock = ("attention", "ffn", "stock_fused_mhc_max_rows", "draft_attention")
     for key in stock:

@@ -444,8 +444,6 @@ hardware_overrides:
     extra_args:
       - "--distributed-executor-backend"
       - "mp"
-      - "--gpu-memory-utilization"
-      - "0.9"
       - "--max-num-seqs"
       - "512"
       - "--max-num-batched-tokens"
@@ -477,10 +475,6 @@ strategy_overrides:
         extra_args:
           - "--attention_config.indexer_kv_dtype"
           - "fp8"
-      mi300x:
-        extra_args:
-          - "--gpu-memory-utilization"
-          - "0.85"
   single_node_tep:
     hardware_overrides:
     # sm_120 has neither Blackwell kernel: the FP4 indexer cache and
@@ -493,10 +487,6 @@ strategy_overrides:
           - "fp8"
           - "--moe-backend"
           - "auto"
-      mi300x:
-        extra_args:
-          - "--gpu-memory-utilization"
-          - "0.85"
   single_node_dep:
     # Force DP=4 on all hardware (fills GB200's 4-GPU tray; on 8-GPU nodes use
     # half the GPUs per replica). dedupeArgs (last-wins) shadows the default
@@ -514,10 +504,6 @@ strategy_overrides:
           - "fp8"
           - "--moe-backend"
           - "auto"
-      mi300x:
-        extra_args:
-          - "--gpu-memory-utilization"
-          - "0.85"
   multi_node_dep:
     extra_args:
       - "--compilation-config"
@@ -776,7 +762,6 @@ guide: |
   vllm serve deepseek-ai/DeepSeek-V4-Flash \
     --tensor-parallel-size 1 --pipeline-parallel-size 1 \
     --kv-cache-dtype fp8 --trust-remote-code --block-size 256 \
-    --gpu-memory-utilization 0.92 \
     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
     --attention_config.indexer_kv_dtype mxfp4 \
     --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 \
@@ -834,9 +819,8 @@ guide: |
   ### MI300X (8×192GB)
 
   Verified single-node serving on MI300X (8×192 GB, CDNA 3) with the same AMD
-  launch as the MI325X/MI355X sections below — the builder lowers
-  `--gpu-memory-utilization` to `0.85` on MI300X (the 192 GB cards leave less
-  headroom at `0.9`), and DSpark speculative decoding is validated on it.
+  launch as the MI325X/MI355X sections below, and DSpark speculative decoding is
+  validated on it.
 
   ### MI325X (1×256GB)
 
@@ -885,7 +869,6 @@ guide: |
     --max-num-batched-tokens 8192 \
     --distributed-executor-backend mp \
     --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
     --tokenizer-mode deepseek_v4 \
     --reasoning-parser deepseek_v4 \
     --tool-call-parser deepseek_v4 \

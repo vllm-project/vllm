@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Engram host tables in host-NUMA cuMem, shared across DP ranks by FABRIC handle.
+"""Engram tables in cuMem, shared between processes by FABRIC handle.
 
-GPUs map cuMem host memory with 2M pages instead of the 64K pages of a registered
-/dev/shm mapping, so random row lookups miss the TLB far less.
+Host tables: one copy in host-NUMA memory per node-local DP group, which GPUs map
+with 2M pages instead of /dev/shm's 64K pages, so row lookups miss the TLB less.
+Peer tables: rows split over the HBM of several engines' GPUs.
 """
 
 import ctypes
@@ -17,21 +18,25 @@ from cuda.bindings import driver as cu
 
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import init_logger
-from vllm.models.deepseek_v41.common.engram import describe_error, gather_errors
+from vllm.models.deepseek_v41.common.engram import (
+    EngramPeerGroup,
+    describe_error,
+    gather_errors,
+)
 from vllm.utils.cpu_resource_utils import get_memory_node_info
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
 FABRIC_HANDLE = cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
-# Tables are created in chunks, so the creator can stop before draining its node.
+# Host tables are created in chunks, so the creator stops before draining its node.
 CHUNK_BYTES = 2 << 30
 # Fraction of the NUMA node left to other allocations.
 NUMA_RESERVE_FRACTION = 0.05
 
 
 class ExportedHostTable(NamedTuple):
-    """What a peer needs to map a table."""
+    """What another rank needs to map a host table."""
 
     numa_node: int
     padded_bytes: int
@@ -119,7 +124,7 @@ def fabric_host_memory_supported() -> bool:
 
 
 def _create_table(num_bytes: int) -> tuple[list, ExportedHostTable]:
-    """Allocate and export a table on this GPU's host NUMA node.
+    """Allocate and export a host table on this GPU's NUMA node.
 
     Stops once the node would drop below its reserve. The kernel compacts to
     find 2M pages and fails the chunk, rather than OOM-killing, if it cannot.
@@ -149,7 +154,7 @@ def _create_table(num_bytes: int) -> tuple[list, ExportedHostTable]:
 def _map_table(
     table: ExportedHostTable, num_bytes: int, handles: list
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Map a table, importing its handles unless given, and release the handles.
+    """Map a host table, importing its handles unless given, and release them.
 
     Returns CPU and GPU uint8 views; either keeps the mapping alive.
     """
@@ -191,9 +196,14 @@ def _map_table(
         host_buffer, _unmap, address, table.padded_bytes, mapped
     )
     finalizer.atexit = False  # type: ignore[misc]
-    # Torch retains this object, so the GPU view keeps the buffer alive too.
-    # Name the device: an index-less "cuda" makes torch copy the table.
-    gpu_view = torch.as_tensor(
+    gpu_view = _gpu_view(address, num_bytes, owner=host_buffer)
+    return torch.frombuffer(host_buffer, dtype=torch.uint8), gpu_view
+
+
+def _gpu_view(address: int, num_bytes: int, owner: object = None) -> torch.Tensor:
+    """A uint8 tensor over mapped memory; torch retains `owner` with it."""
+    # Name the device: an index-less "cuda" makes torch copy the memory.
+    return torch.as_tensor(
         SimpleNamespace(
             __cuda_array_interface__={
                 "shape": (num_bytes,),
@@ -201,11 +211,63 @@ def _map_table(
                 "data": (address, False),
                 "version": 3,
             },
-            owner=host_buffer,
+            owner=owner,
         ),
-        device=torch.device("cuda", device),
+        device=torch.device("cuda", torch.accelerator.current_device_index()),
     )
-    return torch.frombuffer(host_buffer, dtype=torch.uint8), gpu_view
+
+
+def _unmap_slices(addresses: list[int], size: int) -> None:
+    for address in addresses:
+        _unmap(address, size, [(0, size)])
+
+
+class PeerTableMappings:
+    """This process's mappings of every slice of a peer table, unmapped once
+    neither the table nor any tensor over its slice holds them. A slice's
+    memory is freed when every GPU has unmapped it."""
+
+    def __init__(self, size: int) -> None:
+        self.addresses: list[int] = []
+        finalizer = weakref.finalize(self, _unmap_slices, self.addresses, size)
+        finalizer.atexit = False  # type: ignore[misc]
+
+
+def share_peer_table(
+    num_bytes: int, group: EngramPeerGroup
+) -> tuple[torch.Tensor, PeerTableMappings]:
+    """Allocate this GPU's slice of a table in its HBM and map every GPU's slice.
+
+    Every slice holds `num_bytes`. Returns this GPU's slice and the mappings,
+    whose addresses are in rank order.
+    """
+    device = torch.accelerator.current_device_index()
+    prop = cu.CUmemAllocationProp()
+    prop.type = cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+    prop.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+    prop.location.id = device
+    prop.requestedHandleTypes = FABRIC_HANDLE
+    size = round_up(num_bytes, _allocation_granularity(prop))
+    own = _call_driver(cu.cuMemCreate, size, prop, 0)
+    exported = group.all_gather(_export_fabric_handle(own))
+    access = _read_write_access(
+        cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE, device
+    )
+    mappings = PeerTableMappings(size)
+    for rank, peer in enumerate(exported):
+        handle = (
+            own
+            if rank == group.rank_in_group
+            else _call_driver(cu.cuMemImportFromShareableHandle, peer, FABRIC_HANDLE)
+        )
+        address = int(_call_driver(cu.cuMemAddressReserve, size, 0, 0, 0))
+        mappings.addresses.append(address)
+        _call_driver(cu.cuMemMap, address, size, 0, handle, 0)
+        _call_driver(cu.cuMemSetAccess, address, size, [access], 1)
+        # The mapping keeps the slice alive.
+        _release([handle])
+    address = mappings.addresses[group.rank_in_group]
+    return _gpu_view(address, num_bytes, owner=mappings), mappings
 
 
 def share_host_table(

@@ -25,11 +25,10 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_group_id, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
     is_mamba_prefill_checkpoint_valid,
 )
@@ -37,7 +36,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
-from .utils import create_requests
+from .utils import create_requests, mamba_layer, new_kv_cache_group
 
 pytestmark = pytest.mark.cpu_test
 
@@ -101,21 +100,23 @@ def _make_hybrid_kv_cache_manager(
         num_blocks=10000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full_layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=ATTN_BLOCK_SIZE,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba_layer"],
-                MambaSpec(
-                    block_size=MAMBA_BLOCK_SIZE,
-                    shapes=((1, 1),),
-                    dtypes=(torch.float32,),
+                MambaManager.layer_config(
+                    MambaSpec(
+                        block_size=MAMBA_BLOCK_SIZE,
+                        shapes=((1, 1),),
+                        dtypes=(torch.float32,),
+                    ),
                     mamba_cache_mode="align",
                     num_speculative_blocks=NUM_SPEC,
                     num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
@@ -254,29 +255,31 @@ def test_partial_checkpoint_resume_preserves_cached_state(internal: bool) -> Non
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["attention"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["state"],
-                MambaSpec(
-                    block_size=block_size,
-                    shapes=((1,),),
-                    dtypes=(torch.float32,),
+                mamba_layer(
+                    MambaSpec(
+                        block_size=block_size,
+                        shapes=((1,),),
+                        dtypes=(torch.float32,),
+                    ),
                     mamba_cache_mode="align",
+                    num_speculative_blocks=0,
                     num_prefill_checkpoint_blocks=int(internal),
                     prefill_checkpoint_alignment=16 if internal else None,
                 ),
             ),
         ],
     )
-    register_all_kvcache_specs(config)
     init_none_hash(sha256)
     scheduler = Scheduler(
         config, cache, StructuredOutputManager(config), block_size, hash_size
