@@ -83,7 +83,7 @@ async def submit_with_slot(
     The slot is released when the work finishes rather than when the caller
     is cancelled: a worker thread cannot be interrupted and keeps the work's
     arguments and result alive until it returns. With as many slots as
-    workers, work therefore never waits in the executor's queue.
+    workers, work therefore never queues behind other work.
     """
     loop = asyncio.get_running_loop()
     await slots.acquire()
