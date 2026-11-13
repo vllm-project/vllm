@@ -28,7 +28,8 @@ def init_decisions_state(
     state.openai_serving_decisions = None
     try:
         strategy_cls = select_read_strategy(engine_client.model_config, supported_tasks)
-    except ValueError:
+    except ValueError as e:
+        logger.info("Decisions endpoints disabled: %s", e)
         return None
     try:
         strategy = strategy_cls(
@@ -41,8 +42,8 @@ def init_decisions_state(
             )
         )
     except ValueError as e:
-        # The architecture has a strategy, so its endpoints were expected.
-        logger.warning("/v1/systemone and /v1/decisions are off: %s", e)
+        # The model has a strategy that cannot start: a misconfiguration.
+        logger.warning("Decisions endpoints disabled: %s", e)
         return None
 
     if strategy.task == "generate":
