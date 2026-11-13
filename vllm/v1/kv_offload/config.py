@@ -19,6 +19,9 @@ class OffloadingGroupConfig:
     # Chunks of this group the tier keeps for one request, or None when
     # attention reaches back without a bound (a full layer).
     sliding_window_size_in_chunks: int | None = None
+    # Packed block (byte offset, padded page bytes), in layer_names order.
+    # Empty when the group is not certified for compact filesystem storage.
+    packed_layout: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
