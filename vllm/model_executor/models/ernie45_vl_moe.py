@@ -32,7 +32,7 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 # from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -48,9 +48,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.ernie45_vl_rope import (
-    Ernie4_5_VLRotaryEmbedding,
-)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -152,14 +150,19 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         h_rope = (self.head_dim // 2 - freq_allocation) // 2
         w_rope = (self.head_dim // 2 - freq_allocation) // 2
 
-        self.rotary_emb = Ernie4_5_VLRotaryEmbedding(
-            head_size=self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position_embeddings=max_position_embeddings,
-            base=rope_parameters["rope_theta"],
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max(
+                max_position_embeddings,
+                get_current_vllm_config().model_config.max_model_len,
+            ),
             is_neox_style=False,
-            dtype=torch.get_default_dtype(),
-            mrope_section=[h_rope, w_rope, t_rope],
+            rope_parameters={
+                "rope_type": "ernie45_vl",
+                "rope_theta": rope_parameters["rope_theta"],
+                "mrope_section": [h_rope, w_rope, t_rope],
+            },
+            mrope_positions_factor=1,
         )
 
         self.attn = Attention(
