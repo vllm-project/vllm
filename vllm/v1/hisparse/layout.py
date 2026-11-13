@@ -114,13 +114,16 @@ def _lay_out_hisparse_groups(
     other_groups = [
         group for group in groups if group.role is not KVCacheGroupRole.HISPARSE_INDEXER
     ]
+    spread_block_bytes = _pool_bytes_per_block(vllm_config, other_groups)
+    if _spread_page_stride(spread_block_bytes, indexer_specs) is None:
+        return groups
     candidates = [
         groups,
         _fill_hisparse_groups(
             vllm_config,
             mla_specs,
             regular_groups,
-            _pool_bytes_per_block(vllm_config, other_groups),
+            spread_block_bytes,
             spread_indexer_pages=True,
         ),
     ]
@@ -202,12 +205,8 @@ def _fill_hisparse_groups(
     indexer_page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values())
     page_stride = None
     if spread_indexer_pages:
-        page_bytes = indexer_page_bytes // len(indexer_specs)
-        page_stride = block_bytes // next(
-            pages
-            for pages in range(block_bytes // page_bytes, 0, -1)
-            if block_bytes % (pages * _INDEXER_PAGE_ALIGNMENT) == 0
-        )
+        page_stride = _spread_page_stride(block_bytes, indexer_specs)
+        assert page_stride is not None
         indexer_page_bytes = page_stride * len(indexer_specs)
     pages_per_block = max(block_bytes // indexer_page_bytes, 1)
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
@@ -311,6 +310,25 @@ def _fill_hisparse_groups(
         *hot_groups,
         *regular_groups,
     ]
+
+
+def _spread_page_stride(
+    block_bytes: int, indexer_specs: dict[str, MLAAttentionSpec]
+) -> int | None:
+    """Stride of the indexer pages spread evenly over a block, or None when the
+    block cannot hold a page of every indexer layer."""
+    page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values()) // len(
+        indexer_specs
+    )
+    pages = next(
+        (
+            pages
+            for pages in range(block_bytes // page_bytes, len(indexer_specs) - 1, -1)
+            if block_bytes % (pages * _INDEXER_PAGE_ALIGNMENT) == 0
+        ),
+        None,
+    )
+    return block_bytes // pages if pages else None
 
 
 def _split_state_group(

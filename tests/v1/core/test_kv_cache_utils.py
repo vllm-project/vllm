@@ -65,6 +65,7 @@ from vllm.v1.core.kv_cache_utils import (
     to_event_extra_keys,
 )
 from vllm.v1.hisparse.layout import (
+    _spread_page_stride,
     create_hisparse_layout,
     get_hisparse_kv_cache_groups,
     get_hisparse_steady_state_concurrency,
@@ -317,6 +318,25 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page(
         g for g in groups if g.role == KVCacheGroupRole.HISPARSE_INDEXER
     )
     assert indexer_group.kv_cache_spec.block_size == 2048
+
+
+@pytest.mark.parametrize(("num_layers", "page_stride"), [(20, 331776), (24, None)])
+def test_hisparse_indexer_pages_spread_only_when_every_layer_fits(
+    num_layers, page_stride
+):
+    """Spreading indexer pages over a block needs a page slot per indexer layer;
+    with fewer slots the spread group would outgrow the block."""
+    indexer_specs = {
+        f"model.layers.{i}.self_attn.indexer": MLAAttentionSpec(
+            block_size=2304,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+        for i in range(num_layers)
+    }
+    assert _spread_page_stride(6635520, indexer_specs) == page_stride
 
 
 @pytest.mark.parametrize(
