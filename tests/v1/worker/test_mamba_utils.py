@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from tests.v1.worker.test_utils import _TestReplaySSMMixer
 from vllm.config import CacheConfig
 from vllm.config.mamba import MambaConfig
@@ -24,12 +25,13 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheLayout,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -40,6 +42,7 @@ from vllm.v1.worker.mamba_utils import (
     _get_mamba_spec_for_layer,
     _reinterpret_u64_as_i64,
     get_mamba_group_ids,
+    get_mamba_group_params,
     get_mamba_groups,
     postprocess_mamba_fused_kernel,
 )
@@ -72,7 +75,7 @@ class MambaCopyBuffers:
     dst_ptrs: CpuGpuBuffer
     sizes: CpuGpuBuffer
     mamba_group_ids: list[int]
-    mamba_spec: MambaSpec
+    block_size: int
     offset: int = 0
 
     @classmethod
@@ -84,7 +87,6 @@ class MambaCopyBuffers:
         make_buffer: Callable[..., Any],
     ) -> "MambaCopyBuffers":
         mamba_groups = get_mamba_groups(kv_cache_config)
-        mamba_spec = next(iter(mamba_groups))
         mamba_group_ids = get_mamba_group_ids(mamba_groups)
         entries_per_req = sum(
             len(
@@ -103,7 +105,7 @@ class MambaCopyBuffers:
             dst_ptrs=make_buffer(n, dtype=torch.uint64),
             sizes=make_buffer(n, dtype=torch.int32),
             mamba_group_ids=mamba_group_ids,
-            mamba_spec=mamba_spec,
+            block_size=next(iter(mamba_groups)).block_size,
         )
 
 
@@ -205,7 +207,7 @@ def postprocess_mamba(
     num_accepted_tokens_cpu = input_batch.num_accepted_tokens_cpu
     mamba_state_idx_cpu = input_batch.mamba_state_idx_cpu
     mamba_group_ids = copy_bufs.mamba_group_ids
-    mamba_spec = copy_bufs.mamba_spec
+    block_size = copy_bufs.block_size
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
@@ -217,13 +219,11 @@ def postprocess_mamba(
             num_computed_tokens + num_scheduled_tokens - num_draft_tokens
         )
         new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens - 1
-        aligned_new_computed_tokens = (
-            new_num_computed_tokens // mamba_spec.block_size * mamba_spec.block_size
-        )
+        aligned_new_computed_tokens = new_num_computed_tokens // block_size * block_size
         if aligned_new_computed_tokens >= num_tokens_running_state:
             accept_token_bias = aligned_new_computed_tokens - num_tokens_running_state
             src_block_idx = mamba_state_idx_cpu[i]
-            dest_block_idx = aligned_new_computed_tokens // mamba_spec.block_size - 1
+            dest_block_idx = aligned_new_computed_tokens // block_size - 1
             collect_mamba_copy_meta(
                 copy_bufs,
                 kv_cache_config,
@@ -471,11 +471,9 @@ def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheCo
             (cfg.temporal_state_dim,),
         ),
         dtypes=(cfg.dtype, cfg.dtype),
-        mamba_cache_mode="align",
     )
-    group = KVCacheGroupSpec(
-        layer_names=layer_names,
-        kv_cache_spec=mamba_spec,
+    group = new_kv_cache_group(
+        layer_names, mamba_spec, MambaManager.config(mamba_cache_mode="align")
     )
     return KVCacheConfig(
         num_blocks=cfg.num_blocks,
@@ -566,7 +564,7 @@ def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies():
     kv_config = KVCacheConfig(
         num_blocks=3,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["mixer"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["mixer"], spec)],
     )
     cfg = _TestConfig(num_layers=1, max_num_reqs=2)
     device = torch.device("cpu")
@@ -596,7 +594,7 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
         )
         for mixer in mixers
     ]
-    assert specs[0].is_uniform_with_collection({"first": specs[0], "second": specs[1]})
+    assert MambaManager.can_share_block_table(specs)
     for mixer in mixers:
         mixer.bind_kv_cache(torch.zeros((3, 1, 1, 128), dtype=torch.int8))
         mixer.A = -torch.ones(1)
@@ -606,6 +604,7 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
         ReplaySSMModelContext.create(
             [(mixers, specs[0], torch.zeros((1, 1), dtype=torch.int32))],
             max_num_reqs=1,
+            materialize_prefixes=False,
         )
 
 
@@ -632,7 +631,6 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
     ],
 )
 def test_replayssm_precopy_moves_packed_state_and_trackers(
-    monkeypatch,
     layout,
     previous_column,
     computed,
@@ -651,7 +649,6 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
             torch.float32,
             torch.bfloat16,
         ),
-        mamba_cache_mode="align",
         state_alignment=16,
         block_stride_alignment=16,
     )
@@ -664,7 +661,11 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     layer_names = ["layers.0.mixer", "layers.1.mixer"]
     kv_config = get_kv_cache_config_from_groups(
         config,
-        [KVCacheGroupSpec(layer_names, spec)],
+        [
+            new_kv_cache_group(
+                layer_names, spec, MambaManager.config(mamba_cache_mode="align")
+            )
+        ],
         5 * (2 * spec.page_size_bytes + 8),
     )
     pages = allocate_kv_cache(kv_config, device, layout)
@@ -717,7 +718,6 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     model_state = object.__new__(MambaHybridModelState)
     model_state._align_mode = True
     model_state._mamba_ctx = ctx
-    monkeypatch.setattr(model_state, "_get_mamba_group_info", lambda _: ([0], spec))
     model_state._mamba_state_idx_gpu = torch.tensor(
         [-1, previous_column], dtype=torch.int32, device=device
     )
@@ -776,35 +776,37 @@ def test_mamba_groups_support_different_state_specs():
         shapes=((4, 4), (2, 4, 4)),
         dtypes=(torch.float16, torch.float32),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
-        num_speculative_blocks=3,
     )
     short_conv_spec = MambaSpec(
         block_size=16,
         shapes=((12, 8),),
         dtypes=(torch.float16,),
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+    )
+    # Groups may differ in prefill checkpointing.
+    gdn_config = MambaManager.config(
         mamba_cache_mode="align",
         num_speculative_blocks=3,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    short_conv_config = MambaManager.config(
+        mamba_cache_mode="align", num_speculative_blocks=3
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["gdn.0", "gdn.1"], gdn_spec),
-            KVCacheGroupSpec(["ple.0"], short_conv_spec),
+            new_kv_cache_group(["gdn.0", "gdn.1"], gdn_spec, gdn_config),
+            new_kv_cache_group(["ple.0"], short_conv_spec, short_conv_config),
         ],
     )
 
     mamba_groups = get_mamba_groups(kv_cache_config)
     assert mamba_groups == {gdn_spec: [0], short_conv_spec: [1]}
 
-    model_state = object.__new__(MambaHybridModelState)
-    model_state._mamba_group_ids = []
-    model_state._mamba_spec = None
-    group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
-    assert group_ids == [0, 1]
-    assert representative_spec is gdn_spec
+    assert get_mamba_group_ids(mamba_groups) == [0, 1]
+    assert get_mamba_group_params(kv_cache_config, [0, 1]) == (16, 3)
 
     cfg = _TestConfig()
     copy_bufs = _make_copy_bufs(cfg, kv_cache_config, torch.device("cpu"))
@@ -849,16 +851,15 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
         shapes=((4, 4), (2, 4, 4)),
         dtypes=(torch.float16, torch.float32),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
-        num_speculative_blocks=3,
     )
     short_conv_spec = MambaSpec(
         block_size=16,
         shapes=((12, 8),),
         dtypes=(torch.float16,),
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
-        mamba_cache_mode="align",
-        num_speculative_blocks=3,
+    )
+    mamba_config = MambaManager.config(
+        mamba_cache_mode="align", num_speculative_blocks=3
     )
     layer_specs = {
         "gdn.0": gdn_spec,
@@ -869,12 +870,11 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                list(layer_specs),
-                UniformTypeKVCacheSpecs(
-                    block_size=16,
-                    kv_cache_specs=layer_specs,
-                ),
+            KVCacheGroup.from_layers(
+                {
+                    name: KVCacheLayerConfig(mamba_config, spec)
+                    for name, spec in layer_specs.items()
+                }
             )
         ],
     )
@@ -886,12 +886,7 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
     }
 
     # The group is listed once per spec, so its id must not be repeated.
-    model_state = object.__new__(MambaHybridModelState)
-    model_state._mamba_group_ids = []
-    model_state._mamba_spec = None
-    group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
-    assert group_ids == [0]
-    assert representative_spec is gdn_spec
+    assert get_mamba_group_ids(get_mamba_groups(kv_cache_config)) == [0]
 
     cfg = _TestConfig()
     copy_bufs = _make_copy_bufs(cfg, kv_cache_config, torch.device("cpu"))
@@ -957,8 +952,6 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     state.cache_config = CacheConfig(mamba_cache_mode="align")
     state._align_mode = True
     state._use_replayssm_trackers = False
-    state._mamba_group_ids = []
-    state._mamba_spec = None
     state._mamba_state_copy_funcs = _COPY_FUNCS
     state.max_num_reqs = cfg.max_num_reqs
     state.device = device
@@ -1013,11 +1006,11 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         block_size=128,
         shapes=tuple(tensor.shape[1:] for tensor in mixer.kv_cache),
         dtypes=tuple(tensor.dtype for tensor in mixer.kv_cache),
-        mamba_cache_mode=cache_mode,
     )
     replay = ReplaySSMModelContext.create(
         [([mixer], spec, torch.tensor([[1]], dtype=torch.int32, device=device))],
         max_num_reqs=1,
+        materialize_prefixes=cache_mode == "align",
     )
     _postprocess_replayssm_kernel[(1, 1)](
         None,
