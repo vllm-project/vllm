@@ -363,7 +363,10 @@ class MoRIIOConfig:
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
         #                     completion never arrived is aborted (sec).
         # write_recv_timeout -> Timeout before a WRITE-mode consumer request
-        #                     still waiting for write_done is failed (sec).
+        #                     still waiting for write_done is failed, unless
+        #                     its prefill still answers (sec).
+        # write_recv_max_timeout -> Timeout after which it fails even then
+        #                     (sec, default 3 x write_recv_timeout).
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.

@@ -4,6 +4,7 @@ import contextlib
 import logging
 import math
 import queue
+import socket
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -158,6 +159,15 @@ except ImportError:
 
 def is_moriio_available() -> bool:
     return MoRIIO_enabled
+
+
+def _peer_listening(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Whether a TCP connection to a MoRIIO peer's notify socket is accepted."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _describe_memory(memory_desc: Any) -> str:
@@ -786,10 +796,32 @@ class MoRIIOConnectorScheduler:
                 "write_recv_timeout", MoRIIOConstants.DEFAULT_WRITE_RECV_TIMEOUT
             ),
         )
+        # A prefill that still answers at write_recv_timeout is slow, not gone:
+        # its receives are failed only at this cap.
+        self._write_recv_max_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.write_recv_max_timeout",
+            self.kv_transfer_config.kv_connector_extra_config.get(
+                "write_recv_max_timeout", 3 * self._write_recv_timeout
+            ),
+        )
+        if self._write_recv_max_timeout < self._write_recv_timeout:
+            raise ValueError(
+                "kv_connector_extra_config.write_recv_max_timeout "
+                f"({self._write_recv_max_timeout}) must not be below "
+                f"write_recv_timeout ({self._write_recv_timeout})"
+            )
+        self._write_recv_armed_at: dict[ReqId, float] = {}
+        # The prefill notify socket each receive's allocation was sent to.
+        self._write_recv_peer: dict[ReqId, tuple[str, int]] = {}
+        self._write_recv_probes: dict[tuple[str, int], Future[bool]] = {}
+        self._write_recv_prober: ThreadPoolExecutor | None = None
         self._write_recv_timer_enabled = False
         if self.mode == MoRIIOMode.WRITE and not self.is_producer:
             if self.kv_transfer_config.kv_load_failure_policy == "fail":
                 self._write_recv_timer_enabled = True
+                self._write_recv_prober = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="moriio-recv-probe"
+                )
             else:
                 logger.warning(
                     "MoRI-IO WRITE-mode consumer: write_recv_timeout is disabled; "
@@ -1297,6 +1329,7 @@ class MoRIIOConnectorScheduler:
                     _should_notify = self._global_dp_rank == remote_dp_rank
                 else:
                     _should_notify = self._is_kv_master
+                write_recv_peer: tuple[str, int] | None = None
                 if _should_notify and num_external_tokens == 0:
                     # Nothing left to fetch (full local prefix hit), so release
                     # the producer's blocks instead of sending an empty
@@ -1372,6 +1405,8 @@ class MoRIIOConnectorScheduler:
                         target_port = remote_notify_port + get_port_offset(
                             _remote_dp_rank_for_port, tp_index
                         )
+                        if write_recv_peer is None:
+                            write_recv_peer = (_notify_host, target_port)
 
                         self.send_notify_block(
                             req_id=request.request_id,
@@ -1383,10 +1418,13 @@ class MoRIIOConnectorScheduler:
                         )
 
                 if num_external_tokens > 0 and self._write_recv_timer_enabled:
+                    now = time.monotonic()
                     self._write_recv_deadline.setdefault(
-                        request.request_id,
-                        time.monotonic() + self._write_recv_timeout,
+                        request.request_id, now + self._write_recv_timeout
                     )
+                    self._write_recv_armed_at.setdefault(request.request_id, now)
+                    if write_recv_peer is not None:
+                        self._write_recv_peer[request.request_id] = write_recv_peer
 
             # Only trigger 1 KV transfer per request.
 
@@ -1575,21 +1613,66 @@ class MoRIIOConnectorScheduler:
         return meta
 
     def _reap_stale_write_recvs(self) -> set[ReqId]:
-        """Stop timing the WRITE receives past their deadline and return them."""
+        """Stop timing the WRITE receives that timed out and return them.
+
+        At its deadline a receive whose prefill still accepts connections is
+        given another `write_recv_timeout`, up to `write_recv_max_timeout`: a
+        prefill busy with a long queue is slow, not gone. The probe runs off
+        the scheduler thread; until it answers the receive keeps waiting.
+        """
         now = time.monotonic()
-        expired = {r for r, t in self._write_recv_deadline.items() if now >= t}
+        expired: set[ReqId] = set()
+        for req_id, deadline in list(self._write_recv_deadline.items()):
+            if now < deadline:
+                continue
+            peer = self._write_recv_peer.get(req_id)
+            cap = self._write_recv_armed_at[req_id] + self._write_recv_max_timeout
+            if peer is not None and now < cap:
+                assert self._write_recv_prober is not None
+                probe = self._write_recv_probes.get(peer)
+                if probe is None:
+                    probe = self._write_recv_prober.submit(_peer_listening, *peer)
+                    self._write_recv_probes[peer] = probe
+                if not probe.done():
+                    continue
+                if probe.result():
+                    self._write_recv_deadline[req_id] = min(
+                        now + self._write_recv_timeout, cap
+                    )
+                    logger.warning(
+                        "MoRI-IO WRITE: no write_done for request %s yet, but its "
+                        "prefill at %s:%d answers; waiting up to %.0fs in all "
+                        "(write_recv_max_timeout).",
+                        req_id,
+                        *peer,
+                        self._write_recv_max_timeout,
+                    )
+                    continue
+            expired.add(req_id)
+        # A probe answers for every receive of its prefill at this step only.
+        for peer in [p for p, probe in self._write_recv_probes.items() if probe.done()]:
+            del self._write_recv_probes[peer]
         self._write_recv_timed_out |= expired
         for req_id in expired:
-            del self._write_recv_deadline[req_id]
+            waited = now - self._write_recv_armed_at[req_id]
+            self._forget_write_recv(req_id)
             logger.error(
                 "MoRI-IO WRITE: no write_done for request %s after %.0fs "
-                "(write_recv_timeout); failing it if it is still waiting. Its "
-                "blocks stay allocated because the producer may still write "
-                "them.",
+                "(write_recv_timeout %.0fs, write_recv_max_timeout %.0fs); "
+                "failing it if it is still waiting. Its blocks stay allocated "
+                "because the producer may still write them.",
                 req_id,
+                waited,
                 self._write_recv_timeout,
+                self._write_recv_max_timeout,
             )
         return expired
+
+    def _forget_write_recv(self, req_id: ReqId) -> None:
+        """Stop timing a WRITE receive."""
+        self._write_recv_deadline.pop(req_id, None)
+        self._write_recv_armed_at.pop(req_id, None)
+        self._write_recv_peer.pop(req_id, None)
 
     def shutdown(self):
         for path, sock in self.paths.items():
@@ -1599,6 +1682,8 @@ class MoRIIOConnectorScheduler:
             except Exception as e:
                 logger.warning("Error closing ZMQ socket for path %s: %s", path, e)
         self.paths.clear()
+        if self._write_recv_prober is not None:
+            self._write_recv_prober.shutdown(wait=False, cancel_futures=True)
 
     def split_block_groups(
         self, block_ids: list[list[int]] | tuple[list[int], ...]
@@ -1816,7 +1901,7 @@ class MoRIIOConnectorScheduler:
         if not self.is_producer:
             recving = set(connector_output.finished_recving or ())
             for req_id in recving:
-                self._write_recv_deadline.pop(req_id, None)
+                self._forget_write_recv(req_id)
             reported = recving & self._write_recv_timed_out
             self._write_recv_timed_out -= reported
             held = reported & set(connector_output.failed_recving or ())

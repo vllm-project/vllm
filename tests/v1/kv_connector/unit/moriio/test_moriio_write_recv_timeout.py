@@ -6,8 +6,10 @@ Runs the real ``Scheduler`` and the real ``MoRIIOConnectorWorker``
 ``start_load_kv`` / ``get_transfer_results``, with no GPU or RDMA.
 """
 
+import socket
 import time
 from collections import OrderedDict
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +34,16 @@ from .test_moriio_connector import create_vllm_config as create_moriio_config
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 TIMEOUT_S = 60.0
+
+
+class _InlineExecutor:
+    def submit(self, fn, *args):
+        future: Future = Future()
+        future.set_result(fn(*args))
+        return future
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
 
 
 class _Clock:
@@ -77,6 +89,14 @@ class _Engine:
         self.scheduler = create_scheduler(config)
         connector = self.scheduler.connector.connector_scheduler
         monkeypatch.setattr(connector, "send_notify_block", lambda **kwargs: None)
+        # The prefill's notify socket: gone unless a test says it answers. Probes
+        # answer at once, so a deadline is decided in the step it passes.
+        self.prefill_alive = False
+        monkeypatch.setattr(
+            moriio_connector, "_peer_listening", lambda host, port: self.prefill_alive
+        )
+        connector._write_recv_prober.shutdown()
+        connector._write_recv_prober = _InlineExecutor()
         self.pool = self.scheduler.kv_cache_manager.block_pool
         self.workers = [_make_consumer_worker() for _ in range(tp_size)]
         # Like the executors: only multi-worker outputs are aggregated.
@@ -211,3 +231,45 @@ def test_write_done_with_the_timeout_completes_the_request(engine):
     engine.step(write_done=frozenset({request.request_id}))
     engine.step()
     assert request.status == RequestStatus.RUNNING
+
+
+def test_alive_prefill_is_waited_for_past_the_deadline(engine):
+    """A prefill that still answers at the deadline is slow, e.g. behind a long
+    queue, not gone: its request keeps waiting and completes."""
+    engine.prefill_alive = True
+    request = engine.add_waiting_request()
+
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    engine.clock.now += TIMEOUT_S
+    engine.step()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    engine.step(write_done=frozenset({request.request_id}))
+    engine.step()
+    assert request.status == RequestStatus.RUNNING
+
+
+def test_alive_prefill_still_fails_at_the_max_timeout(engine):
+    engine.prefill_alive = True
+    request = engine.add_waiting_request()
+    held = engine.pool.get_num_free_blocks()
+
+    engine.clock.now += TIMEOUT_S + 1
+    engine.step()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # write_recv_max_timeout defaults to 3 x write_recv_timeout.
+    engine.clock.now += 2 * TIMEOUT_S
+    engine.step()
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert engine.pool.get_num_free_blocks() == held
+
+
+def test_peer_listening_tells_a_listening_socket_from_a_closed_port():
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+        assert moriio_connector._peer_listening("127.0.0.1", port)
+    assert not moriio_connector._peer_listening("127.0.0.1", port)
