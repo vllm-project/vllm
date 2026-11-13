@@ -221,6 +221,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 
 - `/metrics` - Prometheus metrics, including model, throughput, queue, and KV-cache statistics
 - `/kv_event_sources` - KV-event publisher configuration for each data-parallel rank, which may reveal internal transport endpoints (when KV events are configured)
+- `/kv_identity` - KV identity and its components (checkpoint and configuration digests, vLLM and Transformers versions) for each data-parallel rank
 - `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
