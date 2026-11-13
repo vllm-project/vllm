@@ -9,7 +9,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import MegaMoEActivation
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    MEGA_MOE_FP8_BLOCK_SM90,
+    MegaMoEActivation,
+    check_deep_gemm_mega_moe_supported,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     requant_block_fp8_to_ue8m0,
 )
@@ -310,6 +314,35 @@ def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode, sm90):
     _assert_layout(_routed(experts), _expected_routed(ckpt, sm90), sm90)
     _assert_layout(_shared(experts), _expected_shared(shared_ckpt, sm90), sm90)
     assert {n: p.data_ptr() for n, p in experts.named_parameters()} == storage
+
+
+def test_sm90_eplb_views_cover_padded_block_scales(monkeypatch):
+    """EPLB moves experts as rows of these views. The SM90 block scales pad
+    their MN stride to 4 (N/128 = 2 here), and each row must still be one
+    expert of the parameter."""
+    monkeypatch.setattr(
+        current_platform, "is_device_capability", lambda cap, **_: cap == 90
+    )
+    experts = _experts()
+    names = [n for n, _ in experts.named_parameters() if not n.startswith("shared_")]
+    for name, view in zip(names, experts.get_expert_weights(), strict=True):
+        param = getattr(experts, name)
+        view[1].fill_(7)
+        assert (param[1].float() == 7).all(), name
+        assert (param[0].float() == 0).all(), name
+
+
+def test_sm90_format_rejected_on_sm100(monkeypatch):
+    monkeypatch.setattr(
+        current_platform, "is_device_capability", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda *args, **kwargs: True
+    )
+    with pytest.raises(NotImplementedError, match="requires SM90"):
+        check_deep_gemm_mega_moe_supported(
+            torch.device("cpu"), HIDDEN, INTER, MEGA_MOE_FP8_BLOCK_SM90
+        )
 
 
 def test_bf16_checkpoint_loads_as_is():
