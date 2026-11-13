@@ -17,6 +17,10 @@ NATIVE_SUITES = {
     "test_token_gpu.py",
 }
 EXTERNAL_REGRESSIONS = {
+    "tests/v1/worker/test_draft_tokens_handler.py": (
+        "test_variable_length_drafts_wait_for_copy_before_trimming",
+        "test_retained_drafts_wait_only_for_their_own_copy",
+    ),
     "tests/v1/core/test_async_scheduler.py": (
         "test_worker_invalid_drafts_follow_queued_step_and_grammar_union",
     ),

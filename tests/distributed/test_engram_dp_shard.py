@@ -822,6 +822,7 @@ def _check_dummy_hash_model_forward(
     torch.nn.Module.__init__(model)
     model.parallel_config = vllm_config.parallel_config
     model.use_native_mega_moe = False
+    model.use_mega_gate = False
     model.use_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False

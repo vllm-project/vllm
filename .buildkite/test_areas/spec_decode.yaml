@@ -330,7 +330,9 @@ steps:
   timeout_in_minutes: 20
   device: h200_35gb
   source_file_dependencies:
+    - vllm/sampling_params.py
     - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/sample/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
   commands:
@@ -345,7 +347,9 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/sampling_params.py
       - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/sample/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/model_executor/model_loader/
       - vllm/v1/sample/
@@ -459,8 +463,11 @@ steps:
   num_devices: 2
   source_file_dependencies:
     - vllm/v1/worker/gpu/spec_decode/eagle/
+    - vllm/distributed/parallel_state.py
+    - vllm/v1/worker/gpu/model_runner.py
     - vllm/model_executor/models/deepseek_mtp.py
     - vllm/model_executor/models/deepseek_v2.py
+    - vllm/model_executor/models/qwen3_next_mtp.py
     - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py

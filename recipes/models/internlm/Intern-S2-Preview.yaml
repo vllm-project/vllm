@@ -196,7 +196,7 @@ guide: |
     handler landed via vLLM PR #42705 — use a nightly wheel or build from main
     once the PR merges.
   - **OOM at full 262K context:** drop `--max-model-len` to 65536 or 131072,
-    or lower `--gpu-memory-utilization` headroom.
+    or lower `--max-num-seqs`.
 
   ## References
 
