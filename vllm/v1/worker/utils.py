@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -934,8 +935,36 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 setattr(layer, name, torch.empty(0, dtype=torch.int32))
 
 
-_MAX_COW_TRANSIENT_BYTES = 256 * 1024 * 1024
-"""Upper bound on bytes materialized per chunk by copy_kv_cache_blocks_inplace."""
+def _block_copy_runs(
+    blocks: torch.Tensor, src_blocks: np.ndarray, dst_blocks: np.ndarray
+) -> np.ndarray:
+    """Split block copies into contiguous byte runs.
+
+    Returns:
+        An int64 array of shape `[num_runs, 3]` holding the source address,
+        destination address and size in bytes of each run.
+
+    """
+    shape, strides = blocks.shape[1:], blocks.stride()[1:]
+    run_len = 1
+    outer_dims = len(shape)
+    for dim in reversed(range(len(shape))):
+        if shape[dim] != 1 and strides[dim] != run_len:
+            break
+        run_len *= shape[dim]
+        outer_dims = dim
+    offsets = np.zeros(1, dtype=np.int64)
+    for size, stride in zip(shape[:outer_dims], strides[:outer_dims]):
+        offsets = (offsets[:, None] + np.arange(size) * stride).reshape(-1)
+    element_size = blocks.element_size()
+    offsets = blocks.data_ptr() + offsets * element_size
+    block_bytes = blocks.stride(0) * element_size
+    src_runs, dst_runs = (
+        (block_ids[:, None] * block_bytes + offsets).reshape(-1)
+        for block_ids in (src_blocks, dst_blocks)
+    )
+    sizes = np.full_like(src_runs, run_len * element_size)
+    return np.stack([src_runs, dst_runs, sizes], axis=1)
 
 
 def copy_kv_cache_blocks_inplace(
@@ -947,7 +976,7 @@ def copy_kv_cache_blocks_inplace(
         return
 
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices: torch.Tensor | None = None
+    block_views: list[torch.Tensor] = []
     seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
     for cache in kv_caches:
@@ -967,11 +996,6 @@ def copy_kv_cache_blocks_inplace(
         if key in seen:
             continue
         seen.add(key)
-
-        if indices is None:
-            indices = async_tensor_h2d(indices_np, device=cache.device)
-        assert cache.device == indices.device
-        src, dst = indices.unbind(dim=1)
 
         kernel_blocks_per_block, remainder = divmod(cache.shape[0], num_blocks)
         assert remainder == 0, (
@@ -994,16 +1018,30 @@ def copy_kv_cache_blocks_inplace(
             # Fold virtual block splitting into the shape so that dim 0 counts
             # scheduler blocks; unflatten of dim 0 is always a view.
             blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
-        # The RHS gather materializes len(src) rows in one allocation. Rows
-        # can be tens of MiB (mamba state), so a large CoW wave would
-        # transiently allocate multi-GiB and OOM near the memory limit.
-        # Copy in byte-bounded chunks; src and dst sets are disjoint in
-        # copy-on-write (dst blocks are freshly allocated), so chunking is
-        # order-equivalent.
-        row_bytes = blocks.stride(0) * blocks.element_size()
-        chunk = max(1, _MAX_COW_TRANSIENT_BYTES // row_bytes)
-        for start in range(0, src.numel(), chunk):
-            blocks[dst[start : start + chunk]] = blocks[src[start : start + chunk]]
+        block_views.append(blocks)
+
+    if not block_views:
+        return
+    device = block_views[0].device
+    assert all(blocks.device == device for blocks in block_views)
+    src_blocks, dst_blocks = indices_np.T
+    # An indexed copy gathers every source block into a temporary, which can
+    # take GiBs for large state blocks, so GPU copies go straight between
+    # blocks in one batched memcpy. The batched copies run concurrently, so
+    # chained copies (a block that is both a source and a destination) keep
+    # the indexed copy, which reads all sources first.
+    if device.type == "cuda" and not np.intersect1d(src_blocks, dst_blocks).size:
+        runs = np.concatenate(
+            [_block_copy_runs(blocks, src_blocks, dst_blocks) for blocks in block_views]
+        )
+        ops.swap_blocks_batch(
+            *(torch.from_numpy(np.ascontiguousarray(col)) for col in runs.T)
+        )
+        return
+
+    src, dst = async_tensor_h2d(indices_np, device=device).unbind(dim=1)
+    for blocks in block_views:
+        blocks[dst] = blocks[src]
 
 
 def is_uniform_query_len(num_reqs: int, num_tokens: int, max_query_len: int) -> bool:

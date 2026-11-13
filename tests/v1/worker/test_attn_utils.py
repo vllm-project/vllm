@@ -675,8 +675,18 @@ def test_allocate_compressed_mla_cache(
     assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
 
 
+_DEVICES = [
+    "cpu",
+    pytest.param(
+        "cuda",
+        marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"),
+    ),
+]
+
+
+@pytest.mark.parametrize("device", _DEVICES)
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
-def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
+def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout, device: str):
     num_blocks = 4
     num_layers = 2
     spec = FullAttentionSpec(
@@ -685,7 +695,9 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
         head_size=2,
         dtype=torch.float32,
     )
-    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8, device=device
+    )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
     for layer_idx, cache in enumerate(caches):
@@ -727,7 +739,8 @@ def test_fixed_block_stride_propagates_outward_in_lhbnc():
     assert strides[0] == strides[2] * spec.num_heads
 
 
-def test_copy_kv_cache_blocks_separate_head_groups():
+@pytest.mark.parametrize("device", _DEVICES)
+def test_copy_kv_cache_blocks_separate_head_groups(device: str):
     # LHBNC stores each head group separately, so a block's bytes are scattered
     # across L*H regions.
     layout = KVCacheLayout.LHBNC
@@ -741,7 +754,9 @@ def test_copy_kv_cache_blocks_separate_head_groups():
         num_head_slots=2,
         state_content_bytes=2 * 2 * 4,
     )
-    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8, device=device
+    )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
     for layer_idx, cache in enumerate(caches):
@@ -763,6 +778,7 @@ def test_copy_kv_cache_blocks_separate_head_groups():
         torch.testing.assert_close(cache[1], expected[layer_idx][1])
 
 
+@pytest.mark.parametrize("device", _DEVICES)
 @pytest.mark.parametrize(
     "layout,num_layers",
     [
@@ -773,7 +789,7 @@ def test_copy_kv_cache_blocks_separate_head_groups():
     ],
 )
 def test_copy_kv_cache_blocks_with_virtual_block_splitting(
-    layout: KVCacheLayout, num_layers: int
+    layout: KVCacheLayout, num_layers: int, device: str
 ):
     num_blocks = 4
     physical_per_logical = 2
@@ -783,7 +799,9 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
         head_size=2,
         dtype=torch.float32,
     )
-    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8, device=device
+    )
     caches = dense_kv_cache_views(
         raw,
         spec,
@@ -991,7 +1009,8 @@ def test_packed_token_cache_cannot_be_split():
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
 
 
-def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():
+@pytest.mark.parametrize("device", _DEVICES)
+def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block(device: str):
     """Hybrid overlays: a Mamba state view and an attention view of one tensor
     share a base address but span different bytes per block, and several such
     tensors live in one allocation (so the whole-storage fast path is off).
@@ -1003,19 +1022,21 @@ def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():
     block_stride = 64  # bytes per scheduler block in every tensor
     state_bytes = 24  # Mamba state occupies only the leading bytes of a block
     tensor_bytes = num_blocks * block_stride
-    raw = torch.arange(num_tensors * tensor_bytes, dtype=torch.int32).to(torch.uint8)
+    raw = torch.arange(num_tensors * tensor_bytes, dtype=torch.int32).to(
+        device=device, dtype=torch.uint8
+    )
     storage = raw.untyped_storage()
 
     caches: list[torch.Tensor] = []
     for tensor_idx in range(num_tensors):
         base = tensor_idx * tensor_bytes
-        mamba = torch.empty(0, dtype=torch.int8)
+        mamba = torch.empty(0, dtype=torch.int8, device=device)
         mamba.set_(storage)
         mamba = mamba.as_strided(
             (num_blocks, 1, 1, state_bytes), (block_stride, 1, 1, 1), base
         )
         # 2 kernel pages of 8 int16 per scheduler block cover the whole block.
-        attn = torch.empty(0, dtype=torch.int16)
+        attn = torch.empty(0, dtype=torch.int16, device=device)
         attn.set_(storage)
         attn = attn.as_strided((num_blocks * 2, 1, 8, 2), (16, 16, 2, 1), base // 2)
         assert mamba.data_ptr() == attn.data_ptr()
