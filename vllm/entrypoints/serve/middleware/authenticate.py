@@ -8,7 +8,10 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
+# "/adapters" covers the SageMaker LoRA aliases (POST /adapters and
+# DELETE /adapters/{adapter_name}), which call the same handlers as
+# /v1/load_lora_adapter and /v1/unload_lora_adapter.
+GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere", "/adapters")
 
 
 class AuthenticationMiddleware:
