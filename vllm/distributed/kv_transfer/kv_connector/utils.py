@@ -396,31 +396,45 @@ def get_current_attn_backends_and_specs(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     fallback: list[type[AttentionBackend]],
-) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
-    """Distinct (backend, spec) pairs of the transfer layers, else `fallback`.
+) -> tuple[
+    list[type[AttentionBackend]], list[AttentionSpec | None], list[list[str]] | None
+]:
+    """Distinct (backend, spec, query heads) groups of the transfer layers, with
+    their layer names, else `fallback` with no layer names.
 
-    Attention caches in a block-outermost layout are skipped: blocks there are
-    never split group-wide (`prepare_kernel_block_sizes`), and a cache that
-    needs smaller kernel blocks views them inside each block, so its kernel
-    pages never split transferred blocks. Compressed caches are skipped too
-    (`check_compressed_kernel_split` guards them).
+    The layer names let kernel block selection match the model runner's, which
+    picks per attention group. Attention caches in a block-outermost layout are
+    skipped: blocks there are never split group-wide
+    (`prepare_kernel_block_sizes`), and a cache that needs smaller kernel blocks
+    views them inside each block, so its kernel pages never split transferred
+    blocks. Compressed caches are skipped too (`check_compressed_kernel_split`
+    guards them).
     """
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
-    pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
+    groups: dict[
+        tuple[type[AttentionBackend], AttentionSpec | None, int], list[str]
+    ] = {}
     has_layers = False
     layer_type = cast(type[Any], AttentionLayerBase)
     for group in kv_cache_config.transfer_groups:
         layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
         for name, layer in layers.items():
             has_layers = True
-            spec = group.kv_cache_specs[name]
-            if not isinstance(spec, AttentionSpec):
-                pairs[layer.get_attn_backend(), None] = None
-            elif spec.tokens_per_state == 1 and not layout.is_block_outermost:
-                pairs[layer.get_attn_backend(), spec] = None
+            group_spec = group.kv_cache_specs[name]
+            spec: AttentionSpec | None = None
+            if isinstance(group_spec, AttentionSpec):
+                if group_spec.tokens_per_state != 1 or layout.is_block_outermost:
+                    continue
+                spec = group_spec
+            key = (layer.get_attn_backend(), spec, getattr(layer, "num_heads", 0))
+            groups.setdefault(key, []).append(name)
     if not has_layers:
-        return fallback, [None] * len(fallback)
-    return [backend for backend, _ in pairs], [spec for _, spec in pairs]
+        return fallback, [None] * len(fallback), None
+    return (
+        [backend for backend, _, _ in groups],
+        [spec for _, spec, _ in groups],
+        list(groups.values()),
+    )
 
 
 def check_compressed_kernel_split(

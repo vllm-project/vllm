@@ -2110,7 +2110,7 @@ def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
         transfer_groups=[make_kv_cache_group(["draft"], spec)]
     )
 
-    backends, specs = kv_utils.get_current_attn_backends_and_specs(
+    backends, specs, _ = kv_utils.get_current_attn_backends_and_specs(
         vllm_config, kv_cache_config, [_DraftBackend]
     )
 
