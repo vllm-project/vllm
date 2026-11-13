@@ -2539,15 +2539,18 @@ def test_flashinfer_prims_customize_spec_splits_fp8_planes(
     ("env", "expected"),
     [
         pytest.param("cute-dsl-prims", (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC), id="prims"),
-        pytest.param("auto", None, id="auto"),
+        pytest.param("auto", None, id="auto-delegates"),
     ],
 )
 def test_flashinfer_prims_supported_kv_cache_layouts(monkeypatch, env, expected):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.utils import get_flashinfer_kv_cache_layouts
 
     platform = _prims_platform_stub((12, 0))
     monkeypatch.setenv(_PRIMS_ENV, env)
     monkeypatch.setattr(flashinfer_backend, "current_platform", platform)
+    if expected is None:
+        expected = get_flashinfer_kv_cache_layouts()
     assert flashinfer_backend.FlashInferBackend.supported_kv_cache_layouts() == expected
 
 
