@@ -66,7 +66,6 @@ def _builder(
         block_size=BLOCK_SIZE,
         shapes=shapes,
         dtypes=dtypes,
-        num_speculative_blocks=NUM_SPEC,
     )
 
     return GDNAttentionMetadataBuilder(
