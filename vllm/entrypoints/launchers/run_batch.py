@@ -176,7 +176,7 @@ _BATCH_REQUEST_INPUT_BODY_ADAPTER: TypeAdapter[BatchRequestInputBody] = TypeAdap
 class BatchRequestInput(OpenAIBaseModel):
     """The per-line object of the batch input file.
 
-    ``url`` selects the request type that ``body`` is parsed as.
+    `url` selects the request type that `body` is parsed as.
     """
 
     # A developer-provided per-request id that will be used to match outputs to
@@ -450,7 +450,7 @@ def validate_batch(input_file: IO[str]) -> int:
             continue
         try:
             BatchRequestInput.model_validate_json(request_json)
-        except pydantic.ValidationError as e:
+        except (pydantic.ValidationError, VLLMValidationError) as e:
             raise ValueError(f"Invalid request on line {line_number}: {e}") from e
         num_requests += 1
     return num_requests

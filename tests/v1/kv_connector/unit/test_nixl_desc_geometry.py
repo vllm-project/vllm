@@ -33,6 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
+from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -354,8 +356,8 @@ def _register_overlaid_mla_worker(
 ):
     """Register two MLA layers overlaid on one allocation.
 
-    ``tail_bytes`` leaves spare bytes past the last block, the way an allocation
-    rounded up to a page boundary does. Clearing ``page_covers_view`` narrows
+    `tail_bytes` leaves spare bytes past the last block, the way an allocation
+    rounded up to a page boundary does. Clearing `page_covers_view` narrows
     each layer's view below its page, leaving the block interior non-contiguous.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
@@ -563,9 +565,9 @@ def _make_mla_hybrid_worker(
     mamba=True,
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
-    layout, or a pure MLA one without ``mamba``.
+    layout, or a pure MLA one without `mamba`.
 
-    ``kda_only_tensor`` adds a third layer to the first KDA group in a tensor
+    `kda_only_tensor` adds a third layer to the first KDA group in a tensor
     no other group uses, as when a model has more SSM than MLA layers."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
@@ -738,11 +740,19 @@ def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
 
 
 @pytest.mark.cpu_test
-def test_nixl_keeps_packed_sparse_mla_manager_block():
+@pytest.mark.parametrize(
+    ("indexer_backend", "tokens_per_state"),
+    [
+        # GLM-5.3-Flash: a compressed kpool indexer.
+        (Glm5NextIndexerBackend, 4),
+        # Kimi-K3.1: a token indexer, written at kernel slots.
+        (KimiK3IndexerBackend, 1),
+    ],
+)
+def test_nixl_keeps_packed_sparse_mla_manager_block(indexer_backend, tokens_per_state):
     """Like the worker, NIXL keeps packed sparse MLA + indexer manager blocks."""
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
-    from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
     specs = {
@@ -750,10 +760,14 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
             1152, num_kv_heads=1, head_size=512, dtype=torch.bfloat16
         ),
         "indexer": MLAAttentionSpec(
-            1152, num_kv_heads=1, head_size=128, dtype=torch.uint8, tokens_per_state=4
+            1152,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.uint8,
+            tokens_per_state=tokens_per_state,
         ),
     }
-    backends = {"mla": FlashMLASparseBackend, "indexer": Glm5NextIndexerBackend}
+    backends = {"mla": FlashMLASparseBackend, "indexer": indexer_backend}
     layers = {
         name: MagicMock(spec=AttentionLayerBase, **{"get_attn_backend.return_value": b})
         for name, b in backends.items()
@@ -1079,9 +1093,9 @@ def _run_hetero_case(
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
-    ``remote_kernel`` defaults to the local kernel block size; a smaller
-    value additionally exercises block_size_ratio > 1. Without ``mamba`` the
-    model is pure MLA, whose local prefix hit of ``cached`` blocks is not
+    `remote_kernel` defaults to the local kernel block size; a smaller
+    value additionally exercises block_size_ratio > 1. Without `mamba` the
+    model is pure MLA, whose local prefix hit of `cached` blocks is not
     pulled.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -1486,8 +1500,8 @@ def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
 def _make_csa_linear_ple_worker(
     scratch_aliases: str = "compressed", ple_page_size: int = 256
 ):
-    """``scratch_aliases`` selects which pages the compressor ring overlays;
-    ``ple_page_size`` widens the PLE page beyond the page it shares a region
+    """`scratch_aliases` selects which pages the compressor ring overlays;
+    `ple_page_size` widens the PLE page beyond the page it shares a region
     with (block-outer layout: both start at byte 0 of the block)."""
     from unittest.mock import MagicMock
 
@@ -2070,6 +2084,45 @@ def test_shared_base_regions_with_distinct_block_lens_stay_separate():
     np.testing.assert_array_equal(
         descs[:, 0], [base[0], base[0] + 256, base[0], base[0] + 256]
     )
+
+
+@pytest.mark.parametrize(
+    ("layout", "transfer_block_size"),
+    [(KVCacheLayout.BLHNC, 1024), (KVCacheLayout.LBNHC, 64)],
+)
+def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
+    monkeypatch, layout, transfer_block_size
+):
+    """A Kimi-K3.1 DSpark draft's FLASHINFER_MLA takes 32/64-token kernel
+    blocks. In a packed layout it views them inside each block, so transfers
+    keep whole blocks; otherwise its block size splits them."""
+    from vllm.distributed.kv_transfer.kv_connector import utils as kv_utils
+    from vllm.v1.worker.utils import select_common_block_size
+
+    class _DraftBackend:
+        @staticmethod
+        def get_supported_kernel_block_sizes(_spec):
+            return [32, 64]
+
+    spec = MLAAttentionSpec(
+        block_size=1024, num_kv_heads=1, head_size=576, dtype=torch.uint8
+    )
+    layer = SimpleNamespace(get_attn_backend=lambda: _DraftBackend)
+    monkeypatch.setattr(
+        kv_utils, "get_layers_from_vllm_config", lambda *_: {"draft": layer}
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
+    )
+    kv_cache_config = SimpleNamespace(
+        transfer_groups=[KVCacheGroupSpec(["draft"], spec)]
+    )
+
+    backends, specs = kv_utils.get_current_attn_backends_and_specs(
+        vllm_config, kv_cache_config, [_DraftBackend]
+    )
+
+    assert select_common_block_size(1024, backends, specs) == transfer_block_size
 
 
 # Real model KV layouts, end to end on CPU: vLLM's planner and allocator build

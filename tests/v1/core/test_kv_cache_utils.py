@@ -41,8 +41,11 @@ from vllm.multimodal.inputs import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
+    _pool_bytes_per_block,
     get_kv_cache_groups,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -72,6 +75,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
@@ -165,10 +169,10 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
+            hf_text_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7, kv_cache_layout=None),
     )
     host_page = specs["model.layers.0.self_attn"].page_size_bytes
     host_budget = (4 + extra_blocks) * host_page
@@ -185,8 +189,6 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
 def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     """Workers report HiSparse's resident/hot caches, which lay out their own raw
     backing; KV cache layout resolution must skip them."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     specs: dict[str, KVCacheSpec] = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -226,6 +228,86 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     assert layouts[0] == layouts[1]
 
 
+@pytest.mark.parametrize(
+    ("source_alignment", "hot_alignment"),
+    [(None, 576 * 2), (MultipleOf(64), 64 * 576 * 2), (MultipleOf(32), 32 * 576 * 2)],
+)
+def test_hisparse_packs_hot_layers_up_to_largest_device_page(
+    source_alignment, hot_alignment
+):
+    """Hybrid models share the device pool with larger non-MLA pages; hot
+    layers must pack up to that page, not one group per index group, and
+    indexer blocks fill it. Hot blocks are whole rows apart unless the
+    attention kernel reads fixed pages."""
+    mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
+    specs: dict[str, KVCacheSpec] = {}
+    for layer in range(2):
+        specs[f"model.layers.{layer}.self_attn"] = MLAAttentionSpec(
+            head_size=576,
+            is_index_group_leader=True,
+            block_stride_alignment=source_alignment,
+            **mla,
+        )
+        specs[f"model.layers.{layer}.self_attn.indexer"] = MLAAttentionSpec(
+            head_size=128,
+            cache_role=SparseCacheRole.INDEXER,
+            **mla,
+        )
+    specs["model.layers.2.self_attn"] = FullAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=4096, dtype=torch.bfloat16
+    )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_text_config.index_topk = 128
+
+    groups = get_hisparse_kv_cache_groups(config, specs)
+    assert groups is not None
+    hot_groups = [g for g in groups if isinstance(g.kv_cache_spec, HiSparseHotSpec)]
+    assert len(hot_groups) == 1
+    assert len(hot_groups[0].layer_names) == 2
+    assert hot_groups[0].kv_cache_spec.get_block_stride_alignment() == hot_alignment
+    (indexer_group,) = (
+        g for g in groups if g.role == KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    assert indexer_group.kv_cache_spec.block_size == 2048
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_layout", "indexer_block_size"), [(None, 4096), ("BLHNC", 2304)]
+)
+def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block_size):
+    """A block-outer pool block is whole hot rows, and indexer kernel pages
+    spread out to divide it when growing it to whole pages costs more."""
+    mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
+    specs: dict[str, KVCacheSpec] = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            head_size=576, is_index_group_leader=True, **mla
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            head_size=128,
+            cache_role=SparseCacheRole.INDEXER,
+            block_stride_alignment=MultipleOf(64),
+            **mla,
+        ),
+        "model.layers.1.self_attn": FullAttentionSpec(
+            block_size=64, num_kv_heads=1, head_size=4096, dtype=torch.bfloat16
+        ),
+    }
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.cache_config.kv_cache_layout = kv_cache_layout
+    config.model_config.hf_text_config.index_topk = 128
+
+    groups = get_hisparse_kv_cache_groups(config, specs)
+    assert groups is not None
+    (indexer_group,) = (
+        g for g in groups if g.role == KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    assert indexer_group.kv_cache_spec.block_size == indexer_block_size
+    if kv_cache_layout is not None:
+        assert _pool_bytes_per_block(config, groups) == 1_049_472
+
+
 def test_hisparse_rejects_deepseek_v4():
     full_specs = {
         "model.layers.0.attn": MLAAttentionSpec(
@@ -238,8 +320,8 @@ def test_hisparse_rejects_deepseek_v4():
     }
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=512)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7, kv_cache_layout=None),
     )
 
     with pytest.raises(ValueError, match="does not support DeepSeek V4"):
@@ -1196,7 +1278,7 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         pytest.param(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
-        pytest.param({"kv_connector": True}, 0, id="kv-connector"),
+        pytest.param({"kv_connector": True}, 1, id="kv-connector"),
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
 )
@@ -1368,8 +1450,6 @@ def test_dcp_target_allocates_replicated_draft_independently(
     monkeypatch, sliding_window, disable_hybrid, pcp_size
 ):
     """A draft must retain all positions even when the target shards them."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.parallel_config.decode_context_parallel_size = 4
@@ -1428,10 +1508,37 @@ def test_dcp_target_allocates_replicated_draft_independently(
     assert [len(group) for group in cached_blocks.blocks] == [1, 4]
 
 
+def test_dcp_hybrid_target_pads_replicated_draft_pages(monkeypatch):
+    """A hybrid target keeps a layer-compact layout next to a replicated draft:
+    the draft's pages are padded to the target's instead of packing blocks."""
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    config.cache_config.block_size = 16
+    config.cache_config.kv_cache_layout = None
+    target = new_mla_spec()
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((target.page_size_bytes // 4,),),
+        dtypes=(torch.float32,),
+    )
+    draft = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+        sliding_window=256,
+    )
+    specs = {"target": target, "mamba": mamba, "draft": draft}
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"]], specs.values())
+    assert layout == KVCacheLayout.LBHNC
+    groups = get_kv_cache_groups(config, specs)
+    assert {g.kv_cache_spec.page_size_bytes for g in groups} == {target.page_size_bytes}
+
+
 def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
     """A replicated kpool tail ring is per-request state, not a draft group."""
-    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.parallel_config.decode_context_parallel_size = 4
@@ -2381,7 +2488,7 @@ def test_resolve_block_hashes_rejects_mismatched_view():
 
 
 def test_is_full_attention_spec_unwraps_uniform_type_specs():
-    """``UniformTypeKVCacheSpecs`` is not a ``FullAttentionSpec``, so callers
+    """`UniformTypeKVCacheSpecs` is not a `FullAttentionSpec`, so callers
     scanning groups with a bare isinstance miss DeepSeek-V4-shaped configs."""
     common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
     full = FullAttentionSpec(block_size=4, **common)

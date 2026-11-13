@@ -18,30 +18,30 @@
 """The MoE tail of the Muse Spark specialized decode.
 
 With expert parallelism every rank holds the GEMM2 rows of its local experts
-for the replicated tokens (``UnfinalizedMoEOutput``). The tail (``MoETail``)
+for the replicated tokens (`UnfinalizedMoEOutput`). The tail (`MoETail`)
 RMS-normalizes each local route's row over the pooled width (post_expert_norm),
 weights it by its route weight, sums a token's routes in FP32, and all-reduces
 the per-rank BF16 partial sums (the EP combine). Per token, over the routes
-``r`` local to a rank with row ``x_r`` and weight ``w_r``::
+`r` local to a rank with row `x_r` and weight `w_r`::
 
     s_r = x_r * (gamma + gain_center)       # weight_before_norm
     partial = bf16(sum_r w_r * s_r * rsqrt(mean(s_r**2) + eps))
     out = bf16(sum over ranks, in rank order, of partial)  # FP32 sum
 
-Without ``weight_before_norm`` the weight multiplies after the norm. The output
+Without `weight_before_norm` the weight multiplies after the norm. The output
 is bitwise the stock MNNVL MoE finalize's for the same rows, identical on every
 rank. It takes two kernels over one Lamport mailbox: a publisher that
-multicasts each token's partial, and a reduction that sums the ``tp`` slots.
+multicasts each token's partial, and a reduction that sums the `tp` slots.
 
-Under expert TP (``TpTail``) every rank holds a K-partial of every route's
+Under expert TP (`TpTail`) every rank holds a K-partial of every route's
 GEMM2 row instead. The rows are summed across ranks before the norm, bitwise
-as the stock TP finalize (``tp_moe_finalize_rmsnorm``) on its single-launch
+as the stock TP finalize (`tp_moe_finalize_rmsnorm`) on its single-launch
 token-owner path::
 
     x_r = bf16(sum over ranks, in rank order, of the K-partials)  # FP32 sum
     out = bf16(sum_r fp32(w_r * norm(x_r)))    # routes in order, from 0.0
 
-See ``_TpTailKernel``.
+See `_TpTailKernel`.
 """
 
 from collections.abc import Sequence
@@ -250,9 +250,9 @@ class _NormFinalizePublishDeviceKernel:
 
 
 class _TailReduceKernel:
-    """Sum the ``tp`` partials of every token from the mailbox into ``output``.
+    """Sum the `tp` partials of every token from the mailbox into `output`.
 
-    Each 8-column fragment waits for all ``tp`` slots (bounded), adds them in
+    Each 8-column fragment waits for all `tp` slots (bounded), adds them in
     rank order in FP32 from 0.0 and stores the BF16 sum; then the stage
     advances, dependents are released and the slots are re-armed.
     """
@@ -379,7 +379,7 @@ TP_MAX_SPLIT = 16
 
 
 def tp_split(m: int, tp: int, nsm: int) -> int:
-    """H bands per token of the TP tail for ``m`` tokens on ``nsm`` SMs, as
+    """H bands per token of the TP tail for `m` tokens on `nsm` SMs, as
     the stock TP finalize picks them; the split fixes the sum-of-squares tree,
     so the tails agree bitwise."""
     ctas = -(-m // tp) * tp
@@ -391,9 +391,9 @@ def tp_split(m: int, tp: int, nsm: int) -> int:
 
 class _TpTailKernel:
     """The expert-TP MoE tail, one launch: grid (split, slots, tp), clusters of
-    the ``split`` H bands of one (slot, d), ``TOP_K`` x ``band_threads``
+    the `split` H bands of one (slot, d), `TOP_K` x `band_threads`
     threads; CTA (b, g, d) works on H band b of token t = g * tp + d. Rank
-    ``t % tp`` owns token ``t``.
+    `t % tp` owns token `t`.
 
     - Send: every rank sends its K-partial rows of token t's routes to the
       owner's route mailbox (unicast), -0.0 as +0.0.
@@ -404,10 +404,10 @@ class _TpTailKernel:
       into the output.
 
     The sum's arithmetic, order and BF16 roundings are the stock TP
-    finalize's (``tp_split`` gives its sum-of-squares tree).
+    finalize's (`tp_split` gives its sum-of-squares tree).
 
     Each CTA reads its generation word(s) after griddepcontrol.wait and
-    advances them at exit; the words are per finest band (``TP_MAX_SPLIT``),
+    advances them at exit; the words are per finest band (`TP_MAX_SPLIT`),
     so every word of a slot advances once per launch whatever the split and
     all ranks agree on it. A slot is re-armed by its reader right after the
     read, and its next writer is at least one launch later.
@@ -763,8 +763,8 @@ class TailConstants(NamedTuple):
 
 
 def tail_constants(norm) -> TailConstants:
-    """The constants the stock post-expert finalize passes for ``norm`` (a
-    MuseSpark1xRMSNorm over the pooled width)."""
+    """The constants the stock post-expert finalize passes for `norm` (a
+    MuseSparkRMSNorm over the pooled width)."""
     if norm.hidden_size != POOLED:
         raise ValueError(f"the post-expert norm must span {POOLED} columns")
     if norm.variance_size_override is not None:
@@ -789,7 +789,7 @@ def tail_weight(norm, device: torch.device) -> torch.Tensor:
 
 
 def compile_reduce(*, tp: int, capacity: int, enable_pdl: bool):
-    """Compile the reduction for a ``[3, tp, capacity, P]`` mailbox."""
+    """Compile the reduction for a `[3, tp, capacity, P]` mailbox."""
     assert_not_capturing("the MoE tail reduction")
     reduce = _TailReduceKernel(
         hidden=POOLED,
@@ -861,7 +861,7 @@ def _check_tail_args(
     capacity: int, unfinalized: "UnfinalizedMoEOutput", out: torch.Tensor
 ) -> None:
     """Refuse a call either tail cannot take (before anything launches: the
-    other ranks would wait for this one). ``out`` must be dense: the kernels
+    other ranks would wait for this one). `out` must be dense: the kernels
     write through its flat view."""
     m = out.shape[0]
     rows = unfinalized.gemm2_permuted
@@ -903,9 +903,9 @@ class MoETail:
     """The MoE tail of one executor: its Lamport mailbox and compiled kernels.
 
     Built once, collectively over the TP group, before CUDA graph capture. Every
-    MoE layer binds its post-expert norm with :meth:`bind`; the layers share the
+    MoE layer binds its post-expert norm with `bind`; the layers share the
     mailbox (their calls are sequential on every rank, as the stock workspace's
-    are). ``tp`` >= 2 (multicast); ``capacity`` rows per call at most.
+    are). `tp` >= 2 (multicast); `capacity` rows per call at most.
     """
 
     def __init__(
@@ -949,7 +949,7 @@ class MoETail:
         return publisher
 
     def bind(self, norm) -> "BoundTail":
-        """One layer's tail: ``norm`` is its post_expert_norm. Both route-weight
+        """One layer's tail: `norm` is its post_expert_norm. Both route-weight
         dtypes are compiled here, before capture."""
         constants = tail_constants(norm)
         for dtype in ROUTE_WEIGHT_DTYPES:
@@ -984,8 +984,8 @@ class MoETail:
 
 
 class BoundTail:
-    """One MoE layer's tail on ``tail`` (a ``MoETail``, or a ``TpTail`` for
-    the expert-TP layers); ``run`` is graph-capturable and allocates nothing."""
+    """One MoE layer's tail on `tail` (a `MoETail`, or a `TpTail` for
+    the expert-TP layers); `run` is graph-capturable and allocates nothing."""
 
     def __init__(self, tail: Any, constants: TailConstants, weight: torch.Tensor):
         self.tail = tail
@@ -994,7 +994,7 @@ class BoundTail:
         self._weight_view = to_cute(weight, 16)
 
     def run(self, unfinalized: "UnfinalizedMoEOutput", out: torch.Tensor) -> None:
-        """Finalize the experts' output into ``out`` (BF16 [b, P],
+        """Finalize the experts' output into `out` (BF16 [b, P],
         contiguous): the MoE output, identical on every rank. Every rank of
         the group calls it with the same b; b = 0 does nothing on every rank."""
         m = out.shape[0]
@@ -1066,8 +1066,8 @@ class TpTail:
     Built once, collectively over the TP group, before CUDA graph capture; the
     layers share it (their calls are sequential on every rank). Every rank
     holds a K-partial of every route row; the output is bitwise the stock TP
-    finalize's on its token-owner path for the same partials (``tp_split``).
-    ``tp`` >= 2 (multicast); ``capacity`` tokens per call at most. ``batches``:
+    finalize's on its token-owner path for the same partials (`tp_split`).
+    `tp` >= 2 (multicast); `capacity` tokens per call at most. `batches`:
     the token counts a captured call runs (the executor's), whose band splits
     every bind compiles; other counts compile theirs on their first call.
     """
@@ -1120,7 +1120,7 @@ class TpTail:
         return tp_split(m, self.tp, self.nsm)
 
     def select(self, constants: TailConstants, weight_dtype: torch.dtype, m: int):
-        """The tail for one norm and route-weight dtype at ``m`` tokens (cached
+        """The tail for one norm and route-weight dtype at `m` tokens (cached
         per band split; compiled on a miss, which must precede capture)."""
         split = self.split(m)
         key = (constants, weight_dtype, split)
@@ -1142,8 +1142,8 @@ class TpTail:
         return kernel
 
     def bind(self, norm) -> BoundTail:
-        """One layer's tail: ``norm`` is its post_expert_norm. The splits of
-        ``batches`` are compiled here for both route-weight dtypes, before
+        """One layer's tail: `norm` is its post_expert_norm. The splits of
+        `batches` are compiled here for both route-weight dtypes, before
         capture."""
         constants = tail_constants(norm)
         for dtype in ROUTE_WEIGHT_DTYPES:

@@ -45,7 +45,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig, hisparse_host_pool_gib
+from .kv_transfer import KVCacheAccess, KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
@@ -122,7 +122,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
-        "MuseSpark1xForCausalLM",
+        "MuseSparkForCausalLM",
         "MuseSparkForConditionalGeneration",
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
@@ -583,6 +583,15 @@ class VllmConfig:
         )
 
     @property
+    def use_replayssm_trackers(self) -> bool:
+        """Mamba2 ReplaySSM whose rings follow the runner-committed trackers."""
+        return (
+            self.cache_config.use_replayssm
+            and not self.cache_config.use_kda_recoverssm
+            and (self.use_flashinfer_replayssm or self.num_speculative_tokens > 0)
+        )
+
+    @property
     def num_speculative_tokens(self) -> int:
         if (
             self.speculative_config is not None
@@ -595,6 +604,14 @@ class VllmConfig:
         ):
             return self.diffusion_config.canvas_length
         return 0
+
+    @property
+    def num_scheduled_spec_tokens(self) -> int:
+        """See `SpeculatorConfig.num_scheduled_spec_tokens`."""
+        speculative_config = self.speculative_config
+        if speculative_config is None:
+            return self.num_speculative_tokens
+        return speculative_config.speculator_config.num_scheduled_spec_tokens
 
     @property
     def num_lookahead_tokens(self) -> int:
@@ -1492,7 +1509,6 @@ class VllmConfig:
             )
 
             self.model_config.verify_with_parallel_config(self.parallel_config)
-            self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
@@ -1829,7 +1845,7 @@ class VllmConfig:
                     "--no-scheduler-reserve-full-isl."
                 )
             if self.model_config is not None and not hasattr(
-                self.model_config.hf_config, "index_topk"
+                self.model_config.hf_text_config, "index_topk"
             ):
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk."
@@ -2134,6 +2150,15 @@ class VllmConfig:
                 "HiSparse requires a KV transfer config with HiSparseConnector "
                 "and host_pool_gib; to combine it with another connector, nest "
                 "both in MultiConnector instead of using --kv-offloading-size."
+            )
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.prefill_context_kv_only
+            and not (self.kv_transfer_config and self.kv_transfer_config.is_kv_producer)
+        ):
+            raise ValueError(
+                "prefill_context_kv_only is for a P/D prefill instance: it needs a "
+                "kv_transfer_config that produces KV (kv_producer or kv_both)."
             )
         self._verify_aux_output_compatibility()
 
@@ -3181,12 +3206,18 @@ class VllmConfig:
         may pick a different runner, and must not revisit the decision.
         """
         from vllm.platforms import current_platform
+        from vllm.utils.vmm_driver import imex_channel_available
 
         cache_config = self.cache_config
         if cache_config._extensible_kv_cache_resolved:
             return
         cache_config._extensible_kv_cache_resolved = True
         requested = cache_config.enable_extensible_kv_cache
+        kv_cache_access = (
+            KVCacheAccess.IN_PROCESS
+            if self.kv_transfer_config is None
+            else self.kv_transfer_config.kv_cache_access()
+        )
         unsupported = None
         if not current_platform.is_cuda_alike():
             unsupported = "it is only supported on CUDA and ROCm"
@@ -3205,13 +3236,10 @@ class VllmConfig:
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
                 "cache size, so no measurement would size the cache"
             )
-        elif (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("LMCacheMPConnector")
-        ):
+        elif KVCacheAccess.LEGACY_IPC in kv_cache_access:
             unsupported = (
-                "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
-                "which cannot export driver-mapped memory"
+                "a KV connector (e.g. LMCacheMPConnector) shares the KV cache "
+                "through legacy CUDA IPC, which cannot export driver-mapped memory"
             )
         elif (
             self.kv_transfer_config is not None
@@ -3221,21 +3249,45 @@ class VllmConfig:
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
             )
-        elif (
-            self.kv_transfer_config is not None
-            and current_platform.is_rocm()
-            and self.kv_transfer_config.registers_kv_cache_memory()
-        ):
+        elif current_platform.is_rocm() and kv_cache_access.needs_single_chunk():
             # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
-                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
+                "which connectors that register the KV cache (e.g. NIXL, Mooncake, "
+                "MoRIIO, UMBP) require"
             )
+        exports_fd = KVCacheAccess.EXPORTS_FD in kv_cache_access
+        if exports_fd and (requested is False or unsupported is not None):
+            raise ValueError(
+                "enable_extensible_kv_cache: a KV connector (e.g. "
+                "LMCacheMPConnector with lmcache.mp.use_vmm_api) imports the KV "
+                "cache through POSIX file descriptors, which needs it, but "
+                f"{unsupported or 'it is disabled'}."
+            )
+        # FABRIC handles to driver-mapped memory need an IMEX channel.
+        fabric_unavailable = (
+            KVCacheAccess.EXPORTS_FABRIC in kv_cache_access
+            and not imex_channel_available()
+        )
         if requested is None:
-            cache_config.enable_extensible_kv_cache = unsupported is None
+            enabled = unsupported is None and (exports_fd or not fabric_unavailable)
+            cache_config.enable_extensible_kv_cache = enabled
+            if unsupported is None and not enabled:
+                logger.info(
+                    "Extensible KV cache off: without an IMEX channel, KV transfers "
+                    "within a host (e.g. NIXL) would lose NVLink and fall back to "
+                    "RDMA or TCP. If transfers only cross hosts, pass "
+                    "--enable-extensible-kv-cache."
+                )
         elif requested and unsupported is not None:
             raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
+        if cache_config.enable_extensible_kv_cache and fabric_unavailable:
+            logger.warning(
+                "No IMEX channel: with the extensible KV cache, KV transfers within "
+                "a host (e.g. NIXL) fall back to TCP. Transfers across hosts use "
+                "RDMA."
+            )
 
     def _validate_adaptive_verification(self) -> None:
         spec_config = self.speculative_config
@@ -3443,7 +3495,7 @@ class VllmConfig:
         """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
 
         Called once by the engine core before profiling; workers only assign the
-        result via ``set_kv_cache_layout``.
+        result via `set_kv_cache_layout`.
         """
         if (
             not kv_cache_groups
@@ -3609,9 +3661,26 @@ class VllmConfig:
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
-        elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+        elif self.mamba_config.backend not in (
+            MambaBackendEnum.TRITON,
+            MambaBackendEnum.FLASHINFER,
+        ):
+            raise ValueError(
+                "--use-replayssm requires --mamba-backend triton or flashinfer"
+            )
+        elif (
+            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            or use_mamba_replayssm_spec
+        ):
+            is_flashinfer = self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            name = (
+                "FlashInfer ReplaySSM"
+                if is_flashinfer
+                else "Triton ReplaySSM speculative decoding"
+            )
             if (
-                self.cache_config.mamba_cache_mode == "align"
+                is_flashinfer
+                and self.cache_config.mamba_cache_mode == "align"
                 and self.model_config is not None
                 and self.model_config.dtype != torch.bfloat16
             ):
@@ -3619,30 +3688,23 @@ class VllmConfig:
                     "FlashInfer ReplaySSM align requires bfloat16 model inputs "
                     "for its replay rings; SSM state cache dtype is independent"
                 )
-            if self.parallel_config.use_ubatching:
-                raise ValueError("FlashInfer ReplaySSM does not support microbatching")
-            if self.parallel_config.pipeline_parallel_size > 1:
+            if not is_flashinfer and self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
-                    "FlashInfer ReplaySSM currently requires pipeline_parallel_size=1"
+                    f"{name} does not support --enable-mamba-cache-stochastic-rounding"
                 )
+            if self.parallel_config.use_ubatching:
+                raise ValueError(f"{name} does not support microbatching")
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(f"{name} currently requires pipeline_parallel_size=1")
             if use_mamba_replayssm_spec:
                 query_len = 1 + self.num_speculative_tokens
                 if self.cache_config.replayssm_buffer_len < query_len:
                     raise ValueError(
-                        "FlashInfer ReplaySSM speculative decoding requires "
+                        "ReplaySSM speculative decoding requires "
                         "--replayssm-buffer-len >= 1 + num_speculative_tokens "
                         f"({query_len}); got "
                         f"{self.cache_config.replayssm_buffer_len}"
                     )
-        elif use_mamba_replayssm_spec:
-            raise ValueError(
-                "Mamba2 ReplaySSM speculative decoding requires "
-                "--mamba-backend flashinfer"
-            )
-        elif self.mamba_config.backend != MambaBackendEnum.TRITON:
-            raise ValueError(
-                "--use-replayssm requires --mamba-backend triton or flashinfer"
-            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
