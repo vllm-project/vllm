@@ -147,6 +147,10 @@ Identify and inline trivially-simple helper functions which have only one call s
 
 Avoid formatting or whitespace changes that are unrelated to the PR, as long as pre-commit still passes.
 
+#### 3.5: C++/CUDA Build Cost
+
+Files in `csrc/` are compiled once per GPU architecture, so a build's critical path is one unit rather than the sum: when a PR grows a kernel translation unit, check whether it is, or is about to become, that unit, and whether the variants it instantiates should be split over several units instead. See [`csrc/AGENTS.md`](../../../csrc/AGENTS.md).
+
 ### 4. Pull Request Contents
 
 This section pertains to the contents of the pull request itself, rather than the changes.

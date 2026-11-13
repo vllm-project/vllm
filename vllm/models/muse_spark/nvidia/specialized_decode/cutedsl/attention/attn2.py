@@ -306,8 +306,8 @@ def _attend_page(cur, qf, pos, lim0, lim1, low0, low1, sl2, state, o, windowed):
 
 def _stash_partial(so, sm, sl, g, t, o, m0, m1, l0, l1) -> None:
     """A warp's softmax state (lane: dims [16 t, 16 t + 16) of rows g and
-    g + 8) as rows of logical dims at ``so``, with the row maxima at ``sm``
-    and sums at ``sl``."""
+    g + 8) as rows of logical dims at `so`, with the row maxima at `sm`
+    and sums at `sl`."""
     for offset in (1, 2):
         l0 = add_ftz_f32(l0, cute.arch.shuffle_sync_bfly(l0, offset=offset))
         l1 = add_ftz_f32(l1, cute.arch.shuffle_sync_bfly(l1, offset=offset))
@@ -389,8 +389,8 @@ def _wait_phase0(mbar: Int32) -> None:
 
 @cute.jit
 def _merge_cluster_one(recv: Int32, n_active: Int32, lane: Int32):
-    """The owner's merge of its row's CLUSTER partials at ``recv`` in rank
-    order (ranks below ``n_active`` hold pages): (l, o[2 lane], o[2 lane + 1])."""
+    """The owner's merge of its row's CLUSTER partials at `recv` in rank
+    order (ranks below `n_active` hold pages): (l, o[2 lane], o[2 lane + 1])."""
     big = Float32(NEG_BIG)
     mk = [
         load_shared_f32_or(recv + k * SLOT_BYTES + 256, Int32(k < n_active), big)
@@ -441,8 +441,8 @@ def _page_round(
     o: cute.Tensor,
     windowed: cutlass.Constexpr[bool],
 ):
-    """One round of the warp's page loop: page pg (in ``cur``) attended while
-    page pg + 64 loads into ``nxt``, which then becomes ``cur``."""
+    """One round of the warp's page loop: page pg (in `cur`) attended while
+    page pg + 64 loads into `nxt`, which then becomes `cur`."""
     pn = pg + CLUSTER_WARPS
     if pn < num_pages:
         entry = load_global_nc_s32_or(
@@ -498,12 +498,12 @@ def _short_path(
     rounds: cutlass.Constexpr[int],
 ) -> None:
     """The one-cluster computation of the cluster's 16 rows: pages
-    ``first_page`` + [0, num_pages) of the request (their first two
+    `first_page` + [0, num_pages) of the request (their first two
     block-table entries of this warp read: e_first, e_second), at most two
     rounds of the cluster's warps in the one-cluster kernel, SHORT_ROUNDS in
-    the split kernel (``rounds`` > 0: a window's at most ``rounds`` rounds,
+    the split kernel (`rounds` > 0: a window's at most `rounds` rounds,
     straight-line; else a loop the compiler unrolls, or a rolled loop in the
-    one-cluster kernel or with ``rolled``)."""
+    one-cluster kernel or with `rolled`)."""
     windowed = window > 0
     g = lane >> 2
     t = lane & 3
@@ -665,8 +665,8 @@ def _short_path(
 
 
 def _issue_step(ring, step, count, first, bt_row, kv_base, kv_page_stride, tid):
-    """Copy the pages of ring step ``step`` (pages first + 4 step + [0, 4) of
-    this CTA's ``count``; none past it) into ring slots 4 (step % 2) + [0, 4):
+    """Copy the pages of ring step `step` (pages first + 4 step + [0, 4) of
+    this CTA's `count`; none past it) into ring slots 4 (step % 2) + [0, 4):
     thread i the 16-byte chunks i and i + 128 of each page. The block-table
     entries load first, then the copies issue (traced inline)."""
     pages = [step * GROUP_PAGES + pi for pi in range(GROUP_PAGES)]
@@ -734,8 +734,8 @@ def _attend_group(
     s: cute.Tensor,
     windowed: cutlass.Constexpr[bool],
 ):
-    """``_attend_page`` for up to GROUP_PAGES pages staged in the ring (the
-    slots from shared address ``group``, pages page0 + p) in one
+    """`_attend_page` for up to GROUP_PAGES pages staged in the ring (the
+    slots from shared address `group`, pages page0 + p) in one
     online-softmax step."""
     qf = _read_qf(qf_frag)
     for i in cutlass.range_constexpr(GROUP_PAGES * 8):
@@ -801,7 +801,7 @@ def _push_rows(smem, mbar, warp, lane, rank) -> None:
 @cute.jit
 def _merge_cluster_long(recv: Int32, n_active: Int32, lane: Int32):
     """The owner's merge of its row's partials from the cluster's first
-    ``n_active`` CTAs at ``recv`` (stride WARPS slots) in rank order:
+    `n_active` CTAs at `recv` (stride WARPS slots) in rank order:
     (m, l, o[2 lane], o[2 lane + 1])."""
     m = Float32(NEG_BIG)
     for k in range(n_active):
@@ -823,7 +823,7 @@ def _merge_cluster_long(recv: Int32, n_active: Int32, lane: Int32):
 
 @cute.jit
 def _merge_rows(row_partials: Int64, active: Int32, lane: Int32):
-    """(l, o[2 lane], o[2 lane + 1]) of a row's ``active`` cross-cluster
+    """(l, o[2 lane], o[2 lane + 1]) of a row's `active` cross-cluster
     partials, merged in cluster order."""
     mz = Float32(NEG_BIG)
     for z in range(active):
@@ -851,8 +851,8 @@ def _merge_rows_m(
     active: Int32,
     lane: Int32,
 ):
-    """``_merge_rows`` with the m of each of the ``slots`` partials loaded at
-    once (those from ``active`` on read partial active - 1 and are not
+    """`_merge_rows` with the m of each of the `slots` partials loaded at
+    once (those from `active` on read partial active - 1 and are not
     merged)."""
     ms = []
     for z in cutlass.range_constexpr(slots):
@@ -882,8 +882,8 @@ def _merge_rows_batched(
     active: Int32,
     lane: Int32,
 ):
-    """``_merge_rows`` with every partial's loads issued at once: (m, l) and
-    the o pair of each of the ``slots`` partials (those from ``active`` on
+    """`_merge_rows` with every partial's loads issued at once: (m, l) and
+    the o pair of each of the `slots` partials (those from `active` on
     read partial active - 1 and are not merged)."""
     ml = []
     vo = []
@@ -922,10 +922,10 @@ def _merge_partials(
     oy: Float32,
     merge: cutlass.Constexpr[str],
 ):
-    """Publish this cluster's (o, m, l) of a row, one of ``active``; the warp
+    """Publish this cluster's (o, m, l) of a row, one of `active`; the warp
     that completes the row's count returns (1, l, o[2 lane], o[2 lane + 1]),
     the merge of every partial in cluster order (whichever warp is last,
-    loading them as ``merge`` says), after resetting the counter for the next
+    loading them as `merge` says), after resetting the counter for the next
     launch; the others return 0."""
     row_partials = partials + row_id * (slots * SLOT_BYTES)
     mine = row_partials + Int64(split) * SLOT_BYTES
@@ -989,7 +989,7 @@ def _long_context(
     num_z: cutlass.Constexpr[int],
     merge: cutlass.Constexpr[str],
 ) -> None:
-    """A request of ``n`` pages from page ``first`` (more than SHORT_ROUNDS
+    """A request of `n` pages from page `first` (more than SHORT_ROUNDS
     rounds of a cluster's warps): the GROUPS * num_z clusters of the
     (request, KV head) each take an equal contiguous page range; CTA r streams
     its sixteenth of the range through the ring and warp w attends the 16 rows
@@ -1070,7 +1070,7 @@ def _long_cluster(
     per: Int32,
     merge: cutlass.Constexpr[str],
 ) -> None:
-    """Cluster ``split`` of ``active`` of a long request: pages
+    """Cluster `split` of `active` of a long request: pages
     first + split * per + [0, per) (clipped to the request)."""
     g = lane >> 2
     t = lane & 3
@@ -1457,9 +1457,9 @@ def compile_attn2(
     window: int,
     options: str = "",
 ):
-    """cute.compile one variant of the kernel for ``kv_heads`` KV heads,
-    ``num_splits`` z slices (1 for the one-cluster kernel) and ``window`` (0:
-    none), with these extra compile ``options``, before CUDA graph capture.
+    """cute.compile one variant of the kernel for `kv_heads` KV heads,
+    `num_splits` z slices (1 for the one-cluster kernel) and `window` (0:
+    none), with these extra compile `options`, before CUDA graph capture.
     The result takes q, gate, kv_cache, block_table, seq_lens, out and the
     workspace (None for the one-cluster kernel), checks their dtypes, ranks,
     the static extents, unit strides, row-stride divisibility and alignment,
@@ -1513,13 +1513,13 @@ def compile_attn2(
 
 
 def split_kernel(max_seq_len: int, window: int) -> bool:
-    """Whether a deployment of ``max_seq_len`` launches the split kernel."""
+    """Whether a deployment of `max_seq_len` launches the split kernel."""
     return max_seq_len > SHORT_MAX_LEN or window > 0
 
 
 def window_pages(window: int) -> int:
     """The most pages from row 0's first visible key to a request's last
-    with ``window`` (0: no window, no bound): ceil(L / 16) - (L - 7 - W) // 16
+    with `window` (0: no window, no bound): ceil(L / 16) - (L - 7 - W) // 16
     at most."""
     return (window + QUERY_ROWS + 2 * PAGE - 3) // PAGE if window > 0 else 1 << 30
 
@@ -1541,7 +1541,7 @@ def counters_bytes(rows: int) -> int:
 
 
 def workspace_bytes(rows: int, num_splits: int) -> int:
-    """Workspace bytes of a split launch over ``rows`` (request, KV head,
+    """Workspace bytes of a split launch over `rows` (request, KV head,
     query-head) rows: the counters, then a partial of SLOT floats per row and
     cluster of its (request, KV head)."""
     return counters_bytes(rows) + rows * num_splits * GROUPS * SLOT_BYTES
@@ -1666,25 +1666,25 @@ def attn2(
     num_splits: int = 1,
     workspace: torch.Tensor | None = None,
 ) -> None:
-    """``out [8 R, 512 kv_heads] = sigmoid(gate) * rmsnorm(attention(q,
-    kv_cache))`` per query head for R = q.shape[0] / 8 requests whose 8 query
+    """`out [8 R, 512 kv_heads] = sigmoid(gate) * rmsnorm(attention(q,
+    kv_cache))` per query head for R = q.shape[0] / 8 requests whose 8 query
     rows are the last 8 of their seq_lens cache entries.
 
     q, gate and out hold the heads of each KV head contiguously (8 x 64
     columns per KV head); their rows may be strided (q and gate are column
-    views of the attention front's output, ``split_qkv``). kv_cache is the
+    views of the attention front's output, `split_qkv`). kv_cache is the
     layer's BF16 [pages, kv_heads, 16, 128] cache. Lengths must be
     8..max_seq_len and covered by the first ceil(L / 16) block_table entries
     (device values, not checked here). max_seq_len is the deployment's maximum
-    length: above 2048, or with ``window`` > 0 (row t of a request sees keys
+    length: above 2048, or with `window` > 0 (row t of a request sees keys
     [L - 8 + t - window + 1, L - 8 + t]), the split kernel runs over
-    ``num_splits`` z slices and needs ``workspace``, uint8 of at least
-    ``workspace_bytes`` whose counters are zero before the first call (every
+    `num_splits` z slices and needs `workspace`, uint8 of at least
+    `workspace_bytes` whose counters are zero before the first call (every
     call leaves them zero). Launched on the current stream of the inputs'
     device (the compiled call switches to q's device and back), with PDL when
-    ``enable_pdl``. Raises ValueError on inputs outside this contract (some
+    `enable_pdl`. Raises ValueError on inputs outside this contract (some
     through the compiled call's own checks); allocates nothing, so a call is
-    graph-capturable once ``prepare`` has compiled its variant."""
+    graph-capturable once `prepare` has compiled its variant."""
     split = _check(
         q,
         kv_cache,

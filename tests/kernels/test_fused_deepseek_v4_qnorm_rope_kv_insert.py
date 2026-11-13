@@ -443,7 +443,7 @@ V41_HEAD_BYTES = HEAD_DIM + HEAD_DIM // 32  # 512 fp8 + 16 UE8M0 scales = 528
 @pytest.mark.parametrize("num_tokens", [1, 17, 64])
 @pytest.mark.parametrize("block_size", [32, 64])
 def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int):
-    """``kv_mxfp8=True`` writes DeepSeek's V4.1 record: all 512 dims as fp8 e4m3
+    """`kv_mxfp8=True` writes DeepSeek's V4.1 record: all 512 dims as fp8 e4m3
     with one UE8M0 scale per 32 dims, no bf16 RoPE tail.
 
     Both sides quantize the same bf16-rounded rotated row, so the bytes must
@@ -543,12 +543,12 @@ NUM_Q_CHUNKS = HEAD_DIM // Q_CHUNK  # 32
 def test_q_interleaved_pads_without_rope(
     num_tokens: int, n_heads: int, q_head_padded: int
 ):
-    """``is_q_interleaved`` with no norm or RoPE only zero-pads Q.
+    """`is_q_interleaved` with no norm or RoPE only zero-pads Q.
 
     The mega-attention kernel norms and rotates Q itself, so every live
     element must survive bit-exact while the padding heads -- which interleave
     with the live ones inside each of the 32 head-dim chunks -- come back
-    zero. ``q_head_padded=0`` drops the Q pass entirely and returns nothing,
+    zero. `q_head_padded=0` drops the Q pass entirely and returns nothing,
     for a shard already at the kernel's head count.
     """
     torch.manual_seed(5)
@@ -599,10 +599,10 @@ def test_q_interleaved_pads_without_rope(
 def test_q_interleaved_survives_graph_replay(n_heads: int):
     """A captured fused insert refills its padded Q buffer on every replay.
 
-    The op allocates ``q_out`` itself, so the tensor a capture hands back has
+    The op allocates `q_out` itself, so the tensor a capture hands back has
     to keep receiving the new padding when the graph is replayed over changed
     input -- that is what lets the layer prepare Q inside the captured region
-    rather than in ``forward_mqa``.
+    rather than in `forward_mqa`.
     """
     torch.manual_seed(6)
     device = "cuda"
@@ -718,10 +718,10 @@ def test_q_interleaved_is_orthogonal_to_norm_and_rope(
 @pytest.mark.parametrize("num_tokens", [17, 1024, 2049])
 @pytest.mark.parametrize("dp_pad", [0, 5])
 def test_q_interleaved_pad_copy_matches_fused_insert(num_tokens: int, dp_pad: int):
-    """A KV-only launch plus ``_pad_interleaved_q`` equals the fused launch.
+    """A KV-only launch plus `_pad_interleaved_q` equals the fused launch.
 
     Same cache bytes and same padded Q bits; the copy writes into a NaN-filled
-    buffer, and the last ``dp_pad`` rows have no slot, as under DP padding.
+    buffer, and the last `dp_pad` rows have no slot, as under DP padding.
     """
     from vllm.models.deepseek_v41.attention import _pad_interleaved_q
 

@@ -884,7 +884,7 @@ class WhisperForConditionalGeneration(
     ) -> list[int]:
         """Return token IDs for all supported language tokens.
 
-        Used with ``SamplingParams.allowed_token_ids`` to constrain
+        Used with `SamplingParams.allowed_token_ids` to constrain
         language detection to only produce valid language tokens.
         """
         token_ids = [
@@ -901,8 +901,8 @@ class WhisperForConditionalGeneration(
     ) -> PromptType:
         """Return a prompt that elicits a single language token from Whisper.
 
-        Feed only ``<|startoftranscript|>`` as the decoder input so the model
-        predicts the most likely language token (e.g. ``<|de|>``).
+        Feed only `<|startoftranscript|>` as the decoder input so the model
+        predicts the most likely language token (e.g. `<|de|>`).
         """
         return ExplicitEncoderDecoderPrompt(
             encoder_prompt=TextPrompt(
@@ -921,7 +921,7 @@ class WhisperForConditionalGeneration(
         """Parse the language token predicted by Whisper.
 
         Decodes the first token ID and extracts the language code from the
-        ``<|xx|>`` format. Expects a valid language token from constrained generation.
+        `<|xx|>` format. Expects a valid language token from constrained generation.
         """
         decoded = tokenizer.decode(
             [token_ids[0]],
@@ -1057,7 +1057,7 @@ def _create_fake_bias_for_k_proj(
     So that the bias for k_proj in qkv_proj or kv_proj can be initialized with
     zeros.
 
-    If the checkpoint already provides a real ``.bias`` entry for the given
+    If the checkpoint already provides a real `.bias` entry for the given
     weight, it is forwarded as-is and no fake bias is injected for that layer.
     """
     # Map the weight-name suffix to the corresponding bias-name suffix, e.g.

@@ -12,8 +12,8 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.spec_decode.utils import next_power_of_2
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 
@@ -127,9 +126,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             return get_model(
                 vllm_config=draft_vllm_config,
                 prefix="draft_model",
-                load_config=get_pp_safe_draft_load_config(
-                    get_draft_load_config(draft_vllm_config)
-                ),
+                load_config=get_draft_load_config(draft_vllm_config),
             )
 
     @torch.inference_mode()
@@ -286,14 +283,15 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             draft_tokens.unsqueeze(1),
         )
         self.input_buffers.input_ids[:num_reqs].copy_(draft_tokens.int())
+        # Device-side limit: graph replays see an auto-fit reduction, no host sync.
         torch.clamp(
             self.input_buffers.positions[:num_reqs] + 1,
-            max=self.max_model_len - 1,
+            max=self.max_model_len_gpu - 1,
             out=self.input_buffers.positions[:num_reqs],
         )
         torch.clamp(
             self.input_buffers.seq_lens[:num_reqs] + 1,
-            max=self.max_model_len,
+            max=self.max_model_len_gpu,
             out=self.input_buffers.seq_lens[:num_reqs],
         )
 

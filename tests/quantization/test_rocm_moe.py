@@ -117,7 +117,7 @@ def test_rocm_quantized_moe_generation(
     with RemoteOpenAIServer(
         model,
         args,
-        env_dict={"VLLM_ROCM_USE_AITER": "1", "VLLM_USE_V2_MODEL_RUNNER": "1"},
+        env_dict={"VLLM_ROCM_USE_AITER": "1"},
         override_hf_configs={**COMMON_OVERRIDES, **overrides},
         max_wait_seconds=1200,
     ) as server:

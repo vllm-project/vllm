@@ -2,27 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MuseGlimmer multimodal model for vLLM.
 
-Native port of the MuseGlimmer text decoder (``MuseGlimmerForCausalLM``). The text
+Native port of the MuseGlimmer text decoder (`MuseGlimmerForCausalLM`). The text
 stack is a Gemma2 derivative with the
 following MuseGlimmer-specific deltas, each of which is handled explicitly here:
 
-  * SiLU-gated MLP (``hidden_activation="silu"``), not Gemma's gelu-tanh.
+  * SiLU-gated MLP (`hidden_activation="silu"`), not Gemma's gelu-tanh.
   * Scaleless RMSNorm on the token embeddings (no sqrt(hidden) scaling).
-  * Per-layer sandwich RMSNorms with a baked ``+1`` weight offset
-    (``x * (1 + w)``), matching Gemma, but with distinct eps for the
-    pre/post norms (``rms_norm_eps`` vs ``post_norm_eps``).
+  * Per-layer sandwich RMSNorms with a baked `+1` weight offset
+    (`x * (1 + w)`), matching Gemma, but with distinct eps for the
+    pre/post norms (`rms_norm_eps` vs `post_norm_eps`).
   * QK-norm (weightless, fp32) applied *before* RoPE, followed by a query
-    pre-scale of ``qk_scale_factor / sqrt(head_dim)``.
+    pre-scale of `qk_scale_factor / sqrt(head_dim)`.
   * A per-head sigmoid attention output gate.
   * iRoPE layout: NoPE layers use full attention, RoPE layers use sliding
-    window attention. RoPE is applied NEOX-style (``is_neox_style=True``):
-    the HF converter (``convert_muse_glimmer_weights_to_hf.py``, 20260806+) permutes
-    q/k into the half-split (NEOX) layout via ``_permute_for_rope`` so they
-    pair with ``rotate_half`` — matching the reference's interleaved rotation
+    window attention. RoPE is applied NEOX-style (`is_neox_style=True`):
+    the HF converter (`convert_muse_glimmer_weights_to_hf.py`, 20260806+) permutes
+    q/k into the half-split (NEOX) layout via `_permute_for_rope` so they
+    pair with `rotate_half` — matching the reference's interleaved rotation
     on the *native* (unpermuted) weights. Serving the permuted HF weights with
-    ``is_neox_style=False`` scrambles q/k and causes token-repetition collapse.
-  * Final logits are pre-scaled by ``output_multiplier`` and then tanh
-    soft-capped at ``final_logit_softcapping``.
+    `is_neox_style=False` scrambles q/k and causes token-repetition collapse.
+  * Final logits are pre-scaled by `output_multiplier` and then tanh
+    soft-capped at `final_logit_softcapping`.
   * Untied lm_head.
 
 The vision path supports variable-resolution images and temporally patched
@@ -107,9 +107,9 @@ logger = init_logger(__name__)
 
 
 def _text_config(config):
-    """MuseGlimmer checkpoints may nest the text config under ``text_config``
-    (multimodal ``MuseGlimmerConfig``) or expose it directly
-    (``MuseGlimmerTextConfig``)."""
+    """MuseGlimmer checkpoints may nest the text config under `text_config`
+    (multimodal `MuseGlimmerConfig`) or expose it directly
+    (`MuseGlimmerTextConfig`)."""
     return getattr(config, "text_config", config)
 
 
@@ -165,7 +165,9 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         processor = self.get_hf_processor()
         image_processor = processor.image_processor
         video_processor = processor.video_processor
-        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         return {
             "image": int(image_processor.max_image_tokens),
             "video": (
@@ -185,11 +187,9 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         )
         return ImageSize(width=side, height=side)
 
-    def get_num_frames_with_most_features(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_processor = self.get_hf_processor().video_processor
-        num_videos = max(mm_counts.get("video", 0), 1)
+        num_videos = max(num_videos, 1)
         groups = max(
             1,
             seq_len // num_videos // int(video_processor.max_video_frame_tokens),
@@ -231,7 +231,7 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
                 width=video_size,
                 height=video_size,
                 num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts
+                    seq_len, mm_counts.get("video", 0)
                 ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),

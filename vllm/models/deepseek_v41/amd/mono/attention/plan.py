@@ -58,12 +58,12 @@ def flag_stride(n: int) -> int:
 
 
 def flag_copy(c, bid, stride):
-    """The first pair of the flag copy CTA ``bid`` polls (generic: 0)."""
+    """The first pair of the flag copy CTA `bid` polls (generic: 0)."""
     return bid % COPIES * stride if c["tuned"] else 0
 
 
 def on_copy(copy, i):
-    """Flag ``i`` of the copy at pair ``copy`` (``flag_copy``)."""
+    """Flag `i` of the copy at pair `copy` (`flag_copy`)."""
     return i if isinstance(copy, int) and copy == 0 else copy + i
 
 
@@ -95,7 +95,7 @@ class Dims:
     @property
     def head_tiles(self) -> int:
         """16-head MFMA tiles a rank: TP8's 8 heads take one, half of it
-        padding (``heads_pad``)."""
+        padding (`heads_pad`)."""
         return cdiv(self.heads, HEAD_TILE)
 
     @property
@@ -168,7 +168,7 @@ def byte_layout(items, start=0, align=256):
 
 def front_scratch(s: int, d: Dims, tuned: bool = False) -> dict:
     """K1's scratch regions -> (byte offset, bytes): published data (plain
-    words behind a flag) and mailbox pairs (``tuned``: the polled flags'
+    words behind a flag) and mailbox pairs (`tuned`: the polled flags'
     copies)."""
     xrdy = WQKV_KPARTS * s  # a flag a (token, K half)
     return byte_layout(
@@ -185,8 +185,8 @@ def front_scratch(s: int, d: Dims, tuned: bool = False) -> dict:
 
 
 def back_scratch(s: int, d: Dims, start: int = 0, tuned: bool = False) -> dict:
-    """K2's scratch regions, laid out past ``start``: published data (plain)
-    and flag pairs (``tuned``: the polled flags' copies)."""
+    """K2's scratch regions, laid out past `start`: published data (plain)
+    and flag pairs (`tuned`: the polled flags' copies)."""
     ck = (
         64 if GFX942 or (d.head_tiles == 2 and s * cdiv(KEYS, 64) <= 256) else 128
     )  # back.chunk_keys

@@ -391,8 +391,8 @@ coordinates recovery across the engines.
 ### Configuring recovery
 
 Both retry and scale-down require `--enable-fault-tolerance`,
-`--enable-expert-parallel`, an FT-capable `--all2all-backend` (`nixl_ep` or
-`deepep_low_latency`), and the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
+`--enable-expert-parallel`, and an FT-capable `--all2all-backend` (`nixl_ep` or
+`deepep_low_latency`).
 Retry can recover from a fault when all workers remain alive.
 
 For scale-down recovery, also enable `--enable-eplb` and configure enough
@@ -400,6 +400,18 @@ redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
 logical experts on the surviving ranks. The original checkpoint must remain
 accessible to survivors so they can reload expert weights.
 The orchestrator selects the recovery mode when it sends the recovery request.
+
+The `FaultToleranceConfig.request_failure_policy` setting controls how faults
+affect unfinished requests. The default, `"fail"`, aborts them immediately.
+To keep them queued for resumption after successful retry or scale-down recovery,
+set `--fault-tolerance-config '{"request_failure_policy": "recompute"}'`.
+The engine recomputes their KV cache from the prompt and already generated
+tokens, then continues generation. Streams on surviving engines stall during
+recovery and continue afterward; requests on a dead engine cannot be resumed
+this way.
+To discard queued requests for a particular retry, include `"abort": true` in
+the retry request's `params`. This parameter must be a JSON boolean and defaults
+to `false`; resumption still requires `request_failure_policy="recompute"`.
 
 ### Coordinating recovery
 

@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FP8 indexer WK pair fusion across incremental ``load_weights`` calls.
+"""FP8 indexer WK pair fusion across incremental `load_weights` calls.
 
-Reordering weight loaders (e.g. ``runai_streamer``) yield tensors in
-IO-completion order, so a layer's FP8 ``indexer.wk`` weight /
-``weight_scale_inv`` pair can be split by ``lm_head.weight``:
-``AutoWeightsLoader`` splits the checkpoint stream at every ``model`` <->
-non-``model`` prefix transition, issuing two consecutive ``load_weights()``
+Reordering weight loaders (e.g. `runai_streamer`) yield tensors in
+IO-completion order, so a layer's FP8 `indexer.wk` weight /
+`weight_scale_inv` pair can be split by `lm_head.weight`:
+`AutoWeightsLoader` splits the checkpoint stream at every `model` <->
+non-`model` prefix transition, issuing two consecutive `load_weights()`
 calls to the inner model. The pending pair buffer must therefore survive
 across calls, or one half of the pair is silently dropped and the WK shard
-of the fused ``wk_weights_proj`` parameter keeps its initialization.
+of the fused `wk_weights_proj` parameter keeps its initialization.
 """
 
 from types import SimpleNamespace
@@ -61,7 +61,7 @@ if current_platform.is_cuda():
     # skipif above can skip the tests, so a plain definition would crash
     # collection on the ROCm mirrors where the modules are None.
     class _StubDSAWeights(deepseek_v32_model.DeepseekV32Model):
-        """Real ``load_weights`` over a single fused ``wk_weights_proj`` param."""
+        """Real `load_weights` over a single fused `wk_weights_proj` param."""
 
         def __init__(self, prefix: str = "model.layers.1"):
             nn.Module.__init__(self)

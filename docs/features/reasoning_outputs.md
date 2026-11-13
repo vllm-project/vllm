@@ -437,6 +437,32 @@ types = [item.type for item in response.output]
 assert "reasoning" not in types
 ```
 
+## Anthropic Messages Thinking Types
+
+The Anthropic Messages API (`/v1/messages`) accepts a `thinking` configuration
+whose `type` selects how much the model reasons. vLLM maps the Anthropic types
+onto its own controls:
+
+| `thinking.type` | Effect |
+| --- | --- |
+| `"disabled"` | Sets `reasoning_effort` to `"none"`, which clears `enable_thinking` for templates that honor it. Models that cannot turn thinking off are served with a low effort instead. |
+| `"enabled"` | Sets `thinking_token_budget` to `budget_tokens` (must be at least 1024 and less than `max_tokens`). |
+| `"adaptive"` | Pins nothing: the model chooses depth beneath the `output_config.effort` ceiling. |
+| `"between_tools"` | Maps to `"disabled"`; thinking is off up front, and on models that cannot turn it off a low effort is used instead. |
+
+### `thinking.type=between_tools`
+
+The type is accepted and mapped to `thinking.type="disabled"`, using the same
+model/template compatibility fallback: `reasoning_effort` is set to `"none"`,
+which clears `enable_thinking` for templates that honor it, and models that
+cannot turn thinking off are served with the configured low effort instead.
+Because the resolved effort applies to every round, including tool
+continuations, a template that honors `"none"` suppresses thinking there too.
+vLLM cannot force a model to emit progress notes between tool calls; whether it
+does so depends on the model and chat template. Any reasoning the model emits
+is returned as thinking blocks. Models that support reasoning between tool
+calls are covered under [Interleaved Thinking](interleaved_thinking.md).
+
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`), Anthropic Messages API (`/v1/messages`) and the Responses API (`/v1/responses`).
