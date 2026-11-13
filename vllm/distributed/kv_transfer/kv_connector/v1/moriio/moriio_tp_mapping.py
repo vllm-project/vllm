@@ -224,8 +224,8 @@ def compute_write_tp_mapping(
 class ReadSource:
     """What one consumer rank reads from one producer rank.
 
-    ``target`` is the producer's view (``local`` = producer, ``remote`` =
-    consumer), as in :class:`WriteTarget`.
+    `target` is the producer's view (`local` = producer, `remote` =
+    consumer), as in `WriteTarget`.
     """
 
     tp_rank: int

@@ -304,7 +304,7 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k "not heterogeneous_tp" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_dummy_e2e_rocm.py -k "not heterogeneous_tp" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 # The same P/D between different TP sizes (WRITE TP2 -> TP1, READ TP1 -> TP2
 # and TP2 -> TP1, READ fan-in against WRITE fan-in), which needs 3 GPUs.
@@ -329,7 +329,7 @@ steps:
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k heterogeneous_tp
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_dummy_e2e_rocm.py -k heterogeneous_tp
 
 # The heterogeneous-TP READ cases over RDMA instead of xGMI, including the
 # fan-in of split heads and recurrent state that xGMI cannot run on one node,
@@ -362,7 +362,7 @@ steps:
   - export MORIIO_DUMMY_E2E_BACKEND=rdma
   # Fail loudly instead of timing out in the handshake without RDMA devices.
   - ls /dev/infiniband
-  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py -k "heterogeneous_tp and READ" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s -rs v1/kv_connector/moriio_integration/test_dummy_e2e_rocm.py -k "heterogeneous_tp and READ" --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval"
   device: h200_35gb

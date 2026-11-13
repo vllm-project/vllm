@@ -984,7 +984,7 @@ def test_heterogeneous_tp_read_matches_write(case: Case):
     Both pairs run the same weights at the same TP sizes, so decode sums in the
     same order and the first-token log-probs must match exactly. WRITE runs over
     xGMI, which handles fan-in on one node; READ runs over the backend under
-    test, so with ``MORIIO_DUMMY_E2E_BACKEND=rdma`` this checks that every head
+    test, so with `MORIIO_DUMMY_E2E_BACKEND=rdma` this checks that every head
     and state slice pulled over RDMA lands right, which the
     completes-and-uses-the-KV check above cannot see.
     """

@@ -113,6 +113,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
@@ -3570,13 +3571,25 @@ class MoRIIOConnectorWorker:
     def _layer_total_num_kv_heads(self, layer_name: str | None = None) -> int:
         """KV heads of a layer across all TP ranks.
 
-        Layers may differ (e.g. Gemma4 sliding vs full attention), and the
-        model-wide count is their maximum. Without a layer: the model-wide count.
+        Layers may differ from the model-wide count, which is their maximum:
+        Gemma4's sliding and full attention layers, or a draft model's layers.
+        Without a layer: the model-wide count.
         """
-        arch = self.model_config.model_arch_config
-        if layer_name is None or arch.per_layer_overrides is None:
+        if layer_name is None:
             return self.model_config.get_total_num_kv_heads()
-        return arch[extract_layer_index(layer_name)].total_num_kv_heads
+        spec = cast(AttentionSpec, self.layer_to_spec[layer_name])
+        if spec.num_kv_heads > 1 or self.world_size == 1:
+            return spec.num_kv_heads * self.world_size
+        # With one head per rank, up to world_size ranks share each head, so the
+        # spec cannot tell the count. Draft layers may be numbered past the
+        # target's layers, which its per-layer config does not list.
+        arch = self.model_config.model_arch_config
+        total = self.model_config.get_total_num_kv_heads()
+        if arch.per_layer_overrides is not None:
+            layer_idx = extract_layer_index(layer_name)
+            if layer_idx < len(arch.per_layer_overrides):
+                total = arch[layer_idx].total_num_kv_heads
+        return min(total, self.world_size)
 
     def _write_tp_mapping(self, remote_tp_size: int | None) -> MoRIIOWriteTPMapping:
         """Decode ranks this prefill rank writes, and what each receives."""
@@ -3610,10 +3623,10 @@ class MoRIIOConnectorWorker:
     ) -> tuple[list[tuple[int, ReadSource | None]], tuple[int, ...]]:
         """(sources, holders) of one request's READ.
 
-        ``sources`` pairs each prefill TP rank to read with what to take from it
-        (None: the whole shard, equal TP). ``holders`` are the prefill TP ranks
+        `sources` pairs each prefill TP rank to read with what to take from it
+        (None: the whole shard, equal TP). `holders` are the prefill TP ranks
         to release, which in fan-in include ranks whose identical copy is not
-        read. ``chosen_tp`` replaces the source when every holder has the same
+        read. `chosen_tp` replaces the source when every holder has the same
         copy (the flexible mirror's round-robin pick). Sources depend on the
         layer's KV-head count; holders do not.
         """
@@ -3857,9 +3870,9 @@ class MoRIIOConnectorWorker:
         remote_engine_id: EngineId,
         source: ReadSource | None,
     ) -> tuple[list[int], list[int], list[int]]:
-        """(local, remote, sizes) pulling ``source``'s share of a layer.
+        """(local, remote, sizes) pulling `source`'s share of a layer.
 
-        The prefill rank is the side whose heads ``source.target`` names as
+        The prefill rank is the side whose heads `source.target` names as
         local, so the head-slice offsets are computed from it and swapped.
         """
         same_layout = self._block_copy_matches_peer(layer_name, remote_moriio_meta)
@@ -4122,7 +4135,7 @@ class MoRIIOConnectorWorker:
         The layer owns two registered regions, so the offset list is split at
         the conv/ssm boundary and each half goes to its own session. A half
         with nothing to move is skipped rather than posted empty. With a
-        ``source`` (heterogeneous TP) only its slice of the state is read.
+        `source` (heterogeneous TP) only its slice of the state is read.
         """
         if source is None:
             local, remote, sizes, n_conv = self._compute_mamba_transfer_offsets(
