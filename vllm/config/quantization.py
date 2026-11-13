@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import field
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 import regex as re
 from pydantic import (
@@ -63,6 +63,17 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
 _WEIGHT_QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Static,
     "mxfp4": kMxfp4Static,
+    "nvfp4": kNvfp4Static,
+}
+
+# `requantize_from` lists unquantized checkpoint layers by dtype.
+_REQUANTIZE_FROM_DTYPE_NAMES: dict[str, str] = {
+    "bf16": "bfloat16",
+    "bfloat16": "bfloat16",
+    "fp16": "float16",
+    "float16": "float16",
+    "fp32": "float32",
+    "float32": "float32",
 }
 
 
@@ -198,6 +209,22 @@ class QuantizationConfigArgs:
     `activation` keys. A layer that matches no pattern is left unquantized.
     Mutually exclusive with `linear` and `moe`.
     """
+
+    requantize_from: (
+        list[QuantKeyField | Literal["bfloat16", "float16", "float32"]] | None
+    ) = None
+    """Checkpoint layers to quantize online, by format, e.g. `["nvfp4"]`. A
+    quantized layer is listed by its weight format and an unquantized one by its
+    dtype (`"bf16"`, `"fp16"` or `"fp32"`). When set, all other layers keep
+    their checkpoint method."""
+
+    @field_validator("requantize_from", mode="before")
+    @classmethod
+    def _coerce_requantize_from(cls, v: Any) -> Any:
+        if not isinstance(v, list):
+            return v
+        names = {**_REQUANTIZE_FROM_DTYPE_NAMES, **_WEIGHT_QUANT_KEY_NAMES}
+        return [names.get(key, key) if isinstance(key, str) else key for key in v]
 
     @field_validator("linear", "moe", mode="before")
     @classmethod
@@ -407,6 +434,7 @@ def merge_quantization_config(
         moe=merge_spec(base.moe, override.moe),
         ignore=override.ignore or base.ignore,
         targets=override.targets or base.targets,
+        requantize_from=override.requantize_from or base.requantize_from,
     )
 
 

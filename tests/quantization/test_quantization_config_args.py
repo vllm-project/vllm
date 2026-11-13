@@ -197,6 +197,20 @@ def test_resolve_merges_explicit_over_shorthand():
     assert "activation" not in args.linear.fields_set
 
 
+def test_requantize_from_accepts_weight_format_and_dtype_names():
+    args = quant_config_args(
+        moe="fp8_per_tensor",
+        requantize_from=["nvfp4", "mxfp8", "bf16", "fp16", "float32"],
+    )
+    assert args.requantize_from == [
+        kNvfp4Static,
+        kMxfp8Static,
+        "bfloat16",
+        "float16",
+        "float32",
+    ]
+
+
 def test_resolve_preserves_explicit_null_activation():
     args = resolve_quantization_config(
         "fp8_per_tensor",

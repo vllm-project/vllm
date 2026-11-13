@@ -166,6 +166,15 @@ vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
 
     Checkpoint-exclusion policy is not enforced by online quantization/re-quantization. Only exclusion through `--quantization-config.targets`/`--quantization-config.ignore` is enforced. 
 
+`requantize_from` restricts online quantization to the listed checkpoint layers: quantized layers by their weight format (e.g. `"nvfp4"`), and unquantized layers by their dtype (`"bf16"`, `"fp16"` or `"fp32"`). All other layers keep their checkpoint method. For example, to run the NVFP4 experts of a checkpoint with per-tensor FP8 GEMMs on a GPU without FP4 tensor cores (e.g. Ada, Hopper):
+
+```bash
+vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
+  --quantization-config '{"moe":"fp8_per_tensor","requantize_from":["nvfp4"]}'
+```
+
+The `moe` target can be any online MoE method, e.g. `fp8_per_block` or `fp8_per_channel`; the FP8 MoE kernel is selected for the chosen scheme.
+
 ### Online quantization on unquantized layers from partially-quantized checkpoints
 
 Online quantization can be used on already quantized checkpoints independently of their original `quant_method` (`modelopt`, `compressed-tensors`, `quark`, etc.), for layers that are left unquantized in the original checkpoint.

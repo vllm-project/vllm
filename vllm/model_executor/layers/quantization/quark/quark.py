@@ -77,6 +77,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
     kMxfp4Static,
+    kMxfp8Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -1042,13 +1043,14 @@ class QuarkLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.scheme.process_weights_after_loading(layer)
 
+    def requantization_source_key(self, layer: torch.nn.Module) -> QuantKey | None:
+        key = getattr(getattr(layer, "scheme", None), "weight_quant_key", None)
+        return key if key == kMxfp8Static else None
+
     def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
         """Reconstruct serialized weights for online requantization."""
         from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
             dequant_mxfp8_to_bf16,
-        )
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            kMxfp8Static,
         )
 
         if getattr(layer.scheme, "weight_quant_key", None) != kMxfp8Static:

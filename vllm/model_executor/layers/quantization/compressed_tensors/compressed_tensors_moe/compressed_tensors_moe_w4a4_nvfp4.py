@@ -207,6 +207,9 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
+    def requantization_source_key(self, layer: torch.nn.Module) -> QuantKey | None:
+        return kNvfp4Static
+
     def dequantize_weight(
         self, layer: torch.nn.Module
     ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
