@@ -53,7 +53,7 @@ def use_workspace_lane(lane: int) -> Iterator[None]:
 class WorkspaceManager:
     """Manager for workspace allocation.
 
-    Manages shared scratch and keyed persistent resources per ``(ubatch, lane)``.
+    Manages shared scratch and keyed persistent resources per `(ubatch, lane)`.
     Can be locked to prevent growth or new resources during execution.
     """
 
@@ -139,9 +139,9 @@ class WorkspaceManager:
         return dbo_current_ubatch_id() * self._num_lanes + lane
 
     def get_persistent_resource(self, key: Hashable, factory: Callable[[], T]) -> T:
-        """Return the resource cached for ``key`` in the current ubatch and lane.
+        """Return the resource cached for `key` in the current ubatch and lane.
 
-        The first request calls ``factory`` and stores its result for the lifetime
+        The first request calls `factory` and stores its result for the lifetime
         of this manager. Later requests return the same object without calling
         the factory again. Each ubatch/lane pair has a separate cache. Once the
         manager is locked, requesting a key missing from that cache raises an
@@ -224,11 +224,11 @@ class WorkspaceManager:
     ) -> tuple[torch.Tensor, bool]:
         """Get a scratch view at the end of the workspace that can outlive requests.
 
-        ``get_simultaneous`` hands out views from the start of the workspace, so
+        `get_simultaneous` hands out views from the start of the workspace, so
         requests smaller than the workspace leave its end alone. This view spans
         the last bytes of the workspace, and the returned flag says whether they
-        still hold what the previous ``get_retained`` left there: that call used
-        the same key and size, no ``get_simultaneous`` request since reached into
+        still hold what the previous `get_retained` left there: that call used
+        the same key and size, no `get_simultaneous` request since reached into
         the span, and the workspace was not reallocated in between. What the
         bytes mean is the caller's to track; only the latest key is remembered.
 

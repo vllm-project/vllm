@@ -8,6 +8,7 @@ from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.parser.engine.registered_adapters import MinimaxM2ParserReasoningAdapter
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -32,12 +33,8 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         self.start_token_id = self.vocab.get("<think>")
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        end_token_id = self.end_token_id
-        start_token_id = self.start_token_id
-        for input_id in reversed(input_ids):
-            if input_id in (end_token_id, start_token_id):
-                return input_id == end_token_id
-        return False
+        i = rfind_tokens(input_ids, (self.end_token_id, self.start_token_id))
+        return i >= 0 and input_ids[i] == self.end_token_id
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return input_ids

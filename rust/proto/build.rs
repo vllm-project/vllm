@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
         proto_dir.join("control.proto"),
         proto_dir.join("inference.proto"),
+        proto_dir.join("render.proto"),
     ];
 
     for proto in &protos {

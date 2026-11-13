@@ -4,11 +4,11 @@
 
 A GGUF NVFP4 super-block holds 64 values as four 16-value sub-blocks, each with
 a UE4M3 scale byte and 8 bytes of E2M1 codes (low nibbles = values 0..7, high
-nibbles = values 8..15). The value is ``e4m3(scale) * e2m1(code) * tensor_scale``
-where ``tensor_scale`` is the companion ``<name>.scale`` F32 tensor (one per
+nibbles = values 8..15). The value is `e4m3(scale) * e2m1(code) * tensor_scale`
+where `tensor_scale` is the companion `<name>.scale` F32 tensor (one per
 expert for stacked expert tensors). ModelOpt packs consecutive values into one
-byte (low nibble first) and stores the same three factors as ``weight``,
-``weight_scale`` and ``weight_scale_2``, so conversion is a lossless repack.
+byte (low nibble first) and stores the same three factors as `weight`,
+`weight_scale` and `weight_scale_2`, so conversion is a lossless repack.
 """
 
 import glob
@@ -114,8 +114,8 @@ def dequantize_nvfp4(
     global_scale: torch.Tensor | None = None,
     out_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """ModelOpt-layout NVFP4 [N, K / 2] -> [N, K]. Without ``global_scale`` the
-    result is ``e2m1 * e4m3``, which is exact in bf16."""
+    """ModelOpt-layout NVFP4 [N, K / 2] -> [N, K]. Without `global_scale` the
+    result is `e2m1 * e4m3`, which is exact in bf16."""
     chunk_rows = 8192
     lut = torch.tensor(_E2M1, dtype=torch.float32, device=weight.device)
     out = torch.empty(
@@ -163,10 +163,10 @@ def gguf_nvfp4_weights_iterator(
     device: torch.device | str = "cuda",
     dequantize: frozenset[str] = frozenset(),
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Yield HF-style (name, tensor) pairs; NVFP4 tensors become ``.weight``
-    (packed uint8), ``.weight_scale`` (E4M3) and ``.weight_scale_2`` (F32),
-    except HF base names in ``dequantize``, which become a BF16 ``.weight``
-    holding ``e2m1 * e4m3`` (exact) plus the F32 ``.weight_scale_2`` that the
+    """Yield HF-style (name, tensor) pairs; NVFP4 tensors become `.weight`
+    (packed uint8), `.weight_scale` (E4M3) and `.weight_scale_2` (F32),
+    except HF base names in `dequantize`, which become a BF16 `.weight`
+    holding `e2m1 * e4m3` (exact) plus the F32 `.weight_scale_2` that the
     caller applies to the fp32 output."""
     try:
         import gguf

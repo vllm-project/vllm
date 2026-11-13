@@ -49,10 +49,10 @@ def _load_q_and_rope(
     Returns a tuple
         (q_bf16x2, tid, global_tid, sublane, token_id, head_tile_id,
          head_start, in_bounds, num_token_heads)
-    where ``q_bf16x2`` is a (coarsen, 8) rmem tile of Uint32 packed
+    where `q_bf16x2` is a (coarsen, 8) rmem tile of Uint32 packed
     bf16x2 pairs covering the 16 BF16 lanes owned by this thread for
-    each of ``coarsen`` heads. RoPE is applied in place to the
-    trailing ``rope_dim`` lanes; the leading nope lanes pass through.
+    each of `coarsen` heads. RoPE is applied in place to the
+    trailing `rope_dim` lanes; the leading nope lanes pass through.
     """
     block_id, _, _ = cute.arch.block_idx()
     tid, _, _ = cute.arch.thread_idx()

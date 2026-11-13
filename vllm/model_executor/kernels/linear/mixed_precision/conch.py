@@ -27,6 +27,9 @@ class ConchLinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if c.act_type not in (torch.float16, torch.bfloat16):
+            return False, "ConchLinearKernel only supports 16-bit activations"
+
         if c.weight_type not in _CONCH_SUPPORTED_WEIGHT_TYPES:
             error_msg = (
                 f"Weight type ({c.weight_type}) not supported by "
