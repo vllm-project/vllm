@@ -10,3 +10,30 @@ vLLM uses the following environment variables to configure the system:
 ```python
 --8<-- "vllm/envs.py:env-vars-definition"
 ```
+
+## Experimental Kimi-K3.1 AttnRes norm cache on ROCm
+
+`VLLM_ROCM_KIMI_ATTN_RES_NORM_CACHE=1` enables reuse of historical AttnRes
+reciprocal RMS values within one native model forward. It defaults to `0`.
+The initial block is recomputed by each consumer; later blocks publish a norm
+only when their live prefix is written. Layer-specific norm and projection
+weights and output normalization still run normally.
+
+The current admission is limited to gfx950, BF16 residuals, 93 layers,
+AttnRes block size 12, hidden size 7168, epsilon `1e-5`, TP8/DCP8, PP1/DP1,
+and 280 or 336 input rows. Other shapes and configurations retain the native
+path. Microbatching, DBO, LoRA, batch-invariant execution and specialized decode
+are excluded. Set the environment variable before constructing the model.
+
+The FP32 cache occupies eight values per input row (8,960 or 10,752 bytes).
+It is a forward-local tensor passed explicitly between layers, not a model or
+workspace resource retained across requests. During graph capture its storage
+follows the graph's ordinary intermediate-tensor lifetime; each replay rewrites
+every reusable slot before reading it. The existing residual-bank allocation is
+unchanged.
+
+This is an experimental option. Kernel sequence tests cover writer/consumer
+ordering, BF16 and fused FP8 outputs, and shared-pool replay with changed inputs
+and alternating shapes. Native V2 memory-profiling-to-serving capture, compiled
+FULL/PIECEWISE replay, model quality and serving performance still require
+qualification before production use. No request-latency improvement is claimed.

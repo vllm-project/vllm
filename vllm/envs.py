@@ -219,6 +219,7 @@ if TYPE_CHECKING:
     VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
+    VLLM_ROCM_KIMI_ATTN_RES_NORM_CACHE: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
@@ -1737,6 +1738,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # speculator sees, so it is off by default while the effect is measured.
     "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", "0"))
+    ),
+    # Experimental, default-off Kimi-K3.1 historical AttnRes RMS cache on gfx950.
+    # Reuse blocks 1-7 only within an ordered native model forward; block 0
+    # retains native recomputation. Restricted to BF16, 93 layers, block size
+    # 12, hidden size 7168, epsilon 1e-5, TP8/DCP8, PP1/DP1 and 280/336 rows.
+    # DBO, microbatching, LoRA, batch-invariant and specialized decode modes
+    # retain the native path. Graph-manager/model-quality qualification and
+    # serving performance measurement are required before production use.
+    "VLLM_ROCM_KIMI_ATTN_RES_NORM_CACHE": lambda: bool(
+        int(os.getenv("VLLM_ROCM_KIMI_ATTN_RES_NORM_CACHE", "0"))
     ),
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
