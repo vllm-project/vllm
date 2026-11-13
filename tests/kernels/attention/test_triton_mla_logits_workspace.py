@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Sizing of the split-KV logits workspace of ``TritonMLAImpl.forward_mqa``.
+"""Sizing of the split-KV logits workspace of `TritonMLAImpl.forward_mqa`.
 
-The reservation must cover the largest ``attn_logits`` that ``forward_mqa``
+The reservation must cover the largest `attn_logits` that `forward_mqa`
 asks the workspace manager for. A windowed layer (a DSpark draft layer) splits
-at most its window, so reserving for ``max_model_len`` instead holds GPU memory
+at most its window, so reserving for `max_model_len` instead holds GPU memory
 that the profiling run then takes from the KV cache. The decode kernel is
 replaced by a recorder and the workspace manager by a recorder or a CPU
 manager, so these tests need no GPU.
@@ -117,7 +117,7 @@ def _workspace_requests() -> Iterator[list[tuple[int, ...]]]:
 def _run_longest_draft_decode(impl: TritonMLAImpl) -> torch.Tensor:
     """forward_mqa on a full batch of draft blocks at max_model_len context.
 
-    Returns the ``attn_logits`` scratch passed to the decode kernel.
+    Returns the `attn_logits` scratch passed to the decode kernel.
     """
     metadata = SimpleNamespace(
         max_seq_len=MAX_MODEL_LEN,

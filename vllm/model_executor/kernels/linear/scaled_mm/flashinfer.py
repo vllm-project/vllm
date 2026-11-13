@@ -210,7 +210,7 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
 
 class FlashInferMxfp8DeepGemmBlockScaledMMKernel(DeepGemmFp8BlockScaledMMKernel):
     """Block-FP8 linear on SM107: FlashInfer's small-M MXFP8 CuTe-DSL GEMM for
-    up to ``MXFP8_MAX_M`` rows, DeepGEMM above.
+    up to `MXFP8_MAX_M` rows, DeepGEMM above.
 
     The UE8M0 128x128 weight scales DeepGEMM uses are repeated to one scale per
     32 values; both GEMMs read the same FP8 weight. Small-M activations are
@@ -282,7 +282,7 @@ class FlashInferMxfp8DeepGemmBlockScaledMMKernel(DeepGemmFp8BlockScaledMMKernel)
 
 
 def _block_scale_to_mxfp8(scale: torch.Tensor, n: int, k: int) -> torch.Tensor:
-    """Power-of-two ``[N/128, K/128]`` block scales -> swizzled MXFP8 scales."""
+    """Power-of-two `[N/128, K/128]` block scales -> swizzled MXFP8 scales."""
     if scale.dtype == torch.float32:
         e8m0 = ((scale.view(torch.int32) >> 23) & 0xFF).to(torch.uint8)
     else:
