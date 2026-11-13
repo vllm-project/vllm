@@ -11,7 +11,7 @@ from vllm.distributed.ec_transfer.ec_connector.tiering import io
 
 def _paths(tmp_path: Path) -> tuple[Path, Path]:
     entry_path = tmp_path / "nested" / "entry.ec"
-    temporary_path = entry_path.with_name(f".{entry_path.name}.tmp")
+    temporary_path = tmp_path / ".tmp" / "owner" / "entry.tmp"
     return entry_path, temporary_path
 
 
@@ -43,8 +43,7 @@ def test_store_entry_rejects_any_buffer_size_mismatch(
     with pytest.raises(
         ValueError,
         match=(
-            f"buffer size is {actual_size} bytes, "
-            f"expected exactly {file_size_bytes}"
+            f"buffer size is {actual_size} bytes, expected exactly {file_size_bytes}"
         ),
     ):
         io.store_entry(
@@ -154,22 +153,20 @@ def test_load_entry_rejects_wrong_file_size_before_modifying_buffers(
     destination = bytearray(b"xxxx")
 
     with pytest.raises(OSError, match="file size is 3 bytes, expected 4"):
-        io.load_entry(
-            entry_path, [memoryview(destination)], file_size_bytes=4
-        )
+        io.load_entry(entry_path, [memoryview(destination)], file_size_bytes=4)
 
     assert destination == b"xxxx"
 
 
-def test_store_entry_requires_temporary_file_beside_final_file(
+def test_store_entry_rejects_temporary_path_equal_to_final_path(
     tmp_path: Path,
 ) -> None:
     entry_path, _ = _paths(tmp_path)
 
-    with pytest.raises(ValueError, match="temporary file must be beside"):
+    with pytest.raises(ValueError, match="temporary file must differ"):
         io.store_entry(
             entry_path,
-            tmp_path / "other" / "entry.tmp",
+            entry_path,
             [memoryview(b"data")],
             file_size_bytes=4,
         )

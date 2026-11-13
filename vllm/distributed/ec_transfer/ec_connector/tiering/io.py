@@ -53,8 +53,7 @@ def _prepare_buffers(
 
     if total_size != file_size_bytes:
         raise ValueError(
-            f"buffer size is {total_size} bytes, "
-            f"expected exactly {file_size_bytes}"
+            f"buffer size is {total_size} bytes, expected exactly {file_size_bytes}"
         )
     return prepared
 
@@ -95,11 +94,12 @@ def store_entry(
     fsync: bool = False,
 ) -> None:
     """Write a complete entry to a temporary file, then publish atomically."""
-    if temporary_path == entry_path or temporary_path.parent != entry_path.parent:
-        raise ValueError("temporary file must be beside and differ from final file")
+    if temporary_path == entry_path:
+        raise ValueError("temporary file must differ from final file")
 
     buffers = _prepare_buffers(sources, file_size_bytes, writable=False)
     entry_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path.parent.mkdir(parents=True, exist_ok=True)
 
     fd: int | None = None
     try:

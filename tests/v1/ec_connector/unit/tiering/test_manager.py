@@ -376,7 +376,7 @@ def indexed_scheduler(tmp_path, request, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         store_entry(
             path,
-            get_ec_temporary_path(path, "seed"),
+            get_ec_temporary_path(path, "seed", "0" * 32),
             [memoryview(bytes(file_size))],
             file_size,
         )
@@ -387,14 +387,14 @@ def indexed_scheduler(tmp_path, request, monkeypatch):
         scheduler.shutdown()
 
 
-def image_request(*identifiers, request_id="gpu-hint"):
+def image_request(*identifiers, request_id="gpu-hint", num_embeds=2):
     from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
     return Request(
         request_id=request_id,
-        prompt_token_ids=[0] * (2 * len(identifiers)),
+        prompt_token_ids=[0] * (num_embeds * len(identifiers)),
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
         mm_features=[
@@ -402,7 +402,7 @@ def image_request(*identifiers, request_id="gpu-hint"):
                 data=None,
                 modality="image",
                 identifier=identifier,
-                mm_position=PlaceholderRange(offset=2 * i, length=2),
+                mm_position=PlaceholderRange(offset=num_embeds * i, length=num_embeds),
             )
             for i, identifier in enumerate(identifiers)
         ],
@@ -419,52 +419,6 @@ def test_mixed_images_prefetch_both_and_gpu_hits_bypass_file_waits(
     assert scheduler.ensure_cache_available(request, 0, {"A", "B"})
     assert scheduler._primary.get("A") is not None
     assert scheduler._primary.get("B") is not None
-
-
-def test_gpu_cache_snapshot_is_read_only_and_expires_after_eviction():
-    from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
-
-    cache = EncoderCacheManager(cache_size=2)
-    resident = image_request("A")
-    assert cache.can_allocate(resident, 0, 2, 0)
-    cache.allocate(resident, 0)
-    cache.free(resident)
-    references = {key: set(refs) for key, refs in cache.cached.items()}
-    reclaimable = cache.num_freeable_slots
-    incoming = image_request("A", "B")
-    assert cache.get_cached_mm_hashes(incoming) == frozenset({"A"})
-    assert cache.cached == references
-    assert cache.num_freeable_slots == reclaimable
-    other = image_request("B")
-    assert cache.can_allocate(other, 0, 2, 0)
-    cache.allocate(other, 0)
-    assert cache.get_cached_mm_hashes(incoming) == frozenset({"B"})
-
-
-def test_gpu_snapshot_does_not_hide_incompatible_embedding_count():
-    from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
-    from vllm.sampling_params import SamplingParams
-    from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
-    from vllm.v1.request import Request
-
-    cache = EncoderCacheManager(cache_size=4)
-    resident = image_request("A")
-    cache.allocate(resident, 0)
-    incompatible = Request(
-        request_id="different-shape",
-        prompt_token_ids=[0] * 3,
-        sampling_params=SamplingParams(max_tokens=1),
-        pooling_params=None,
-        mm_features=[
-            MultiModalFeatureSpec(
-                data=None,
-                modality="image",
-                identifier="A",
-                mm_position=PlaceholderRange(offset=0, length=3),
-            )
-        ],
-    )
-    assert cache.get_cached_mm_hashes(incompatible) == frozenset()
 
 
 def test_cpu_ready_gpu_miss_loads_without_filesystem_read(indexed_scheduler):
@@ -613,7 +567,10 @@ def test_async_arrival_prefetch_survives_one_of_two_request_cancellations(
     path = get_ec_entry_path(filesystem._root_dir, manager._namespace_digest, key)
     path.parent.mkdir(parents=True, exist_ok=True)
     store_entry(
-        path, get_ec_temporary_path(path, "late"), [memoryview(bytes(128))], 128
+        path,
+        get_ec_temporary_path(path, "late", "0" * 32),
+        [memoryview(bytes(128))],
+        128,
     )
     first = image_request("late", request_id="first")
     second = image_request("late", request_id="second")
@@ -633,8 +590,9 @@ def test_async_arrival_prefetch_survives_one_of_two_request_cancellations(
 
 
 @pytest.mark.parametrize("cpu_ready", [False, True])
+@pytest.mark.parametrize("cached_count", [2, 3])
 def test_connector_original_interface_uses_fresh_gpu_lookup(
-    indexed_scheduler, cpu_ready
+    indexed_scheduler, cpu_ready, cached_count
 ):
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
     from vllm.distributed.ec_transfer.ec_connector.tiering.connector import (
@@ -645,32 +603,64 @@ def test_connector_original_interface_uses_fresh_gpu_lookup(
     connector = ECTieringConnector(
         indexed_scheduler._vllm_config, ECConnectorRole.SCHEDULER
     )
-    cache = EncoderCacheManager(cache_size=2)
-    resident = image_request("A", request_id="resident")
+    cache = EncoderCacheManager(cache_size=4)
+    resident = image_request("A", request_id="resident", num_embeds=cached_count)
     cache.allocate(resident, 0)
     cache.free(resident)
-    connector.bind_gpu_cache_lookup(cache.get_cached_mm_hashes)
+    connector.bind_encoder_cache_lookup(cache.get_cached_num_encoder_embeds)
     request = image_request("A")
     scheduler = connector.connector_scheduler
     try:
         if cpu_ready:
             scheduler._primary.alloc("A", 2, (2, 32))
             scheduler._primary.mark_ready("A")
-        else:
+        elif cached_count == 2:
             scheduler._primary.alloc("busy", scheduler._primary._region.num_blocks)
+        references = {key: set(refs) for key, refs in cache.cached.items()}
+        reclaimable = cache.num_freeable_slots
+        if cached_count != 2 and not cpu_ready:
+            assert not connector.ensure_cache_available(request, 0)
+            assert scheduler._tiering_manager._pending_reads
+            return
         assert connector.ensure_cache_available(request, 0)
+        assert cache.cached == references
+        assert cache.num_freeable_slots == reclaimable
         assert not scheduler._tiering_manager._pending_reads
         assert "A" not in scheduler._pending_loads
         # The callback is evaluated again, rather than retaining an arrival snapshot.
-        other = image_request("B")
-        assert cache.can_allocate(other, 0, 2, 0)
+        other = image_request("B", num_embeds=4)
+        assert cache.can_allocate(other, 0, 4, 0)
         cache.allocate(other, 0)
-        assert cache.get_cached_mm_hashes(request) == frozenset()
+        assert cache.get_cached_num_encoder_embeds(request, 0) is None
         if cpu_ready:
             assert connector.ensure_cache_available(request, 0)
         else:
             scheduler._primary.discard("busy")
             assert not connector.ensure_cache_available(request, 0)
             assert scheduler._tiering_manager._pending_reads
+    finally:
+        connector.shutdown()
+
+
+def test_default_connector_hooks_preserve_cpu_cache(indexed_scheduler):
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
+    from vllm.distributed.ec_transfer.ec_connector.cpu.connector import ECCPUConnector
+
+    connector = ECCPUConnector(
+        indexed_scheduler._vllm_config, ECConnectorRole.SCHEDULER
+    )
+    try:
+        cache = connector.connector_scheduler._cache
+        entry = cache.alloc("A", 1, (2, 32))
+        cache.mark_ready("A")
+
+        def unexpected_lookup(request, input_id):
+            raise AssertionError("CPU-only connector must not query GPU cache")
+
+        connector.bind_encoder_cache_lookup(unexpected_lookup)
+        connector.on_new_request(image_request("A"))
+        assert connector.has_cache_item("A")
+        assert cache.get("A") is entry
+        assert entry.ready and entry.evictable
     finally:
         connector.shutdown()

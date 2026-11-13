@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from threading import Event
@@ -19,6 +21,7 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
 )
 from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
     get_ec_entry_path,
+    get_ec_namespace_path,
     get_ec_temporary_path,
 )
 
@@ -152,7 +155,9 @@ def test_manager_publishes_only_completed_writes_and_routes_completions(
     assert not manager.contains(_CACHE_KEY)
     submission = executor.submissions[0]
     assert submission.entry_path.suffix == ".ec"
-    assert submission.temporary_path.parent == submission.entry_path.parent
+    assert submission.temporary_path.parent.parent == (
+        get_ec_namespace_path(tmp_path, _NAMESPACE_DIGEST) / ".tmp"
+    )
     assert submission.temporary_path.suffix == ".tmp"
     assert submission.fsync
 
@@ -318,9 +323,13 @@ def test_pending_writes_reserve_capacity_and_failure_releases_it(tmp_path):
     assert len(executor.submissions) == 1
     executor.finish(0, success=False)
     assert not manager.poll_completed_writes()[0].success
+    assert manager.used_bytes == 4
+    assert executor.submissions[1].operation == "delete"
+    executor.finish(1, success=True)
+    manager.poll_completed_writes()
     assert manager.used_bytes == 0
     assert manager.submit_write(second, [memoryview(b"data")], 4)
-    executor.finish(1, success=True)
+    executor.finish(2, success=True)
     assert manager.poll_completed_writes()[0].success
     assert manager.used_bytes == 4
 
@@ -397,7 +406,8 @@ def test_manager_recovers_published_entries_from_current_namespace(
 
     malformed_path = entry_path.parent / "not-a-cache-key.ec"
     malformed_path.write_bytes(b"ignored")
-    temporary_path = get_ec_temporary_path(entry_path, "unfinished")
+    temporary_path = get_ec_temporary_path(entry_path, "unfinished", "0" * 32)
+    temporary_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path.write_bytes(b"ignored")
     symlink_key = f"{2:064x}"
     symlink_path = get_ec_entry_path(
@@ -498,7 +508,9 @@ def test_async_lookup_discovers_late_file_and_releases_request(tmp_path: Path) -
 
     path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY)
     path.parent.mkdir(parents=True, exist_ok=True)
-    store_entry(path, get_ec_temporary_path(path, "late"), [memoryview(b"data")], 4)
+    store_entry(
+        path, get_ec_temporary_path(path, "late", "0" * 32), [memoryview(b"data")], 4
+    )
     try:
         assert not manager.contains(_CACHE_KEY)
         assert manager.lookup(_CACHE_KEY, 4, "request") is None
@@ -518,7 +530,7 @@ def test_async_lookup_discovers_late_file_and_releases_request(tmp_path: Path) -
         missing_path.parent.mkdir(parents=True, exist_ok=True)
         store_entry(
             missing_path,
-            get_ec_temporary_path(missing_path, "new"),
+            get_ec_temporary_path(missing_path, "new", "0" * 32),
             [memoryview(b"next")],
             4,
         )
@@ -549,7 +561,12 @@ def test_external_deletion_invalidates_index_without_repeated_reads(
     path = get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY)
     path.parent.mkdir(parents=True, exist_ok=True)
     if indexed_at_startup:
-        store_entry(path, get_ec_temporary_path(path, "seed"), [memoryview(b"data")], 4)
+        store_entry(
+            path,
+            get_ec_temporary_path(path, "seed", "0" * 32),
+            [memoryview(b"data")],
+            4,
+        )
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
         namespace_digest=_NAMESPACE_DIGEST,
@@ -560,7 +577,10 @@ def test_external_deletion_invalidates_index_without_repeated_reads(
     try:
         if not indexed_at_startup:
             store_entry(
-                path, get_ec_temporary_path(path, "late"), [memoryview(b"data")], 4
+                path,
+                get_ec_temporary_path(path, "late", "0" * 32),
+                [memoryview(b"data")],
+                4,
             )
             assert manager.lookup(_CACHE_KEY, 4, "request") is None
             assert _resolved(manager, _CACHE_KEY, "request")
@@ -590,7 +610,10 @@ def test_index_hit_skips_probe_unless_recorded_size_is_stale(
     path.parent.mkdir(parents=True, exist_ok=True)
     data = b"old-data" if stale_size else b"data"
     store_entry(
-        path, get_ec_temporary_path(path, "seed"), [memoryview(data)], len(data)
+        path,
+        get_ec_temporary_path(path, "seed", "0" * 32),
+        [memoryview(data)],
+        len(data),
     )
     manager = ECFileSystemTierManager(
         root_dir=tmp_path,
@@ -601,7 +624,10 @@ def test_index_hit_skips_probe_unless_recorded_size_is_stale(
     )
     if stale_size:
         store_entry(
-            path, get_ec_temporary_path(path, "fixed"), [memoryview(b"data")], 4
+            path,
+            get_ec_temporary_path(path, "fixed", "0" * 32),
+            [memoryview(b"data")],
+            4,
         )
     probes = []
     original = Path.lstat
@@ -614,6 +640,17 @@ def test_index_hit_skips_probe_unless_recorded_size_is_stale(
     monkeypatch.setattr(Path, "lstat", record_probe)
     try:
         if stale_size:
+            assert manager.lookup(_CACHE_KEY, 4, "first") is False
+            assert manager.used_bytes == len(data)
+            manager.drain()
+            assert manager.used_bytes == 0
+            assert not path.exists()
+            store_entry(
+                path,
+                get_ec_temporary_path(path, "retry", "0" * 32),
+                [memoryview(b"data")],
+                4,
+            )
             assert manager.lookup(_CACHE_KEY, 4, "first") is None
             assert _resolved(manager, _CACHE_KEY, "first")
         else:
@@ -628,7 +665,10 @@ def test_index_hit_skips_probe_unless_recorded_size_is_stale(
     assert probes == ([path] if stale_size else [])
 
 
-def test_failed_read_holds_capacity_until_cleanup_succeeds(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["read", "size_mismatch"])
+def test_invalid_entry_holds_capacity_until_cleanup_succeeds(
+    tmp_path, monkeypatch, failure
+):
     from vllm.distributed.ec_transfer.ec_connector.tiering import executor
 
     release_delete = Event()
@@ -655,9 +695,12 @@ def test_failed_read_holds_capacity_until_cleanup_succeeds(tmp_path, monkeypatch
         manager.drain()
         assert manager.poll_completed_writes()[0].success
         assert manager.lookup(_CACHE_KEY, 4, "request")
-        assert manager.submit_read(_CACHE_KEY, [memoryview(bytearray(4))])
-        manager._executor.drain()
-        assert not manager.poll_completed_reads()[0].success
+        if failure == "read":
+            assert manager.submit_read(_CACHE_KEY, [memoryview(bytearray(4))])
+            manager._executor.drain()
+            assert not manager.poll_completed_reads()[0].success
+        else:
+            assert manager.lookup(_CACHE_KEY, 2, "size-mismatch") is False
         assert manager.used_bytes == 4
         assert delete_started.wait(timeout=5)
         assert not manager.contains(_CACHE_KEY)
@@ -685,4 +728,190 @@ def test_failed_read_holds_capacity_until_cleanup_succeeds(tmp_path, monkeypatch
         release_delete.set()
         manager.release_request("request")
         manager.release_request("new-request")
+        manager.release_request("size-mismatch")
         manager.shutdown()
+
+
+@pytest.mark.parametrize("deny_recovery_cleanup", [False, True])
+def test_recovery_skips_live_writer_and_cleans_crashed_writer(
+    tmp_path, monkeypatch, deny_recovery_cleanup
+):
+    ready = tmp_path / "ready"
+    code = """
+import sys
+from pathlib import Path
+from threading import Event
+from vllm.distributed.ec_transfer.ec_connector.tiering import io
+from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
+    ECFileSystemTierManager,
+)
+writev = io.os.writev
+def blocked_write(fd, buffers):
+    writev(fd, buffers)
+    Path(sys.argv[2]).touch()
+    Event().wait()
+io.os.writev = blocked_write
+manager = ECFileSystemTierManager(Path(sys.argv[1]), "a" * 64, 8, 1, 1)
+assert manager.submit_write("b" * 64, [memoryview(b"data")], 4)
+Event().wait()
+"""
+    process = subprocess.Popen([sys.executable, "-c", code, str(tmp_path), str(ready)])
+    live = recovered = None
+    unlink = Path.unlink
+
+    def unlink_or_fail(path, *args, **kwargs):
+        if deny_recovery_cleanup and path.suffix == ".tmp":
+            raise PermissionError("orphan cleanup denied")
+        return unlink(path, *args, **kwargs)
+
+    try:
+        deadline = monotonic() + 30
+        while not ready.exists():
+            assert process.poll() is None
+            assert monotonic() < deadline
+            Event().wait(0.001)
+        temporary = next(tmp_path.rglob("*.ec.*.tmp"))
+        rglob = Path.rglob
+
+        def reject_recursive_temporary_scan(path, pattern, *args, **kwargs):
+            assert pattern != "*.tmp", (
+                "cleanup must only scan the dead owner's directory"
+            )
+            return rglob(path, pattern, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "rglob", reject_recursive_temporary_scan)
+        live = ECFileSystemTierManager(tmp_path, _NAMESPACE_DIGEST, 8, 1, 1)
+        assert temporary.read_bytes() == b"data"
+        assert live.submit_write("c" * 64, [memoryview(b"next")], 4)
+        live.drain()
+        assert live.poll_completed_writes()[0].success
+        process.kill()
+        process.wait(timeout=10)
+        monkeypatch.setattr(Path, "unlink", unlink_or_fail)
+        if deny_recovery_cleanup:
+            with pytest.raises(PermissionError, match="orphan cleanup denied"):
+                ECFileSystemTierManager(tmp_path, _NAMESPACE_DIGEST, 8, 1, 1)
+            assert temporary.exists()
+            assert (
+                temporary.parents[2] / ".owners" / f"{temporary.parent.name}.lock"
+            ).exists()
+            deny_recovery_cleanup = False
+        recovered = ECFileSystemTierManager(tmp_path, _NAMESPACE_DIGEST, 8, 1, 1)
+        recovered.drain()
+        assert not temporary.exists()
+        assert recovered.contains("c" * 64)
+    finally:
+        deny_recovery_cleanup = False
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        if recovered is not None:
+            recovered.shutdown()
+        if live is not None:
+            live.shutdown()
+    assert not list(tmp_path.rglob("*.lock"))
+    assert not list(
+        (get_ec_namespace_path(tmp_path, _NAMESPACE_DIGEST) / ".tmp").iterdir()
+    )
+
+
+def test_failed_temporary_cleanup_retains_capacity_and_retries(tmp_path, monkeypatch):
+    from vllm.distributed.ec_transfer.ec_connector.tiering import io
+
+    unlink = Path.unlink
+    replace = io.os.replace
+    denied = True
+
+    def fail_publish(*args):
+        raise OSError("publish failed")
+
+    def deny_cleanup(path, *args, **kwargs):
+        if denied and path.suffix == ".tmp":
+            raise PermissionError("temporary unlink denied")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(io.os, "replace", fail_publish)
+    monkeypatch.setattr(Path, "unlink", deny_cleanup)
+    manager = ECFileSystemTierManager(tmp_path, _NAMESPACE_DIGEST, 4, 1, 1)
+    try:
+        assert manager.submit_write(_CACHE_KEY, [memoryview(b"data")], 4)
+        manager.drain()
+        assert not manager.poll_completed_writes()[0].success
+        assert len(list(tmp_path.rglob("*.ec.*.tmp"))) == 1
+        assert manager.used_bytes == 4
+        denied = False
+        monkeypatch.setattr(io.os, "replace", replace)
+        assert not manager.submit_write("c" * 64, [memoryview(b"next")], 4)
+        manager.drain()
+        assert not list(tmp_path.rglob("*.ec.*.tmp"))
+        assert manager.used_bytes == 0
+        assert manager.submit_write("c" * 64, [memoryview(b"next")], 4)
+        manager.drain()
+        assert manager.poll_completed_writes()[0].success
+    finally:
+        denied = False
+        manager.shutdown()
+    assert not list(tmp_path.rglob("*.lock"))
+
+
+def test_recovery_many_dead_owners_uses_bounded_file_descriptors(tmp_path):
+    namespace = get_ec_namespace_path(tmp_path, _NAMESPACE_DIGEST)
+    (namespace / ".owners").mkdir(parents=True)
+    for number in range(80):
+        owner = f"{number:032x}"
+        (namespace / ".owners" / f"{owner}.lock").touch()
+        path = get_ec_temporary_path(
+            get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY), "write", owner
+        )
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"data")
+    code = """
+import resource
+import sys
+from pathlib import Path
+from vllm.distributed.ec_transfer.ec_connector.tiering.temporary import (
+    ECTemporaryFileOwner,
+)
+namespace = Path(sys.argv[1])
+hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard_limit))
+owner = ECTemporaryFileOwner(namespace)
+owner.close({})
+assert not list(namespace.glob('.tmp/*/*.tmp'))
+assert not list((namespace / '.owners').iterdir())
+"""
+    subprocess.run([sys.executable, "-c", code, str(namespace)], check=True, timeout=30)
+
+
+def test_recovery_metadata_error_preserves_owner_for_next_start(tmp_path, monkeypatch):
+    from vllm.distributed.ec_transfer.ec_connector.tiering.temporary import (
+        ECTemporaryFileOwner,
+    )
+
+    namespace = get_ec_namespace_path(tmp_path, _NAMESPACE_DIGEST)
+    owner_id = "a" * 32
+    lock = namespace / ".owners" / f"{owner_id}.lock"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    path = get_ec_temporary_path(
+        get_ec_entry_path(tmp_path, _NAMESPACE_DIGEST, _CACHE_KEY), "write", owner_id
+    )
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"data")
+    lstat = Path.lstat
+
+    def failed_stat(candidate, *args, **kwargs):
+        if candidate == path:
+            raise OSError("metadata I/O error")
+        return lstat(candidate, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat", failed_stat)
+        with pytest.raises(OSError, match="metadata I/O error"):
+            ECTemporaryFileOwner(namespace)
+    assert path.read_bytes() == b"data"
+    assert lock.exists()
+    recovered = ECTemporaryFileOwner(namespace)
+    recovered.close({})
+    assert not path.exists()
+    assert not lock.exists()

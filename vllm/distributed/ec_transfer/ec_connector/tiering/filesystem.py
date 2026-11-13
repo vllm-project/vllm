@@ -23,6 +23,9 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
     get_ec_temporary_path,
 )
 from vllm.distributed.ec_transfer.ec_connector.tiering.lookup import ECFileLookup
+from vllm.distributed.ec_transfer.ec_connector.tiering.temporary import (
+    ECTemporaryFileOwner,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import ReqContext
 from vllm.v1.kv_offload.tiering.backpressure import (
@@ -125,12 +128,17 @@ class ECFileSystemTierManager:
     ) -> None:
         if capacity_bytes <= 0:
             raise ValueError("filesystem capacity_bytes must be positive")
+        owner = ECTemporaryFileOwner(get_ec_namespace_path(root_dir, namespace_digest))
         if executor is None:
             from vllm.distributed.ec_transfer.ec_connector.tiering.executor import (
                 ECFileIOExecutor,
             )
 
-            executor = ECFileIOExecutor(n_read_threads, n_write_threads)
+            try:
+                executor = ECFileIOExecutor(n_read_threads, n_write_threads)
+            except BaseException:
+                owner.close(owner.orphaned)
+                raise
 
         self._root_dir = root_dir
         self._namespace_digest = namespace_digest
@@ -140,6 +148,11 @@ class ECFileSystemTierManager:
         self._pending_delete_bytes = 0
         self._fsync = fsync
         self._executor = executor
+        self._temporary_owner = owner
+        self._temporary_cleanup = dict(owner.orphaned)
+        self._temporary_cleanup_bytes = sum(self._temporary_cleanup.values())
+        self._pending_temporary_deletes: dict[int, Path] = {}
+        self._write_temporary: dict[int, Path] = {}
         self._backpressure_detector: BackpressureDetector | None = None
         if backpressure is not None and backpressure.enabled:
             self._backpressure_detector = EMABackpressureDetector(
@@ -158,15 +171,26 @@ class ECFileSystemTierManager:
         self._read_pins: Counter[str] = Counter()
         self._completed_reads: deque[ECReadResult] = deque()
         self._completed_writes: deque[ECWriteResult] = deque()
-        self._recover_index()
-        self._lookup = ECFileLookup(root_dir, namespace_digest)
-        self._evict_to_capacity()
+        try:
+            self._recover_index()
+            self._lookup = ECFileLookup(root_dir, namespace_digest)
+            self._evict_to_capacity()
+            self._retry_temporary_cleanup()
+        except BaseException:
+            if hasattr(self, "_lookup"):
+                self._lookup.shutdown()
+            self._executor.shutdown()
+            owner.close(self._temporary_cleanup)
+            raise
 
     @property
     def used_bytes(self) -> int:
         """Return indexed bytes, write reservations and unconfirmed deletions."""
         return (
-            self._used_bytes + self._reserved_write_bytes + self._pending_delete_bytes
+            self._used_bytes
+            + self._reserved_write_bytes
+            + self._pending_delete_bytes
+            + self._temporary_cleanup_bytes
         )
 
     @property
@@ -199,9 +223,10 @@ class ECFileSystemTierManager:
             return None
         entry = self._entries.get(cache_key)
         if entry is not None and entry.file_size_bytes != file_size_bytes:
-            del self._entries[cache_key]
-            self._used_bytes -= entry.file_size_bytes
-            entry = None
+            self._invalid_keys.add(cache_key)
+            self._entries.move_to_end(cache_key, last=False)
+            self._evict_to_capacity()
+            return False
         key = self._lookup.key(cache_key, file_size_bytes)
         result = self._lookup.lookup(key, ReqContext(req_id=request_id))
         if entry is not None:
@@ -267,6 +292,7 @@ class ECFileSystemTierManager:
             raise ValueError("file_size_bytes must be positive")
         if file_size_bytes > self._capacity_bytes:
             return False
+        self._retry_temporary_cleanup()
         if cache_key in self._invalid_keys:
             self._evict_to_capacity()
             return False
@@ -288,7 +314,9 @@ class ECFileSystemTierManager:
             self._namespace_digest,
             cache_key,
         )
-        temporary_path = get_ec_temporary_path(entry_path, uuid4().hex)
+        temporary_path = get_ec_temporary_path(
+            entry_path, uuid4().hex, self._temporary_owner.owner_id
+        )
         entry = ECFileEntry(cache_key, entry_path, file_size_bytes)
         job_id = self._executor.submit_write(
             cache_key,
@@ -301,6 +329,7 @@ class ECFileSystemTierManager:
         if job_id is None:
             return False
         self._pending_writes[job_id] = entry
+        self._write_temporary[job_id] = temporary_path
         self._pending_write_keys.add(cache_key)
         self._reserved_write_bytes += file_size_bytes
         return True
@@ -332,10 +361,12 @@ class ECFileSystemTierManager:
         if self._shutdown:
             return
         self._accepting = False
+        self._retry_temporary_cleanup()
         self._lookup.shutdown()
         self.drain()
         self._executor.shutdown()
         self._collect_executor_completions()
+        self._temporary_owner.close(self._temporary_cleanup)
         self._shutdown = True
 
     def _collect_executor_completions(self) -> None:
@@ -345,7 +376,20 @@ class ECFileSystemTierManager:
             elif completion.operation == "write":
                 self._complete_write(completion)
             elif completion.operation == "delete":
-                self._complete_delete(completion)
+                if completion.job_id in self._pending_temporary_deletes:
+                    path = self._pending_temporary_deletes.pop(completion.job_id)
+                    if completion.success:
+                        self._temporary_cleanup_bytes -= self._temporary_cleanup.pop(
+                            path
+                        )
+                    else:
+                        logger.warning(
+                            "Failed to clean encoder-cache temporary file %s: %s",
+                            path,
+                            completion.error,
+                        )
+                else:
+                    self._complete_delete(completion)
             else:
                 raise RuntimeError(
                     f"unknown filesystem I/O operation: {completion.operation}"
@@ -378,6 +422,7 @@ class ECFileSystemTierManager:
 
     def _complete_write(self, completion: ECFileIOCompletion) -> None:
         entry = self._pending_writes.pop(completion.job_id)
+        temporary_path = self._write_temporary.pop(completion.job_id)
         self._pending_write_keys.remove(completion.cache_key)
         self._reserved_write_bytes -= entry.file_size_bytes
         if completion.success:
@@ -391,6 +436,10 @@ class ECFileSystemTierManager:
             self._lookup.mark_present(
                 [self._lookup.key(completion.cache_key, entry.file_size_bytes)]
             )
+        else:
+            self._temporary_cleanup[temporary_path] = entry.file_size_bytes
+            self._temporary_cleanup_bytes += entry.file_size_bytes
+            self._retry_temporary_cleanup()
         self._completed_writes.append(
             ECWriteResult(
                 cache_key=completion.cache_key,
@@ -402,6 +451,23 @@ class ECFileSystemTierManager:
             )
         )
         self._evict_to_capacity()
+
+    def _retry_temporary_cleanup(self) -> None:
+        pending = set(self._pending_temporary_deletes.values())
+        for path, size in self._temporary_cleanup.items():
+            if path in pending:
+                continue
+            try:
+                job_id = self._executor.submit_delete(path.name, path, max(1, size))
+            except Exception:
+                logger.warning(
+                    "Failed to submit encoder-cache temporary cleanup for %s",
+                    path,
+                    exc_info=True,
+                )
+                continue
+            if job_id is not None:
+                self._pending_temporary_deletes[job_id] = path
 
     def _complete_delete(self, completion: ECFileIOCompletion) -> None:
         indexed_entry = self._pending_deletes.pop(completion.job_id)

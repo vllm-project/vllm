@@ -238,7 +238,9 @@ def test_entry_path_is_versioned_and_hash_prefix_sharded() -> None:
         / "20"
         / f"{cache_key}.ec"
     )
-    temporary_path = get_ec_temporary_path(path, "write-operation-1")
-    assert temporary_path.parent == path.parent
-    assert temporary_path.name.startswith(f".{path.name}.")
+    temporary_path = get_ec_temporary_path(path, "write-operation-1", "0" * 32)
+    assert temporary_path.parent == (
+        get_ec_namespace_path(Path("/cache"), namespace_digest) / ".tmp" / ("0" * 32)
+    )
+    assert temporary_path.name.startswith(f".{path.name}.{'0' * 32}.")
     assert temporary_path.suffix == ".tmp"

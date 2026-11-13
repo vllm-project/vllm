@@ -109,9 +109,18 @@ def get_ec_namespace_path(root_dir: Path, namespace_digest: str) -> Path:
     return root_dir / f"v{EC_FILE_FORMAT_VERSION}" / namespace_digest
 
 
-def get_ec_temporary_path(entry_path: Path, operation_token: str) -> Path:
-    """Return a collision-resistant temporary path beside the final entry."""
+def get_ec_temporary_path(
+    entry_path: Path, operation_token: str, owner_id: str
+) -> Path:
+    """Return a temporary path in the namespace's per-owner staging directory."""
     if not operation_token:
         raise ValueError("operation_token must not be empty")
     token_digest = hashlib.sha256(operation_token.encode("utf-8")).hexdigest()[:16]
-    return entry_path.with_name(f".{entry_path.name}.{token_digest}.tmp")
+    if len(owner_id) != 32 or not set(owner_id) <= _LOWERCASE_HEX_DIGITS:
+        raise ValueError("owner_id must be 32 lowercase hexadecimal characters")
+    return (
+        entry_path.parents[2]
+        / ".tmp"
+        / owner_id
+        / f".{entry_path.name}.{owner_id}.{token_digest}.tmp"
+    )
