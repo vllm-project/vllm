@@ -160,6 +160,15 @@ def test_is_envs_cache_enabled() -> None:
     assert not envs._is_envs_cache_enabled()
 
 
+def test_nixl_dcp_is_opt_in_without_changing_direct_preference() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        assert environment_variables["VLLM_USE_NIXL_DCP_A2A"]() is False
+        assert environment_variables["VLLM_USE_DIRECT_DCP_A2A"]() is None
+        os.environ["VLLM_USE_NIXL_DCP_A2A"] = "1"
+        assert environment_variables["VLLM_USE_NIXL_DCP_A2A"]() is True
+        assert environment_variables["VLLM_USE_DIRECT_DCP_A2A"]() is None
+
+
 def test_precompiled_install_flags_are_orthogonal() -> None:
     # The Rust frontend flag is independent of the C-extension precompiled
     # flag: requesting the precompiled Rust frontend must not implicitly
