@@ -98,8 +98,9 @@ vllm serve <model> --quantization-config.moe.activation mxfp8
 
 `quantization_config` lets you select an activation format independently of
 the weight format. For online quantization, it can be used to override the
-default activation quantization of MXFP4 layers; other online weight formats
-reject an activation override.
+default activation quantization of MXFP4 layers. Online MXFP8 MoE layers accept
+only `"activation": "mxfp8"`, their default; other online weight formats reject
+an activation override.
 
 For example, to enable MXFP4 MoE weights along MXFP8 activations:
 

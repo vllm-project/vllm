@@ -13,7 +13,7 @@ from tests.kernels.moe.utils import (
     check_deferred_moe_finalize,
     make_dummy_moe_config,
 )
-from tests.kernels.utils import torch_moe
+from tests.kernels.utils import torch_experts, torch_moe
 from vllm._aiter_ops import (
     is_aiter_found,
     is_aiter_found_and_supported,
@@ -44,14 +44,16 @@ HOPPER_MXFP4_BF16_AVAILABLE = (
 ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = is_aiter_found()
+ROCM_GFX942 = False
 ROCM_GFX950 = False
 ROCM_GFX1250 = False
 
 if ROCM_AVAILABLE:
-    from vllm.platforms.rocm import on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
+    ROCM_GFX942 = on_gfx942()
     ROCM_GFX950 = on_gfx950()
     ROCM_GFX1250 = on_gfx1250()
 
@@ -1716,6 +1718,7 @@ class RocmBackendConfig(TypedDict):
     requires_aiter: bool
     requires_gfx950: bool
     requires_gfx1250: NotRequired[bool]
+    requires_gfx942: NotRequired[bool]
     interleaved_layout: NotRequired[bool]
     act_type: NotRequired[str]
 
@@ -2236,6 +2239,221 @@ def test_aiter_mxfp4_moe_pad_masks_only_padding(
     for before, after in zip(weights_before, weights):
         assert torch.equal(before, after), "the MoE op modified its weights"
     torch.testing.assert_close(padded, unpadded, atol=1e-2, rtol=1e-2)
+
+
+ROCM_MXFP8_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
+    "AITER_TRITON_MXFP8_MXFP8": {
+        "activation": "SILU",
+        "rtol": 0.1,
+        "percent": 0.9,
+        "requires_aiter": True,
+        "requires_gfx950": False,
+        "requires_gfx942": True,
+    },
+}
+
+
+@pytest.mark.parametrize("backend_name", list(ROCM_MXFP8_BACKEND_CONFIGS.keys()))
+@pytest.mark.parametrize(
+    "routing_method_name,activation_name,topk,apply_router_weight_on_input",
+    [
+        ("Renormalize", "SILU", 4, False),
+        ("RenormalizeNaive", "SILU", 4, False),
+        ("MiniMax2", "SILU", 4, False),
+        ("DeepSeekV3", "SILU", 4, False),
+        ("Renormalize", "SWIGLUOAI", 4, False),
+        ("MiniMax2", "SILU", 1, True),
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [1, 37, 300])
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
+@torch.inference_mode()
+def test_rocm_mxfp8_moe_oracle(
+    backend_name: str,
+    routing_method_name: str,
+    activation_name: str,
+    topk: int,
+    apply_router_weight_on_input: bool,
+    num_tokens: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """MXFP8 counterpart of `test_rocm_mxfp4_moe_oracle`: the oracle picks the
+    backend and the assembled kernel matches `torch_experts` on the dequantized
+    weights, routed by vLLM's top-k functions."""
+    config = ROCM_MXFP8_BACKEND_CONFIGS[backend_name]
+    if config["requires_aiter"] and not ROCM_AITER_AVAILABLE:
+        pytest.skip(f"Backend {backend_name} requires AITER")
+    if config.get("requires_gfx942") and not ROCM_GFX942:
+        pytest.skip(f"Backend {backend_name} requires GFX942")
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        convert_to_fp8_moe_kernel_format,
+        make_fp8_moe_kernel,
+        make_fp8_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+        select_mxfp8_moe_backend,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        RoutedExpertsSink,
+    )
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+        fused_topk,
+    )
+    from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+        grouped_topk,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+
+    # w13 is [E, 768, 512] and w2 is [E, 512, 384]: non-square on purpose.
+    num_experts, hidden_size, intermediate_size = 16, 512, 384
+    routing_method = RoutingMethodType[routing_method_name]
+    activation = MoEActivation[activation_name]
+    torch.manual_seed(42)
+    device = "cuda:0"
+
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=activation,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=routing_method,
+        max_num_tokens=512,
+    )
+    backend, experts_cls = select_mxfp8_moe_backend(moe_config)
+    assert backend == Fp8MoeBackend[backend_name]
+
+    def quantize(*shape: int) -> tuple[torch.Tensor, torch.Tensor]:
+        w = torch.randn(*shape, dtype=torch.bfloat16, device=device) / shape[-1] ** 0.5
+        w_q, w_s = mxfp8_e4m3_quantize(w.view(-1, shape[-1]))
+        return w_q.view(shape), w_s.view(torch.uint8).view(*shape[:-1], -1)
+
+    w13_q, w13_s = quantize(num_experts, 2 * intermediate_size, hidden_size)
+    w2_q, w2_s = quantize(num_experts, hidden_size, intermediate_size)
+    # The conversion rewrites the weights in place; dequantize them first.
+    w13_dq = mxfp8_dequantize(w13_q.clone(), w13_s).to(torch.bfloat16)
+    w2_dq = mxfp8_dequantize(w2_q.clone(), w2_s).to(torch.bfloat16)
+    w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+        backend, torch.nn.Module(), w13_q, w2_q, w13_s, w2_s, None, None
+    )
+    quant_config = make_fp8_moe_quant_config(
+        fp8_backend=backend,
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+        a1_scale=None,
+        a2_scale=None,
+        block_shape=[1, 32],
+    )
+
+    # MXFP8-representable input, so the kernel's input quantization is exact.
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
+    x = mxfp8_dequantize(*mxfp8_e4m3_quantize(x)).to(torch.bfloat16)
+    router_logits = torch.randn(
+        num_tokens, num_experts, dtype=torch.float32, device=device
+    )
+    routing_kwargs: dict = {}
+    if routing_method in (RoutingMethodType.DeepSeekV3, RoutingMethodType.MiniMax2):
+        groups = 4 if routing_method == RoutingMethodType.DeepSeekV3 else 1
+        routing_kwargs = dict(
+            num_expert_group=groups,
+            topk_group=min(groups, 2),
+            e_score_correction_bias=0.1 * torch.randn(num_experts, device=device),
+            routed_scaling_factor=2.5,
+        )
+        topk_weights, topk_ids = grouped_topk(
+            x, router_logits, topk, True, scoring_func="sigmoid", **routing_kwargs
+        )
+    else:
+        topk_weights, topk_ids, _ = fused_topk(x, router_logits, topk, True)
+
+    captured: list[torch.Tensor] = []
+    sink = RoutedExpertsSink(moe_config, lambda ids: captured.append(ids.clone()))
+    with set_current_vllm_config(VllmConfig()):
+        kernel = make_fp8_moe_kernel(
+            moe_quant_config=quant_config,
+            moe_config=moe_config,
+            experts_cls=experts_cls,
+            fp8_backend=backend,
+        )
+        assert kernel.is_monolithic
+        out = kernel.apply_monolithic(
+            hidden_states=x,
+            w1=w13,
+            w2=w2,
+            router_logits=router_logits,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            routing_sink=sink,
+            **routing_kwargs,
+        )
+        ref = torch_experts(
+            x,
+            w13_dq,
+            w2_dq,
+            topk_weights,
+            topk_ids,
+            apply_router_weights_on_input=apply_router_weight_on_input,
+            activation=activation,
+        )
+
+    check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+    # Routed-experts capture reports the experts the reference routed to.
+    assert len(captured) == 1
+    torch.testing.assert_close(
+        captured[0].long().sort(-1).values, topk_ids.long().sort(-1).values
+    )
+
+
+def test_mxfp8_e4m3fn_to_e4m3fnuz_keeps_values():
+    """The fn -> fnuz weight conversion of gfx942 MXFP8 MoE is value-exact."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        dequant_mxfp8_to_bf16,
+        mxfp8_e4m3fn_to_e4m3fnuz,
+    )
+
+    gen = torch.Generator().manual_seed(0)
+    bits = torch.randint(-128, 128, (4, 64, 64), dtype=torch.int8, generator=gen)
+    bits[(bits & 0x7F) == 0x7F] = 0  # drop e4m3fn NaN encodings
+    bits[0, 0, :8] = -128  # 0x80 is -0 in fn, NaN in fnuz
+    w = bits.view(torch.float8_e4m3fn)
+    scale = torch.randint(100, 150, (4, 64, 2), dtype=torch.uint8, generator=gen)
+    scale[0, 0, 0], scale[0, 0, 1], scale[1, 0, 0] = 253, 254, 255
+
+    ref = dequant_mxfp8_to_bf16(w.clone(), scale).float()
+    w_fnuz, s_fnuz = mxfp8_e4m3fn_to_e4m3fnuz(w.clone(), scale)
+    assert w_fnuz.dtype == torch.float8_e4m3fnuz
+    assert not (w_fnuz.view(torch.int8) == -128).any()
+
+    got = (
+        w_fnuz.float().view(4, 64, 2, 32)
+        * torch.exp2(s_fnuz.float() - 127).unsqueeze(-1)
+    ).view(4, 64, 64)
+    finite = (s_fnuz != 255).repeat_interleave(32, dim=-1)
+    torch.testing.assert_close(got[finite], ref[finite], atol=0, rtol=0)
+    # 253 -> 254 stays finite; 254 and 255 cannot be bumped and become NaN.
+    assert s_fnuz[0, 0, 0] == 254
+    assert s_fnuz[0, 0, 1] == 255 and s_fnuz[1, 0, 0] == 255
 
 
 # -----------------------------------------------------------------------------

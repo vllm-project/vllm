@@ -1001,6 +1001,57 @@ def test_inc_mxfp8_moe_method_registers_block_scaled_weights(monkeypatch) -> Non
         )
 
 
+def test_inc_mxfp8_moe_method_forwards_monolithic_kernel(monkeypatch) -> None:
+    """A monolithic MXFP8 MoE kernel (e.g. the AITER Triton one on gfx942) gets
+    the router logits and the layer's routing parameters."""
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp8_moe.select_mxfp8_moe_backend",
+        lambda *, config: (object(), object()),
+    )
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_moe import (
+        INCMxfp8MoEMethod,
+    )
+
+    method = INCMxfp8MoEMethod(cast(Any, SimpleNamespace(is_act_and_mul=True)))
+    method.moe_kernel = Mock(is_monolithic=True)
+    layer = SimpleNamespace(
+        w13_weight=object(),
+        w2_weight=object(),
+        activation=object(),
+        global_num_experts=8,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        num_expert_group=4,
+        topk_group=2,
+        e_score_correction_bias=object(),
+        routed_scaling_factor=2.5,
+        routing_sink=object(),
+    )
+    x, router_logits = object(), object()
+
+    out = method.apply_monolithic(cast(Any, layer), x, router_logits)
+
+    assert out is method.moe_kernel.apply_monolithic.return_value
+    method.moe_kernel.apply_monolithic.assert_called_once_with(
+        x,
+        layer.w13_weight,
+        layer.w2_weight,
+        router_logits,
+        activation=layer.activation,
+        global_num_experts=layer.global_num_experts,
+        expert_map=layer.expert_map,
+        apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        num_expert_group=layer.num_expert_group,
+        topk_group=layer.topk_group,
+        e_score_correction_bias=layer.e_score_correction_bias,
+        routed_scaling_factor=layer.routed_scaling_factor,
+        routing_sink=layer.routing_sink,
+    )
+
+
 def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     monkeypatch,
 ) -> None:
