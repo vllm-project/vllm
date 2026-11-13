@@ -6,6 +6,7 @@
 #include <type_traits>
 #include "common.cuh"
 #include "rms_normalize.cuh"
+#include "fp8_quant.cuh"
 
 namespace hip_custom_communicator {
 
@@ -23,7 +24,7 @@ DINLINE void attn_res(
     int64_t output_stride_n, DTYPE* block_output_ptr,
     int64_t block_output_stride_m, int64_t block_output_stride_n,
     int input_size_m, int input_size_n, int offs_m, int offs_n, int num_blocks,
-    float eps, float output_eps, float inv_hidden) {
+    float eps, float output_eps, float inv_hidden, uint8_t* quant_ptr, int64_t quant_stride_m, float* quant_scale_ptr, int64_t quant_scale_stride_m) {
   [[maybe_unused]] const auto pack_at = [&](int k) {
     const int t = static_cast<int>(threadIdx.x) % THREADS_PER_BLOCK;
     return LAYOUT == Layout::tile
@@ -245,10 +246,16 @@ DINLINE void attn_res(
         for (int j = 0; j < P; ++j)
           result[i][k][j] = static_cast<DTYPE>(acc[i][k][j]);
   }
-  store<1, ROWS, THREADS_PER_BLOCK, WAVE_SIZE, false, LAYOUT, TAIL>(
-      result, &output_ptr, 1, 0, 0, 0, output_stride_m, output_stride_n, 1,
-      input_size_m, input_size_n, input_size_m, input_size_n, offs_m, offs_n,
-      1);
+  // A null output_ptr: the caller takes only the FP8 copy.
+  if (output_ptr != nullptr)
+    store<1, ROWS, THREADS_PER_BLOCK, WAVE_SIZE, false, LAYOUT, TAIL>(
+        result, &output_ptr, 1, 0, 0, 0, output_stride_m, output_stride_n, 1,
+        input_size_m, input_size_n, input_size_m, input_size_n, offs_m,
+        offs_n, 1);
+  if (quant_ptr != nullptr)
+    quantize_rows_fp8<THREADS_PER_BLOCK, WAVE_SIZE, LAYOUT>(
+        result, quant_ptr, quant_stride_m, quant_scale_ptr,
+        quant_scale_stride_m, input_size_m, input_size_n, offs_m, offs_n);
 }
 
 template <int TILE_K, int THREADS_PER_BLOCK, int WAVE_SIZE, Layout LAYOUT,
@@ -266,7 +273,7 @@ DINLINE void attn_res(
     DTYPE* block_output_ptr, int64_t block_output_stride_m,
     int64_t block_output_stride_n, int input_size_m, int input_size_n,
     int offs_m, int offs_n, int num_blocks, float eps, float output_eps,
-    float inv_hidden) {
+    float inv_hidden, uint8_t* quant_ptr, int64_t quant_stride_m, float* quant_scale_ptr, int64_t quant_scale_stride_m) {
   constexpr int tile_n = K * P * THREADS_PER_BLOCK;
   if constexpr (CHUNKED) {
     const int n_all = input_size_n;
@@ -485,7 +492,7 @@ DINLINE void attn_res(
         prefix_output_stride_m, prefix_output_stride_n, output_ptr,
         output_stride_m, output_stride_n, block_output_ptr,
         block_output_stride_m, block_output_stride_n, input_size_m,
-        input_size_n, offs_m, offs_n, num_blocks, eps, output_eps, inv_hidden);
+        input_size_n, offs_m, offs_n, num_blocks, eps, output_eps, inv_hidden, quant_ptr, quant_stride_m, quant_scale_ptr, quant_scale_stride_m);
   }
 }
 

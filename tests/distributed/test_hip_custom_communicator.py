@@ -231,6 +231,38 @@ def test_all_reduce_add_rms_norm_correctness(monkeypatch, tp_size, quantization)
     _on_ranks(monkeypatch, tp_size, quantization, body)
 
 
+def _attn_res_inputs(comm, device, rows, with_prefix):
+    """Every rank's input, then the shared prefix (or None), blocks and weights
+    of an AttnRes call."""
+    dtype = torch.bfloat16
+    xs = [
+        torch.randint(
+            -8,
+            8,
+            (rows, HIDDEN),
+            generator=torch.Generator(device=device).manual_seed(r),
+            device=device,
+        ).to(dtype)
+        for r in range(comm.arguments.world)
+    ]
+    g = torch.Generator(device=device).manual_seed(0)
+    prefix = (
+        torch.randint(-8, 8, (rows, HIDDEN), generator=g, device=device).to(dtype)
+        if with_prefix
+        else None
+    )
+    blocks = torch.randint(-8, 8, (rows, 10, HIDDEN), generator=g, device=device).to(
+        dtype
+    )
+    norm_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+    norm_weight.normal_(mean=1.0, std=0.1, generator=g)
+    qk_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+    qk_weight.normal_(mean=0.0, std=0.1, generator=g)
+    out_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
+    out_weight.normal_(mean=1.0, std=0.1, generator=g)
+    return xs, prefix, blocks, norm_weight, qk_weight, out_weight
+
+
 @pytest.mark.parametrize("tp_size", TP_SIZES)
 @pytest.mark.parametrize("quantization", QUANTIZATIONS)
 def test_all_reduce_add_attn_res_rms_norm_correctness(
@@ -242,34 +274,10 @@ def test_all_reduce_add_attn_res_rms_norm_correctness(
         dtype = torch.bfloat16
         for rows in NUM_TOKENS:
             for with_prefix, write_index in [(True, -1), (False, NUM_BLOCKS)]:
-                xs = [
-                    torch.randint(
-                        -8,
-                        8,
-                        (rows, HIDDEN),
-                        generator=torch.Generator(device=device).manual_seed(r),
-                        device=device,
-                    ).to(dtype)
-                    for r in range(comm.arguments.world)
-                ]
-                x = xs[rank]
-                g = torch.Generator(device=device).manual_seed(0)
-                prefix = (
-                    torch.randint(-8, 8, (rows, HIDDEN), generator=g, device=device).to(
-                        dtype
-                    )
-                    if with_prefix
-                    else None
+                xs, prefix, blocks, norm_weight, qk_weight, out_weight = (
+                    _attn_res_inputs(comm, device, rows, with_prefix)
                 )
-                blocks = torch.randint(
-                    -8, 8, (rows, 10, HIDDEN), generator=g, device=device
-                ).to(dtype)
-                norm_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
-                norm_weight.normal_(mean=1.0, std=0.1, generator=g)
-                qk_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
-                qk_weight.normal_(mean=0.0, std=0.1, generator=g)
-                out_weight = torch.empty(HIDDEN, dtype=dtype, device=device)
-                out_weight.normal_(mean=1.0, std=0.1, generator=g)
+                x = xs[rank]
 
                 exact_sum = x.clone()
                 dist.all_reduce(exact_sum, group=group.device_group)
@@ -333,6 +341,165 @@ def test_all_reduce_add_attn_res_rms_norm_correctness(
                     _compare(got_out, want_out, used, where)
                     _compare(got_prefix, want_prefix, used, where)
                     _compare(got_blocks, want_blocks, used, where)
+
+    _on_ranks(monkeypatch, tp_size, quantization, body)
+
+
+@pytest.mark.parametrize("tp_size", TP_SIZES)
+@pytest.mark.parametrize("quantization", QUANTIZATIONS)
+def test_all_reduce_add_attn_res_rms_norm_fp8_copy(monkeypatch, tp_size, quantization):
+    """Each config's FP8 copy is AITER's per-token quant of the output the same
+    config writes without it, bit for bit, and the other outputs are unchanged.
+    A chunked kernel (a row wider than its tile) writes no copy."""
+
+    def body(comm, group, device, rank):
+        from vllm._aiter_ops import _rocm_aiter_per_token_quant_impl
+
+        for rows in NUM_TOKENS:
+            for with_prefix, write_index in [(True, -1), (False, NUM_BLOCKS)]:
+                xs, prefix, blocks, *weights = _attn_res_inputs(
+                    comm, device, rows, with_prefix
+                )
+                q = comm.arguments.quantization
+                forced = [
+                    comm.kernel_config(
+                        "all_reduce_add_attn_res_rms_norm", a, rows, HIDDEN, q
+                    )
+                    for a in AllReduceAddAttnResRmsNormConfig.algorithms
+                ]
+                for config in [None, *(c for c in forced if c is not None)]:
+                    used = config or comm.tuned(
+                        "all_reduce_add_attn_res_rms_norm", rows, HIDDEN, None
+                    )
+                    want_blocks = blocks.clone()
+                    want_prefix, want_out = comm.all_reduce_add_attn_res_rms_norm(
+                        xs[rank],
+                        prefix,
+                        want_blocks,
+                        *weights,
+                        NUM_BLOCKS,
+                        write_index,
+                        ATTN_RES_EPS,
+                        EPS,
+                        config=config,
+                    )
+                    want_codes, want_scales = _rocm_aiter_per_token_quant_impl(
+                        want_out, torch.float8_e4m3fn
+                    )
+                    tile_n = (
+                        used.add_attn_res_rms_norm_tile_n
+                        if used.split
+                        else used.tile_n
+                    )
+                    for write_output in [True, False]:
+                        where = (rows, with_prefix, used, write_output)
+                        got_blocks = blocks.clone()
+                        got = comm.all_reduce_add_attn_res_rms_norm_fp8(
+                            xs[rank],
+                            prefix,
+                            got_blocks,
+                            *weights,
+                            NUM_BLOCKS,
+                            write_index,
+                            ATTN_RES_EPS,
+                            EPS,
+                            write_output=write_output,
+                            config=config,
+                        )
+                        if HIDDEN > tile_n:
+                            assert got is None, where
+                            continue
+                        assert got is not None, where
+                        got_prefix, got_out, (codes, scales) = got
+                        assert torch.equal(
+                            codes.view(torch.uint8), want_codes.view(torch.uint8)
+                        ), where
+                        assert torch.equal(scales, want_scales), where
+                        assert torch.equal(got_prefix, want_prefix), where
+                        assert torch.equal(got_blocks, want_blocks), where
+                        if write_output:
+                            assert torch.equal(got_out, want_out), where
+                        else:
+                            assert got_out is None, where
+
+    _on_ranks(monkeypatch, tp_size, quantization, body)
+
+
+def _kimi_k3_attn_res_layers(device, norm_weight, qk_weight, out_weight):
+    """The AttnRes norm, projection and output norm of a Kimi-K3 decoder layer,
+    holding the given weights."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.layernorm import RMSNorm
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    dtype = torch.bfloat16
+    with set_current_vllm_config(VllmConfig()), torch.device(device):
+        norm = RMSNorm(HIDDEN, eps=ATTN_RES_EPS, dtype=dtype)
+        proj = ReplicatedLinear(HIDDEN, 1, bias=False, params_dtype=dtype)
+        output_norm = RMSNorm(HIDDEN, eps=EPS, dtype=dtype)
+    norm.weight.data.copy_(norm_weight)
+    proj.weight.data.copy_(qk_weight.unsqueeze(0))
+    output_norm.weight.data.copy_(out_weight)
+    return norm, proj, output_norm
+
+
+@pytest.mark.parametrize("tp_size", TP_SIZES)
+@pytest.mark.parametrize("quantization", QUANTIZATIONS)
+def test_kimi_k3_attn_res_site_hands_fp8_consumers_the_copy(
+    monkeypatch, tp_size, quantization
+):
+    """Kimi-K3's fused AttnRes call site gives an FP8 per-token consumer the
+    kernel's FP8 copy: AITER's quant of the bf16 output the site gives other
+    consumers, with the same prefix and blocks."""
+
+    def body(comm, group, device, rank):
+        from vllm._aiter_ops import _rocm_aiter_per_token_quant_impl
+        from vllm.model_executor.layers.fusion.quant_activation import (
+            QuantizedActivation,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8DynamicTokenSym,
+        )
+        from vllm.models.kimi_k3.amd.linear import _apply_attn_res_fused
+
+        for rows in (16, MAX_TOKENS):
+            for with_prefix, write_index in [(True, -1), (False, NUM_BLOCKS)]:
+                xs, prefix, blocks, *weights = _attn_res_inputs(
+                    comm, device, rows, with_prefix
+                )
+                norm, proj, output_norm = _kimi_k3_attn_res_layers(device, *weights)
+                outputs = []
+                for quant_key in (None, kFp8DynamicTokenSym):
+                    got_blocks = blocks.clone()
+                    got_prefix, got = _apply_attn_res_fused(
+                        comm,
+                        prefix,
+                        xs[rank],
+                        got_blocks,
+                        proj,
+                        norm,
+                        output_norm,
+                        NUM_BLOCKS,
+                        write_index,
+                        quant_key=quant_key,
+                    )
+                    outputs.append((got_prefix, got, got_blocks))
+                (want_prefix, want_out, want_blocks), (got_prefix, got, got_blocks) = (
+                    outputs
+                )
+                where = (rows, with_prefix)
+                want_codes, want_scales = _rocm_aiter_per_token_quant_impl(
+                    want_out, torch.float8_e4m3fn
+                )
+                assert isinstance(got, QuantizedActivation), where
+                assert torch.equal(
+                    got.data.view(torch.uint8), want_codes.view(torch.uint8)
+                ), where
+                assert torch.equal(got.scale, want_scales), where
+                assert got.orig_shape == want_out.shape, where
+                assert got.orig_dtype == want_out.dtype, where
+                assert torch.equal(got_prefix, want_prefix), where
+                assert torch.equal(got_blocks, want_blocks), where
 
     _on_ranks(monkeypatch, tp_size, quantization, body)
 

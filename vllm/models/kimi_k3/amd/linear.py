@@ -300,8 +300,9 @@ def _apply_attn_res_fused(
     output_norm: RMSNorm,
     num_valid_blocks: int,
     block_write_idx: int = -1,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return fused_communicator.all_reduce_add_attn_res_rms_norm(
+    quant_key: QuantKey | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | QuantizedActivation]:
+    args = (
         delta,
         prefix_sum,
         block_residual,
@@ -313,6 +314,17 @@ def _apply_attn_res_fused(
         norm.variance_epsilon,
         output_norm.variance_epsilon,
     )
+    # As _apply_attn_res does, the kernel writes the FP8 input its consumer reads.
+    if quant_key == kFp8DynamicTokenSym and not envs.VLLM_BATCH_INVARIANT:
+        fused = fused_communicator.all_reduce_add_attn_res_rms_norm_fp8(
+            *args, write_output=False
+        )
+        if fused is not None:
+            prefix_output, _, (data, scale) = fused
+            return prefix_output, QuantizedActivation(
+                data, scale, delta.dtype, delta.shape, kFp8DynamicTokenSym
+            )
+    return fused_communicator.all_reduce_add_attn_res_rms_norm(*args)
 
 
 class KimiMoE(nn.Module):
@@ -887,6 +899,7 @@ class KimiDecoderLayer(nn.Module):
                 self.input_layernorm,
                 self.prev_valid_blocks,
                 self.block_write_idx if self.is_block_write_layer else -1,
+                quant_key=attention_quant_key,
             )
         else:
             hidden_states = _apply_attn_res(
@@ -911,6 +924,9 @@ class KimiDecoderLayer(nn.Module):
         mlp_valid_blocks = self.prev_valid_blocks + (
             1 if self.is_block_write_layer else 0
         )
+        mlp_quant_key = (
+            self.mlp.get_input_quant_key() if isinstance(self.mlp, KimiMLP) else None
+        )
         # Fused: the attention output arrives unreduced. The AttnRes reduces it.
         if self.fused_communicator is not None:
             prefix_sum, hidden_states = _apply_attn_res_fused(
@@ -922,6 +938,7 @@ class KimiDecoderLayer(nn.Module):
                 self.mlp_res_norm,
                 self.post_attention_layernorm,
                 mlp_valid_blocks,
+                quant_key=mlp_quant_key,
             )
         else:
             if prefix_sum is None:
@@ -938,11 +955,7 @@ class KimiDecoderLayer(nn.Module):
                 mlp_valid_blocks,
                 delta=prefix_delta,
                 output_norm=self.post_attention_layernorm,
-                quant_key=(
-                    self.mlp.get_input_quant_key()
-                    if isinstance(self.mlp, KimiMLP)
-                    else None
-                ),
+                quant_key=mlp_quant_key,
             )
 
         hidden_states = self.mlp(hidden_states)

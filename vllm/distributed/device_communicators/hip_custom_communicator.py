@@ -1187,6 +1187,90 @@ class HipCustomCommunicator:
         config: AllReduceAddAttnResRmsNormConfig | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """All-reduce `input`, then AttnRes. Returns the new prefix and the output."""
+        result = self._all_reduce_add_attn_res_rms_norm(
+            input,
+            prefix,
+            blocks,
+            norm_weight,
+            qk_weight,
+            output_norm_weight,
+            num_blocks,
+            write_index,
+            eps,
+            output_eps,
+            config=config,
+            quantize=False,
+            write_output=True,
+        )
+        assert result is not None, "without the FP8 copy every config runs"
+        prefix_output, output, _ = result
+        assert output is not None
+        return prefix_output, output
+
+    @final
+    def all_reduce_add_attn_res_rms_norm_fp8(
+        self,
+        input: torch.Tensor,
+        prefix: torch.Tensor | None,
+        blocks: torch.Tensor,
+        norm_weight: torch.Tensor,
+        qk_weight: torch.Tensor,
+        output_norm_weight: torch.Tensor | None,
+        num_blocks: int,
+        write_index: int,
+        eps: float,
+        output_eps: float,
+        *,
+        write_output: bool,
+        config: AllReduceAddAttnResRmsNormConfig | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor, torch.Tensor]]
+        | None
+    ):
+        """All-reduce `input`, then AttnRes, and write the output's per-row
+        dynamic FP8 (e4m3fn) codes and float32 scales in the same kernel, equal
+        to AITER's per-token quant of the output. Returns the new prefix, the
+        output (None unless `write_output`) and the (codes, scales); None when
+        the config's kernel cannot write the copy (a row wider than its tile)."""
+        return self._all_reduce_add_attn_res_rms_norm(
+            input,
+            prefix,
+            blocks,
+            norm_weight,
+            qk_weight,
+            output_norm_weight,
+            num_blocks,
+            write_index,
+            eps,
+            output_eps,
+            config=config,
+            quantize=True,
+            write_output=write_output,
+        )
+
+    @final
+    def _all_reduce_add_attn_res_rms_norm(
+        self,
+        input: torch.Tensor,
+        prefix: torch.Tensor | None,
+        blocks: torch.Tensor,
+        norm_weight: torch.Tensor,
+        qk_weight: torch.Tensor,
+        output_norm_weight: torch.Tensor | None,
+        num_blocks: int,
+        write_index: int,
+        eps: float,
+        output_eps: float,
+        *,
+        config: AllReduceAddAttnResRmsNormConfig | None,
+        quantize: bool,
+        write_output: bool,
+    ) -> (
+        tuple[
+            torch.Tensor, torch.Tensor | None, tuple[torch.Tensor, torch.Tensor] | None
+        ]
+        | None
+    ):
         if self.lifecycle.status == "broken":
             raise RuntimeError(
                 f"broken: {self.lifecycle.detail}. Close it and build a new one on "
@@ -1197,13 +1281,6 @@ class HipCustomCommunicator:
         assert self.state is not None, "an open communicator has its state"
         if input.dim() != 2:
             raise RuntimeError(f"not_two_d: not {tuple(input.shape)}")
-
-        prefix_output, output = torch.empty_like(input), torch.empty_like(input)
-        if (
-            self.lifecycle.status == "capturing"
-            and not torch.cuda.is_current_stream_capturing()
-        ):
-            return prefix_output, output
 
         if config is None:
             rows, cols = input.shape
@@ -1221,6 +1298,28 @@ class HipCustomCommunicator:
             raise AssertionError(
                 f"an exact communicator given an INT4 config: {config}"
             )
+        # Only an unchunked kernel, one that holds a whole row, writes the copy.
+        tile_n = config.add_attn_res_rms_norm_tile_n if config.split else config.tile_n
+        assert tile_n is not None, config
+        if quantize and input.shape[1] > tile_n:
+            return None
+
+        prefix_output, output = torch.empty_like(input), torch.empty_like(input)
+        quant = (
+            (
+                torch.empty_like(input, dtype=torch.float8_e4m3fn),
+                torch.empty(
+                    (input.shape[0], 1), dtype=torch.float32, device=input.device
+                ),
+            )
+            if quantize
+            else None
+        )
+        if (
+            self.lifecycle.status == "capturing"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            return prefix_output, output if write_output else None, quant
 
         block_output = blocks[:, write_index] if write_index >= 0 else None
         error = torch.ops._rocm_C.hip_custom_communicator_all_reduce_add_attn_res_rms_norm(  # noqa: E501
@@ -1261,10 +1360,13 @@ class HipCustomCommunicator:
             add_attn_res_rms_norm_tile_n=config.add_attn_res_rms_norm_tile_n,
             add_attn_res_rms_norm_tile_k=config.add_attn_res_rms_norm_tile_k,
             add_attn_res_rms_norm_pack_bytes=config.add_attn_res_rms_norm_pack_bytes,
+            quant_output=None if quant is None else quant[0],
+            quant_scale=None if quant is None else quant[1],
+            write_output=write_output,
         )
         if error is not None:
             raise RuntimeError(f"{Error(error).name}: {config} on {input.shape}")
-        return prefix_output, output
+        return prefix_output, output if write_output else None, quant
 
     @final
     @contextmanager

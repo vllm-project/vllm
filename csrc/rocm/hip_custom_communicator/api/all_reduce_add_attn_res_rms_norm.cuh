@@ -1,7 +1,9 @@
 #pragma once
 
 // Host side of the all-reduce with AttnRes: checks the call, then launches its
-// kernel.
+// kernel. The kernel can also write an FP8 (OCP e4m3fn) copy of the output and
+// its float32 per-row scale (quant_output, quant_scale), and skip the bf16
+// output (write_output).
 
 #include "../../ops.h"
 #include "../types.cuh"
@@ -9,51 +11,63 @@
 #include "../kernels/all_reduce.cuh"
 #include "../kernels/all_reduce_add_attn_res_rms_norm.cuh"
 
-ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
-    int64_t state, torch::Tensor& input,
-    const std::optional<torch::Tensor>& prefix, torch::Tensor& blocks,
-    torch::Tensor& norm_weight, torch::Tensor& qk_weight,
-    const std::optional<torch::Tensor>& output_norm_weight,
-    torch::Tensor& prefix_output, torch::Tensor& output,
-    const std::optional<torch::Tensor>& block_output, int64_t num_blocks,
-    double eps, double output_eps, const std::string& algorithm_name,
-    int64_t grid_x, int64_t grid_y, int64_t grid_z, int64_t block_x,
-    int64_t block_y, int64_t block_z, int64_t waves_per_eu, int64_t tile_m,
-    int64_t tile_n, int64_t tile_k, const std::string& quantization_name,
-    int64_t pack_bytes, std::optional<int64_t> add_attn_res_rms_norm_grid_x,
-    std::optional<int64_t> add_attn_res_rms_norm_grid_y,
-    std::optional<int64_t> add_attn_res_rms_norm_grid_z,
-    std::optional<int64_t> add_attn_res_rms_norm_block_x,
-    std::optional<int64_t> add_attn_res_rms_norm_block_y,
-    std::optional<int64_t> add_attn_res_rms_norm_block_z,
-    std::optional<int64_t> add_attn_res_rms_norm_waves_per_eu,
-    std::optional<int64_t> add_attn_res_rms_norm_tile_m,
-    std::optional<int64_t> add_attn_res_rms_norm_tile_n,
-    std::optional<int64_t> add_attn_res_rms_norm_tile_k,
-    std::optional<int64_t> add_attn_res_rms_norm_pack_bytes) {
-  using namespace hip_custom_communicator;
-  using namespace hip_custom_communicator::internal;
+namespace hip_custom_communicator::internal {
 
-  if (state == 0) return error_code(Error::not_open);
+// The tensors of one AttnRes call. `input` is what the rows kernel reads: the
+// caller's input, or the split path's reduced copy.
+struct AttnResCall {
+  const torch::Tensor& input;
+  const std::optional<torch::Tensor>& prefix;
+  const torch::Tensor& blocks;
+  const torch::Tensor& norm_weight;
+  const torch::Tensor& qk_weight;
+  const std::optional<torch::Tensor>& output_norm_weight;
+  const torch::Tensor& prefix_output;
+  const torch::Tensor& output;
+  const std::optional<torch::Tensor>& block_output;
+  const std::optional<torch::Tensor>& quant_output;
+  const std::optional<torch::Tensor>& quant_scale;
+  bool write_output;
 
-  if (!input.is_cuda() || !norm_weight.is_cuda() || !qk_weight.is_cuda() ||
-      !prefix_output.is_cuda() || !output.is_cuda() || !blocks.is_cuda())
+  bool quantizes() const { return quant_output.has_value(); }
+  uint8_t* quant_ptr() const {
+    return quantizes() ? static_cast<uint8_t*>(quant_output->data_ptr())
+                       : nullptr;
+  }
+  int64_t quant_stride_m() const {
+    return quantizes() ? quant_output->stride(0) : 0;
+  }
+  float* quant_scale_ptr() const {
+    return quantizes() ? static_cast<float*>(quant_scale->data_ptr()) : nullptr;
+  }
+  int64_t quant_scale_stride_m() const {
+    return quantizes() ? quant_scale->stride(0) : 0;
+  }
+};
+
+// The checks of every AttnRes call, before a kernel is chosen.
+inline ErrorCode check_attn_res_call(const AttnResCall& c, int64_t num_blocks) {
+  const torch::Tensor& input = c.input;
+  if (!input.is_cuda() || !c.norm_weight.is_cuda() || !c.qk_weight.is_cuda() ||
+      !c.prefix_output.is_cuda() || !c.output.is_cuda() || !c.blocks.is_cuda())
     return error_code(Error::not_on_device);
 
   if (input.dim() != 2 || input.size(0) < 1 || input.size(1) < 1)
     return error_code(Error::shape_mismatch);
   const int64_t width = input.size(1);
-  if (prefix_output.sizes() != input.sizes() ||
-      output.sizes() != input.sizes() || blocks.dim() != 3 ||
-      blocks.size(0) != input.size(0) || blocks.size(2) != width ||
-      blocks.stride(2) != 1 || num_blocks < 0 || num_blocks > blocks.size(1) ||
-      norm_weight.dim() != 1 || norm_weight.numel() != width ||
-      qk_weight.dim() != 1 || qk_weight.numel() != width)
+  if (c.prefix_output.sizes() != input.sizes() ||
+      c.output.sizes() != input.sizes() || c.blocks.dim() != 3 ||
+      c.blocks.size(0) != input.size(0) || c.blocks.size(2) != width ||
+      c.blocks.stride(2) != 1 || num_blocks < 0 ||
+      num_blocks > c.blocks.size(1) || c.norm_weight.dim() != 1 ||
+      c.norm_weight.numel() != width || c.qk_weight.dim() != 1 ||
+      c.qk_weight.numel() != width)
     return error_code(Error::shape_mismatch);
-  std::vector<const torch::Tensor*> same = {&blocks, &norm_weight, &qk_weight,
-                                            &prefix_output, &output};
+  std::vector<const torch::Tensor*> same = {&c.blocks, &c.norm_weight,
+                                            &c.qk_weight, &c.prefix_output,
+                                            &c.output};
   for (const std::optional<torch::Tensor>* o :
-       {&prefix, &output_norm_weight, &block_output})
+       {&c.prefix, &c.output_norm_weight, &c.block_output})
     if (*o) {
       if (!(*o)->is_cuda()) return error_code(Error::not_on_device);
       same.push_back(&**o);
@@ -61,17 +75,36 @@ ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
   for (const torch::Tensor* t : same)
     if (t->scalar_type() != input.scalar_type())
       return error_code(Error::dtype_mismatch);
-  if ((prefix && prefix->sizes() != input.sizes()) ||
-      (block_output && (block_output->sizes() != input.sizes() ||
-                        block_output->stride(1) != 1)) ||
-      (output_norm_weight && (output_norm_weight->dim() != 1 ||
-                              output_norm_weight->numel() != width)))
+  if ((c.prefix && c.prefix->sizes() != input.sizes()) ||
+      (c.block_output && (c.block_output->sizes() != input.sizes() ||
+                          c.block_output->stride(1) != 1)) ||
+      (c.output_norm_weight && (c.output_norm_weight->dim() != 1 ||
+                                c.output_norm_weight->numel() != width)))
     return error_code(Error::shape_mismatch);
 
-  if (reinterpret_cast<uintptr_t>(blocks.data_ptr()) % kPackBytes != 0)
+  // The FP8 copy: e4m3fn codes shaped as the input, a float32 scale per row.
+  if (c.quant_output.has_value() != c.quant_scale.has_value())
+    return error_code(Error::field_missing);
+  if (!c.write_output && !c.quantizes())
+    return error_code(Error::field_missing);
+  if (c.quantizes()) {
+    if (!c.quant_output->is_cuda() || !c.quant_scale->is_cuda())
+      return error_code(Error::not_on_device);
+    if (c.quant_output->scalar_type() != at::ScalarType::Float8_e4m3fn ||
+        c.quant_scale->scalar_type() != at::ScalarType::Float)
+      return error_code(Error::dtype_mismatch);
+    if (c.quant_output->sizes() != input.sizes() ||
+        c.quant_scale->dim() != 2 || c.quant_scale->size(0) != input.size(0) ||
+        c.quant_scale->size(1) != 1)
+      return error_code(Error::shape_mismatch);
+    if (c.quant_output->stride(1) != 1)
+      return error_code(Error::inner_stride_not_one);
+  }
+
+  if (reinterpret_cast<uintptr_t>(c.blocks.data_ptr()) % kPackBytes != 0)
     return error_code(Error::not_aligned);
 
-  const torch::Tensor sources = blocks.narrow(1, 0, num_blocks);
+  const torch::Tensor sources = c.blocks.narrow(1, 0, num_blocks);
 
   struct Span {
     uintptr_t first, last;
@@ -97,12 +130,15 @@ ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
     span.width = static_cast<uintptr_t>(run * elem);
     return span;
   };
+  const auto opt = [](const std::optional<torch::Tensor>& t) {
+    return t ? &*t : nullptr;
+  };
   for (const torch::Tensor* i : std::initializer_list<const torch::Tensor*>{
-           &input, prefix ? &*prefix : nullptr, &sources, &norm_weight,
-           &qk_weight, output_norm_weight ? &*output_norm_weight : nullptr})
+           &input, opt(c.prefix), &sources, &c.norm_weight, &c.qk_weight,
+           opt(c.output_norm_weight)})
     for (const torch::Tensor* o : std::initializer_list<const torch::Tensor*>{
-             &prefix_output, &output,
-             block_output ? &*block_output : nullptr}) {
+             &c.prefix_output, &c.output, opt(c.block_output),
+             opt(c.quant_output), opt(c.quant_scale)}) {
       if (i == nullptr || o == nullptr || i->numel() == 0 || o->numel() == 0)
         continue;
       const Span a = span_of(*i), b = span_of(*o);
@@ -117,6 +153,188 @@ ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
       if (meets(at, a.width, bt) || meets(bt, b.width, at))
         return error_code(Error::inputs_overlap_outputs);
     }
+  return std::nullopt;
+}
+
+// The FP8 copy is written a pack (pack_bytes / element bytes codes) at a time,
+// and only by the unchunked kernels, which hold a whole row.
+inline ErrorCode check_quant_launch(const AttnResCall& c, int64_t pack_bytes,
+                                    bool chunked) {
+  if ((c.quantizes() || !c.write_output) && chunked)
+    return error_code(Error::quantization_not_supported);
+  if (!c.quantizes()) return std::nullopt;
+  const int64_t codes = pack_bytes / c.input.element_size();
+  if (c.quant_output->stride(0) % codes != 0 ||
+      reinterpret_cast<uintptr_t>(c.quant_output->data_ptr()) % codes != 0)
+    return error_code(Error::row_stride_not_packs);
+  return std::nullopt;
+}
+
+// The rows kernel (AddAttnResRmsNorm, world 0): the split path's second kernel.
+struct RowsLaunch {
+  void* kernel = nullptr;
+  dim3 grid, block;
+  int shared_bytes = 0;
+};
+
+inline ErrorCode prepare_attn_res_rows(
+    RowsLaunch& launch, const AttnResCall& c, int64_t num_blocks,
+    int64_t grid_x, int64_t grid_y, int64_t grid_z, int64_t block_x,
+    int64_t block_y, int64_t block_z, int64_t waves_per_eu, int64_t tile_m,
+    int64_t tile_n, int64_t tile_k, int64_t pack_bytes, int wave_size,
+    int64_t lds_bytes, int64_t scratch_a_lane) {
+  const torch::Tensor& input = c.input;
+  const int64_t n = input.size(1), e = input.element_size();
+  const at::ScalarType dtype = input.scalar_type();
+  if (grid_y != 1 || grid_z != 1 || grid_x < 1)
+    return error_code(Error::launch_out_of_range);
+  if (tile_m < 1 || tile_n < 1 || tile_k < 1)
+    return error_code(Error::field_not_positive);
+  if (pack_bytes < 2 || pack_bytes > kPackBytes ||
+      (pack_bytes & (pack_bytes - 1)) != 0 || pack_bytes < e)
+    return error_code(Error::pack_out_of_range);
+  if (n * e % pack_bytes != 0) return error_code(Error::row_not_packs);
+  if (input.stride(1) != 1 || c.blocks.stride(2) != 1 ||
+      c.norm_weight.stride(0) != 1 || c.qk_weight.stride(0) != 1 ||
+      c.prefix_output.stride(1) != 1 || c.output.stride(1) != 1 ||
+      (c.prefix && c.prefix->stride(1) != 1) ||
+      (c.output_norm_weight && c.output_norm_weight->stride(0) != 1) ||
+      (c.block_output && c.block_output->stride(1) != 1))
+    return error_code(Error::inner_stride_not_one);
+  if (input.stride(0) * e % pack_bytes != 0 ||
+      c.blocks.stride(0) * e % pack_bytes != 0 ||
+      c.blocks.stride(1) * e % pack_bytes != 0 ||
+      c.prefix_output.stride(0) * e % pack_bytes != 0 ||
+      c.output.stride(0) * e % pack_bytes != 0 ||
+      (c.prefix && c.prefix->stride(0) * e % pack_bytes != 0) ||
+      (c.block_output && c.block_output->stride(0) * e % pack_bytes != 0))
+    return error_code(Error::row_stride_not_packs);
+
+  const bool chunked = n > tile_n;
+  if (const ErrorCode error = check_quant_launch(c, pack_bytes, chunked))
+    return error;
+  const int shared_bytes =
+      chunked ? static_cast<int>(tile_m * (num_blocks + 1) * sizeof(float)) : 0;
+  void* kernel = nullptr;
+  for (const auto& i : kAddAttnResRmsNormInstances)
+    if (i.algorithm == AddAttnResRmsNormAlgorithm::rows &&
+        i.block_x == block_x && i.block_y == block_y && i.block_z == block_z &&
+        i.waves_per_eu == waves_per_eu && i.tile_m == tile_m &&
+        i.tile_n == tile_n && i.tile_k == tile_k &&
+        i.quantization == Quantization::exact && i.pack_bytes == pack_bytes &&
+        i.world == 0 && i.wave_size == wave_size && i.dtype == dtype &&
+        i.weight_dtype == dtype && i.contiguous == false &&
+        i.chunked == chunked && i.tail == false && i.quantize_int4 == false)
+      kernel = i.kernel;
+  if (kernel == nullptr) return error_code(Error::not_built);
+
+  hipFuncAttributes attributes;
+  if (hipFuncGetAttributes(&attributes, kernel) != hipSuccess)
+    return error_code(Error::hip_failed);
+  if (block_x > attributes.maxThreadsPerBlock)
+    return error_code(Error::block_too_large);
+  if (static_cast<int64_t>(attributes.sharedSizeBytes) + shared_bytes >
+      lds_bytes)
+    return error_code(Error::lds_too_large);
+  if (static_cast<int64_t>(attributes.localSizeBytes) > scratch_a_lane)
+    return error_code(Error::scratch_too_large);
+
+  launch.kernel = kernel;
+  launch.grid = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y),
+                     static_cast<unsigned>(grid_z));
+  launch.block =
+      dim3(static_cast<unsigned>(block_x), static_cast<unsigned>(block_y),
+           static_cast<unsigned>(block_z));
+  launch.shared_bytes = shared_bytes;
+  return std::nullopt;
+}
+
+inline void launch_attn_res_rows(const RowsLaunch& launch, const AttnResCall& c,
+                                 int64_t num_blocks, double eps,
+                                 double output_eps, hipStream_t stream) {
+  const auto ptr = [](const std::optional<torch::Tensor>& t) -> void* {
+    return t ? t->data_ptr() : nullptr;
+  };
+  const auto stride = [](const std::optional<torch::Tensor>& t, int d) {
+    return t ? t->stride(d) : int64_t{0};
+  };
+  const auto size = [](const std::optional<torch::Tensor>& t, int d) {
+    return t ? static_cast<int>(t->size(d)) : 0;
+  };
+  const auto run = [&]<typename T, typename W>() {
+    const auto typed =
+        reinterpret_cast<AddAttnResRmsNormKernel<T, W>>(launch.kernel);
+    typed<<<launch.grid, launch.block, launch.shared_bytes, stream>>>(
+        static_cast<const T*>(c.input.data_ptr()), c.input.stride(0),
+        c.input.stride(1), static_cast<int>(c.input.size(0)),
+        static_cast<int>(c.input.size(1)),
+        static_cast<const T*>(ptr(c.prefix)), stride(c.prefix, 0),
+        stride(c.prefix, 1), size(c.prefix, 0), size(c.prefix, 1),
+        static_cast<const T*>(c.blocks.data_ptr()), c.blocks.stride(0),
+        c.blocks.stride(1), c.blocks.stride(2),
+        static_cast<int>(c.blocks.size(0)), static_cast<int>(c.blocks.size(1)),
+        static_cast<int>(c.blocks.size(2)),
+        static_cast<const T*>(c.norm_weight.data_ptr()), c.norm_weight.stride(0),
+        static_cast<int>(c.norm_weight.size(0)),
+        static_cast<const T*>(c.qk_weight.data_ptr()), c.qk_weight.stride(0),
+        static_cast<int>(c.qk_weight.size(0)),
+        static_cast<const T*>(ptr(c.output_norm_weight)),
+        stride(c.output_norm_weight, 0), size(c.output_norm_weight, 0),
+        static_cast<T*>(c.prefix_output.data_ptr()), c.prefix_output.stride(0),
+        c.prefix_output.stride(1), static_cast<int>(c.prefix_output.size(0)),
+        static_cast<int>(c.prefix_output.size(1)),
+        c.write_output ? static_cast<T*>(c.output.data_ptr()) : nullptr,
+        c.output.stride(0), c.output.stride(1),
+        static_cast<int>(c.output.size(0)), static_cast<int>(c.output.size(1)),
+        static_cast<T*>(ptr(c.block_output)), stride(c.block_output, 0),
+        stride(c.block_output, 1), size(c.block_output, 0),
+        size(c.block_output, 1), num_blocks, eps, output_eps, c.quant_ptr(),
+        c.quant_stride_m(), c.quant_scale_ptr(), c.quant_scale_stride_m());
+  };
+  if (c.input.scalar_type() == at::ScalarType::BFloat16)
+    run.template operator()<c10::BFloat16, c10::BFloat16>();
+  else
+    run.template operator()<c10::Half, c10::Half>();
+}
+
+}  // namespace hip_custom_communicator::internal
+
+ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
+    int64_t state, torch::Tensor& input,
+    const std::optional<torch::Tensor>& prefix, torch::Tensor& blocks,
+    torch::Tensor& norm_weight, torch::Tensor& qk_weight,
+    const std::optional<torch::Tensor>& output_norm_weight,
+    torch::Tensor& prefix_output, torch::Tensor& output,
+    const std::optional<torch::Tensor>& block_output, int64_t num_blocks,
+    double eps, double output_eps, const std::string& algorithm_name,
+    int64_t grid_x, int64_t grid_y, int64_t grid_z, int64_t block_x,
+    int64_t block_y, int64_t block_z, int64_t waves_per_eu, int64_t tile_m,
+    int64_t tile_n, int64_t tile_k, const std::string& quantization_name,
+    int64_t pack_bytes, std::optional<int64_t> add_attn_res_rms_norm_grid_x,
+    std::optional<int64_t> add_attn_res_rms_norm_grid_y,
+    std::optional<int64_t> add_attn_res_rms_norm_grid_z,
+    std::optional<int64_t> add_attn_res_rms_norm_block_x,
+    std::optional<int64_t> add_attn_res_rms_norm_block_y,
+    std::optional<int64_t> add_attn_res_rms_norm_block_z,
+    std::optional<int64_t> add_attn_res_rms_norm_waves_per_eu,
+    std::optional<int64_t> add_attn_res_rms_norm_tile_m,
+    std::optional<int64_t> add_attn_res_rms_norm_tile_n,
+    std::optional<int64_t> add_attn_res_rms_norm_tile_k,
+    std::optional<int64_t> add_attn_res_rms_norm_pack_bytes,
+    const std::optional<torch::Tensor>& quant_output,
+    const std::optional<torch::Tensor>& quant_scale, bool write_output) {
+  using namespace hip_custom_communicator;
+  using namespace hip_custom_communicator::internal;
+
+  if (state == 0) return error_code(Error::not_open);
+
+  const AttnResCall call{input,         prefix,       blocks,
+                         norm_weight,   qk_weight,    output_norm_weight,
+                         prefix_output, output,       block_output,
+                         quant_output,  quant_scale,  write_output};
+  if (const ErrorCode error = check_attn_res_call(call, num_blocks))
+    return error;
+
   for (const int64_t v : {waves_per_eu, tile_m, tile_n, tile_k, pack_bytes,
                           grid_x, grid_y, grid_z, block_x, block_y, block_z})
     if (v < std::numeric_limits<int>::min() ||
@@ -264,6 +482,8 @@ ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
                    : 0;
 
     const bool chunked = n > tile_n;
+    if (const ErrorCode error = check_quant_launch(call, pack, chunked))
+      return error;
 
     const bool tail = quantization == Quantization::int4 &&
                       (n % kInt4Group != 0 || n / kInt4Group % s.world != 0);
@@ -361,7 +581,8 @@ ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
           static_cast<int>(output_norm_weight_size_n),
           static_cast<T*>(prefix_output_ptr), prefix_output_stride_m,
           prefix_output_stride_n, static_cast<int>(prefix_output_size_m),
-          static_cast<int>(prefix_output_size_n), static_cast<T*>(output_ptr),
+          static_cast<int>(prefix_output_size_n),
+          write_output ? static_cast<T*>(output_ptr) : nullptr,
           output_stride_m, output_stride_n, static_cast<int>(output_size_m),
           static_cast<int>(output_size_n), static_cast<T*>(block_output_ptr),
           block_output_stride_m, block_output_stride_n,
@@ -375,7 +596,9 @@ ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
           s.world, s.symmetric.max_blocks * s.world, int64_t{s.world},
           int64_t{1}, int64_t{2}, s.symmetric.max_blocks, int64_t{s.world},
           s.status_device, int64_t{1}, int64_t{kStatusFields}, s.rank,
-          s.timeout_ticks, num_blocks, eps, output_eps);
+          s.timeout_ticks, num_blocks, eps, output_eps, call.quant_ptr(),
+          call.quant_stride_m(), call.quant_scale_ptr(),
+          call.quant_scale_stride_m());
     };
     if (dtype == at::ScalarType::BFloat16)
       launch.template operator()<c10::BFloat16, c10::BFloat16>();
@@ -577,75 +800,22 @@ ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
   if (std::max(partials_need, partials_end) > s.symmetric.partials_bytes)
     return error_code(Error::partials_too_small);
 
-  const dim3 second_grid(static_cast<unsigned>(*add_attn_res_rms_norm_grid_x),
-                         static_cast<unsigned>(*add_attn_res_rms_norm_grid_y),
-                         static_cast<unsigned>(*add_attn_res_rms_norm_grid_z));
-  const dim3 second_block(
-      static_cast<unsigned>(*add_attn_res_rms_norm_block_x),
-      static_cast<unsigned>(*add_attn_res_rms_norm_block_y),
-      static_cast<unsigned>(*add_attn_res_rms_norm_block_z));
-  const int64_t second_pack = *add_attn_res_rms_norm_pack_bytes;
-  if (*add_attn_res_rms_norm_grid_y != 1 ||
-      *add_attn_res_rms_norm_grid_z != 1 || *add_attn_res_rms_norm_grid_x < 1)
-    return error_code(Error::launch_out_of_range);
-  if (*add_attn_res_rms_norm_tile_m < 1 || *add_attn_res_rms_norm_tile_n < 1 ||
-      *add_attn_res_rms_norm_tile_k < 1)
-    return error_code(Error::field_not_positive);
-  if (second_pack < 2 || second_pack > kPackBytes ||
-      (second_pack & (second_pack - 1)) != 0 || second_pack < e)
-    return error_code(Error::pack_out_of_range);
-  if (n * e % second_pack != 0) return error_code(Error::row_not_packs);
-  if (blocks_stride_n != 1 || norm_weight_stride_n != 1 ||
-      qk_weight_stride_n != 1 || prefix_output_stride_n != 1 ||
-      output_stride_n != 1 || (prefix_ptr != nullptr && prefix_stride_n != 1) ||
-      (output_norm_weight_ptr != nullptr && output_norm_weight_stride_n != 1) ||
-      (block_output_ptr != nullptr && block_output_stride_n != 1))
-    return error_code(Error::inner_stride_not_one);
-  if (summed_stride_m * e % second_pack != 0 ||
-      blocks_stride_m * e % second_pack != 0 ||
-      blocks_stride_r * e % second_pack != 0 ||
-      prefix_output_stride_m * e % second_pack != 0 ||
-      output_stride_m * e % second_pack != 0 ||
-      (prefix_ptr != nullptr && prefix_stride_m * e % second_pack != 0) ||
-      (block_output_ptr != nullptr &&
-       block_output_stride_m * e % second_pack != 0))
-    return error_code(Error::row_stride_not_packs);
-
-  const bool second_chunked = n > *add_attn_res_rms_norm_tile_n;
-  const int second_shared_bytes =
-      second_chunked ? static_cast<int>(*add_attn_res_rms_norm_tile_m *
-                                        (num_blocks + 1) * sizeof(float))
-                     : 0;
-  void* second_kernel = nullptr;
-  for (const auto& i : kAddAttnResRmsNormInstances)
-    if (i.algorithm == AddAttnResRmsNormAlgorithm::rows &&
-        i.block_x == *add_attn_res_rms_norm_block_x &&
-        i.block_y == *add_attn_res_rms_norm_block_y &&
-        i.block_z == *add_attn_res_rms_norm_block_z &&
-        i.waves_per_eu == *add_attn_res_rms_norm_waves_per_eu &&
-        i.tile_m == *add_attn_res_rms_norm_tile_m &&
-        i.tile_n == *add_attn_res_rms_norm_tile_n &&
-        i.tile_k == *add_attn_res_rms_norm_tile_k &&
-        i.quantization == Quantization::exact && i.pack_bytes == second_pack &&
-        i.world == 0 && i.wave_size == s.device.wave_size && i.dtype == dtype &&
-        i.weight_dtype == dtype && i.contiguous == false &&
-        i.chunked == second_chunked && i.tail == false &&
-        i.quantize_int4 == false)
-      second_kernel = i.kernel;
-  if (second_kernel == nullptr) return error_code(Error::not_built);
-
-  hipFuncAttributes second_attributes;
-  if (hipFuncGetAttributes(&second_attributes, second_kernel) != hipSuccess)
-    return error_code(Error::hip_failed);
-  if (*add_attn_res_rms_norm_block_x > second_attributes.maxThreadsPerBlock)
-    return error_code(Error::block_too_large);
-  if (static_cast<int64_t>(second_attributes.sharedSizeBytes) +
-          second_shared_bytes >
-      s.device.lds_bytes)
-    return error_code(Error::lds_too_large);
-  if (static_cast<int64_t>(second_attributes.localSizeBytes) >
-      s.device.scratch_a_lane)
-    return error_code(Error::scratch_too_large);
+  // The rows kernel reads the reduced copy: check and find it before the
+  // all-reduce runs.
+  const AttnResCall rows_call{summed,        prefix,       blocks,
+                              norm_weight,   qk_weight,    output_norm_weight,
+                              prefix_output, output,       block_output,
+                              quant_output,  quant_scale,  write_output};
+  RowsLaunch rows;
+  if (const ErrorCode error = prepare_attn_res_rows(
+          rows, rows_call, num_blocks, *add_attn_res_rms_norm_grid_x,
+          *add_attn_res_rms_norm_grid_y, *add_attn_res_rms_norm_grid_z,
+          *add_attn_res_rms_norm_block_x, *add_attn_res_rms_norm_block_y,
+          *add_attn_res_rms_norm_block_z, *add_attn_res_rms_norm_waves_per_eu,
+          *add_attn_res_rms_norm_tile_m, *add_attn_res_rms_norm_tile_n,
+          *add_attn_res_rms_norm_tile_k, *add_attn_res_rms_norm_pack_bytes,
+          s.device.wave_size, s.device.lds_bytes, s.device.scratch_a_lane))
+    return error;
 
   void* const* peer_inputs = nullptr;
   int peer_inputs_size = 0;
@@ -703,38 +873,7 @@ ErrorCode hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
     launch_all_reduce.template operator()<c10::BFloat16, c10::BFloat16>();
   else
     launch_all_reduce.template operator()<c10::Half, c10::Half>();
-  const auto launch_attn_res = [&]<typename T, typename W>() {
-    const auto typed =
-        reinterpret_cast<AddAttnResRmsNormKernel<T, W>>(second_kernel);
-    typed<<<second_grid, second_block, second_shared_bytes, stream>>>(
-        static_cast<const T*>(summed_ptr), summed_stride_m, summed_stride_n,
-        static_cast<int>(summed_size_m), static_cast<int>(summed_size_n),
-        static_cast<const T*>(prefix_ptr), prefix_stride_m, prefix_stride_n,
-        static_cast<int>(prefix_size_m), static_cast<int>(prefix_size_n),
-        static_cast<const T*>(blocks_ptr), blocks_stride_m, blocks_stride_r,
-        blocks_stride_n, static_cast<int>(blocks_size_m),
-        static_cast<int>(blocks_size_r), static_cast<int>(blocks_size_n),
-        static_cast<const T*>(norm_weight_ptr), norm_weight_stride_n,
-        static_cast<int>(norm_weight_size_n),
-        static_cast<const T*>(qk_weight_ptr), qk_weight_stride_n,
-        static_cast<int>(qk_weight_size_n),
-        static_cast<const T*>(output_norm_weight_ptr),
-        output_norm_weight_stride_n,
-        static_cast<int>(output_norm_weight_size_n),
-        static_cast<T*>(prefix_output_ptr), prefix_output_stride_m,
-        prefix_output_stride_n, static_cast<int>(prefix_output_size_m),
-        static_cast<int>(prefix_output_size_n), static_cast<T*>(output_ptr),
-        output_stride_m, output_stride_n, static_cast<int>(output_size_m),
-        static_cast<int>(output_size_n), static_cast<T*>(block_output_ptr),
-        block_output_stride_m, block_output_stride_n,
-        static_cast<int>(block_output_size_m),
-        static_cast<int>(block_output_size_n), num_blocks, eps, output_eps);
-  };
-
-  if (dtype == at::ScalarType::BFloat16)
-    launch_attn_res.template operator()<c10::BFloat16, c10::BFloat16>();
-  else
-    launch_attn_res.template operator()<c10::Half, c10::Half>();
+  launch_attn_res_rows(rows, rows_call, num_blocks, eps, output_eps, stream);
 
   if (hipGetLastError() != hipSuccess) return error_code(Error::hip_failed);
   return std::nullopt;
