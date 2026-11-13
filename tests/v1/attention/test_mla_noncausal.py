@@ -251,7 +251,7 @@ def test_dcp_noncausal_group_keeps_spec_decode_reorder_threshold():
         {"draft": _mla_layer(non_causal=True)}, num_speculative_tokens=7
     )
     builder = _DcpCapableMLAMetadataBuilder(
-        _merged_mla_spec(),
+        _mla_spec(),
         ["draft"],
         vllm_config,
         torch.device("cpu"),
@@ -267,7 +267,7 @@ def test_dcp_causal_group_without_varlen_support_stays_single_token():
         {"target": _mla_layer()}, num_speculative_tokens=7, method="mtp"
     )
     builder = _DcpCapableMLAMetadataBuilder(
-        _merged_mla_spec(),
+        _mla_spec(),
         ["target"],
         vllm_config,
         torch.device("cpu"),
