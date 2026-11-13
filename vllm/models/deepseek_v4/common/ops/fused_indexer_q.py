@@ -206,7 +206,7 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_weights,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -441,7 +441,7 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             index_weights,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
