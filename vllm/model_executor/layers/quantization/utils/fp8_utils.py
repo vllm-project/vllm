@@ -1584,3 +1584,21 @@ def process_fp8_input_tensor_strategy_moe(
         amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
         amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
     )
+
+
+def dequant_block_fp8_to_bf16(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_size: Sequence[int],
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """`[..., N, K]` fp8 x `[..., ceil(N/bn), ceil(K/bk)]` block scales -> `out_dtype`.
+
+    Leading dimensions (e.g. the expert dimension) are batched.
+    """
+    n, k = weight.shape[-2:]
+    bn, bk = block_size
+    scale = scale_inv.to(torch.float32)
+    scale = scale.repeat_interleave(bn, dim=-2)[..., :n, :]
+    scale = scale.repeat_interleave(bk, dim=-1)[..., :k]
+    return (weight.to(torch.float32) * scale).to(out_dtype)

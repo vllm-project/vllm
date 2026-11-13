@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -47,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
+    dequant_block_fp8_to_bf16,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
@@ -197,16 +199,6 @@ class Fp8Config(QuantizationConfig):
                 )
 
                 return Mxfp4MoEMethod(layer.moe_config)
-            if (
-                envs.VLLM_FP8_MOE_REQUANT == "mxfp4"
-                and self.weight_block_size is not None
-                and current_platform.is_rocm()
-            ):
-                from vllm.model_executor.layers.quantization.online.fp8_requant import (  # noqa: E501
-                    Fp8BlockExpertsAsMxfp4FusedMoE,
-                )
-
-                return Fp8BlockExpertsAsMxfp4FusedMoE(self, layer)
             return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -457,6 +449,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
+
+
+_DEQUANT_CHUNK_BYTES = 1 << 30
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -710,6 +705,71 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
         self.moe_kernel.fused_experts.keep_constants(layer)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized FP8 experts (for online
+        requantization), in groups of experts bounding the staging memory."""
+        w13, w2 = layer.w13_weight, layer.w2_weight
+        w13_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        out_dtype = layer.orig_dtype
+        num_experts = w13.shape[0]
+        shards = self.moe.w13_num_shards
+        # fp32 staging of the scaled weights plus the `out_dtype` result.
+        expert_bytes = (w13[0].numel() + w2[0].numel()) * (4 + out_dtype.itemsize)
+        experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+
+        def dequant_block(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+            # The scale grid follows the checkpoint block shape, or the finer one
+            # adapted to TP sharding (`moe_block_shape`): take the one matching
+            # the scale shape.
+            n, k = w.shape[-2:]
+            block = next(
+                (
+                    b
+                    for b in (self.weight_block_size, self.moe_block_shape)
+                    if b is not None
+                    and -(-n // b[0]) == scale.shape[-2]
+                    and -(-k // b[1]) == scale.shape[-1]
+                ),
+                None,
+            )
+            if block is None:
+                raise ValueError(
+                    f"FP8 scale grid {tuple(scale.shape[-2:])} matches neither "
+                    f"block shape {self.weight_block_size} nor "
+                    f"{self.moe_block_shape} for a {(n, k)} weight."
+                )
+            return dequant_block_fp8_to_bf16(w, scale, block, out_dtype)
+
+        for start in range(0, num_experts, experts_per_chunk):
+            experts = slice(start, min(start + experts_per_chunk, num_experts))
+            n_exp = experts.stop - experts.start
+            if self.block_quant:
+                # Each w13 shard (w1, w3) has its own block grid: dequantize
+                # them as separate batch entries.
+                w13_chunk, w13_scale_chunk = w13[experts], w13_scale[experts]
+                shard_rows = w13_chunk.shape[1] // shards
+                shard_scale_rows = w13_scale_chunk.shape[1] // shards
+                dq13 = dequant_block(
+                    w13_chunk.reshape(n_exp * shards, shard_rows, -1),
+                    w13_scale_chunk.reshape(
+                        n_exp * shards, shard_scale_rows, w13_scale_chunk.shape[-1]
+                    ),
+                ).reshape(w13_chunk.shape)
+                dq2 = dequant_block(w2[experts], w2_scale[experts])
+            else:
+                shard_rows = w13.shape[1] // shards
+                scale13 = w13_scale[experts].repeat_interleave(shard_rows, dim=1)
+                dq13 = (w13[experts].to(torch.float32) * scale13[..., None]).to(
+                    out_dtype
+                )
+                dq2 = (
+                    w2[experts].to(torch.float32) * w2_scale[experts][:, None, None]
+                ).to(out_dtype)
+            yield experts, dq13, dq2
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():

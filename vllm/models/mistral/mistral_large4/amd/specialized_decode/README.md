@@ -20,8 +20,8 @@ the top-k of layer 4k).
 ## Enabling
 
 ```bash
-VLLM_FP8_MOE_REQUANT=mxfp4 VLLM_FP8_MOE_REQUANT_ACT=a4w4 \
 vllm serve <Mistral-Large-4> -tp 4 --dtype bfloat16 \
+  --quantization-config '{"moe": "mxfp4"}' \
   --additional-config '{"decode_backend": "latency_specialized"}'
 ```
 

@@ -142,12 +142,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
-    VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_FP8_MOE_REQUANT: Literal["none", "mxfp4"] = "none"
-    VLLM_FP8_MOE_REQUANT_ACT: Literal["a8w4", "a4w4", "a16w4"] = "a8w4"
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
@@ -1354,11 +1351,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
         "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", "fp32"
     ).lower(),
-    # Muse Spark on ROCm: online-quantize routed experts ("" or "mxfp4"; first
-    # and last layer stay BF16).
-    "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT": lambda: os.getenv(
-        "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", ""
-    ).lower(),
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
@@ -1371,19 +1363,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.
-    # ROCm: re-quantize block-FP8 routed experts to MXFP4 at load (half the
-    # expert bytes, aiter MXFP4 MoE kernels). _ACT picks the activation dtype:
-    # a8w4 (fp8 per-token, FlyDSL interleaved kernels; default), a4w4 (MXFP4
-    # activations, FlyDSL separated kernels) or a16w4 (bf16, aiter Triton).
-    "VLLM_FP8_MOE_REQUANT": env_with_choices(
-        "VLLM_FP8_MOE_REQUANT", "none", ["none", "mxfp4"], case_sensitive=False
-    ),
-    "VLLM_FP8_MOE_REQUANT_ACT": env_with_choices(
-        "VLLM_FP8_MOE_REQUANT_ACT",
-        "a8w4",
-        ["a8w4", "a4w4", "a16w4"],
-        case_sensitive=False,
-    ),
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),

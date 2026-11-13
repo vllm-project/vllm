@@ -130,12 +130,13 @@ variants:
     description: "FP8 block-scaled weights with the DSpark drafter (~128 GiB of weights per GPU on 8 GPUs). On AMD the routed experts are re-quantized to MXFP4 at load, which also fits TP4. Validated on GB300, B300, H200 and MI350X."
     hardware_overrides:
       amd:
-        extra_env:
-          # FP8 → MXFP4 routed experts, layer by layer at load (peak memory:
-          # the MXFP4 model plus one layer of FP8 experts). a8w4 = FP8
-          # activations; a4w4 (MXFP4 activations) measured level with it at TP4.
-          VLLM_FP8_MOE_REQUANT: "mxfp4"
-          VLLM_FP8_MOE_REQUANT_ACT: "a8w4"
+        extra_args:
+          # FP8 → MXFP4 routed experts, re-quantized at load by online
+          # quantization. `activation: null` = a8w4 (FP8 activations);
+          # `{"moe": "mxfp4"}` (MXFP4 activations, a4w4) measured level with
+          # it at TP4.
+          - "--quantization-config"
+          - '{"moe":{"weight":"mxfp4","activation":null}}'
       # The ROCm image carries ML4 kernels and AITER tables a wheel doesn't.
       mi350x:
         install:
@@ -581,10 +582,10 @@ presets:
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
+      - "--quantization-config"
+      - '{"moe":"mxfp4"}'
       - "--max-num-seqs"
       - "64"
-    env:
-      VLLM_FP8_MOE_REQUANT_ACT: "a4w4"
     runbook: |
       Measured on MI350X, TP4, a4w4 experts, FP8 KV cache, against the
       standard decode on the same GPUs.
@@ -645,8 +646,8 @@ presets:
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
-    env:
-      VLLM_FP8_MOE_REQUANT_ACT: "a4w4"
+      - "--quantization-config"
+      - '{"moe":"mxfp4"}'
     runbook: |
       Measured on MI355X, a4w4 experts, FP8 KV cache, DSpark: c1 / c4 TPOT p50
       3.56 / 6.14 ms on real prompts (1.05x / 1.02x vs the TP4 preset).
@@ -744,11 +745,13 @@ notes:
       hardware: [amd]
     body: |
       ROCm has no NVFP4 kernels. Serve the FP8 checkpoint, whose routed
-      experts are re-quantized to OCP MXFP4 at load
-      (`VLLM_FP8_MOE_REQUANT=mxfp4`; expert weights drop from ~125 to ~69 GiB
-      per GPU at TP8), or the AMD Quark MXFP4 checkpoint.
-      `VLLM_FP8_MOE_REQUANT_ACT` picks the activation format: `a8w4` (FP8, the
-      default) or `a4w4` (MXFP4, required by the specialized decode).
+      experts are re-quantized to OCP MXFP4 at load with online quantization
+      (`--quantization-config '{"moe":"mxfp4"}'`; expert weights drop from ~125
+      to ~69 GiB per GPU at TP8), or the AMD Quark MXFP4 checkpoint. The
+      activation format is picked in the same spec: `{"moe":"mxfp4"}` is `a4w4`
+      (MXFP4, required by the specialized decode) and
+      `{"moe":{"weight":"mxfp4","activation":null}}` is `a8w4` (FP8, the
+      default of the AMD FP8 recipe).
       `VLLM_ROCM_USE_AITER=1` runs the MoE, GEMMs, MLA decode, RMSNorm and the
       TP all-reduce on AITER; every AMD number here was measured with it on.
       The latent KV cache is FP8 (E4M3) by default on ROCm, 1.86x the capacity
@@ -801,8 +804,8 @@ troubleshooting:
       hardware: [amd]
     body: |
       The specialized decode is default-deny: it starts only at TP4 on
-      gfx950, with MXFP4 a4w4 experts (`VLLM_FP8_MOE_REQUANT=mxfp4
-      VLLM_FP8_MOE_REQUANT_ACT=a4w4`), Model Runner V2, an FP8 (E4M3) or bf16
+      gfx950, with MXFP4 a4w4 experts (`--quantization-config
+      '{"moe":"mxfp4"}'`), Model Runner V2, an FP8 (E4M3) or bf16
       latent KV cache and no context, data, pipeline or expert parallelism.
       The error lists every reason; fix them or drop `--additional-config`.
 
@@ -884,7 +887,7 @@ guide: |
   of vLLM (image `vllm/vllm-openai-rocm:mistral-large-4`). The routed experts run as
   OCP MXFP4 on AITER's fused MoE, either from the
   AMD Quark MXFP4 checkpoint or from the FP8 checkpoint re-quantized at load
-  (`VLLM_FP8_MOE_REQUANT=mxfp4`, layer by layer, so peak load memory stays low). With
+  (`--quantization-config '{"moe":"mxfp4"}'`). With
   MXFP4 experts the model fits four GPUs, so one 8-GPU node serves two TP4 replicas.
   The sparse MLA runs on AITER's MLA decode kernels (`ROCM_AITER_MLA_SPARSE`), the
   DSA indexer on AITER's gfx950 indexer kernels, and the latent KV cache is plain FP8
