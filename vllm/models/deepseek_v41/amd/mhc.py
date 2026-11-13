@@ -315,8 +315,8 @@ _mhc_seam_warmed_up = False
 def warmup_mhc_seam(hidden_size: int, hc_mult: int, device: torch.device) -> None:
     """Load `module_mhc_seam_asm` before CUDA-graph capture.
 
-    One call compiles the module. `pre_mix` None fills AITER's cached
-    identity gate, which a later graph keeps reading.
+    One call at `MHC_SEAM_MIN_TOKENS` with a carried `pre_mix`, as the
+    decoder's seams pass, loads the functions they launch.
     """
     global _mhc_seam_warmed_up
     if _mhc_seam_warmed_up:
@@ -328,6 +328,8 @@ def warmup_mhc_seam(hidden_size: int, hc_mult: int, device: torch.device) -> Non
     bf16 = dict(dtype=torch.bfloat16, device=device)
     comb_res_mix = torch.zeros(num_tokens, hc_mult, hc_mult, **f32)
     comb_res_mix[..., 0] = 1
+    pre_mix = torch.zeros(num_tokens, hc_mult, **f32)
+    pre_mix[:, 0] = 1
     _mhc_seam(
         torch.zeros(num_tokens, hc_mult, hidden_size, **bf16),
         torch.zeros(mix_hc, hc_mult * hidden_size, **f32),
@@ -338,7 +340,7 @@ def warmup_mhc_seam(hidden_size: int, hc_mult: int, device: torch.device) -> Non
         1e-6,
         1.0,
         20,
-        None,
+        pre_mix,
         torch.zeros(num_tokens, hidden_size, **bf16),
         torch.zeros(num_tokens, hc_mult, 1, **f32),
         comb_res_mix,
