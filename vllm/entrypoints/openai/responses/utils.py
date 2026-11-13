@@ -366,6 +366,7 @@ def construct_chat_messages_with_tool_call(
 
 
 def _to_chat_content_part(part: dict[str, Any]) -> dict[str, Any]:
+    """Convert a Responses content part to its chat completions equivalent."""
     part_type = part.get("type")
     if part_type in ("input_text", "output_text"):
         return {**part, "type": "text"}
@@ -545,11 +546,8 @@ def _construct_message_from_response_item(
     if isinstance(item, dict) and "role" in item:
         content = item.get("content")
         if not isinstance(content, list):
-            return item  # type: ignore[return-value]
-        return {  # type: ignore[return-value]
-            **item,
-            "content": [_to_chat_content_part(part) for part in content],
-        }
+            return item
+        return {**item, "content": [_to_chat_content_part(part) for part in content]}
     item_type = item.get("type") if isinstance(item, dict) else item.type
     raise VLLMValidationError(
         f"Unsupported input item type: {item_type}",
