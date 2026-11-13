@@ -318,7 +318,7 @@ class DequantGatherKCacheKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         block_size: int,

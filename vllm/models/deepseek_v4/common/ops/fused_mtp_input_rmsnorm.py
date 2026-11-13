@@ -118,7 +118,7 @@ class FusedMTPInputRMSNormKernel(
                 HIDDEN,
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,
@@ -265,7 +265,7 @@ class MTPSharedHeadRMSNormKernel(
             HIDDEN,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         dtype: torch.dtype,

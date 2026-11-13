@@ -236,7 +236,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         total_patches = r * r * per_item_out * max_batch_size
 
         p = config.vision_patch_size
-        patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=dtype)
+        patch_dtype = self.vision.patch_embed.input_norm.input_dtype or dtype
+        patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=patch_dtype)
 
         metadata = build_packed_vit_metadata(
             grids,
@@ -275,8 +276,9 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
         patches = mm_kwargs["patches"]
         dtype = self.aligner.w1.weight.dtype
-        if patches.dtype != dtype:
-            patches = patches.to(dtype)
+        patch_dtype = self.vision.patch_embed.input_norm.input_dtype or dtype
+        if patches.dtype != patch_dtype:
+            patches = patches.to(patch_dtype)
 
         # Unpadded: the manager zero-pads patches/cos/sin/merge buffers, and
         # pad_cu_seqlens pads the tail with zero-length sequences.
@@ -298,18 +300,18 @@ class DeepseekV4VLEncoderCudaGraphMixin:
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         vit_out = self.vision.forward_packed(
-            inputs["patches"],
-            inputs["vit_cos"],
-            inputs["vit_sin"],
-            inputs["cu_seqlens"],
-            inputs["max_seqlen"],
+            values["patches"],
+            values["vit_cos"],
+            values["vit_sin"],
+            values["cu_seqlens"],
+            values["max_seqlen"],
         )
         return self.aligner.forward_packed(
-            vit_out, inputs["merge_idx"], inputs["merge_mask"]
+            vit_out, values["merge_idx"], values["merge_mask"]
         )
 
     def encoder_eager_forward(

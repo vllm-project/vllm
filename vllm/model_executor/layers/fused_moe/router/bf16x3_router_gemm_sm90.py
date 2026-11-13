@@ -555,7 +555,7 @@ class Sm90BF16x3RouterGemmKernel(
             split_k=compile_key.split_k,
         )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_tokens: int,
