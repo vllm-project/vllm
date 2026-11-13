@@ -83,7 +83,10 @@ from ..mla.query import Q_SENT, tiled_from
 QUERY_OVERLAP = {
     "tp": "1-20:late_front,21-1024:fork",
     "dcp": "1-1024:front",
-    "dcp_split": "1-239:fork,240-1024:wait",
+    # Override (runtime A/B): VLLM_KIMI_K3_DCP_SPLIT_OVERLAP, a "rows:mode,..." table.
+    "dcp_split": os.environ.get(
+        "VLLM_KIMI_K3_DCP_SPLIT_OVERLAP", "1-239:fork,240-1024:wait"
+    ),
     "tp1": "1-1024:fork",
 }
 # TP without the fused indexer (the late modes follow its select): the TP table the
