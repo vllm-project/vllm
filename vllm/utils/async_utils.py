@@ -6,6 +6,7 @@ This is similar in concept to the `asyncio` module.
 """
 
 import asyncio
+import concurrent.futures
 import contextlib
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -64,12 +65,35 @@ def make_async_with_semaphore(
         semaphore = asyncio.Semaphore(executor._max_workers)
 
     async def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-        loop = asyncio.get_event_loop()
-        p_func = partial(func, *args, **kwargs)
-        async with semaphore:
-            return await loop.run_in_executor(executor, p_func)
+        future = await submit_with_slot(executor, semaphore, func, *args, **kwargs)
+        return await asyncio.shield(asyncio.wrap_future(future))
 
     return _async_wrapper
+
+
+async def submit_with_slot(
+    executor: ThreadPoolExecutor,
+    slots: asyncio.Semaphore,
+    func: Callable[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> concurrent.futures.Future[T]:
+    """Wait for a free slot, then run `func` on `executor`.
+
+    The slot is released when the work finishes rather than when the caller
+    is cancelled: a worker thread cannot be interrupted and keeps the work's
+    arguments and result alive until it returns. With as many slots as
+    workers, work therefore never waits in the executor's queue.
+    """
+    loop = asyncio.get_running_loop()
+    await slots.acquire()
+    try:
+        future = executor.submit(func, *args, **kwargs)
+    except BaseException:
+        slots.release()
+        raise
+    future.add_done_callback(lambda _: run_in_loop(loop, slots.release))
+    return future
 
 
 def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):

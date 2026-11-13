@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import gc
 import threading
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -219,8 +221,9 @@ async def test_language_detection_cancel_aborts_engine_request():
 
 
 def _make_blocking_vad_server(monkeypatch, decode_workers: int, vad_workers: int):
-    """Build the real decode and VAD pools with a decode that records each
-    call and a VAD that blocks until the returned event is set."""
+    """Build the real decode and VAD pools with a decode that records a weak
+    reference to each waveform and a VAD that blocks until the returned event
+    is set."""
     monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_PREPROCESS_WORKERS", decode_workers)
     monkeypatch.setattr(
         SpeechToTextBaseServing,
@@ -233,12 +236,13 @@ def _make_blocking_vad_server(monkeypatch, decode_workers: int, vad_workers: int
         ),
     )
 
-    decoded: list[bytes] = []
+    decoded: list[weakref.ref] = []
     vad_released = threading.Event()
 
     def fake_decode_audio(self, audio_data):
-        decoded.append(audio_data)
-        return np.zeros(16000, dtype=np.float32), 16000, 1.0
+        y = np.zeros(16000, dtype=np.float32)
+        decoded.append(weakref.ref(y))
+        return y, 16000, 1.0
 
     def fake_chunk_speech(self, y, sr, duration, request):
         vad_released.wait()  # holds the VAD worker until released
@@ -275,7 +279,7 @@ def _start_vad_requests(server, num_requests: int) -> list[asyncio.Task]:
     ]
 
 
-async def _wait_for_decodes(decoded: list[bytes], count: int) -> None:
+async def _wait_for_decodes(decoded: list[weakref.ref], count: int) -> None:
     for _ in range(3000):  # up to 30 s on a slow machine
         if len(decoded) >= count:
             break
@@ -305,30 +309,36 @@ async def test_vad_pool_bounds_decoded_audio_waiting_for_vad(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_vad_pool_cancellation_releases_permits(monkeypatch):
-    """Cancelling requests that are running or waiting for VAD returns
-    promptly and frees their permits, so new requests can decode again."""
+    """Cancelling requests returns promptly, and each permit is freed once the
+    request's work has left the pools, so repeated cancellations neither block
+    new requests nor let live waveforms exceed the bound."""
     decode_workers, vad_workers, num_requests = 2, 1, 8
     bound = decode_workers + vad_workers
     server, decoded, vad_released = _make_blocking_vad_server(
         monkeypatch, decode_workers, vad_workers
     )
-    cancelled = _start_vad_requests(server, num_requests)
-    new_tasks: list[asyncio.Task] = []
+    tasks: list[asyncio.Task] = []
     try:
-        await _wait_for_decodes(decoded, bound)
-        # One request is running VAD, the rest wait for VAD or for a permit.
-        for task in cancelled:
-            task.cancel()
-        results = await asyncio.wait_for(
-            asyncio.gather(*cancelled, return_exceptions=True), timeout=5
-        )
-        assert all(isinstance(r, asyncio.CancelledError) for r in results)
-
-        new_tasks = _start_vad_requests(server, num_requests)
-        await _wait_for_decodes(decoded, 2 * bound)
-        assert len(decoded) == 2 * bound
+        for i in range(3):
+            tasks = _start_vad_requests(server, num_requests)
+            # The first request keeps running VAD after it is cancelled and
+            # holds its permit, so later rounds decode one request fewer.
+            expected = bound + i * (bound - 1)
+            await _wait_for_decodes(decoded, expected)
+            assert len(decoded) == expected
+            gc.collect()
+            assert sum(ref() is not None for ref in decoded) <= bound
+            if i < 2:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=5
+                )
+                assert all(task.cancelled() for task in tasks)
     finally:
         vad_released.set()
-        await asyncio.wait_for(asyncio.gather(*new_tasks), timeout=30)
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), timeout=30
+        )
         server.shutdown()
-    assert len(decoded) == bound + num_requests
+    assert len(decoded) == 2 * bound - 1 + num_requests

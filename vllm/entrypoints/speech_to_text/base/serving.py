@@ -6,7 +6,7 @@ import math
 import time
 import zlib
 from collections.abc import AsyncGenerator, Callable, Set
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
@@ -43,7 +43,12 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterators
+from vllm.utils.async_utils import (
+    make_async_with_semaphore,
+    merge_async_iterators,
+    run_in_loop,
+    submit_with_slot,
+)
 from vllm.utils.import_utils import has_silero_vad
 
 from ..transcription.protocol import (
@@ -156,11 +161,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             max_workers=num_audio_preprocess_workers,
             thread_name_prefix="stt-preprocess",
         )
-        preprocess_semaphore = asyncio.Semaphore(num_audio_preprocess_workers)
+        self._preprocess_slots = asyncio.Semaphore(num_audio_preprocess_workers)
         self._decode_and_chunk_speech_async = make_async_with_semaphore(
             self._decode_and_chunk_speech,
             executor=self._preprocess_executor,
-            semaphore=preprocess_semaphore,
+            semaphore=self._preprocess_slots,
         )
         # VAD-enabled requests decode on the preprocess pool and then run
         # VAD + audio splitting on a dedicated pool, so VAD scales
@@ -172,16 +177,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 max_workers=max_vad_workers,
                 thread_name_prefix="stt-vad",
             )
-            self._decode_audio_async = make_async_with_semaphore(
-                self._decode_audio,
-                executor=self._preprocess_executor,
-                semaphore=preprocess_semaphore,
-            )
-            self._chunk_speech_async = make_async_with_semaphore(
-                self._chunk_speech, executor=self._vad_executor
-            )
-            # Held from before decode until VAD finishes, so decoded waveforms
-            # waiting for a VAD worker are bounded by the worker counts rather
+            self._vad_slots = asyncio.Semaphore(max_vad_workers)
+            # Held from before decode until this request's work has left both
+            # pools, so live waveforms are bounded by the worker counts rather
             # than by the number of in-flight requests.
             self._vad_pipeline_semaphore = asyncio.Semaphore(
                 num_audio_preprocess_workers + max_vad_workers
@@ -258,6 +256,43 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         chunks = self._chunk_speech(y, sr, duration, request)
         return chunks, duration
 
+    async def _decode_and_chunk_speech_with_vad_pool(
+        self,
+        audio_data: bytes,
+        request: SpeechToTextRequest,
+    ) -> tuple[list[np.ndarray], float]:
+        assert self._vad_executor is not None
+        loop = asyncio.get_running_loop()
+        permit = self._vad_pipeline_semaphore
+        await permit.acquire()
+        job: Future | None = None
+        try:
+            job = await submit_with_slot(
+                self._preprocess_executor,
+                self._preprocess_slots,
+                self._decode_audio,
+                audio_data,
+            )
+            y, sr, duration = await asyncio.shield(asyncio.wrap_future(job))
+            job = await submit_with_slot(
+                self._vad_executor,
+                self._vad_slots,
+                self._chunk_speech,
+                y,
+                sr,
+                duration,
+                request,
+            )
+            chunks = await asyncio.shield(asyncio.wrap_future(job))
+            return chunks, duration
+        finally:
+            # A cancelled request's work keeps running and holds its waveform,
+            # so the permit is only released once that work finishes.
+            if job is None:
+                permit.release()
+            else:
+                job.add_done_callback(lambda _: run_in_loop(loop, permit.release))
+
     async def _detect_language(
         self,
         audio_chunk: np.ndarray,
@@ -329,12 +364,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         if self._vad_executor is not None and request.build_vad_config().enabled:
-            async with self._vad_pipeline_semaphore:
-                y, sr, duration = await self._decode_audio_async(audio_data)
-                chunks = await self._chunk_speech_async(y, sr, duration, request)
-                # VAD chunks are copies; free the waveform before releasing
-                # the permit.
-                del y
+            chunks, duration = await self._decode_and_chunk_speech_with_vad_pool(
+                audio_data, request
+            )
         else:
             chunks, duration = await self._decode_and_chunk_speech_async(
                 audio_data, request
