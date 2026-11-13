@@ -47,7 +47,7 @@ pytestmark = pytest.mark.skipif(
 )
 is_sm90 = current_platform.is_device_capability(90)
 is_sm100 = current_platform.is_device_capability_family(100)
-is_sm120 = current_platform.is_device_capability(120)
+is_sm120 = current_platform.is_device_capability_family(120)
 has_sm90_mega_moe = (
     is_sm90
     and is_deep_gemm_supported()
@@ -62,7 +62,7 @@ requires_sm100 = pytest.mark.skipif(
 )
 requires_mx_mega_moe_gpu = pytest.mark.skipif(
     not (is_sm90 or is_sm100 or is_sm120),
-    reason="MX MegaMoE input staging requires SM90, SM100 or SM120",
+    reason="MX MegaMoE input staging requires SM90, SM100 or SM120-family GPUs",
 )
 # Hidden-state quantizations of the SM100 and SM90 fp8_fp4_mega_moe kernels.
 FP8_HIDDEN_QUANTS = pytest.mark.parametrize(
@@ -1593,7 +1593,8 @@ def real_mega_moe_config(dist_init):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(120), reason="Requires SM120"
+    not current_platform.is_device_capability_family(120),
+    reason="Requires SM120-family GPUs",
 )
 @pytest.mark.parametrize(
     "fmt_name,act_name",
@@ -1639,7 +1640,8 @@ def test_sm120_mega_moe_rejects_unsupported_recipe(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(120), reason="Requires SM120"
+    not current_platform.is_device_capability_family(120),
+    reason="Requires SM120-family GPUs",
 )
 @pytest.mark.parametrize("num_tokens", [7, 65, 256])
 @pytest.mark.parametrize("act_name", ["swiglu", "swiglu_clamp", "swiglu_alpha_beta"])

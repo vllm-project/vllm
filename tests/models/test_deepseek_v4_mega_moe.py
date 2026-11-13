@@ -440,7 +440,8 @@ def _inspect_sm120_mega_moe_backend(model):
 
 @pytest.mark.slow_test
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(120), reason="Requires SM120"
+    not current_platform.is_device_capability_family(120),
+    reason="Requires SM120-family GPUs",
 )
 @multi_gpu_test(num_gpus=4)
 def test_sm120_deepseek_v41_mega_moe_generates_with_real_weights(

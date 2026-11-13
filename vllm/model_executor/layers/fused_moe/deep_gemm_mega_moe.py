@@ -258,7 +258,7 @@ def check_deep_gemm_mega_moe_supported(
             )
         if weight_format == MEGA_MOE_MXFP4:
             weight_format = MEGA_MOE_MXFP4_SM90
-    elif current_platform.is_device_capability(120, device_id=device_id):
+    elif current_platform.is_device_capability_family(120, device_id=device_id):
         if weight_format not in (MEGA_MOE_MXFP4, MEGA_MOE_MXFP4_SM120):
             raise NotImplementedError(
                 "DeepGEMM MegaMoE on SM120 supports MXFP4 experts with "
@@ -268,7 +268,7 @@ def check_deep_gemm_mega_moe_supported(
         weight_format = MEGA_MOE_MXFP4_SM120
     elif not current_platform.is_device_capability_family(100, device_id=device_id):
         raise NotImplementedError(
-            "DeepGEMM MegaMoE requires SM90, SM100 or SM120 GPUs."
+            "DeepGEMM MegaMoE requires SM90, SM100 or SM120-family GPUs."
         )
     if hidden_size % 128 != 0 or intermediate_size % 128 != 0:
         raise ValueError(
