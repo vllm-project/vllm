@@ -361,6 +361,7 @@ def test_self_describing_offload_events_preserve_cache_salt(monkeypatch):
             max_model_len=128,
             max_num_batched_tokens=128,
             max_num_seqs=1,
+            block_size=16,
             gpu_memory_utilization=0.2,
             kv_cache_memory_bytes=8 << 20,
             attention_config={"backend": "TRITON_ATTN"},

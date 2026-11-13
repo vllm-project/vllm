@@ -397,6 +397,23 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
 
+- label: ":computer: (CPU) Self-describing KV Offload Events"
+  key: self-describing-kv-offload-events-cpu
+  depends_on:
+    - image-build-cpu
+  device: cpu-small
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - vllm/v1/core/kv_cache_utils.py
+    - vllm/v1/request.py
+    - tests/v1/kv_connector/unit/offloading_connector/
+  commands:
+    - >-
+      pytest -v -s -m 'cpu_test'
+      v1/kv_connector/unit/offloading_connector/test_events.py
+      v1/kv_connector/unit/offloading_connector/test_scheduler.py
+      v1/kv_connector/unit/offloading_connector/test_config.py
+
 - label: ":nvidia: (H200 MIG 18GB) Self-describing KV Offload Events"
   key: self-describing-kv-offload-events
   depends_on:
@@ -412,7 +429,7 @@ steps:
     - tests/v1/kv_connector/unit/test_offloading_connector.py
   commands:
     - >-
-      pytest -v -s
+      pytest -v -s -m 'not cpu_test'
       tests/v1/kv_connector/unit/offloading_connector/test_events.py
       tests/v1/kv_connector/unit/offloading_connector/test_scheduler.py
       tests/v1/kv_connector/unit/offloading_connector/test_config.py
