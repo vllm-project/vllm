@@ -209,24 +209,10 @@ When the head block (least recently used block) of the free queue is cached, we 
 
 ## Session Retention
 
-Session retention keeps a conversation's cached blocks longer and makes its next prefix lookup cheaper. It is on by default with a TTL of 600 seconds; change the TTL with `--session-cache-ttl <seconds>`, or disable session retention with `--session-cache-ttl 0`. Requests opt in by sending a `session_id` (request body field or the `X-Session-ID` header). Requests without a `session_id` are unaffected.
+Requests that send a `session_id` (request body field or the `X-Session-ID` header) have their cached blocks evicted after all other free blocks, and their next request finds those blocks faster. Nothing is pinned: the cache capacity is unchanged. Requests without a `session_id` are unaffected.
 
-When a request with a `session_id` finishes, its cached blocks are marked as belonging to that session:
-
-- **Eviction order.** Free blocks that belong to a live session are evicted only after every other free block. Nothing is pinned, so the cache capacity is unchanged and a session's blocks can still be evicted under memory pressure.
-- **Lookup.** The session remembers the blocks of its latest request. The next request with the same `session_id` reuses the shared prefix directly instead of looking up every block hash, which matters for very long contexts.
-
-![Where a freed block goes with session retention](../assets/design/prefix_caching/session-free-list-light.svg#only-light)
-![Where a freed block goes with session retention](../assets/design/prefix_caching/session-free-list-dark.svg#only-dark)
-
-![Session prefix lookup compared with the normal lookup](../assets/design/prefix_caching/session-prefix-lookup-light.svg#only-light)
-![Session prefix lookup compared with the normal lookup](../assets/design/prefix_caching/session-prefix-lookup-dark.svg#only-dark)
-
-A session ends, and its blocks return to the normal LRU order, when any of the following happens:
-
-- No request has used the `session_id` for `--session-cache-ttl` seconds.
-- A client calls `POST /close_session` with `{"session_id": "<id>"}`. Use this when the end of a conversation is known, for example at the end of an RL episode. Closing does not evict the blocks.
-- The prefix cache is reset.
+- `--session-cache-ttl <seconds>`: how long a session is kept after its latest request. The default is 600; `0` disables session retention.
+- `POST /close_session` with `{"session_id": "<id>"}`: ends a session early, for example at the end of an RL episode. Its blocks stay cached and are evicted in normal LRU order.
 
 A session is one conversation, so its requests should use one `cache_salt`; a request with a different salt shares no blocks with the session and replaces it. With data parallel deployments, a session only helps when its requests reach the same engine.
 
