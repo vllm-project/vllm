@@ -1467,10 +1467,11 @@ def test_triton_convert_rejects_req_id_longer_than_token_indices():
     not current_platform.is_device_capability_family(90),
     reason="Native small-head FlashMLA kernels require SM90",
 )
-@pytest.mark.parametrize("query_waves", [1, 3])
+@pytest.mark.parametrize("query_batch", ["single", "one_wave", "three_waves"])
 @pytest.mark.parametrize("actual_num_heads", [4, 8, 16, 32, 64, 128])
 @pytest.mark.parametrize("head_size", [512, 576])
 @pytest.mark.parametrize("padded_query", [False, True])
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
 def test_flashmla_bf16_preserves_unused_output_heads(
     default_vllm_config,
     dist_init,
@@ -1478,16 +1479,18 @@ def test_flashmla_bf16_preserves_unused_output_heads(
     actual_num_heads,
     head_size,
     padded_query,
-    query_waves,
+    query_batch,
+    use_cuda_graph,
 ):
-    """Only larger batches use native heads, including gathered queries."""
+    """Native heads preserve unused rows, including small H20/H100 batches."""
     supported, reason = flashmla.is_flashmla_sparse_supported()
     if not supported:
         pytest.skip(reason)
     device = torch.device("cuda")
-    num_tokens = query_waves * num_compute_units(
-        torch.accelerator.current_device_index()
-    )
+    sm_count = num_compute_units(torch.accelerator.current_device_index())
+    num_tokens = {"single": 1, "one_wave": sm_count, "three_waves": 3 * sm_count}[
+        query_batch
+    ]
     impl = FlashMLASparseImpl(
         num_heads=8,
         head_size=head_size,
@@ -1522,19 +1525,35 @@ def test_flashmla_bf16_preserves_unused_output_heads(
     reference, _, reference_lse = flashmla.flash_mla_sparse_fwd(
         q, kv, indices, impl.softmax_scale, topk_length=lengths
     )
+    reference_q = q
     if not padded_query:
         q = q[:, :actual_num_heads].contiguous()
     out = torch.full(
         (num_tokens, padded_heads, 512), 123.0, dtype=torch.bfloat16, device=device
     )
-    output, lse = impl._bf16_flash_mla_kernel(
-        q,
-        kv,
-        indices,
-        lengths,
-        actual_num_heads=actual_num_heads if padded_query else None,
-        out=out if padded_query else None,
-    )
+
+    def run():
+        return impl._bf16_flash_mla_kernel(
+            q,
+            kv,
+            indices,
+            lengths,
+            actual_num_heads=actual_num_heads if padded_query else None,
+            out=out if padded_query else None,
+        )
+
+    output, lse = run()
+    if use_cuda_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output, lse = run()
+        kv.mul_(0.5)
+        reference, _, reference_lse = flashmla.flash_mla_sparse_fwd(
+            reference_q, kv, indices, impl.softmax_scale, topk_length=lengths
+        )
+        out.fill_(123.0)
+        for _ in range(2):
+            graph.replay()
     torch.testing.assert_close(
         output, reference[:, :actual_num_heads], atol=2e-3, rtol=2e-2
     )
@@ -1543,7 +1562,14 @@ def test_flashmla_bf16_preserves_unused_output_heads(
     )
     if padded_query:
         if (
-            query_waves == 3
+            (
+                query_batch == "three_waves"
+                or (
+                    actual_num_heads in (8, 16)
+                    and (current_platform.get_device_name(), sm_count)
+                    in (("NVIDIA H20", 78), ("NVIDIA H100 80GB HBM3", 132))
+                )
+            )
             and current_platform.is_device_capability_family(90)
             and actual_num_heads in (8, 16, 32)
         ):
