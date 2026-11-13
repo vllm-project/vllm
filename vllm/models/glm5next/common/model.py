@@ -1289,7 +1289,7 @@ class Glm5NextForCausalLM(
     def build_specialized_decode(self) -> None:
         from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
 
-        self.specialized_decode = SpecializedDecode(
+        self.specialized_decode = SpecializedDecode.for_target(
             self.model, self.specialized_decode_config
         )
         self.specialized_decode.build_logits(self.logits_processor, self.lm_head)
