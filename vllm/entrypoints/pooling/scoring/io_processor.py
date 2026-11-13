@@ -575,6 +575,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 
+        self._validate_chat_template(
+            request_chat_template=ctx.chat_template,
+            chat_template_kwargs=ctx.chat_template_kwargs,
+            trust_request_chat_template=self.trust_request_chat_template,
+        )
+
         data_1 = ctx.scoring_data.data_1
         data_2 = ctx.scoring_data.data_2
         num_requests = len(data_2)

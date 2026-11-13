@@ -193,7 +193,9 @@ class OfflineInputsContext:
         # Mirror ChatRequestOptionsMixin.build_chat_params.
         return ChatParams(
             chat_template=self.chat_template or default_template,
-            chat_template_content_format=default_template_content_format,
+            chat_template_content_format=(
+                self.chat_template_content_format or default_template_content_format
+            ),
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
                 dict(

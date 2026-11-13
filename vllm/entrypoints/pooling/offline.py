@@ -43,7 +43,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
     """Offline inference for pooling models."""
 
     runner_type: str
-    chat_template: str | None
+    chat_template_config: ChatTemplateConfig
     supported_tasks: tuple[SupportedTask, ...]
 
     def __init__(self):
@@ -51,7 +51,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         if self.pooling_task is not None:
             logger.info("Supported pooling task: %s", self.pooling_task)
 
-        self.chat_template_config = ChatTemplateConfig(chat_template=self.chat_template)
         self.pooling_io_processors = init_pooling_io_processors(
             supported_tasks=self.supported_tasks,
             vllm_config=self.llm_engine.vllm_config,

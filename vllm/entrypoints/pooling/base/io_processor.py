@@ -238,13 +238,36 @@ class PoolingIOProcessor:
         cmpl_tok_params = _build_tok_params(cmpl_add_special_tokens)
         chat_tok_params = _build_tok_params(chat_add_special_tokens)
 
-        chat_params = ctx.build_chat_params(
-            self.chat_template, self.chat_template_content_format
-        )
+        # Validate before building `ChatParams`
         self._validate_chat_template(
             request_chat_template=ctx.chat_template,
             chat_template_kwargs=ctx.chat_template_kwargs,
             trust_request_chat_template=self.trust_request_chat_template,
+        )
+
+        # Mirror `get_request_factory_online`: apply the same template
+        # defaults so that chat rendering is byte-identical between
+        # online and offline paths.
+        #   - `tools`: kept for symmetry (`self.tool_dicts` is None today,
+        #     so this is a no-op, but follows the field if it ever gets
+        #     populated).
+        #   - `tokenize=is_mistral_tokenizer(...)`: Mistral tokenizers
+        #     require the chat template to receive `tokenize`.
+        #   - `default_media_io_kwargs`: pick up the model's default media
+        #     IO kwargs for multimodal models.
+        default_template_kwargs = merge_kwargs(
+            self.template_kwargs,
+            dict(
+                tools=self.tool_dicts,
+                tokenize=is_mistral_tokenizer(self.renderer.tokenizer),
+            ),
+        )
+        mm_config = self.model_config.multimodal_config
+        chat_params = ctx.build_chat_params(
+            self.chat_template, self.chat_template_content_format
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
         )
 
         prompt_extras = ctx.build_prompt_extras()
