@@ -331,9 +331,6 @@ QUICK = [
         gpu=Capacity(requests=4),
         cpu=Capacity(requests=8),
     ),
-]
-
-SCENARIOS = QUICK + [
     Scenario(
         "staging-cpu",
         "cpu cache is just a staging area (small cpu, big gpu)",
@@ -343,6 +340,9 @@ SCENARIOS = QUICK + [
         gpu=Capacity(requests=32),
         cpu=Capacity(requests=16),
     ),
+]
+
+SCENARIOS = QUICK + [
     Scenario(
         "buffered-cpu",
         "cpu cache has slack beyond stores and promotions",
@@ -376,7 +376,7 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=5_000,
-        gpu=Capacity(requests=16),
+        gpu=Capacity(requests=24),
         cpu=Capacity(requests=96),
         isl_tokens=1024,
     ),
@@ -386,7 +386,7 @@ SCENARIOS = QUICK + [
         concurrency=64,
         offload_block_size=64,
         prefix_tokens=5_000,
-        gpu=Capacity(requests=16),
+        gpu=Capacity(requests=24),
         cpu=Capacity(requests=32),
         isl_tokens=1024,
     ),
@@ -754,6 +754,7 @@ def preflight(port: int) -> None:
     if shutil.which("vllm") is None:
         raise RuntimeError("vllm not found on PATH")
     probe = socket.socket()
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         probe.bind(("127.0.0.1", port))
     except OSError:
