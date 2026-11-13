@@ -1290,14 +1290,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             self._failed_requests.clear()
         return failed
 
-    def pop_finished_requests(self) -> tuple[set[str], set[str]]:
-        """Pop finished loads as (loaded without errors, loaded with errors)."""
+    def pop_finished_requests(self, with_errors: bool) -> set[str]:
+        """Pop the finished loads with load errors, or those without."""
         assert self._load_error_requests is not None
         with self.done_task_lock:
-            finished, self.finished_requests = self.finished_requests, set()
-            with_errors = finished & self._load_error_requests
-            self._load_error_requests -= with_errors
-        return finished - with_errors, with_errors
+            errors = self.finished_requests & self._load_error_requests
+            popped = errors if with_errors else self.finished_requests - errors
+            self.finished_requests -= popped
+            self._load_error_requests -= popped
+        return popped
 
     def _report_load_error(self, req_id: str, block_ids: list[int]) -> None:
         if self._load_error_requests is not None:
@@ -1737,11 +1738,8 @@ class MooncakeStoreWorker:
         self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
         self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
         self.early_recv = vllm_config.kv_transfer_config.enable_early_recv
-        # With early receive: queued loads not yet popped as finished, and
-        # finished loads held for the path that reports them.
+        # With early receive: queued loads not yet popped as finished.
         self._loading_req_ids: set[str] = set()
-        self._loaded_req_ids: set[str] = set()
-        self._loaded_with_errors_req_ids: set[str] = set()
         # Device KV regions (addr -> len) registered with the store.
         self._device_regions: dict[int, int] = {}
         # Device regions unregistered for sleep and not yet registered again.
@@ -2433,11 +2431,7 @@ class MooncakeStoreWorker:
         done_recving: set[str] = set()
         if self.early_recv:
             # Loads without errors are reported by poll_finished_recving().
-            self._pop_finished_loads()
-            done_recving, self._loaded_with_errors_req_ids = (
-                self._loaded_with_errors_req_ids,
-                set(),
-            )
+            done_recving = self._pop_finished_loads(with_errors=True)
         elif self.load_async:
             for recv_thread in self.kv_recv_threads:
                 done_recving |= recv_thread.get_and_clear_finished_requests()
@@ -2450,15 +2444,15 @@ class MooncakeStoreWorker:
         )
         return done_sending, done_recving
 
-    def _pop_finished_loads(self) -> None:
+    def _pop_finished_loads(self, with_errors: bool) -> set[str]:
+        popped: set[str] = set()
         for recv_thread in self.kv_recv_threads:
-            loaded, with_errors = recv_thread.pop_finished_requests()
-            self._loaded_req_ids |= loaded
-            self._loaded_with_errors_req_ids |= with_errors
-            self._loading_req_ids -= loaded | with_errors
+            popped |= recv_thread.pop_finished_requests(with_errors)
+        self._loading_req_ids -= popped
+        return popped
 
     def has_pending_recving(self) -> bool:
-        return bool(self._loading_req_ids or self._loaded_req_ids)
+        return bool(self._loading_req_ids)
 
     def poll_finished_recving(self) -> set[str]:
         """Pop the loads that finished without errors.
@@ -2469,9 +2463,7 @@ class MooncakeStoreWorker:
         """
         if not self.has_pending_recving():
             return set()
-        self._pop_finished_loads()
-        loaded, self._loaded_req_ids = self._loaded_req_ids, set()
-        return loaded
+        return self._pop_finished_loads(with_errors=False)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         block_ids: set[int] = set()

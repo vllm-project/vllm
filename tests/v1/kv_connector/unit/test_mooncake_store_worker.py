@@ -4616,8 +4616,6 @@ def _make_bare_worker(
     worker.recv_request_queue = queue.Queue()
     worker.early_recv = early_recv
     worker._loading_req_ids = set()
-    worker._loaded_req_ids = set()
-    worker._loaded_with_errors_req_ids = set()
     worker._device_regions = {}
     worker._released_regions = set()
     worker.finished_store_req = set()
