@@ -1361,7 +1361,9 @@ def run_large_context_topk_test(
             Torch: {torch_vals.sort(descending=True)[0][:10]}"""
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(
+    not _has_cooperative_topk(), reason="cooperative_topk requires SM90+ (non-SM12x)"
+)
 @pytest.mark.parametrize("top_k", [512, 1024, 2048])
 def test_cooperative_topk_cs2(top_k: int) -> None:
     """The 64-row dispatch uses the two-CTA cooperative kernel."""
