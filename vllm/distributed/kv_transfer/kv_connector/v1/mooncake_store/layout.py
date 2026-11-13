@@ -256,7 +256,7 @@ class RankLocalStoreLayout(StoreLayout):
             list(range_objects.metadata) if range_objects is not None else [metadata]
         )
         self._key_prefixes = [PoolKey.build_prefix(m) for m in self._shard_metadata]
-        # Regions each layer-range shard stores, in register order.
+        # Regions each layer-range shard stores, with several ranges.
         self._shard_regions: list[np.ndarray] | None = None
         self.kv_caches_base_addr: list[int] = []
         self.block_stride: list[int] = []
@@ -403,7 +403,8 @@ class RankLocalStoreLayout(StoreLayout):
         self.kv_caches_base_addr = base_addrs
         self.block_stride = block_strides
         self.block_len = block_lens
-        if self.range_objects is not None:
+        # With one range, every region belongs to its object.
+        if len(self._shard_metadata) > 1:
             shard_regions: list[list[int]] = [[] for _ in self._shard_metadata]
             for region, ranges in enumerate(region_ranges):
                 if len(ranges) != 1:

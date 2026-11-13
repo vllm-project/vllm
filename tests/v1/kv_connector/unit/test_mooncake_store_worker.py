@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import ctypes
 import itertools
 import json
 import logging
@@ -3884,6 +3885,89 @@ def test_pp_sizes_store_draft_model_layers_with_the_last_range(
         first_range = len(keys(stages[0]))
         assert without_draft[:first_range] == with_draft[:first_range]
         assert set(without_draft[first_range:]).isdisjoint(with_draft[first_range:])
+
+
+@pytest.mark.cpu_test
+def test_layer_range_objects_follow_block_outermost_placement():
+    """A block-outermost buffer places a group's layers by KV cache spec, and
+    Store objects order their layers the same way: a stage stored as one
+    range keeps the single segment of the whole block, a split range takes one
+    segment per spec, and a layer-first buffer yields the same bytes."""
+    num_blocks, num_layers, block_size = 3, 4, 16
+    specs = {
+        module: AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=head_size, dtype=None
+        )
+        for module, head_size in (
+            ("self_attn.attn", 24),
+            ("self_attn.indexer.k_cache", 8),
+        )
+    }
+    sizes = {"self_attn.attn": 48, "self_attn.indexer.k_cache": 16}
+    group = make_kv_cache_group_from_specs(
+        {
+            f"model.layers.{layer}.{module}": spec
+            for layer in range(num_layers)
+            for module, spec in specs.items()
+        }
+    )
+    block_bytes = num_layers * sum(sizes.values())
+    outermost = torch.empty(num_blocks * block_bytes, dtype=torch.uint8)
+    outer_views: dict[str, torch.Tensor] = {}
+    first_views: dict[str, torch.Tensor] = {}
+    offset = 0
+    for module, size in sizes.items():
+        for layer in range(num_layers):
+            name = f"model.layers.{layer}.{module}"
+            data = (
+                ((torch.arange(num_blocks * size) + 37 * len(outer_views)) % 251)
+                .to(torch.uint8)
+                .view(num_blocks, 1, 1, size)
+            )
+            outer_views[name] = outermost.as_strided(
+                data.shape, (block_bytes, size, size, 1), offset
+            )
+            outer_views[name].copy_(data)
+            first_views[name] = data.clone()
+            offset += size
+
+    def objects(views, layer_ranges) -> list[list[bytes]]:
+        metadata = KeyMetadata("test-model", 0, 0, 0, 0)
+        layout = RankLocalStoreLayout(
+            metadata,
+            block_size,
+            block_size,
+            None
+            if layer_ranges is None
+            else worker._group_range_objects(
+                metadata, group, layer_ranges, frozenset()
+            ),
+        )
+        names = group.layer_names
+        layout.register_kv_caches(
+            [views[name] for name in names], num_blocks, layer_names=names
+        )
+        shards = layout.local_shard_ids
+        addrs, lens, _ = layout.prepare_values(
+            [(0, block_size)] * len(shards), [1], shards
+        )
+        return [
+            [ctypes.string_at(addr, n) for addr, n in zip(row, row_lens)]
+            for row, row_lens in zip(addrs, lens)
+        ]
+
+    whole = objects(outer_views, ((0, num_layers),))
+    assert whole == objects(outer_views, None)
+    assert [len(segments) for segments in whole] == [1]
+    split = objects(outer_views, ((0, 2), (2, num_layers)))
+    assert [len(segments) for segments in split] == [2, 2]
+    for layer_ranges, outer in [
+        (((0, num_layers),), whole),
+        (((0, 2), (2, num_layers)), split),
+    ]:
+        assert [b"".join(s) for s in objects(first_views, layer_ranges)] == [
+            b"".join(s) for s in outer
+        ]
 
 
 @pytest.mark.parametrize("tp_size", [2, 4])

@@ -171,9 +171,11 @@ def _group_range_objects(
 
     KV cache groups are formed over the whole model, and the draft model runs
     on the last PP stage, whose last range holds its layers, so an object holds
-    the same layers at any PP size. Within an object, layers are in group
-    order. `range_namespace` maps the specs of a range's layers to its
-    namespace; by default every range uses `metadata`'s.
+    the same layers at any PP size. Within an object, layers are ordered by KV
+    cache spec, in order of first appearance, then in group order: this is how
+    a block-outermost buffer places a group's layers, so the layers of one spec
+    in a range are one segment. `range_namespace` maps the specs of a range's
+    layers to its namespace; by default every range uses `metadata`'s.
     """
     names = group.layer_names
     if not names:
@@ -188,7 +190,13 @@ def _group_range_objects(
         return layer_range_index(layer_ranges, extract_layer_index(name))
 
     ranges = [range_of(name) for name in names]
-    order = sorted(range(len(names)), key=lambda i: (ranges[i], i))
+    first_seen: dict[tuple[int, KVCacheSpec], int] = {}
+    for name, range_index in zip(names, ranges):
+        first_seen.setdefault((range_index, specs[name]), len(first_seen))
+    order = sorted(
+        range(len(names)),
+        key=lambda i: (ranges[i], first_seen[ranges[i], specs[names[i]]], i),
+    )
     used = sorted(set(ranges))
     return LayerRangeObjects(
         metadata=tuple(
@@ -2106,6 +2114,16 @@ class MooncakeStoreWorker:
         draft_layers: frozenset[str] = frozenset(),
     ) -> list[ChunkedTokenDatabase]:
         """Construct token databases and their Store layouts."""
+        # Rank-local keys naming a layer range always hold that range's layers
+        # in Store object order, so the same key holds the same bytes with or
+        # without pp_sizes and for every KV cache layout.
+        rank_local_ranges = layer_ranges
+        if (
+            rank_local_ranges is None
+            and metadata.layer_range is not None
+            and self._kv_cache_config.hisparse_host_num_blocks is None
+        ):
+            rank_local_ranges = (metadata.layer_range,)
         token_dbs: list[ChunkedTokenDatabase] = []
         for group_idx, group in enumerate(self._kv_cache_groups):
             hash_block_size = (
@@ -2122,9 +2140,9 @@ class MooncakeStoreWorker:
                 )
                 range_objects = (
                     _group_range_objects(
-                        group_metadata, group, layer_ranges, draft_layers
+                        group_metadata, group, rank_local_ranges, draft_layers
                     )
-                    if layer_ranges is not None
+                    if rank_local_ranges is not None
                     else None
                 )
                 token_dbs.append(
