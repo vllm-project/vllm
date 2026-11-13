@@ -303,13 +303,16 @@ from vllm.v1.attention.ops.pcp import (
 )
 from vllm.v1.attention.ops.shardq import allocate_shardq_buffers, shard_q, unshard_out
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     DS_MLA_STATE_CONTENT_BYTES,
     AttentionSpec,
-    KVCacheSpec,
+    KVCacheLayerConfig,
     KVQuantMode,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -1527,7 +1530,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
@@ -1550,18 +1553,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             ),
         )
         if self.sliding_window is not None:
-            return SlidingWindowMLASpec(
-                **common_kwargs,
-                sliding_window=self.sliding_window,
-                non_causal_multi_token_decode=self.non_causal_multi_token_decode,
+            return SlidingWindowManager.layer_config(
+                MLAAttentionSpec(**common_kwargs), sliding_window=self.sliding_window
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
             topk_buffer_width=self.topk_buffer_width,
             is_index_group_leader=self.indexer is not None,
-            non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
-        return spec
+        return FullAttentionManager.layer_config(spec)
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
@@ -2578,8 +2578,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        # merge() unions this flag across the KV group, so a shared target/draft
-        # group would mark the target builder as non-causal.
+        # Per builder: a KV group can mix target and draft layers.
         ctx = self.compilation_config.static_forward_context
         self.non_causal_multi_token_decode = any(
             getattr(ctx[name], "non_causal_multi_token_decode", False)
