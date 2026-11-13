@@ -824,14 +824,16 @@ def _check_k3_replay_and_threshold(worker, grids, hits, misses):
         pytest.param([[1, 32, 64]], 1, 0, id="fills_largest_budget_512"),
         pytest.param([[1, 34, 64]], 0, 1, id="above_largest_budget_544"),
         pytest.param([[1, 28, 28]] * 2, 2, 0, id="two_images_share_replay"),
-        pytest.param([[1, 28, 28], [1, 34, 64]], 1, 1, id="only_oversize_eager"),
+        pytest.param(
+            [[1, 28, 28], [1, 34, 64]], 0, 2, id="batch_over_budget_all_eager"
+        ),
     ],
 )
 def test_kimi_k3_vit_cudagraph_replay_and_threshold(
     grids, hits, misses, vllm_runner, monkeypatch
 ):
-    """Replay matches eager; graphs serve items up to the largest budget (512
-    output tokens by default) and larger items run eagerly."""
+    """Replay matches eager; a batch whose total output tokens fit the largest
+    budget (512 by default) replays once, and a larger batch runs eagerly."""
     # collective_rpc below sends a `partial` function, which needs pickle
     # fallback since msgpack can't serialize it.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
