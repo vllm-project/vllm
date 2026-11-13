@@ -25,7 +25,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     query_start_loc_ptr,
     batch_ptr,
     token_chunk_offset_ptr,
-    o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
+    o_ptr,  # (dim, seqlen)
     # Matrix dimensions
     dim: tl.constexpr,
     num_cache_lines,  # added to support vLLM larger cache lines
@@ -53,6 +53,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     BLOCK_N: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
+    # The wrapper can pass BF16 input directly when the cache is FP32.
+    input_dtype: tl.constexpr = initial_states_ptr.dtype.element_ty
     conv_states_ptr = initial_states_ptr
     conv_state_indices_ptr = cache_indices_ptr
     stride_conv_state_seq = stride_istate_seq
@@ -174,17 +176,17 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             # prior-tokens are zeros
             if KERNEL_WIDTH >= 2:  # STRATEGY1
                 # first chunk and does not have prior-token, so just set to 0
-                col0 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col0 = tl.zeros((BLOCK_N,), dtype=input_dtype)
             if KERNEL_WIDTH >= 3:  # STRATEGY1
-                col1 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col1 = tl.zeros((BLOCK_N,), dtype=input_dtype)
             if KERNEL_WIDTH >= 4:  # STRATEGY1
-                col2 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col2 = tl.zeros((BLOCK_N,), dtype=input_dtype)
             if KERNEL_WIDTH >= 5:  # STRATEGY1
-                col3 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col3 = tl.zeros((BLOCK_N,), dtype=input_dtype)
             if KERNEL_WIDTH >= 6:  # STRATEGY1
-                col4 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col4 = tl.zeros((BLOCK_N,), dtype=input_dtype)
             if KERNEL_WIDTH >= 7:  # STRATEGY1
-                col5 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+                col5 = tl.zeros((BLOCK_N,), dtype=input_dtype)
 
         # STEP 2:
         # here prepare data for updating conv_state
@@ -207,7 +209,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 & (idx_tokens_last < seqlen)[:, None]
                 & (idx_feats < dim)[None, :]
             )  # token-index  # token-index  # feature-index
-            loaded_x = tl.load(x_ptrs, mask_x, 0.0)
+            loaded_x = tl.load(x_ptrs, mask_x, 0.0).to(input_dtype)
             idx_tokens_conv = tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
 
             conv_states_ptrs_target = (
@@ -249,7 +251,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                     & (idx_tokens_conv - VAL < seqlen)[:, None]
                     & (idx_feats < dim)[None, :]
                 )  # token-index  # token-index  # feature-index
-                loaded_x = tl.load(x_ptrs, mask_x, 0.0)
+                loaded_x = tl.load(x_ptrs, mask_x, 0.0).to(input_dtype)
 
                 tl.debug_barrier()  # need this due to the bug in tl.where not enforcing this when data is the result of another tl.load
                 new_conv_state = tl.where(
@@ -280,7 +282,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                     & (idx_tokens_conv - VAL < seqlen)[:, None]
                     & (idx_feats < dim)[None, :]
                 )  # token-index  # token-index  # feature-index
-                new_conv_state = tl.load(x_ptrs, mask_x, 0.0)
+                new_conv_state = tl.load(x_ptrs, mask_x, 0.0).to(input_dtype)
 
                 conv_states_ptrs_target = (
                     conv_states_base
@@ -298,53 +300,95 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         mask_w = idx_feats < dim
         if KERNEL_WIDTH == 2:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
         if KERNEL_WIDTH == 3:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
         if KERNEL_WIDTH == 4:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
-            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
         if KERNEL_WIDTH == 5:
             # ruff: noqa: F841
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
-            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
-            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 3 * stride_x_token  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
         if KERNEL_WIDTH == 6:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col4 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col4 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
-            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
-            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 3 * stride_x_token  # [BLOCK_N]
-            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 4 * stride_x_token  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
         if KERNEL_WIDTH == 7:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
-            col5 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col5 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
-            col4 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col4 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
-            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 3 * stride_x_token  # [BLOCK_N]
-            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 4 * stride_x_token  # [BLOCK_N]
-            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
             conv_states_ptrs = prior_tokens - 5 * stride_x_token  # [BLOCK_N]
-            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca").to(
+                input_dtype
+            )
 
     if HAS_BIAS:
         bias = bias_ptr + idx_feats
@@ -394,7 +438,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 if j == 1:  # KERNEL_WIDTH-1:
                     matrix_w = w_col1
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(input_dtype)
             elif KERNEL_WIDTH == 3:
                 if j == 1:
                     matrix_w = w_col1
@@ -402,7 +446,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 elif j == 2:
                     matrix_w = w_col2
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(input_dtype)
             elif KERNEL_WIDTH == 4:
                 if j == 1:
                     matrix_w = w_col1
@@ -413,7 +457,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 elif j == 3:
                     matrix_w = w_col3
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(input_dtype)
             elif KERNEL_WIDTH == 5:
                 if j == 1:
                     matrix_w = w_col1
@@ -427,7 +471,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 elif j == 4:
                     matrix_w = w_col4
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(input_dtype)
             elif KERNEL_WIDTH == 6:
                 if j == 1:
                     matrix_w = w_col1
@@ -444,7 +488,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 elif j == 5:
                     matrix_w = w_col5
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(input_dtype)
             elif KERNEL_WIDTH == 7:
                 if j == 1:
                     matrix_w = w_col1
@@ -464,7 +508,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 elif j == 6:
                     matrix_w = w_col6
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
-                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(input_dtype)
 
             acc += matrix_x * matrix_w  # [BLOCK_N]
 
@@ -569,9 +613,10 @@ def causal_conv1d_fn(
         activation = "silu"
 
     args = None
-    # Store original dtype to cast back at the end
     original_x_dtype = x.dtype
-    x = x.to(conv_states.dtype)
+    fuse_casts = x.dtype == torch.bfloat16 and conv_states.dtype == torch.float32
+    if not fuse_casts:
+        x = x.to(conv_states.dtype)
     out = torch.empty_like(x)
     if metadata is not None:
         nums_dict = metadata.nums_dict
@@ -590,7 +635,6 @@ def causal_conv1d_fn(
             (MAX_NUM_PROGRAMS,), PAD_SLOT_ID, dtype=torch.int32, device=x.device
         )  # tracking BLOCK_M-based index in the sequence the Triton program is handling
 
-    is_channel_last = (x.stride(0) == 1) & (x.stride(1) > 1)
     dim, cu_seqlen = x.shape
     _, width = weight.shape
     if not 2 <= width <= 7:
@@ -635,7 +679,9 @@ def causal_conv1d_fn(
         assert x.dim() == 2
         assert query_start_loc is not None
         assert query_start_loc.dim() == 1
-        assert x.stride(0) == 1 or x.stride(1) == 1
+        # The legacy cast would have densified an input with gaps.
+        layout = out if fuse_casts else x
+        assert layout.stride(0) == 1 or layout.stride(1) == 1
         if bias is not None:
             assert bias.dim() == 1
             assert dim == bias.size(0)
@@ -649,7 +695,9 @@ def causal_conv1d_fn(
             )
         assert weight.stride(1) == 1
         assert (dim, width) == weight.shape
-        assert is_channel_last, "Need to run in channel-last layout"
+        assert layout.stride(0) == 1 and layout.stride(1) > 1, (
+            "Need to run in channel-last layout"
+        )
 
     if metadata is None:
 
@@ -763,7 +811,7 @@ def causal_conv1d_fn(
         num_stages=2,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )
-    return out.to(original_x_dtype)
+    return out if fuse_casts else out.to(original_x_dtype)
 
 
 @triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
