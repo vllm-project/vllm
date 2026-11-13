@@ -20,10 +20,14 @@ steps:
     mem: 16+
   automatic_shard: true
   _raw_old_commands:
+  - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_cpu_all_reduce.py
+  - pytest -v -s distributed/test_flashinfer_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/test_pipeline_partition.py
   source_file_dependencies:
   - vllm/distributed
   - '!vllm/distributed/kv_transfer/'
@@ -33,7 +37,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s distributed/test_localization.py || true &&
-    pytest --continue-on-collection-errors -v -s distributed/test_comm_ops.py -k "not test_multi_process_tensor_parallel and not test_multi_process_pipeline_parallel" || true &&
+    pytest --continue-on-collection-errors -v -s distributed/test_comm_ops.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_cpu_all_reduce.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_flashinfer_all_reduce.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_shm_broadcast.py || true &&
@@ -165,7 +169,7 @@ steps:
     pytest --continue-on-collection-errors -v -s ./compile/test_wrapper.py || true &&
     pytest --continue-on-collection-errors -v -s ./compile/test_aot_compile.py::test_load_on_another_device || true'
 - label: ':nvidia: (L4) Distributed Torchrun + Shutdown'
-  key: distributed-torchrun-shutdown-tests-2-gpus-2
+  key: distributed-torchrun-shutdown-tests-2-gpus-xpu
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
@@ -226,16 +230,14 @@ steps:
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
-  - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
   - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
-  - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - RDT_MODEL=hmellor/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
+  - RDT_MODEL=vllm-project/tiny-random-DeepseekV2ForCausalLM python3 examples/rl/rlhf_sharded_rdt_small_ep.py
   source_file_dependencies:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
@@ -247,16 +249,16 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
+    cd tests &&
     torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py || true &&
-    PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py || true &&
     TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
-    PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
-    TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true'
+    TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true'
 - label: ':nvidia: (L4) [Nightly] Distributed DP Extended'
   key: distributed-dp-tests-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 90
+  timeout_in_minutes: 45
   num_devices: 4
   optional: true
   working_dir: .
@@ -335,6 +337,7 @@ steps:
   - tests/distributed/test_events
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
+  - tests/distributed/test_pp_transport.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -343,6 +346,40 @@ steps:
     pytest --continue-on-collection-errors -v -s distributed/test_events.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_symm_mem_allreduce.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node || true'
+- label: ':nvidia: (H100) DeepSeek ShardQ Sequence Parallel'
+  key: deepseek-shardq-sequence-parallel
+  device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  source_file_dependencies:
+  - vllm/models/deepseek_v32/
+  - vllm/models/common/ops/sequence_parallel.py
+  - vllm/model_executor/layers/attention/
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/v1/attention/ops/shardq.py
+  - vllm/v1/attention/backends/mla/
+  - vllm/lora/
+  - vllm/v1/worker/gpu/spec_decode/
+  - vllm/config/speculative.py
+  - vllm/config/attention.py
+  - tests/models/deepseek_v32/test_shardq_sequence_parallel.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest --continue-on-collection-errors -v -s tests/models/deepseek_v32/test_shardq_sequence_parallel.py || true'
 - label: ':nvidia: (H100) [Nightly] Distributed Features'
   key: distributed-tests-2xh100-2xmi300
   device: intel_gpu
@@ -399,6 +436,7 @@ steps:
   - pytest -v -s tests/distributed/test_nccl_symm_mem.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
   - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
+  - pytest -v -s tests/distributed/test_pp_cudagraph.py::test_pp_cudagraph_mode_differs_across_stages
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -406,7 +444,8 @@ steps:
     pytest --continue-on-collection-errors -v -s tests/distributed/test_context_parallel.py || true &&
     pytest --continue-on-collection-errors -v -s tests/distributed/test_nccl_symm_mem.py || true &&
     pytest --continue-on-collection-errors -v -s tests/v1/distributed/test_dbo.py || true &&
-    pytest --continue-on-collection-errors -v -s tests/distributed/test_mnnvl_alltoall.py || true'
+    pytest --continue-on-collection-errors -v -s tests/distributed/test_mnnvl_alltoall.py || true &&
+    pytest --continue-on-collection-errors -v -s tests/distributed/test_pp_cudagraph.py::test_pp_cudagraph_mode_differs_across_stages || true'
 - label: ':nvidia: (B200) GEMM-RS/AR'
   key: gemm-rs-ar-2xb200
   device: intel_gpu
@@ -539,7 +578,7 @@ steps:
     mem: 16+
   automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
+  - VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
   source_file_dependencies:
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
@@ -549,4 +588,37 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s model_executor/model_loader/test_weight_cache.py -m distributed(num_gpus=2) || true'
+    VLLM_TRITON_FORCE_FIRST_CONFIG=1 pytest --continue-on-collection-errors -v -s model_executor/model_loader/test_weight_cache.py -m distributed(num_gpus=2) || true'
+- label: ':nvidia: (B200) Distributed Preload with Mooncake Store'
+  key: preload-mooncake-store-2xb200
+  device: intel_gpu
+  timeout_in_minutes: 20
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  automatic_shard: true
+  _raw_old_commands:
+  - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
+  source_file_dependencies:
+  - .buildkite/scripts/check-kv-connectors.sh
+  - requirements/test/kv_connectors_cuda.txt
+  - tests/model_executor/model_loader/test_weight_cache.py
+  - vllm/distributed/mooncake_store.py
+  - vllm/entrypoints/cli/preload.py
+  - vllm/model_executor/model_loader/weight_cache/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    pytest --continue-on-collection-errors -v -s model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e || true'
