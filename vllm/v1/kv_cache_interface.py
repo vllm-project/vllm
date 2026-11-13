@@ -490,11 +490,6 @@ def create_kv_cache_views(
     return views
 
 
-# Sparse MLA kernels re-block the hot buffer's flat rows into pages of up to
-# this many rows, so its block stride only needs to be a whole number of them.
-HISPARSE_KERNEL_ROWS = 64
-
-
 @dataclass(frozen=True, kw_only=True)
 class HiSparseHotSpec(KVCacheSpec):
     """Ephemeral per-request HiSparse hot-cache allocation."""
@@ -511,11 +506,13 @@ class HiSparseHotSpec(KVCacheSpec):
         return self.page_size
 
     def get_block_stride_alignment(self) -> int:
-        kernel_rows = math.gcd(self.block_size, HISPARSE_KERNEL_ROWS)
-        return math.lcm(
-            self.page_size // self.block_size * kernel_rows,
-            super().get_block_stride_alignment(),
-        )
+        from vllm.v1.attention.backend import MultipleOf
+
+        row_bytes = self.page_size // self.block_size
+        alignment = self.block_stride_alignment
+        if isinstance(alignment, MultipleOf):
+            return math.gcd(alignment.base, self.block_size) * row_bytes
+        return math.lcm(row_bytes, alignment or 1)
 
     @property
     def block_table_token_alignment(self) -> int | None:

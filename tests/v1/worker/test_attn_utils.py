@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -65,15 +66,17 @@ from vllm.v1.worker.utils import (
         "indexer_sizes",
         "self_addressed",
         "expected",
+        "indexer",
     ),
     [
-        (True, 256, [64], [64], False, 64),
-        (True, 64, [32, 64], [16, 32], False, 32),
-        (True, 64, [MultipleOf(16)], [32], False, 32),
-        (True, 64, [64], [32], False, None),
-        (True, 256, [MultipleOf(64)], [64], True, 256),
-        (True, 256, [64], [64], True, 64),
-        (False, 256, [64], [64], False, 256),
+        (True, 256, [64], [64], False, 64, 64),
+        (True, 64, [32, 64], [16, 32], False, 32, 32),
+        (True, 64, [MultipleOf(16)], [32], False, 32, 32),
+        (True, 64, [64], [32], False, None, None),
+        (False, 256, [64], [64], False, 256, 256),
+        (True, 384, [MultipleOf(32)], [128, 256], False, 128, 256),
+        (True, 256, [MultipleOf(64)], [64], True, 256, 256),
+        (True, 256, [64], [64], True, 64, 64),
     ],
 )
 def test_get_kv_cache_spec_resolves_hisparse_block_size(
@@ -84,6 +87,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     indexer_sizes,
     self_addressed,
     expected,
+    indexer,
 ):
     """HiSparse keeps the scheduler block only for a self-addressed indexer
     whose sparse attention backends support it; other specs are left alone."""
@@ -120,6 +124,15 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     monkeypatch.setattr(
         attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
     )
+    mamba_fit_inputs: list[dict[str, KVCacheSpec]] = []
+
+    def fit_mamba_blocks(_, kv_cache_spec, __):
+        mamba_fit_inputs.append(kv_cache_spec)
+        return kv_cache_spec
+
+    monkeypatch.setattr(
+        attn_utils_module, "fit_mamba_blocks_to_attention", fit_mamba_blocks
+    )
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
     )
@@ -129,7 +142,11 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         return
 
     resolved = attn_utils.get_kv_cache_spec(config)
-    assert resolved["main"].block_size == resolved["indexer"].block_size == expected
+    assert resolved["main"].block_size == expected
+    assert resolved["indexer"].block_size == indexer
+    assert [specs["indexer"].block_size for specs in mamba_fit_inputs] == (
+        [indexer] if enabled else []
+    )
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())

@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -26,7 +25,6 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
-from vllm.v1.kv_cache_interface import HISPARSE_KERNEL_ROWS
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     REGION_SEGMENTS,
     SharedOffloadRegion,
@@ -101,18 +99,14 @@ class PagedCacheView:
             storage_offset=byte_offset // itemsize,
         )
         row_bytes = row_width * itemsize
-        assert block_stride % row_bytes == 0
-        block_stride_rows = block_stride // row_bytes
-        kernel_rows = math.gcd(block_size, HISPARSE_KERNEL_ROWS)
-        assert block_stride_rows % kernel_rows == 0
-        num_rows = (num_blocks - 1) * block_stride_rows + block_size
+        if block_stride % (block_size * row_bytes):
+            # Blocks whole rows apart: kernels read the strided cache as flat rows.
+            assert block_stride % row_bytes == 0
+            return cls(cache, cache, block_size, block_stride // row_bytes)
         attention_cache = (
-            raw_tensor.view(torch.uint8)[byte_offset:]
-            .narrow(0, 0, num_rows * row_bytes)
-            .view(dtype)
-            .view(-1, kernel_rows, row_width)
+            raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
         )
-        return cls(cache, attention_cache, block_size, block_stride_rows)
+        return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 
 @dataclass(frozen=True)
@@ -166,7 +160,7 @@ class ResolvedHiSparseConfig:
             if padding:
                 logger.warning(
                     "HiSparse device_buffer_size=%d is not aligned to the "
-                    "%d-token block size and allocates %d unused "
+                    "%d-token kernel block size and allocates %d unused "
                     "padding rows per hot group. Use %d to use all allocated "
                     "rows.",
                     device_buffer_size,

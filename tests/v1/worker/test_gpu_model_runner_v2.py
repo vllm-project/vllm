@@ -74,8 +74,8 @@ def test_prompt_tail_keeps_decode_graph_bound(monkeypatch, eligible, expected_bo
 
 @pytest.mark.parametrize("cg_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
 def test_kv_connector_receives_attn_metadata(monkeypatch, cg_mode):
-    """Piecewise steps handed the connector no attention metadata, so HiSparse
-    skipped its per-forward setup and overflowed its swap rows."""
+    """Every CUDA graph mode hands the connector the attention metadata, which
+    HiSparse needs for its per-forward setup."""
     runner = Mock(
         lora_config=None,
         aux_output_connector=None,
@@ -635,9 +635,6 @@ def test_standalone_draft_kv_dtype_override(
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
     monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
-    monkeypatch.setattr(
-        ar_module, "get_pp_safe_draft_load_config", lambda load_config: load_config
-    )
 
     speculator.load_draft_model(object(), set())
 
