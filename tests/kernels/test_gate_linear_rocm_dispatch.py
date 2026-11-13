@@ -270,25 +270,32 @@ def test_rocm_bf16x3_is_reachable_for_low_m_shapes(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("m", "has_aiter", "path"),
+    ("m", "has_aiter", "aiter_enabled", "path"),
     [
-        (1, True, "aiter"),
-        (32, True, "aiter"),
-        (2047, True, "aiter"),
-        (2048, True, "bf16x3"),
-        (0, True, "linear"),
-        (64, False, "linear"),
-        (2048, False, "bf16x3"),
+        (1, True, True, "aiter"),
+        (32, True, True, "aiter"),
+        (2047, True, True, "aiter"),
+        (2048, True, True, "bf16x3"),
+        (0, True, True, "linear"),
+        (64, False, True, "linear"),
+        (2048, False, True, "bf16x3"),
+        (64, True, False, "linear"),
+        (2047, True, False, "linear"),
+        (2048, True, False, "bf16x3"),
     ],
 )
 def test_rocm_bf16x3_dispatch_uses_aiter_below_min_tokens(
-    monkeypatch, m: int, has_aiter: bool, path: str
+    monkeypatch, m: int, has_aiter: bool, aiter_enabled: bool, path: str
 ) -> None:
-    """Below MIN_TOKENS the dispatch runs AITER's gemm_a16w32 when the
-    installed AITER has it; with no rows or without it, the previous path."""
+    """Below MIN_TOKENS the dispatch runs AITER's gemm_a16w32 when AITER is
+    enabled and the installed AITER has it; with no rows, without it, or with
+    AITER disabled, the previous path."""
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.router import (
         bf16x3_router_gemm_rocm as rocm_bf16x3,
     )
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: aiter_enabled)
 
     calls: list[str] = []
 

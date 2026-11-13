@@ -500,8 +500,10 @@ def rocm_bf16x3_router_gemm_dispatch_impl(
     if bf16x3_router_gemm_rocm.is_supported(x, weight):
         return bf16x3_router_gemm_rocm.bf16x3_router_gemm(x, weight_split)
     # Below MIN_TOKENS: AITER's gemm_a16w32 (fp32 FMA at small M, bf16x3 MFMA
-    # above), one launch for every M.
-    aiter_gemm = _aiter_gemm_a16w32()
+    # above), one launch for every M, when AITER is enabled and has it.
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    aiter_gemm = _aiter_gemm_a16w32() if rocm_aiter_ops.is_enabled() else None
     if (
         aiter_gemm is not None
         and x.shape[0] > 0
