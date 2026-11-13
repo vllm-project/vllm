@@ -658,17 +658,14 @@ def test_bucket_without_budget_stays_split_into_rungs():
 def test_compute_budget_config_parses_and_rejects_bad_values():
     assert _compute_budget(None) is None
     assert _compute_budget({}) is None
-    # fill_floor defaults to budget // 6
-    assert _compute_budget({"audio_bucket_budget": 48}) == (48, 8)
-    assert _compute_budget({"audio_bucket_budget": 48, "audio_bucket_fill_floor": 12}) == (48, 12)
+    assert _compute_budget({"audio_bucket_budget": 48}) == 48
+    # The retired fill-floor knob is ignored; the merge trigger is derived.
+    assert _compute_budget({"audio_bucket_budget": 48, "audio_bucket_fill_floor": 12}) == 48
     for bad in (
         {"audio_bucket_budget": 0},
         {"audio_bucket_budget": -4},
         {"audio_bucket_budget": True},
         {"audio_bucket_budget": 4.5},
-        {"audio_bucket_budget": 48, "audio_bucket_fill_floor": 0},
-        {"audio_bucket_budget": 48, "audio_bucket_fill_floor": 96},
-        {"audio_bucket_budget": 48, "audio_bucket_fill_floor": "x"},
     ):
         try:
             _compute_budget(bad)
@@ -679,12 +676,12 @@ def test_compute_budget_config_parses_and_rejects_bad_values():
 
 
 def test_budget_fold_reaches_fill_floor():
-    # A tiny rung-8 call (compute 8 < floor 24) folds into the rung-16 group
-    # (2 x 16 = 32 <= budget 64) and stops at the floor; the healthy rung-32
-    # group (32 >= floor) is left alone.
+    # A tiny rung-8 call (compute 8 < derived floor 64 // 6 = 10) folds into
+    # the rung-16 group (2 x 16 = 32 <= budget 64); the healthy rung-32 group
+    # (32 >= floor) is left alone.
     batch = _batch([5, 30, 12], time_extent=32)
     bucketer = EncoderBucketing(
-        _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=64, fill_floor=24
+        _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=64
     )
     got = {
         kw["input_features"].shape[-1]: indices for indices, kw in bucketer.bucket(batch, 3)
@@ -693,15 +690,14 @@ def test_budget_fold_reaches_fill_floor():
 
 
 def test_budget_does_not_fold_healthy_groups():
-    # Groups at or above the fill floor never fold: compute 6 x 8 = 48 and
-    # 4 x 16 = 64 both sit at/above floor 8, so the short-rung group keeps its
-    # own call instead of being merged up into the larger rung.
+    # Groups at or above the derived floor (48 // 6 = 8) never fold: compute
+    # 6 x 8 = 48 and 4 x 16 = 64 both sit at/above it, so the short-rung group
+    # keeps its own call instead of being merged up into the larger rung.
     batch = _batch([4] * 6 + [10] * 4, time_extent=32)
     bucketer = EncoderBucketing(
         _Spec(),
         LengthBucketingConfig((8, 16, 32)),
         compute_budget=48,
-        fill_floor=8,
     )
     rungs = bucketer.bucket(batch, 10)
     windows = sorted(kw["input_features"].shape[-1] for _, kw in rungs)
@@ -712,18 +708,19 @@ def test_budget_does_not_fold_healthy_groups():
 
 
 def test_budget_fold_blocked_when_merge_exceeds_budget():
-    # 2 x 8 = 16 < floor 24, but folding into rung 32 costs 4 x 32 = 128 > 32,
-    # so the fold is refused (pad inflation stays within budget). The oversized
-    # rung-32 group then splits one item per call (32 // 32 = 1).
-    batch = _batch([4, 4, 30, 30], time_extent=32)
+    # 1 x 8 = 8 < derived floor 54 // 6 = 9, but folding into rung 16 costs
+    # 5 x 16 = 80 > 54, so the fold is refused (pad inflation stays within
+    # budget). The oversized rung-16 group then splits into balanced 2 + 2
+    # calls (54 // 16 = 3 max per call).
+    batch = _batch([4, 10, 10, 10, 10], time_extent=32)
     bucketer = EncoderBucketing(
-        _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=32, fill_floor=24
+        _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=54
     )
-    rungs = bucketer.bucket(batch, 4)
+    rungs = bucketer.bucket(batch, 5)
     assert [(kw["input_features"].shape[-1], indices) for indices, kw in rungs] == [
-        (8, [0, 1]),
-        (32, [2]),
-        (32, [3]),
+        (8, [0]),
+        (16, [1, 2]),
+        (16, [3, 4]),
     ]
 
 
@@ -732,7 +729,7 @@ def test_budget_split_balances_oversized_groups():
     # ceil(20 / 16) = 2 balanced calls of 10 (not greedy 16 + 4).
     batch = _batch([1] + [30] * 20, time_extent=32)
     bucketer = EncoderBucketing(
-        _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=512, fill_floor=85
+        _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=512
     )
     rungs = bucketer.bucket(batch, 21)
     sizes = [len(indices) for indices, kw in rungs]
@@ -746,7 +743,7 @@ def test_budget_low_concurrency_collapses_to_one_call():
     # run it as a single sub-batch at the batch's top rung, unsplit.
     batch = _batch([5, 30, 12], time_extent=32)
     bucketer = EncoderBucketing(
-        _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=96, fill_floor=8
+        _Spec(), LengthBucketingConfig((8, 16, 32)), compute_budget=96
     )
     rungs = bucketer.bucket(batch, 3)
     assert len(rungs) == 1
