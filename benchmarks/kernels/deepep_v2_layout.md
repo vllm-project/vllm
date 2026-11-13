@@ -141,18 +141,25 @@ expanded metadata.
 
 Eight-B200 NVLink serving validation with DeepSeek-V4.1-Flash compared
 non-expanded, expanded direct with unfused preparation, and expanded direct
-with fused preparation on the same padding-aware stack. At fixed 8192 input /
-1024 output tokens and concurrency eight, median TPOT across three rounds was
-10.744 / 13.425 / 12.613 ms. Fusion improved expanded TPOT by about 6%, but
-non-expanded remained faster. TTFT was 524.59 / 576.19 / 588.45 ms; sampled
-total GPU memory was 547.90 / 572.80 / 574.24 GiB. There is no TTFT or memory
-improvement demonstrated by this experiment. Full GSM8K scores were
-1271 / 1277 / 1278 correct out of 1319, with truncations counted as incorrect.
-These scores do not establish output equivalence. All configurations used
-no CPU sync and graph decode; cases ran sequentially rather than interleaved.
-The subsequent runtime-row-count and 64-bit preparation-offset fix passed
-GPU correctness and profiling checks, but did not receive another full serving
-rerun. Neither expansion nor CPU sync is enabled by default.
+with fused preparation on the same padding-aware stack (Pirate2 `dell-b200-02`,
+2026-10-06, prelim: 1271 / 1277 / 1278 correct of 1319; TPOT 10.744 / 13.425 /
+12.613 ms median, TTFT 524.59 / 576.19 / 588.45 ms, GPU peak 547.90 / 572.80 /
+574.24 GiB). Fusion improved expanded TPOT by about 6%, but non-expanded
+remained faster. Rerun 2026-11-13 on `nm-ohio-b200-01` (8×B200, `fe59004790`,
+`EP_DISABLE_GIN=1 NCCL_IB_DISABLE=1`, port 8128) with the corrected GSM8K
+harness (`--use-chat-completions --chat-template-kwargs '{"enable_thinking":
+false}'`; fixes `\/v1\/completions` truncation that dropped prelim to
+~56–59% on the buggy harness) replicated parity within 0.45 pp: **1265
+(95.91%) baseline, 1268 (96.13%) expanded, 1272 (96.44%) expanded+CPU-sync**
+of 1319, with throughput medians **764.6 / 650.5 / 50.2 tok/s** (TPOT 9.85 /
+11.71 / 159.4 ms, TTFT 464 / 534 / 406 ms) confirming non-expanded remains
+fastest. There is no TTFT or memory improvement demonstrated by this
+experiment. Cases ran sequentially rather than interleaved. The subsequent
+runtime-row-count and 64-bit preparation-offset fix passed GPU correctness and
+profiling checks. Rerun artifacts: `/tmp/e2e_fixed/results/dsv41_fixed_full/`
+and `.tmp/pr177-e2e-20261113_fixed_full/`; diagnosis
+`.tmp/pr177-e2e-20261113/fix_diagnosis/`. Neither expansion nor CPU sync is
+enabled by default.
 
 Reference implementation:
 <https://github.com/deepseek-ai/DeepEP/blob/d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb/csrc/elastic/buffer.hpp>
