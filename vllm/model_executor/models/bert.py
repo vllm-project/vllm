@@ -570,16 +570,20 @@ def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
 
 class BertMLMHead(nn.Module):
     def __init__(
-        self, hidden_size: int, vocab_size: int, layer_norm_eps: float = 1e-12
+        self,
+        hidden_size: int,
+        vocab_size: int,
+        layer_norm_eps: float = 1e-12,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
-        self.dense = nn.Linear(hidden_size, hidden_size)
+        self.dense = nn.Linear(hidden_size, hidden_size, dtype=dtype)
         self.activation = nn.GELU()
-        self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
-        self.decoder = nn.Linear(hidden_size, vocab_size, bias=True)
+        self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps, dtype=dtype)
+        self.decoder = nn.Linear(hidden_size, vocab_size, bias=True, dtype=dtype)
 
     def transform(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        x = self.dense(hidden_states)
+        x = self.dense(hidden_states.to(self.dense.weight.dtype))
         x = self.activation(x)
         return self.layer_norm(x)
 
@@ -690,6 +694,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", splade_pooling: str = "max"
     ):
+        self.head_dtype = vllm_config.model_config.head_dtype
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         cfg = vllm_config.model_config.hf_config
 
@@ -698,6 +703,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
             hidden_size=cfg.hidden_size,
             vocab_size=cfg.vocab_size,
             layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-12),
+            dtype=self.head_dtype,
         )
 
         self._splade_pooling = splade_pooling
@@ -713,6 +719,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
                 hidden_size=cfg.hidden_size,
                 vocab_size=cfg.vocab_size,
                 layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-12),
+                dtype=self.head_dtype,
             )
 
         # None of vLLM's built-in sequence pooling types are
@@ -742,6 +749,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
                 hidden_size=cfg.hidden_size,
                 vocab_size=cfg.vocab_size,
                 layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-12),
+                dtype=self.head_dtype,
             )
 
         def _strip(name: str) -> str:
@@ -974,6 +982,7 @@ class BertForMaskedLM(nn.Module):
             hidden_size=config.hidden_size,
             vocab_size=config.vocab_size,
             layer_norm_eps=getattr(config, "layer_norm_eps", 1e-12),
+            dtype=vllm_config.model_config.head_dtype,
         )
 
         pooler_config = vllm_config.model_config.pooler_config
