@@ -160,6 +160,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             self.max_seqs_64_segments = (current_platform.num_compute_units() - 1) // (
                 NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv
             )
+        elif current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx942
+
+            # 64 segments stay faster until the 16-segment grid has about two
+            # programs per CU (measured on MI325X, 304 CUs).
+            if on_gfx942():
+                self.max_seqs_64_segments = (
+                    2 * current_platform.num_compute_units() - 1
+                ) // (NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv)
         headdim_padded = next_power_of_2(self.headdim)
         max_query_len_3d = 1
         speculative_config = vllm_config.speculative_config

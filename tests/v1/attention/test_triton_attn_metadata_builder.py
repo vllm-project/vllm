@@ -38,6 +38,7 @@ def test_split_k_segments_follow_sm_occupancy(
     monkeypatch, builder_cls, capability, num_kv_heads, num_seqs, query_len, segments
 ):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(
         current_platform, "is_device_capability", lambda cap: cap == capability
     )
@@ -152,3 +153,53 @@ def test_draft_decode_update_matches_fresh_build(builder_cls):
     assert torch.equal(metadata.block_table, expected.block_table)
     assert torch.equal(metadata.slot_mapping, expected.slot_mapping)
     assert torch.equal(metadata.query_start_loc, expected.query_start_loc)
+
+
+# gfx942 uses 64 segments until the 16-segment grid reaches about two programs per
+# CU: (2 * 304 - 1) // (16 * num_kv_heads) requests.
+@pytest.mark.parametrize(
+    "builder_cls",
+    [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
+)
+@pytest.mark.parametrize(
+    "gfx942,num_kv_heads,num_seqs,query_len,segments",
+    [
+        (True, 8, 1, 1, 64),
+        (True, 8, 4, 1, 64),
+        (True, 8, 5, 1, 16),
+        (True, 2, 18, 1, 64),
+        (True, 2, 19, 1, 16),
+        (True, 2, 4, 4, 64),
+        (False, 8, 1, 1, 16),  # other ROCm GPUs keep 16
+    ],
+)
+def test_split_k_segments_follow_cu_occupancy_gfx942(
+    monkeypatch, builder_cls, gfx942, num_kv_heads, num_seqs, query_len, segments
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
+    monkeypatch.setattr(current_platform, "num_compute_units", lambda: 304)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            get_num_attention_heads=lambda _: 16,
+            get_num_kv_heads=lambda _: num_kv_heads,
+            get_head_size=lambda: 128,
+            rswa_window=None,
+        ),
+        parallel_config=None,
+        scheduler_config=SimpleNamespace(max_num_seqs=32),
+        speculative_config=None,
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE, static_forward_context={}
+        ),
+    )
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=num_kv_heads, head_size=128, dtype=torch.bfloat16
+    )
+    builder = builder_cls(spec, ["layer.0"], config, "cpu")
+    batch = BatchSpec(seq_lens=[128] * num_seqs, query_lens=[query_len] * num_seqs)
+    metadata = builder.build(0, create_common_attn_metadata(batch, 16, "cpu"))
+    assert metadata.num_par_softmax_segments == segments
+    assert metadata.softmax_segm_output.shape[2] == segments
+    assert metadata.softmax_segm_max.shape[0] >= num_seqs * query_len
