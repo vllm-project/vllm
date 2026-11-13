@@ -29,6 +29,8 @@ class PipelineBoundary:
     kv_source: int | None = None
     index_source: int | None = None
     candidate_source: int | None = None
+    # The kv source whose indexer K cache a later non-kv-source index source reads.
+    indexer_k_source: int | None = None
 
     @property
     def needs_relay(self) -> bool:
@@ -83,6 +85,12 @@ def get_pipeline_boundaries(
                     f"Layer {layer} and its {kind} source disagree on ratio"
                 )
             dependencies[kind].append((source, layer))
+    kv_source_of = {layer: source for source, layer in dependencies["kv"]}
+    dependencies["indexer_k"] = [
+        (kv_source_of[layer], layer)
+        for layer in sources["index"]
+        if layer not in sources["kv"]
+    ]
     candidate = getattr(config, "candidate_source_layer_id", -1)
     candidate_enabled = (
         candidate >= 0 and getattr(config, "candidate_topk_blocks", 0) > 0
@@ -107,6 +115,7 @@ def get_pipeline_boundaries(
                     and any(s >= cut for s in sources["index"])
                     else None
                 ),
+                indexer_k_source=live["indexer_k"],
             )
         )
     return tuple(boundaries)
@@ -167,13 +176,15 @@ class PipelineRelay(nn.Module):
             self.config.index_head_dim, dsa_indexer_uses_fp4(vllm_config)
         )
         if incoming.kv_source is not None:
-            source = incoming.kv_source
-            source_prefix = f"{prefix}.layers.{source}.attn"
-            self.main_cache = PipelineCache(vllm_config, source_prefix)
+            self.main_cache = PipelineCache(
+                vllm_config, f"{prefix}.layers.{incoming.kv_source}.attn"
+            )
+        if incoming.indexer_k_source is not None:
+            source = incoming.indexer_k_source
             self.index_cache = DeepseekV4IndexerCache(
                 head_dim=self.index_row_bytes,
                 dtype=torch.uint8,
-                prefix=f"{source_prefix}.indexer.k_cache",
+                prefix=f"{prefix}.layers.{source}.attn.indexer.k_cache",
                 cache_config=vllm_config.cache_config,
                 compress_ratio=self.config.compress_ratios[source],
             )
@@ -192,16 +203,19 @@ class PipelineRelay(nn.Module):
     def _cache_entries(self, boundary: PipelineBoundary):
         source = boundary.kv_source
         if source is not None:
-            prefix = f"{self.prefix}.layers.{source}.attn"
             yield (
                 f"pp_main_kv_{source}",
-                prefix,
+                f"{self.prefix}.layers.{source}.attn",
+                source,
                 self.main_row_bytes,
                 (576 if self.main_row_bytes == 584 else self.main_row_bytes),
             )
+        source = boundary.indexer_k_source
+        if source is not None:
             yield (
                 f"pp_index_k_{source}",
-                f"{prefix}.indexer.k_cache",
+                f"{self.prefix}.layers.{source}.attn.indexer.k_cache",
+                source,
                 self.index_row_bytes,
                 128 if self.index_row_bytes == 132 else 64,
             )
@@ -211,7 +225,7 @@ class PipelineRelay(nn.Module):
     ) -> dict[str, torch.Tensor]:
         tensors = {
             key: torch.zeros((batch_size, width), dtype=torch.uint8, device=device)
-            for key, _, width, _ in self._cache_entries(boundary)
+            for key, _, _, width, _ in self._cache_entries(boundary)
         }
         if boundary.index_source is not None:
             tensors["pp_topk"] = torch.full(
@@ -250,13 +264,13 @@ class PipelineRelay(nn.Module):
         metadata = context.attn_metadata
         if not isinstance(metadata, dict) or not metadata:
             return tensors
-        for key, prefix, _, value_bytes in self._cache_entries(boundary):
+        for key, prefix, source, _, value_bytes in self._cache_entries(boundary):
             copy_pipeline_cache_rows(
                 self.context[prefix].kv_cache,
                 tensors[key],
                 positions,
                 cast(Any, metadata[prefix]).slot_mapping,
-                self.config.compress_ratios[boundary.kv_source],
+                self.config.compress_ratios[source],
                 value_bytes,
                 scatter=importing,
             )

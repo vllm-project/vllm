@@ -55,7 +55,7 @@ def flash_sharing_config():
 
 @pytest.mark.parametrize("cut", range(1, 40))
 def test_every_pipeline_cut_preserves_live_sharing_sources(flash_sharing_config, cut):
-    """KV, top-k and candidate state have different cross-stage lifetimes."""
+    """Main KV, indexer K, top-k and candidate state have different lifetimes."""
     config = flash_sharing_config
     (boundary,) = get_pipeline_boundaries(config, [(0, cut), (cut, 40)])
     assert boundary.kv_source == next(
@@ -68,6 +68,8 @@ def test_every_pipeline_cut_preserves_live_sharing_sources(flash_sharing_config,
         None,
     )
     assert boundary.candidate_source == (20 if 20 < cut <= 36 else None)
+    # Only index sources 24-36 read another layer's indexer K cache (layer 20's).
+    assert boundary.indexer_k_source == (20 if 20 < cut <= 36 else None)
 
 
 def test_pipeline_state_survives_multiple_hops(flash_sharing_config):
@@ -77,7 +79,7 @@ def test_pipeline_state_survives_multiple_hops(flash_sharing_config):
     assert boundaries == (
         PipelineBoundary(8, 8),
         PipelineBoundary(8, 8),
-        PipelineBoundary(20, 24, 20),
+        PipelineBoundary(20, 24, 20, 20),
     )
 
 
