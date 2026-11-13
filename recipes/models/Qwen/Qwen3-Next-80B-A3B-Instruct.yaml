@@ -179,7 +179,7 @@ guide: |
   ### MTP (Multi-Token Prediction)
   ```bash
   vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct \
-    --tokenizer-mode auto --gpu-memory-utilization 0.8 \
+    --tokenizer-mode auto \
     --speculative-config '{"method": "qwen3_next_mtp", "num_speculative_tokens": 2}' \
     --tensor-parallel-size 4 --no-enable-chunked-prefill
   ```
