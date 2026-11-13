@@ -138,6 +138,14 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Reject tool calls that omit keys their schema marks as required.  A
+    # `null` value satisfies the schema (strict-mode structured outputs model
+    # optional parameters as `T | null`); only an absent key is a violation.
+    # Such a call is held back until every required key has appeared, or the
+    # block closes.  A call that never collects them all is surfaced as text
+    # instead of being emitted with an incomplete ``arguments`` object.
+    validate_required_args: bool = False
+
     def __post_init__(self) -> None:
         if self.arg_value_extender is not None and (
             self.arg_converter is None or not self.stream_arg_deltas

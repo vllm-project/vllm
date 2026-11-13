@@ -374,6 +374,29 @@ def find_tool_name(
     return False
 
 
+def find_tool_required(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> list[str]:
+    """Return the parameter names *tool_name* declares as required, or []."""
+    if not tools:
+        return []
+    for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool, CustomTool)):
+            for name, params in iter_response_function_tool_info(tool):
+                if name == tool_name:
+                    required = (params or {}).get("required", [])
+                    return [r for r in required if isinstance(r, str)]
+            continue
+        if not _is_function_tool(tool):
+            continue
+        name, params = _extract_tool_info(tool)
+        if name == tool_name:
+            required = (params or {}).get("required", [])
+            return [r for r in required if isinstance(r, str)]
+    return []
+
+
 def _params_or_empty_object(params: dict[str, Any] | None) -> dict[str, Any]:
     # Empty/missing parameters still constrain arguments to a JSON object.
     return params if params else {"type": "object", "properties": {}}
