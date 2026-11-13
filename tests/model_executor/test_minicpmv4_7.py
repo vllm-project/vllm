@@ -172,6 +172,54 @@ def _canvas_positions(tokens, target_sizes):
     return positions.tolist(), canvas_rope_delta(positions, len(tokens))
 
 
+@pytest.mark.parametrize(
+    "stray",
+    [
+        pytest.param([_IM_END], id="stray-im-end"),
+        pytest.param([_SLICE_END], id="stray-slice-end"),
+        pytest.param([_IM_START], id="stray-im-start"),
+    ],
+)
+def test_image_bounds_ignore_stray_markers_before_the_image(stray):
+    """A marker typed in message text must not shift the real image's span.
+
+    The tokenizer maps a literal `</image>` (or `<image>`, `</slice>`) in user
+    text to the same special id as the processor's marker. Pairing starts and
+    ends by index then closed the real `<image>` with the earlier stray marker,
+    which made `end < start` and sent the whole request to sequential positions.
+    """
+    image = [_IM_START, _IMAGE_PAD, _IM_END, _SLICE_START, _IMAGE_PAD, _SLICE_END]
+    clean = [_TEXT] + image + [_TEXT]
+    noisy = [_TEXT, *stray, _TEXT] + image + [_TEXT]
+    offset = len(noisy) - len(clean)
+
+    clean_bounds = build_image_bounds(torch.tensor(clean), _CANVAS_IDS)
+    noisy_bounds = build_image_bounds(torch.tensor(noisy), _CANVAS_IDS)
+
+    assert clean_bounds.tolist() == [[2, 3], [5, 6]]
+    assert (noisy_bounds - offset).tolist() == clean_bounds.tolist()
+    assert bool((noisy_bounds[:, 1] >= noisy_bounds[:, 0]).all())
+
+
+def test_image_bounds_ignore_stray_markers_after_the_image():
+    tokens = [_TEXT, _IM_START, _IMAGE_PAD, _IM_END, _TEXT, _IM_END, _SLICE_END]
+    assert build_image_bounds(torch.tensor(tokens), _CANVAS_IDS).tolist() == [[2, 3]]
+
+
+def test_canvas_mrope_positions_unchanged_by_stray_end_marker():
+    """End to end: the canvas positions of the image are the same with or
+    without a stray `</image>` in the preceding text, up to the shift."""
+    image = [_IM_START, _IMAGE_PAD, _IM_END, _TEXT]
+    clean_pos, clean_delta = _canvas_positions([_TEXT] + image, [[4, 4]])
+    noisy = [_TEXT, _IM_END, _TEXT] + image
+    noisy_pos, noisy_delta = _canvas_positions(noisy, [[4, 4]])
+
+    shift = 2  # the two extra text-side tokens
+    for axis in range(3):
+        assert [p - shift for p in noisy_pos[axis][shift:]] == clean_pos[axis]
+    assert noisy_delta == clean_delta
+
+
 def test_canvas_mrope_trailing_newline_stays_inside_the_canvas():
     """A newline right after `</image>` belongs to the canvas, not to the text.
 
