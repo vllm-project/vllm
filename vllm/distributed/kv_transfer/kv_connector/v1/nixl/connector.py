@@ -6,10 +6,10 @@ This module hosts the thin facade classes that vLLM's KV-connector layer
 instantiates. Almost all the real work lives in the per-mode scheduler
 and worker classes; the connector classes here only forward calls.
 
-* :class:`NixlBaseConnector` – common logic shared by pull and push.
-* :class:`NixlPullConnector` – pull-based (READ) KV transfer.
-* :class:`NixlPushConnector` – push-based (WRITE) KV transfer.
-* ``NixlConnector`` – backward-compatible alias for :class:`NixlPullConnector`.
+* `NixlBaseConnector` – common logic shared by pull and push.
+* `NixlPullConnector` – pull-based (READ) KV transfer.
+* `NixlPushConnector` – push-based (WRITE) KV transfer.
+* `NixlConnector` – backward-compatible alias for `NixlPullConnector`.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
 )
@@ -79,6 +80,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # With a CPU kv_buffer_device, NIXL registers host staging buffers.
+        if kv_transfer_config.kv_buffer_device == "cpu":
+            return KVCacheAccess.IN_PROCESS
+        # Peers within a host map it through UCX cuda_ipc.
+        return KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -419,7 +428,7 @@ class NixlPushConnector(NixlBaseConnector):
         """Drive push processing on the worker.
 
         The worker enqueues registrations / finished blocks for the
-        background ``nixl-push-writer`` thread; the writer issues the
+        background `nixl-push-writer` thread; the writer issues the
         WRITE transfers and polls NIXL notifs without further
         engine-thread involvement.
         """

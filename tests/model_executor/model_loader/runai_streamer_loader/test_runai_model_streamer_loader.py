@@ -90,7 +90,7 @@ def test_runai_model_loader_download_files(vllm_runner):
 @create_new_process_for_each_test("spawn")
 def test_runai_mtp_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
     """Skip main-only shards without changing a real MTP model's generation."""
-    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
+    from vllm.models.qwen3_5 import Qwen3_5MTP
     from vllm.platforms import current_platform
     from vllm.transformers_utils.repo_utils import hf_api
     from vllm.v1.metrics.reader import Counter
@@ -378,24 +378,21 @@ def _check_distributed_selection(rank, rendezvous, scenario):
                 ),
                 raising=False,
             )
+            # The last PP rank builds the draft as the only pipeline stage.
             monkeypatch.setattr(
-                rsl,
-                "get_pp_group",
-                lambda: types.SimpleNamespace(
-                    world_size=2 if scenario == "pipeline_draft" else 1
-                ),
-                raising=False,
+                rsl, "in_single_pp_stage", lambda: scenario == "pipeline_draft"
             )
             if scenario == "pipeline_draft" and rank == 0:
                 # Earlier PP stages never invoke the draft loader.
                 torch.distributed.barrier()
                 return
+
             # Exercise real selection and Gloo; observe the distributed stream input.
-            monkeypatch.setattr(
-                rsl,
-                "runai_safetensors_weights_iterator",
-                lambda paths, *args: iter((path, None) for path in paths),
-            )
+            def stream(paths, use_tqdm_on_load, is_distributed):
+                assert is_distributed == (scenario != "pipeline_draft")
+                return iter((path, None) for path in paths)
+
+            monkeypatch.setattr(rsl, "runai_safetensors_weights_iterator", stream)
             model = torch.nn.Module()
             if not (scenario == "missing_hook" and rank == 1):
                 needed = (
@@ -411,7 +408,8 @@ def _check_distributed_selection(rank, rendezvous, scenario):
                     config, model
                 )
             ]
-            expected = files[1:] if scenario == "healthy" else files
+            selects = scenario in ("healthy", "pipeline_draft")
+            expected = files[1:] if selects else files
             assert selected == expected
             if scenario == "pipeline_draft":
                 torch.distributed.barrier()

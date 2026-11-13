@@ -79,7 +79,8 @@ def triton_w4a16_gemm_kernel(
     pid_n = tl.program_id(1)
 
     # Row/col offsets for this tile
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    # int64 rows: offs_m * stride_am and offs_m * stride_cm pass 2**31 for large M
+    offs_m = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
     # b/zeros are stored with N packed: N//8 int32 columns per K row
@@ -322,8 +323,10 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type {c.weight_type} not supported; "
-                f"supported: {cls.SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type {c.weight_type} not supported; "
+                    f"supported: {cls.SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.act_type not in (torch.float16, torch.bfloat16):
@@ -333,8 +336,10 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         if N % 8 != 0:
             return (
                 False,
-                f"Output features ({N}) must be divisible by 8 "
-                "(8 int4 values packed per int32)",
+                (
+                    f"Output features ({N}) must be divisible by 8 "
+                    "(8 int4 values packed per int32)"
+                ),
             )
 
         gs = c.group_size
@@ -344,9 +349,11 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         ):
             return (
                 False,
-                f"Group size {gs} not supported; "
-                f"supported: {TRITON_W4A16_SUPPORTED_GROUP_SIZES} "
-                f"or full K ({c.full_weight_shape[0]})",
+                (
+                    f"Group size {gs} not supported; "
+                    f"supported: {TRITON_W4A16_SUPPORTED_GROUP_SIZES} "
+                    f"or full K ({c.full_weight_shape[0]})"
+                ),
             )
 
         K = c.partition_weight_shape[0]

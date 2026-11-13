@@ -1,24 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Mapping
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
 from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
 from vllm.exceptions import VLLMValidationError
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ImagePixelInputs,
     _dummy_audio_num_samples,
 )
 from vllm.model_executor.models.gemma4_unified import (
     Gemma4UnifiedForConditionalGeneration,
+    Gemma4UnifiedProcessingInfo,
     Gemma4UnifiedVisionEmbedder,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from ....conftest import ImageTestAssets
@@ -74,13 +83,14 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
     image_height: int,
     max_soft_tokens: int,
 ):
-    """Verify ``_compute_num_soft_tokens`` caps output at ``max_soft_tokens``."""
+    """Verify `_compute_num_soft_tokens` caps output at `max_soft_tokens`."""
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs={"do_pan_and_scan": True},
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4UnifiedProcessingInfo)
 
     num_soft_tokens = processor.info._compute_num_soft_tokens(
         image_width=image_width,
@@ -171,6 +181,7 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4UnifiedProcessingInfo)
     image = PILImage.new("RGB", (1000, 1000), color="white")
     image_size = image.size
     mm_items = processor.info.parse_mm_data({"image": image})
@@ -215,13 +226,51 @@ def test_limit_mm_per_prompt(
         )
 
 
-def test_dummy_audio_length_falls_back_for_the_unified_extractor():
-    """The unified audio feature extractor does not define ``fft_length``.
+@pytest.mark.usefixtures("default_vllm_config")
+def test_mm_device_do_normalize():
+    device = current_platform.device_type
+    ctx = build_model_context(
+        GEMMA4_UNIFIED_MODEL_ID, limit_mm_per_prompt={"image": 2, "video": 1}
+    )
+    assert ctx.model_config.multimodal_config.mm_device_do_normalize
 
-    ``Gemma4DummyInputsBuilder.get_dummy_mm_data`` read that attribute
-    unconditionally, so memory profiling raised ``AttributeError`` for every
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+    rng = np.random.default_rng(0)
+    images = [
+        PILImage.fromarray(rng.integers(0, 256, (470, 310, 3), dtype=np.uint8)),
+        PILImage.fromarray(rng.integers(0, 256, (320, 480, 3), dtype=np.uint8)),
+    ]
+    frames = rng.integers(0, 256, (2, 240, 320, 3), dtype=np.uint8)
+    mm_items = processor.info.parse_mm_data(
+        {"image": images, "video": [(frames, {"fps": 2.0, "frames_indices": [0, 1]})]}
+    )
+    prompt = hf_processor.image_token * len(images) + hf_processor.video_token
+
+    def pixels(mm_device_do_normalize: bool) -> list[torch.Tensor]:
+        ctx.model_config.multimodal_config.mm_device_do_normalize = (
+            mm_device_do_normalize
+        )
+        data = processor(prompt, mm_items=mm_items)["mm_kwargs"].get_data()
+        return [*data["pixel_values"], *data["pixel_values_videos"]]
+
+    normalized = pixels(False)
+    raw = pixels(True)
+
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
+    for raw_values, normalized_values in zip(raw, normalized, strict=True):
+        assert raw_values.dtype == torch.uint8
+        output = input_norm(raw_values.to(device), normalized_values.dtype)
+        torch.testing.assert_close(output, normalized_values.to(device))
+
+
+def test_dummy_audio_length_falls_back_for_the_unified_extractor():
+    """The unified audio feature extractor does not define `fft_length`.
+
+    `Gemma4DummyInputsBuilder.get_dummy_mm_data` read that attribute
+    unconditionally, so memory profiling raised `AttributeError` for every
     unified Gemma 4 deployment in which audio is the modality with the largest
-    per-item token count -- which is the case as soon as ``audio_seq_length``
+    per-item token count -- which is the case as soon as `audio_seq_length`
     is raised above the video budget.
     """
 
@@ -315,7 +364,8 @@ class _MockEmbedVision(torch.nn.Module):
         return self.embedding_projection(x)
 
 
-class _MockUnifiedModel:
+class _MockUnifiedModel(Gemma4UnifiedForConditionalGeneration):
+    # Initialize only the modules needed by the borrowed vision methods.
     def __init__(
         self,
         embed_dim: int = 48,
@@ -323,17 +373,15 @@ class _MockUnifiedModel:
         dtype: torch.dtype = torch.float32,
         device: str = "cpu",
     ):
+        torch.nn.Module.__init__(self)
+        self.config = SimpleNamespace(vision_config=SimpleNamespace())
+        self.vision_input_norm = IdentityInputNorm()
         self.vision_embedder = _build_test_embedder(
             embed_dim=embed_dim, max_pos=max_pos, dtype=dtype, device=device
         )
         self.embed_vision = _MockEmbedVision(
             embed_dim=embed_dim, dtype=dtype, device=device
         )
-
-    _vision_chunk = staticmethod(Gemma4UnifiedForConditionalGeneration._vision_chunk)
-    _embed_vision_patches = Gemma4UnifiedForConditionalGeneration._embed_vision_patches
-    _process_image_input = Gemma4UnifiedForConditionalGeneration._process_image_input
-    _process_video_input = Gemma4UnifiedForConditionalGeneration._process_video_input
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
@@ -500,3 +548,76 @@ def test_cuda_execution_with_gpu_sync_allowed():
     assert len(out) == 2
     assert out[0].device.type == "cuda"
     assert out[0].dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize(
+    "residue",
+    # residues 1..160 are exactly where the tower-based mel/conv formula
+    # undercounts ceil(L / 640) by one
+    [0, 1, 160, 161, 639],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_UNIFIED_MODEL_ID])
+def test_audio_repl_token_count_matches_hf_processor(model_id: str, residue: int):
+    """Unified audio placeholder count must equal the HF processor's
+    per-audio valid frame count, ceil(L / 640)."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+
+    audio_len = 640 * 5 + residue
+    assert isinstance(processor.info, Gemma4UnifiedProcessingInfo)
+    repl = processor.info.get_audio_repl(
+        audio_len=audio_len,
+        processor=hf_processor,
+    )
+    num_repl_tokens = repl.full.count(hf_processor.audio_token_id)
+
+    hf_features = hf_processor.feature_extractor(
+        [np.zeros(audio_len, dtype=np.float32)]
+    )
+    num_hf_tokens = int(hf_features["input_features_mask"][0].sum())
+
+    assert num_hf_tokens == math.ceil(audio_len / 640)
+    assert num_repl_tokens == num_hf_tokens
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_UNIFIED_MODEL_ID])
+def test_multi_audio_apply_different_lengths(model_id: str):
+    """Two audios of different lengths must produce self-contained
+    unpadded per-item features whose frame counts match the placeholders."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 2},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor()
+
+    sr = hf_processor.feature_extractor.sampling_rate
+    audios = [
+        (np.zeros(640 * 3, dtype=np.float32), sr),
+        (np.zeros(640 * 5 + 100, dtype=np.float32), sr),
+    ]
+    expected_frames = [3, 6]
+
+    prompt = hf_processor.audio_token * 2
+    processed_inputs = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs={},
+    )
+
+    audio_placeholders = processed_inputs["mm_placeholders"]["audio"]
+    assert [p.get_num_embeds() for p in audio_placeholders] == expected_frames
+
+    mm_items = processed_inputs["mm_kwargs"]["audio"]
+    for item, num_frames in zip(mm_items, expected_frames, strict=True):
+        assert item is not None
+        features = item["input_features_padded"].data
+        mask = item["input_features_mask"].data
+        assert isinstance(features, torch.Tensor)
+        assert isinstance(mask, torch.Tensor)
+        assert features.shape == torch.Size([num_frames, 640])
+        assert int(mask.sum()) == num_frames

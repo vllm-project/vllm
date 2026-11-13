@@ -28,15 +28,16 @@ use tonic_health::server::health_reporter;
 use tower::service_fn;
 use vllm_chat::multimodal::{MmLimitPerPrompt, MmLimitSpec, MmModality};
 use vllm_chat::{
-    ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
-    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
+    ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatRequestProcessor, ChatTextBackend,
+    DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
+    NewChatOutputProcessorOptions, RenderedPrompt,
 };
 use vllm_engine_core_client::mock_engine::{
     DEFAULT_MOCK_BLOCK_SIZE, DEFAULT_MOCK_MAX_MODEL_LEN, DEFAULT_MOCK_NUM_GPU_BLOCKS,
     MockEngineConfig, connect_to_bootstrapped_frontend, default_ready_response,
 };
 use vllm_engine_core_client::protocol::decode_value;
-use vllm_engine_core_client::protocol::dtype::TensorDtype;
+use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue,
@@ -48,21 +49,30 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task_with_ready,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
+use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend};
+use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
+use super::health::{EngineHealth, HealthMonitor};
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
-use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
+use super::pb::render_server::Render as _;
+use super::{
+    ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, RenderServiceImpl, pb,
+};
 use crate::listener::{Listener, MaybeTlsListener};
+use crate::model_names::ServedModelNames;
+use crate::render::RenderState;
 use crate::state::AppState;
 use crate::tls;
 use crate::tls_tests::{TestCerts, server_tls};
@@ -320,6 +330,14 @@ fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
 fn multimodal_backend_with_limits(
     limit_mm_per_prompt: MmLimitPerPrompt,
 ) -> Arc<dyn ChatTextBackend> {
+    Arc::new(FakeMultimodalBackend {
+        model_info: qwen_multimodal_model_info(limit_mm_per_prompt),
+    })
+}
+
+fn qwen_multimodal_model_info(
+    limit_mm_per_prompt: MmLimitPerPrompt,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-grpc-qwen-config-{}.json",
         uuid::Uuid::new_v4()
@@ -342,7 +360,7 @@ fn multimodal_backend_with_limits(
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
     let _ = fs::remove_file(config_path);
-    Arc::new(FakeMultimodalBackend { model_info })
+    model_info
 }
 
 /// Build the gRPC service + mock engine that serves a single request with the
@@ -353,7 +371,7 @@ async fn setup_grpc_service(
 ) -> (
     InferenceServer<InferenceServiceImpl>,
     ControlServer<ControlServiceImpl>,
-    tokio::sync::watch::Receiver<bool>,
+    EngineHealth,
     MockEngineTask,
 ) {
     setup_grpc_service_with_backend(
@@ -373,7 +391,7 @@ async fn setup_grpc_service_with_backend<F>(
 ) -> (
     InferenceServer<InferenceServiceImpl>,
     ControlServer<ControlServiceImpl>,
-    tokio::sync::watch::Receiver<bool>,
+    EngineHealth,
     MockEngineTask,
 )
 where
@@ -387,8 +405,7 @@ where
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let request = decode_add_request(&add);
                 check_request(&request);
                 send_outputs(
                     push,
@@ -410,7 +427,7 @@ async fn setup_grpc_service_with_engine_script<F>(
 ) -> (
     InferenceServer<InferenceServiceImpl>,
     ControlServer<ControlServiceImpl>,
-    tokio::sync::watch::Receiver<bool>,
+    EngineHealth,
     MockEngineTask,
 )
 where
@@ -437,9 +454,10 @@ where
     )
     .await
     .expect("connect client");
-    let engine_health = client.subscribe_health();
+    let llm = EngineCoreLlm::new(client);
+    let engine_health = EngineHealth::subscribe(&llm);
 
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), backend);
+    let chat = ChatLlm::from_shared_backend(llm, backend).with_served_model_name("test-model");
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
@@ -475,31 +493,33 @@ async fn grpc_test_server(
 async fn start_grpc_test_server(
     inference_service: InferenceServer<InferenceServiceImpl>,
     control_service: ControlServer<ControlServiceImpl>,
-    engine_health: tokio::sync::watch::Receiver<bool>,
+    engine_health: EngineHealth,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
-    health_reporter.set_serving::<InferenceServer<InferenceServiceImpl>>().await;
-    health_reporter.set_serving::<ControlServer<ControlServiceImpl>>().await;
+    let health_monitor = HealthMonitor::register(health_reporter, engine_health).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
 
     let server_task = tokio::spawn(async move {
         let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
-        let server = TonicServer::builder()
-            .add_service(health_service)
-            .add_service(control_service)
-            .add_service(inference_service)
-            .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
-        let health_monitor =
-            super::monitor_health(health_reporter, engine_health, shutdown.clone());
-        let server = async move {
-            let result = server.await;
-            shutdown.cancel();
-            result
-        };
-        let (server_result, ()) = tokio::join!(server, health_monitor);
+        let server_shutdown = shutdown.clone();
+        let server_result = health_monitor
+            .serve(shutdown, std::future::pending(), |stop| {
+                let server = TonicServer::builder()
+                    .add_service(health_service)
+                    .add_service(control_service)
+                    .add_service(inference_service)
+                    .serve_with_incoming_shutdown(incoming, stop);
+                async move {
+                    let result = server.await;
+                    server_shutdown.cancel();
+                    result
+                }
+            })
+            .await
+            .expect("grpc server is never forced to abort");
         server_result.expect("grpc server");
     });
 
@@ -677,6 +697,7 @@ async fn h2_unresponsive_peer_closed_within(addr: &str, wait: Duration) -> bool 
 async fn unary_generate_returns_collected_text() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-unary", default_stream_output_specs()).await;
+    let before = render_duration_count();
 
     let response = client
         .generate(pb::GenerateRequest {
@@ -712,8 +733,23 @@ async fn unary_generate_returns_collected_text() {
     let prompt = response.prompt_info.expect("prompt_info present");
     assert_eq!(prompt.num_prompt_tokens, 5); // "hello" = 5 bytes
 
+    // The text facade records the render, as for `/v1/completions`.
+    assert_eq!(render_duration_count() - before, 1.0);
+
     engine_task.await.expect("mock engine task");
     server_task.abort();
+}
+
+/// `vllm:request_render_duration_seconds` observations of `completion`
+/// renders for the test model.
+fn render_duration_count() -> f64 {
+    let rendered = METRICS.render().expect("render metrics");
+    let prefix = "vllm:request_render_duration_seconds_count{model_name=\"test-model\",\
+                  request_type=\"completion\"} ";
+    rendered
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .map_or(0.0, |value| value.parse().expect("numeric sample"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -902,7 +938,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
             default_stream_output_specs(),
             multimodal_backend(),
             |request| {
-                let token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+                let token_ids = decode_prompt_token_ids(request).expect("prompt token ids");
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
@@ -1021,7 +1057,7 @@ async fn generate_forwards_preprocessed_multimodal_features() {
                 multimodal_backend(),
                 move |request| {
                     assert_eq!(
-                        request.prompt_token_ids.as_deref(),
+                        decode_prompt_token_ids(request).as_deref(),
                         Some(&[11, 99, 99, 12][..])
                     );
                     let features = request.mm_features.as_ref().expect("multimodal features");
@@ -1523,7 +1559,7 @@ async fn unary_generate_invalid_sampling_params_returns_invalid_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_invalid_structured_outputs_returns_invalid_argument() {
-    use pb::decoding_parameters::{StringChoices, StructuredOutput};
+    use pb::structured_output::{Kind, StringChoices};
 
     let (mut client, server_task, _engine_task) = grpc_test_server(
         b"engine-grpc-invalid-structured-outputs",
@@ -1533,20 +1569,20 @@ async fn unary_generate_invalid_structured_outputs_returns_invalid_argument() {
 
     for (structured_output, message) in [
         (
-            StructuredOutput::Grammar("  ".to_string()),
+            Kind::Grammar("  ".to_string()),
             "grammar cannot be an empty string",
         ),
         (
-            StructuredOutput::Choice(StringChoices { choices: vec![] }),
+            Kind::Choice(StringChoices { choices: vec![] }),
             "choice cannot be empty",
         ),
         (
-            StructuredOutput::Regex("a\0b".to_string()),
+            Kind::Regex("a\0b".to_string()),
             "must not contain a NUL character",
         ),
         // xgrammar would accept this schema but ignore `uniqueItems`.
         (
-            StructuredOutput::Json(r#"{"type": "array", "uniqueItems": true}"#.to_string()),
+            Kind::Json(r#"{"type": "array", "uniqueItems": true}"#.to_string()),
             "not supported by xgrammar",
         ),
     ] {
@@ -1556,7 +1592,9 @@ async fn unary_generate_invalid_structured_outputs_returns_invalid_argument() {
                 model: "test-model".to_string(),
                 prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
                 decoding: Some(pb::DecodingParameters {
-                    structured_output: Some(structured_output),
+                    structured_output: Some(pb::StructuredOutput {
+                        kind: Some(structured_output),
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2024,8 +2062,7 @@ async fn dropping_generate_stream_aborts_before_engine_output() {
                 boxed_test_future(async move {
                     let add = recv_engine_message(dealer).await;
                     assert_eq!(add[0].as_ref(), &[0x00]);
-                    let request: EngineCoreRequest =
-                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    let request = decode_add_request(&add);
                     submitted_tx.send(()).expect("signal submitted request");
 
                     // A queued request produces no output before cancellation.
@@ -2403,7 +2440,10 @@ async fn control_sleep_rejects_unknown_level() {
             ready,
             Arc::new(FakeTextBackend::default()),
             None,
-            |_, _| boxed_test_future(async move {}),
+            // With sleep mode, the client asks for readiness at connect.
+            |dealer, push| {
+                boxed_test_future(reply_utility_bool(dealer, push, "is_inference_ready", true))
+            },
         )
         .await;
     let (channel, server_task) = start_grpc_test_server(
@@ -2418,6 +2458,7 @@ async fn control_sleep_rejects_unknown_level() {
         .sleep(pb::SleepRequest {
             level: Some(3),
             mode: pb::PauseMode::Unspecified.into(),
+            reset_connector: None,
         })
         .await
         .expect_err("level 3 should be rejected");
@@ -2561,7 +2602,7 @@ async fn control_aggregates_multi_engine_capacity() {
         }
         let client = client_task.await.unwrap().expect("connect multi-engine client");
         let chat = ChatLlm::from_shared_backend(
-            Llm::new(client),
+            EngineCoreLlm::new(client),
             Arc::new(FakeTextBackend::default()) as Arc<dyn ChatTextBackend>,
         );
         let state = AppState::new(vec!["test-model".to_string()], chat);
@@ -2628,20 +2669,29 @@ fn kv_event_source_filters_and_exposes_zmq_publisher() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() {
-    let (inference_service, control_service, _connected_engine_health, _engine_task) =
+    let (inference_service, control_service, connected_engine_health, _engine_task) =
         setup_grpc_service(b"engine-grpc-health-failure", default_stream_output_specs()).await;
-    let (engine_health_tx, engine_health) = tokio::sync::watch::channel(true);
+    let (engine_health_tx, liveness) = tokio::sync::watch::channel(true);
     let (channel, server_task) = start_grpc_test_server(
         inference_service,
         control_service,
-        engine_health,
+        EngineHealth {
+            liveness,
+            ..connected_engine_health
+        },
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
     let mut health_client = HealthClient::new(channel);
 
     let mut health_streams = Vec::new();
-    for service in ["vllm.Inference", "vllm.Control", ""] {
+    for service in [
+        "vllm.Inference",
+        "vllm.Control",
+        "",
+        "liveness",
+        "readiness",
+    ] {
         let service_label = if service.is_empty() {
             "overall"
         } else {
@@ -2769,6 +2819,17 @@ async fn grpc_shutdown_closes_health_watch_and_server() {
         HealthServingStatus::Serving as i32,
         "unexpected initial health status for vllm.Inference"
     );
+    let mut liveness = health_client
+        .watch(HealthCheckRequest {
+            service: "liveness".to_string(),
+        })
+        .await
+        .expect("start health watch for liveness")
+        .into_inner();
+    assert_eq!(
+        next_health_status(&mut liveness).await,
+        HealthServingStatus::Serving
+    );
 
     control_client
         .shutdown(pb::ShutdownRequest {})
@@ -2798,9 +2859,773 @@ async fn grpc_shutdown_closes_health_watch_and_server() {
         stream_end.is_none(),
         "vllm.Inference health watch remained open"
     );
+    let liveness_end = tokio::time::timeout(Duration::from_secs(2), liveness.message())
+        .await
+        .expect("timed out waiting for liveness health watch to close")
+        .expect("failed while closing liveness health watch");
+    assert!(
+        liveness_end.is_none(),
+        "orderly shutdown must not fail liveness: {liveness_end:?}"
+    );
 
     tokio::time::timeout(Duration::from_secs(2), server_task)
         .await
         .expect("timed out waiting for gRPC server shutdown")
         .expect("gRPC server task failed");
+}
+
+async fn next_health_status(
+    stream: &mut tonic::Streaming<tonic_health::pb::HealthCheckResponse>,
+) -> HealthServingStatus {
+    let response = tokio::time::timeout(Duration::from_secs(2), stream.message())
+        .await
+        .expect("timed out waiting for a health update")
+        .expect("failed to read health update")
+        .expect("health watch ended");
+    HealthServingStatus::try_from(response.status).expect("known health status")
+}
+
+/// Serve pause, resume, and readiness asks as an engine that is ready unless
+/// paused, in whatever order the client sends them.
+async fn serve_pausable_engine(dealer: &mut DealerSocket, push: &mut PushSocket) {
+    let mut paused = false;
+    loop {
+        let frames = recv_engine_message(dealer).await;
+        assert_eq!(frames[0].as_ref(), &[0x03]);
+        let payload = decode_value(&frames[1]).expect("decode utility payload");
+        let fields = payload.as_array().expect("utility payload array");
+        let call_id = fields[1].as_u64().expect("utility call id");
+        let result = match fields[2].as_str().expect("utility method") {
+            "is_inference_ready" => Value::Boolean(!paused),
+            "pause_generation" => {
+                paused = true;
+                Value::Nil
+            }
+            "resume_scheduler" => {
+                paused = false;
+                Value::Nil
+            }
+            method => panic!("unexpected utility call {method}"),
+        };
+        send_outputs(
+            push,
+            UtilityCallOutput {
+                output: UtilityOutput {
+                    call_id: call_id.into(),
+                    failure_message: None,
+                    result: Some(UtilityResultEnvelope::without_type_info(result)),
+                },
+                ..Default::default()
+            }
+            .into(),
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_pause_withdraws_readiness_but_not_liveness() {
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-pause-readiness",
+            default_ready_response(),
+            Arc::new(FakeTextBackend::default()),
+            None,
+            |dealer, push| boxed_test_future(serve_pausable_engine(dealer, push)),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut control_client = ControlClient::new(channel.clone());
+    let mut health_client = HealthClient::new(channel);
+    let mut readiness_streams = Vec::new();
+    for service in ["readiness", "vllm.Inference"] {
+        let mut stream = health_client
+            .watch(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .expect("start health watch")
+            .into_inner();
+        assert_eq!(
+            next_health_status(&mut stream).await,
+            HealthServingStatus::Serving
+        );
+        readiness_streams.push(stream);
+    }
+
+    control_client
+        .pause_generation(pb::PauseGenerationRequest::default())
+        .await
+        .expect("pause generation");
+    for stream in &mut readiness_streams {
+        assert_eq!(
+            next_health_status(stream).await,
+            HealthServingStatus::NotServing
+        );
+    }
+    for service in ["liveness", "vllm.Control", ""] {
+        let status = health_client
+            .check(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .expect("check health")
+            .into_inner()
+            .status;
+        assert_eq!(
+            status,
+            HealthServingStatus::Serving as i32,
+            "a pause must not fail {service:?}"
+        );
+    }
+
+    control_client
+        .resume_generation(pb::ResumeGenerationRequest {})
+        .await
+        .expect("resume generation");
+    for stream in &mut readiness_streams {
+        assert_eq!(
+            next_health_status(stream).await,
+            HealthServingStatus::Serving
+        );
+    }
+
+    server_task.abort();
+}
+
+// ========================================================================================
+// Render service
+// ========================================================================================
+
+const RENDER_EOS_TOKEN_ID: u32 = 0xF010;
+
+/// Qwen3-like backend, so that `auto` parser selection resolves the reasoning
+/// and tool-call parsers, rendering each message as `role: text\n`.
+#[derive(Clone, Debug)]
+struct FakeRenderBackend;
+
+impl TextBackend for FakeRenderBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(
+            TestTokenizer::new()
+                .with_regular_token("<think>", 0xF001)
+                .with_regular_token("</think>", 0xF002)
+                .with_special_token("<|im_end|>", RENDER_EOS_TOKEN_ID),
+        )
+    }
+
+    fn model_id(&self) -> &str {
+        "Qwen/Qwen3-0.6B"
+    }
+}
+
+impl ChatBackend for FakeRenderBackend {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(self.clone())
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            self.model_id(),
+            self.tokenizer(),
+            options.tool_call_parser,
+            options.reasoning_parser,
+            options.tool_strict_level,
+        )?))
+    }
+}
+
+impl ChatRenderer for FakeRenderBackend {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
+        let mut prompt = String::new();
+        for message in &request.messages {
+            let mut text = message.text_content()?;
+            if let vllm_chat::ChatMessage::Assistant { content } = message {
+                for block in content {
+                    if let vllm_chat::AssistantContentBlock::ToolCall(call) = block {
+                        text.push_str(&format!(" {}({})", call.name, call.arguments));
+                    }
+                }
+            }
+            prompt.push_str(&format!("{}: {text}\n", message.role().as_str()));
+        }
+        if request.chat_options.add_generation_prompt() {
+            prompt.push_str("assistant:");
+        }
+        Ok(RenderedPrompt {
+            prompt: Prompt::Text(prompt),
+            media_order: None,
+            effective_template_kwargs: request.chat_options.template_kwargs.clone(),
+        })
+    }
+}
+
+fn render_state() -> RenderState {
+    let backend = Arc::new(FakeRenderBackend);
+    RenderState {
+        model: "Qwen/Qwen3-0.6B".to_string(),
+        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
+        max_model_len: Some(1024),
+        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
+        text: TextRequestProcessor::new(backend.clone(), 1024),
+        chat: ChatRequestProcessor::new(backend, None, None),
+        lora_modules: Vec::new(),
+    }
+}
+
+fn render_service() -> RenderServiceImpl<RenderState> {
+    RenderServiceImpl::new(Arc::new(render_state()))
+}
+
+fn user_message(content: pb::chat_content::Content) -> pb::ChatMessage {
+    pb::ChatMessage {
+        message: Some(pb::chat_message::Message::User(pb::chat_message::User {
+            content: Some(pb::ChatContent {
+                content: Some(content),
+            }),
+        })),
+    }
+}
+
+fn user_text(text: &str) -> pb::ChatMessage {
+    user_message(pb::chat_content::Content::Text(text.to_string()))
+}
+
+fn weather_chat_request() -> pb::ChatRequest {
+    pb::ChatRequest {
+        messages: vec![user_text("Weather in Paris?")],
+        tools: vec![pb::ChatTool {
+            name: "get_weather".to_string(),
+            parameters_json: r#"{"type":"object","properties":{"city":{"type":"string"}}}"#
+                .to_string(),
+            ..Default::default()
+        }],
+        chat_template_kwargs: json_to_proto_struct(&serde_json::json!({"enable_thinking": true})),
+        ..Default::default()
+    }
+}
+
+fn render_token_ids(text: &str) -> Vec<u32> {
+    FakeRenderBackend.tokenizer().encode(text, false).expect("encode")
+}
+
+async fn render_chat(
+    service: &RenderServiceImpl<RenderState>,
+    chat: pb::ChatRequest,
+) -> pb::RenderChatResponse {
+    service
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(chat),
+            ..Default::default()
+        }))
+        .await
+        .expect("render chat")
+        .into_inner()
+}
+
+#[tokio::test]
+async fn render_chat_returns_rendered_prompt_and_reasoning_gate() {
+    let rendered = render_chat(&render_service(), weather_chat_request()).await;
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
+    assert_eq!(rendered.structured_output, None);
+    // The engine's reasoning parser sees the same thinking mode as the template.
+    let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
+    assert_eq!(
+        gate.chat_template_kwargs,
+        json_to_proto_struct(&serde_json::json!({"enable_thinking": true}))
+    );
+}
+
+#[tokio::test]
+async fn render_chat_truncates_prompt() {
+    let truncated = |side: pb::prompt_truncation::Side| pb::ChatRequest {
+        truncation: Some(pb::PromptTruncation {
+            limit: Some(pb::prompt_truncation::Limit::MaxTokens(4)),
+            side: side as i32,
+        }),
+        ..weather_chat_request()
+    };
+    let service = render_service();
+
+    let left = render_chat(
+        &service,
+        truncated(pb::prompt_truncation::Side::Unspecified),
+    )
+    .await;
+    let right = render_chat(&service, truncated(pb::prompt_truncation::Side::Right)).await;
+
+    assert_eq!(left.prompt_token_ids, render_token_ids("ant:"));
+    assert_eq!(right.prompt_token_ids, render_token_ids("user"));
+}
+
+/// Without a parser-built grammar, the constraint comes back as sent.
+#[tokio::test]
+async fn render_chat_echoes_structured_output_without_parsers() {
+    let structured_output = pb::StructuredOutput {
+        kind: Some(pb::structured_output::Kind::Json(
+            r#"{"type": "object", "required": ["b", "a"]}"#.to_string(),
+        )),
+    };
+    let state = render_state();
+    let service = RenderServiceImpl::new(Arc::new(RenderState {
+        chat: state.chat.with_parser_selections(
+            vllm_chat::ParserSelection::None,
+            vllm_chat::ParserSelection::None,
+        ),
+        ..state
+    }));
+    let chat = pb::ChatRequest {
+        tools: Vec::new(),
+        structured_output: Some(structured_output.clone()),
+        ..weather_chat_request()
+    };
+
+    let rendered = render_chat(&service, chat).await;
+
+    assert_eq!(rendered.structured_output, Some(structured_output));
+}
+
+/// Assistant blocks render in the order given, a tool call without arguments
+/// renders them as an empty object, and continuing a final message that is not
+/// an assistant's is the client's error.
+#[tokio::test]
+async fn render_chat_maps_assistant_blocks_and_generation_prompt_mode() {
+    use pb::assistant_content_block::Block;
+
+    let block = |block| pb::AssistantContentBlock { block: Some(block) };
+    let assistant = pb::ChatMessage {
+        message: Some(pb::chat_message::Message::Assistant(
+            pb::chat_message::Assistant {
+                blocks: vec![
+                    block(Block::Reasoning("think".to_string())),
+                    block(Block::Text("one ".to_string())),
+                    block(Block::ToolCall(pb::ChatToolCall {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        arguments: String::new(),
+                    })),
+                    block(Block::Text("two".to_string())),
+                ],
+            },
+        )),
+    };
+    let chat = |messages, mode: pb::GenerationPromptMode| pb::ChatRequest {
+        messages,
+        generation_prompt_mode: mode as i32,
+        ..weather_chat_request()
+    };
+    let service = render_service();
+
+    let rendered = render_chat(
+        &service,
+        chat(
+            vec![user_text("Hi"), assistant],
+            pb::GenerationPromptMode::ContinueFinalAssistant,
+        ),
+    )
+    .await;
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Hi\nassistant: one two get_weather({})\n")
+    );
+
+    let status = service
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(chat(
+                vec![user_text("Hi")],
+                pb::GenerationPromptMode::ContinueFinalAssistant,
+            )),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("no final assistant message");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn render_chat_rejects_unknown_model() {
+    let status = render_service()
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(pb::ChatRequest {
+                model: "other-model".to_string(),
+                ..weather_chat_request()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("unknown model");
+
+    assert_eq!(status.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn render_chat_accepts_lora_adapter_model() {
+    let service = RenderServiceImpl::new(Arc::new(RenderState {
+        lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
+        ..render_state()
+    }));
+    let chat = pb::ChatRequest {
+        model: "adapter-a".to_string(),
+        ..weather_chat_request()
+    };
+
+    let rendered = render_chat(&service, chat).await;
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
+}
+
+#[tokio::test]
+async fn render_chat_returns_parser_grammar_for_required_tool_choice() {
+    let chat = pb::ChatRequest {
+        tool_choice: Some(pb::ChatToolChoice {
+            choice: Some(pb::chat_tool_choice::Choice::Mode(
+                pb::chat_tool_choice::Mode::Required as i32,
+            )),
+        }),
+        ..weather_chat_request()
+    };
+
+    let rendered = render_chat(&render_service(), chat).await;
+
+    let Some(pb::StructuredOutput {
+        kind: Some(pb::structured_output::Kind::StructuralTag(structural_tag)),
+    }) = rendered.structured_output
+    else {
+        panic!(
+            "expected a structural tag: {:?}",
+            rendered.structured_output
+        );
+    };
+    assert!(structural_tag.contains("get_weather"), "{structural_tag}");
+    // The grammar covers the output from its first token.
+    let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
+    assert_eq!(gate.reasoning_ended, Some(true));
+}
+
+#[tokio::test]
+async fn render_chat_composes_structured_output_into_parser_grammar() {
+    let chat = pb::ChatRequest {
+        structured_output: Some(pb::StructuredOutput {
+            kind: Some(pb::structured_output::Kind::Json(
+                r#"{"type":"object","properties":{"forecast_summary":{"type":"string"}}}"#
+                    .to_string(),
+            )),
+        }),
+        ..weather_chat_request()
+    };
+
+    let rendered = render_chat(&render_service(), chat).await;
+
+    let Some(pb::StructuredOutput {
+        kind: Some(pb::structured_output::Kind::StructuralTag(structural_tag)),
+    }) = rendered.structured_output
+    else {
+        panic!(
+            "expected a structural tag: {:?}",
+            rendered.structured_output
+        );
+    };
+    assert!(
+        structural_tag.contains("forecast_summary"),
+        "{structural_tag}"
+    );
+}
+
+/// Qwen2-VL-like backend whose renderer writes one `<|image_pad|>` per image.
+struct FakeMultimodalRenderBackend {
+    model_info: vllm_chat::multimodal::MultimodalModelInfo,
+}
+
+impl TextBackend for FakeMultimodalRenderBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID))
+    }
+
+    fn model_id(&self) -> &str {
+        "test-model"
+    }
+}
+
+impl ChatBackend for FakeMultimodalRenderBackend {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(FakeImagePadRenderer)
+    }
+
+    fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
+        Some(&self.model_info)
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            self.model_id(),
+            self.tokenizer(),
+            options.tool_call_parser,
+            options.reasoning_parser,
+            options.tool_strict_level,
+        )?))
+    }
+}
+
+struct FakeImagePadRenderer;
+
+impl ChatRenderer for FakeImagePadRenderer {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
+        let mut prompt = String::new();
+        for message in &request.messages {
+            if let vllm_chat::ChatMessage::User {
+                content: vllm_chat::ChatContent::Parts(parts),
+            } = message
+            {
+                for part in parts {
+                    match part {
+                        vllm_chat::ChatContentPart::Text { text } => prompt.push_str(text),
+                        _ => prompt.push_str("<|image_pad|>"),
+                    }
+                }
+            }
+        }
+        Ok(RenderedPrompt {
+            prompt: Prompt::Text(prompt),
+            media_order: None,
+            effective_template_kwargs: Default::default(),
+        })
+    }
+}
+
+fn multimodal_render_service() -> RenderServiceImpl<RenderState> {
+    let backend = Arc::new(FakeMultimodalRenderBackend {
+        model_info: qwen_multimodal_model_info(Default::default()),
+    });
+    RenderServiceImpl::new(Arc::new(RenderState {
+        text: TextRequestProcessor::new(backend.clone(), 1024),
+        chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
+        ..render_state()
+    }))
+}
+
+fn image_chat_request() -> pb::ChatRequest {
+    use pb::chat_content_part::Part;
+
+    pb::ChatRequest {
+        messages: vec![user_message(pb::chat_content::Content::Parts(
+            pb::ChatContentParts {
+                parts: vec![
+                    pb::ChatContentPart {
+                        part: Some(Part::ImageUrl(pb::ChatImageUrl {
+                            url: TINY_PNG_DATA_URI.to_string(),
+                            ..Default::default()
+                        })),
+                    },
+                    pb::ChatContentPart {
+                        part: Some(Part::Text("Describe".to_string())),
+                    },
+                ],
+            },
+        ))],
+        ..Default::default()
+    }
+}
+
+/// RenderChat preprocesses images into expanded placeholders plus the inline
+/// features that `Inference.Generate` accepts as preprocessed media.
+#[tokio::test]
+async fn render_chat_returns_preprocessed_media_for_generate() {
+    let rendered = render_chat(&multimodal_render_service(), image_chat_request()).await;
+
+    let [item] = rendered.media.as_slice() else {
+        panic!("expected one media item: {:?}", rendered.media);
+    };
+    let Some(pb::media_item::Source::Features(features)) = &item.source else {
+        panic!("expected preprocessed features: {item:?}");
+    };
+    let placeholder =
+        &rendered.prompt_token_ids[features.offset as usize..][..features.length as usize];
+    assert!(placeholder.len() > 1, "placeholder is expanded");
+    assert!(placeholder.iter().all(|&id| id == QWEN_IMAGE_TOKEN_ID));
+    assert!(features.mm_hash.is_some());
+
+    // The media decodes the way Inference.Generate decodes it.
+    let vllm_chat::multimodal::MultimodalInput::Preprocessed(decoded) =
+        super::media::from_proto(rendered.media, None).expect("decode media")
+    else {
+        panic!("expected preprocessed media");
+    };
+    assert!(decoded[0].data.is_some());
+}
+
+#[tokio::test]
+async fn render_chat_can_omit_media_kwargs() {
+    let rendered = multimodal_render_service()
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(image_chat_request()),
+            omit_media_kwargs: true,
+        }))
+        .await
+        .expect("render chat")
+        .into_inner();
+
+    let Some(pb::media_item::Source::Features(features)) = &rendered.media[0].source else {
+        panic!("expected preprocessed features");
+    };
+    assert_eq!(features.kwargs, None);
+    assert!(features.mm_hash.is_some());
+}
+
+/// Input the server cannot map is rejected rather than dropped or defaulted.
+#[tokio::test]
+async fn render_chat_rejects_unset_parts_and_unknown_enum_values() {
+    use pb::chat_content_part::Part;
+
+    let unknown = 99;
+    let with_part = |part| pb::ChatRequest {
+        messages: vec![user_message(pb::chat_content::Content::Parts(
+            pb::ChatContentParts {
+                parts: vec![pb::ChatContentPart { part }],
+            },
+        ))],
+        ..weather_chat_request()
+    };
+    let cases = [
+        ("unset part", with_part(None)),
+        (
+            "image detail",
+            with_part(Some(Part::ImageUrl(pb::ChatImageUrl {
+                url: TINY_PNG_DATA_URI.to_string(),
+                detail: unknown,
+                ..Default::default()
+            }))),
+        ),
+        (
+            "generation prompt mode",
+            pb::ChatRequest {
+                generation_prompt_mode: unknown,
+                ..weather_chat_request()
+            },
+        ),
+        (
+            "tool choice mode",
+            pb::ChatRequest {
+                tool_choice: Some(pb::ChatToolChoice {
+                    choice: Some(pb::chat_tool_choice::Choice::Mode(unknown)),
+                }),
+                ..weather_chat_request()
+            },
+        ),
+        (
+            "truncation side",
+            pb::ChatRequest {
+                truncation: Some(pb::PromptTruncation {
+                    limit: Some(pb::prompt_truncation::Limit::MaxTokens(4)),
+                    side: unknown,
+                }),
+                ..weather_chat_request()
+            },
+        ),
+    ];
+    let service = render_service();
+
+    for (case, chat) in cases {
+        let status = service
+            .render_chat(tonic::Request::new(pb::RenderChatRequest {
+                chat: Some(chat),
+                ..Default::default()
+            }))
+            .await
+            .expect_err(case);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{case}");
+    }
+}
+
+/// Media that cannot be decoded is the client's error, as in HTTP render.
+#[tokio::test]
+async fn render_chat_rejects_undecodable_media_as_invalid_argument() {
+    use pb::chat_content_part::Part;
+
+    let chat = pb::ChatRequest {
+        messages: vec![user_message(pb::chat_content::Content::Parts(
+            pb::ChatContentParts {
+                parts: vec![pb::ChatContentPart {
+                    part: Some(Part::ImageUrl(pb::ChatImageUrl {
+                        url: "data:image/png;base64,bm90IGFuIGltYWdl".to_string(),
+                        ..Default::default()
+                    })),
+                }],
+            },
+        ))],
+        ..Default::default()
+    };
+
+    let status = multimodal_render_service()
+        .render_chat(tonic::Request::new(pb::RenderChatRequest {
+            chat: Some(chat),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("undecodable image");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
+/// Shutdown ends open health watches, including one on the overall server
+/// status, so the render gRPC server's drain finishes.
+#[tokio::test]
+async fn render_grpc_server_shutdown_ends_health_watches() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let server = tokio::spawn(crate::render::serve_render_grpc(
+        Arc::new(render_state()),
+        MaybeTlsListener::plain(Listener::Tcp(listener)),
+        shutdown.clone(),
+    ));
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    // Held until the server stops: dropping the client could close the
+    // connection and end the watch on its own.
+    let mut client = HealthClient::new(channel);
+    let mut watch = client
+        .watch(HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .expect("watch overall health")
+        .into_inner();
+    let first = watch.message().await.expect("watch message").expect("status");
+    assert_eq!(first.status, HealthServingStatus::Serving as i32);
+
+    shutdown.cancel();
+
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("server drains")
+        .expect("server task")
+        .expect("server result");
+    drop(client);
 }

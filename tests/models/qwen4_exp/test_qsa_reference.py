@@ -1,21 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
 import math
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.common import qsa_cache
-from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
-from vllm.models.qwen4_exp.nvidia import indexer_qsa
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.models.qwen4_exp.common import qsa_indexer as qsa_common
+from vllm.models.qwen4_exp.common.qsa_indexer import (
+    QSAIndexerMetadataBuilder,
+    qsa_kv_cache_dtype,
+)
 from vllm.models.qwen4_exp.nvidia import (
     model as _qwen4_exp_model,  # noqa: F401
 )
+from vllm.models.qwen4_exp.nvidia import qsa_indexer
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
+from vllm.models.qwen4_exp.nvidia.ops import qsa_fp8 as qsa_fp8_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
-from vllm.models.qwen4_exp.nvidia.qsa import qsa_kv_cache_dtype
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.utils import clear_layer_kv_caches
@@ -23,6 +28,10 @@ from vllm.v1.worker.utils import clear_layer_kv_caches
 requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
     reason="QSA kernels require CUDA and Triton",
+)
+requires_qsa_metadata_kernels = pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not HAS_TRITON,
+    reason="QSA metadata kernels require CUDA or ROCm and Triton",
 )
 
 
@@ -73,7 +82,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     )
 
     monkeypatch.setattr(
-        indexer_qsa,
+        qsa_indexer,
         "qsa_prepare",
         lambda *args, **kwargs: updates.append((args, kwargs)),
     )
@@ -88,7 +97,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         lambda *args, **kwargs: selections.append((args, kwargs)),
     )
 
-    actual, _ = indexer_qsa.QSAIndexer.forward(
+    actual, _ = qsa_indexer.QSAIndexer.forward(
         indexer,
         torch.zeros(2, 2),
         torch.tensor([7, 8]),
@@ -247,10 +256,10 @@ def _qsa_sparse_paged_attention_reference(
     return output
 
 
-@requires_qsa_kernels
-def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
+@requires_qsa_metadata_kernels
+def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
     device = torch.device("cuda")
-    builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
     builder.compress_ratio = 1
     builder.reorder_batch_threshold = 4
     builder.is_circular_buffer = False
@@ -299,10 +308,10 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     assert metadata.visible_blocks.tolist() == [65, 66, 67, 68] * 3 + [0] * 4
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     device = torch.device("cuda")
-    builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = True
@@ -370,7 +379,7 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
     capacity = compress_ratio * -(-(compress_ratio + num_spec) // compress_ratio)
     query_len = num_spec + 1
 
-    slots = qsa_cache.circular_qsa_slot_mapping(
+    slots = qsa_common.circular_qsa_slot_mapping(
         torch.tensor([[1]], dtype=torch.int32),
         torch.zeros(query_len, dtype=torch.int32),
         torch.arange(chunk_start, chunk_start + query_len),
@@ -384,8 +393,8 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
 
 def _qsa_key_cache(
     block_size: int, compress_ratio: int, **kwargs
-) -> qsa_cache.QSAKeyStateCache:
-    return qsa_cache.QSAKeyStateCache(
+) -> qsa_common.QSARawKeyCache:
+    return qsa_common.QSARawKeyCache(
         head_size=64,
         dtype=torch.bfloat16,
         cache_config=SimpleNamespace(block_size=block_size),
@@ -400,7 +409,7 @@ def _qsa_key_cache(
 
 def test_qsa_state_caches_adapt_the_unified_logical_layout() -> None:
     raw_cache = _qsa_key_cache(block_size=32, compress_ratio=4)
-    compressed_cache = qsa_cache.QSACompressedKeyCache(
+    compressed_cache = qsa_common.QSACompressedKeyCache(
         head_size=64,
         dtype=torch.bfloat16,
         cache_config=SimpleNamespace(block_size=32),
@@ -448,14 +457,14 @@ def test_qsa_ring_capacity_covers_one_speculative_step(
     compress_ratio: int, num_spec: int, expected: int
 ) -> None:
     """Capacity spans the open group plus one speculative step, in whole groups."""
-    spec = _qsa_key_cache(
+    layer_config = _qsa_key_cache(
         block_size=48, compress_ratio=compress_ratio
-    ).get_kv_cache_spec(SimpleNamespace(num_speculative_tokens=num_spec))
-    assert spec.block_size == expected
+    ).get_kv_cache_config(SimpleNamespace(num_speculative_tokens=num_spec))
+    assert layer_config.spec.block_size == expected
 
 
 def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
-    """``--kv-cache-dtype-skip-layers`` keeps the listed QSA layers unquantized.
+    """`--kv-cache-dtype-skip-layers` keeps the listed QSA layers unquantized.
 
     The MTP layer's own attention is the one that matters on Flash-Next: FP8
     there cuts draft acceptance at depth while the target layers stay FP8.
@@ -467,10 +476,10 @@ def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
     assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "fp8"
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     device = torch.device("cuda")
-    builder = QSAMetadataBuilder.__new__(QSAMetadataBuilder)
+    builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
     builder.compress_ratio = 4
     builder.reorder_batch_threshold = 1
     builder.is_circular_buffer = False
@@ -509,7 +518,7 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
 def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
-    """Padded projected Q/K rows must not affect either side cache."""
+    """Padded projected Q/K rows must not affect either indexer cache."""
     from vllm.model_executor.layers.rotary_embedding import get_rope
 
     device = torch.device("cuda")
@@ -534,10 +543,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         )
     raw_cache = torch.zeros((1, 4, 1, 64), dtype=torch.bfloat16, device=device)
     compressed_cache = torch.zeros((1, 2, 1, 64), dtype=torch.bfloat16, device=device)
-    norm = SimpleNamespace(
-        weight=torch.zeros(64, dtype=torch.bfloat16, device=device),
-        variance_epsilon=1e-6,
-    )
+    norm = GemmaRMSNorm(64).to(device=device, dtype=torch.bfloat16)
     indexer = SimpleNamespace(
         _metadata=lambda: (raw_metadata, compressed_metadata),
         skip_topk=True,
@@ -559,7 +565,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
     )
     padded_keys = torch.full((8, 64), torch.nan, dtype=torch.bfloat16, device=device)
     padded_keys[:5].copy_(keys)
-    indexer_qsa.QSAIndexer.forward(
+    qsa_indexer.QSAIndexer.forward(
         indexer,
         torch.cat((torch.ones_like(padded_keys), padded_keys), dim=-1),
         torch.zeros(8, dtype=torch.long, device=device),
@@ -572,7 +578,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
     torch.testing.assert_close(compressed_cache, expected_compressed)
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 @pytest.mark.parametrize("compress_ratio", [1, 4])
 @pytest.mark.parametrize("num_reqs", [2, 3, 4, 7, 8, 9])
 def test_qsa_triton_metadata_matches_pytorch(
@@ -634,7 +640,7 @@ def test_qsa_triton_metadata_matches_pytorch(
         else None
     )
     actual_buffers = make_buffers()
-    actual = qsa_cache.build_qsa_metadata_triton(
+    actual = qsa_common.build_qsa_metadata_triton(
         common,
         *actual_buffers,
         storage_block_size=2,
@@ -647,7 +653,7 @@ def test_qsa_triton_metadata_matches_pytorch(
         torch.empty_like(actual_k_work) if actual_k_work is not None else None
     )
     expected_buffers = make_buffers()
-    expected = qsa_cache._build_qsa_metadata_torch(
+    expected = qsa_common._build_qsa_metadata_torch(
         common,
         *expected_buffers,
         storage_block_size=2,
@@ -662,7 +668,7 @@ def test_qsa_triton_metadata_matches_pytorch(
         torch.testing.assert_close(actual_k_work, expected_k_work)
 
 
-@requires_qsa_kernels
+@requires_qsa_metadata_kernels
 def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
     device = torch.device("cuda")
     num_mapped_tokens = 4096
@@ -697,14 +703,14 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
     max_num_work = (num_tokens + 3) // 4
     actual_k_work = torch.empty(max_num_work, 2, dtype=torch.int32, device=device)
     expected_k_work = torch.empty_like(actual_k_work)
-    actual = qsa_cache.build_qsa_metadata_triton(
+    actual = qsa_common.build_qsa_metadata_triton(
         common,
         *make_buffers(),
         storage_block_size=8,
         compress_ratio=4,
         k_work_metadata_buffer=actual_k_work,
     )
-    expected = qsa_cache._build_qsa_metadata_torch(
+    expected = qsa_common._build_qsa_metadata_torch(
         common,
         *make_buffers(),
         storage_block_size=8,
@@ -1128,6 +1134,114 @@ def test_qsa_sparse_paged_attention_correctness(
     expected = expected * torch.sigmoid(output_gate)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="the fp8 kernel runs on sm_100/sm_103",
+)
+# Per-rank heads at TP1/2/4/8.
+@pytest.mark.parametrize(
+    "num_query_heads,num_kv_heads", [(24, 2), (12, 1), (6, 1), (3, 1)]
+)
+@pytest.mark.parametrize("num_requests", [20, 100])
+def test_qsa_fp8_kernel_correctness(
+    num_query_heads: int, num_kv_heads: int, num_requests: int
+) -> None:
+    """The Blackwell fp8 kernel matches the dense reference.
+
+    An MTP-verify-shaped batch (num_requests x 4 rows) over the engine's fp8
+    cache layout (each token's per-head K|V side by side, page 1920). Covers
+    short contexts (masked tails) and a CUDA-graph padding row, which must
+    stay zero.
+    """
+    cpu_generator = torch.Generator().manual_seed(0)
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    head_dim, page_size = 256, 1920
+    rows_per_request, selection_width = 4, 2051
+    num_rows = num_requests * rows_per_request
+    context_lengths = torch.randint(
+        600, 3 * page_size, (num_requests,), generator=cpu_generator
+    ).tolist()
+    pages = [math.ceil(length / page_size) for length in context_lengths]
+    block_table = torch.full(
+        (num_requests, max(pages)), -1, device="cuda", dtype=torch.int32
+    )
+    physical_pages = torch.randperm(
+        sum(pages), device="cuda", dtype=torch.int32, generator=generator
+    )
+    for request, (first, count) in enumerate(
+        zip(itertools.accumulate([0] + pages[:-1]), pages)
+    ):
+        block_table[request, :count] = physical_pages[first : first + count]
+    token_to_req = torch.arange(
+        num_requests, device="cuda", dtype=torch.int32
+    ).repeat_interleave(rows_per_request)
+    token_to_req[-1] = -1  # CUDA-graph padding
+    logical_indices = torch.full(
+        (num_rows, selection_width + 1), -1, device="cuda", dtype=torch.int32
+    )
+    for row in range(num_rows):
+        length = context_lengths[row // rows_per_request]
+        count = min(length, selection_width)
+        logical_indices[row, :count] = torch.randperm(
+            length, device="cuda", generator=generator
+        )[:count]
+        logical_indices[row, selection_width] = count
+    kv_cache = (
+        torch.randn(
+            sum(pages),
+            page_size,
+            num_kv_heads,
+            2 * head_dim,
+            device="cuda",
+            generator=generator,
+        )
+        .to(torch.bfloat16)
+        .to(torch.float8_e4m3fn)
+    )
+    k_cache, v_cache = kv_cache.split(head_dim, dim=-1)
+    q = torch.randn(
+        num_rows, num_query_heads, head_dim, device="cuda", generator=generator
+    ).to(torch.bfloat16)
+    output_gate = torch.randn(
+        num_rows, num_query_heads, head_dim, device="cuda", generator=generator
+    ).to(torch.bfloat16)
+    k_scale, v_scale = 0.5, 2.0
+    # The comparison is vacuous if the public entry does not dispatch to the
+    # fp8 kernel at this shape.
+    assert qsa_fp8_ops.use_fp8_decode_kernel(num_rows * num_kv_heads, k_cache.dtype)
+
+    actual = qsa_ops.qsa_sparse_paged_attention(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        use_prefill_config=False,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        output_gate=output_gate,
+    )
+    expected = _qsa_sparse_paged_attention_reference(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices[:, :selection_width],
+        block_table,
+        token_to_req,
+        head_dim**-0.5,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
+    expected = expected * torch.sigmoid(output_gate)
+
+    # The reference computes garbage for the padding row (request -1); the
+    # kernel must leave it zero.
+    torch.testing.assert_close(actual[:-1], expected[:-1], rtol=2e-2, atol=2e-2)
+    assert not actual[-1].any()
 
 
 @requires_qsa_kernels

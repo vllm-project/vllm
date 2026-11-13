@@ -35,9 +35,12 @@ else()
   # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40), plus
   # fp4_fp4_mega_moe and fused post-expert RMSNorm for Muse Spark Open
   # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
-  # (vllm-project/DeepGEMM#43).
-  # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "0820030756945b2daec208e8e8255268360f337d")
+  # (vllm-project/DeepGEMM#43), plus the restored FP32 MQA logits and their
+  # `logits_dtype` switch (vllm-project/DeepGEMM#46) and the mega_mhc
+  # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48), plus the SM90
+  # FP8 x FP4 Mega MoE kernel (vllm-project/DeepGEMM#44).
+  # Targets the PyTorch 2.11 stable ABI (requires PyTorch 2.14+ headers at build time) and CPython 3.10 limited API.
+  set(_DEEPGEMM_UPSTREAM_TAG "0f7698fe89811f5626266a1b79a53d1014b91cf0")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)

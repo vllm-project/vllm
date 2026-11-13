@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -327,7 +328,7 @@ def _launch_sparse_decode_reduce(
 ) -> torch.Tensor:
     """Run the reduce kernel, with the inverse-RoPE epilogue if given positions.
 
-    Passing ``out_scale`` selects the MXFP8 epilogue (``out_dtype`` e4m3).
+    Passing `out_scale` selects the MXFP8 epilogue (`out_dtype` e4m3).
     """
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
@@ -915,6 +916,7 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
 
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
     monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: None)
+    monkeypatch.setattr(mod, "_can_use_aiter_pa_prefill_sparse", lambda *args: False)
     monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_dense_fallback)
     monkeypatch.setattr(
         mod,
@@ -937,6 +939,112 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
 
     assert dense_fallback_calls == 1
     assert torch.count_nonzero(output) == 0
+
+
+@pytest.mark.parametrize(
+    ("num_queries", "cdna_version", "mla_enabled", "dtype", "kv_dtype", "expected"),
+    [
+        (512, 3, True, torch.bfloat16, torch.bfloat16, True),
+        (512, 3, True, torch.float16, torch.float16, True),
+        (511, 3, True, torch.bfloat16, torch.bfloat16, False),
+        (512, 4, True, torch.bfloat16, torch.bfloat16, False),
+        (512, 0, True, torch.bfloat16, torch.bfloat16, False),
+        (512, 3, False, torch.bfloat16, torch.bfloat16, False),
+        (512, 3, True, torch.float32, torch.float32, False),
+        (512, 3, True, torch.bfloat16, torch.float16, False),
+    ],
+)
+def test_can_use_aiter_pa_prefill_sparse(
+    monkeypatch,
+    num_queries: int,
+    cdna_version: int,
+    mla_enabled: bool,
+    dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    expected: bool,
+) -> None:
+    """Literal gate. Expected values are not derived from the cutoff constant."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    monkeypatch.setattr(mod, "get_cdna_version", lambda: cdna_version)
+    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: mla_enabled)
+    q = torch.empty(num_queries, 1, HEAD_DIM, dtype=dtype)
+    kv = torch.empty(4, 1, HEAD_DIM, dtype=kv_dtype)
+    assert mod._can_use_aiter_pa_prefill_sparse(q, kv) is expected
+
+
+@pytest.mark.parametrize(
+    ("num_queries", "mla_enabled", "expect_aiter"),
+    [(512, True, True), (511, True, False), (512, False, False)],
+)
+def test_sparse_attn_prefill_routes_gfx942_pa_prefill_sparse(
+    monkeypatch, num_queries: int, mla_enabled: bool, expect_aiter: bool
+) -> None:
+    """Call site launches only when the gate passes."""
+    from unittest.mock import Mock
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    kernel = None
+    if expect_aiter:
+        pytest.importorskip("aiter.ops.triton.attention.pa_prefill_sparse")
+        from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+
+        kernel = pa_prefill_sparse
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_mla_enabled", lambda: mla_enabled)
+    monkeypatch.setattr(mod, "get_cdna_version", lambda: 3)
+    monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: False)
+
+    def zero_output(*args, **kwargs):
+        kwargs["output"].zero_()
+
+    def zero_out(*args, out, **kwargs):
+        out.zero_()
+        return out
+
+    fake_aiter = Mock(side_effect=zero_output)
+    fake_triton = Mock(side_effect=zero_out)
+    monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_aiter", fake_aiter)
+    monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_triton)
+    monkeypatch.setattr(
+        mod,
+        "_rocm_sparse_attn_prefill_ragged_triton",
+        lambda *args, **kwargs: pytest.fail("unexpected ragged Triton fallback"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_ragged_indices_from_dense",
+        lambda *args, **kwargs: (
+            torch.zeros(1, dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+        ),
+    )
+    q = torch.empty(num_queries, 1, HEAD_DIM, dtype=torch.bfloat16)
+    kv = torch.empty(4, 1, HEAD_DIM, dtype=torch.bfloat16)
+    output = torch.empty_like(q)
+    mod.rocm_sparse_attn_prefill(
+        q=q,
+        kv=kv,
+        indices=torch.zeros(num_queries, 1, dtype=torch.int32),
+        topk_length=torch.ones(num_queries, dtype=torch.int32),
+        scale=HEAD_DIM**-0.5,
+        head_dim=HEAD_DIM,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        attn_sink=torch.empty(1, dtype=torch.float32),
+        output=output,
+    )
+
+    if expect_aiter:
+        fake_aiter.assert_called_once()
+        assert fake_aiter.call_args.args[0] is kernel
+        fake_triton.assert_not_called()
+    else:
+        fake_aiter.assert_not_called()
+        fake_triton.assert_called_once()
 
 
 @requires_gfx950
@@ -1215,7 +1323,7 @@ def test_sparse_attn_decode_split_k_kernel(
 
     This path is the gfx942/gfx950 production path, so the test only runs on
     those architectures. The split count is pinned so the partial/reduce kernels are
-    exercised across split counts. ``num_splits=8`` drives splits past the
+    exercised across split counts. `num_splits=8` drives splits past the
     shortest segment length, covering the empty-split edge case handled by the
     reduce kernel.
     """
@@ -1331,7 +1439,7 @@ def test_sparse_attn_decode_reduce_inverse_rope_epilogue(adaptive_splits: bool) 
 
     The epilogue rotates a whole [H, nope + rope] row with one expression by
     feeding cos=1/sin=0 to the NoPE lanes, which only holds if the pair split
-    lands on ``nope_head_dim // 2``; the NoPE lanes therefore have to come
+    lands on `nope_head_dim // 2`; the NoPE lanes therefore have to come
     back untouched, not merely close.
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
@@ -1448,7 +1556,7 @@ def test_inverse_rope_mxfp8_rows() -> None:
 @requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_decode_mxfp8_output() -> None:
-    """``out_mxfp8`` routes the real decode through the MXFP8 epilogue."""
+    """`out_mxfp8` routes the real decode through the MXFP8 epilogue."""
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _rocm_sparse_attn_decode_ragged_triton,
     )
@@ -1746,7 +1854,7 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     device = torch.device("cuda")
     num_reqs = 3
@@ -1770,9 +1878,11 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=upper_query_len - 1,
-        parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
         enable_adaptive_verification=True,
         use_dspark=lambda: True,
+        method="dspark",
+        speculator_config=SimpleNamespace(speculator_class=None),
     )
     mla_spec = MLAAttentionSpec(
         block_size=block_size,
@@ -1783,12 +1893,11 @@ def test_dsv4_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )
-    swa_spec = SlidingWindowMLASpec(
+    swa_spec = MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=HEAD_DIM,
         dtype=torch.bfloat16,
-        sliding_window=window_size,
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )
@@ -1995,7 +2104,7 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     device = torch.device("cuda")
     num_reqs = 3
@@ -2019,9 +2128,11 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
     )
     vllm_config.speculative_config = SimpleNamespace(
         num_speculative_tokens=upper_query_len - 1,
-        parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
         enable_adaptive_verification=True,
         use_dspark=lambda: True,
+        method="dspark",
+        speculator_config=SimpleNamespace(speculator_class=None),
     )
     mla_spec = MLAAttentionSpec(
         block_size=block_size,
@@ -2032,12 +2143,11 @@ def test_dsv41_adaptive_mla_swa_metadata_graph_replay(monkeypatch) -> None:
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )
-    swa_spec = SlidingWindowMLASpec(
+    swa_spec = MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=HEAD_DIM,
         dtype=torch.uint8,
-        sliding_window=32,
         cache_dtype_str="fp8_ds_mla",
         model_version="deepseek_v4",
     )
@@ -2290,7 +2400,7 @@ def _inv_rope_via_rotary_native(
     o: torch.Tensor,
     positions: torch.Tensor,
 ) -> torch.Tensor:
-    """Reference: the official ``forward_native(inverse=True)`` path."""
+    """Reference: the official `forward_native(inverse=True)` path."""
     expected, _ = rotary_emb.forward_native(positions, o.clone(), None, inverse=True)
     return expected.to(torch.bfloat16)
 
@@ -2674,6 +2784,36 @@ def test_paged_mqa_logits_gate_v41_shuffle_vs_c4a_flat() -> None:
         gated_c4a[:, :seq_len], ref[:, :seq_len], atol=2e-3, rtol=2e-3
     )
 
+    # Explicit cache_layout="NORMAL" forces the block-flat Triton path even at
+    # ratio 1; here through a strided section view (block stride > page bytes,
+    # as in a merged cache). Same bytes as cache_flat must give the C4A result.
+    unit_stride = 50512
+    merged_view = torch.zeros(
+        num_pages * unit_stride, dtype=torch.uint8, device=device
+    ).as_strided(
+        (num_pages, block_size, 1, head_size + 4),
+        (unit_stride, head_size + 4, head_size + 4, 1),
+    )
+    merged_flat = merged_view.reshape(num_pages, -1)
+    merged_flat[:, :scale_off] = values.reshape(num_pages, -1).view(torch.uint8)
+    merged_flat[:, scale_off:] = (
+        scales.contiguous().view(torch.uint8).view(num_pages, -1)
+    )
+    got_normal = rocm_fp8_paged_mqa_logits(
+        q,
+        merged_view,
+        weights,
+        context_lens,
+        block_tables,
+        dummy_sched,
+        max_model_len,
+        compress_ratio=1,
+        cache_layout="NORMAL",
+    )
+    torch.testing.assert_close(
+        got_normal[:, :seq_len], gated_c4a[:, :seq_len], atol=0, rtol=0
+    )
+
 
 def _combine_topk_swa_indices_torch(
     topk_indices,
@@ -2829,3 +2969,260 @@ def test_v41_rocm_combine_uses_shared_kernel() -> None:
     from vllm.models.deepseek_v41.common.ops import cache_utils
 
     assert rocm.combine_topk_swa_indices is cache_utils.combine_topk_swa_indices
+
+
+# --- Merged-cache (MergedMLAIndexerSpec) indexer insert/gather ---------------
+# Per 64-token unit of the merged cache:
+#   [64 x 656B MLA fp8_ds_mla | 64 x 128B indexer fp8 data | 64 x 4B fp32
+#    scales | pad], unit stride 50512B. The indexer section handed to the
+# Triton wrappers is the strided [num_units, 64, 132] view; its block-flat
+# (NORMAL) layout must be requested explicitly via cache_layout.
+_MERGED_UNIT_BYTES = 50512
+_MERGED_BLOCK = 64
+_MERGED_MLA_ROW = 656
+_MERGED_IDX_HEAD_DIM = 128
+_MERGED_IDX_ROW = 132  # 128B fp8 data + 4B fp32 scale (two regions)
+
+
+def _merged_indexer_view(num_units: int, device: torch.device):
+    """Return (flat_buffer, indexer_section_view) for a synthetic merged cache."""
+    flat = torch.zeros(num_units * _MERGED_UNIT_BYTES, dtype=torch.uint8, device=device)
+    view = flat.as_strided(
+        (num_units, _MERGED_BLOCK, _MERGED_IDX_ROW),
+        (_MERGED_UNIT_BYTES, _MERGED_IDX_ROW, 1),
+        storage_offset=_MERGED_BLOCK * _MERGED_MLA_ROW,
+    )
+    return flat, view
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_indexer_insert_gather_merged_cache_normal_layout() -> None:
+    """cache_layout="NORMAL" round-trips through the strided merged view.
+
+    The insert wrapper auto-selects SHUFFLE when block_size > 1, which would
+    scramble the block-flat merged layout.
+    """
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        FP8_DTYPE,
+        cp_gather_indexer_k_quant_cache_triton,
+        indexer_k_quant_and_cache_triton,
+    )
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    num_units = 4
+    flat, idx_view = _merged_indexer_view(num_units, device)
+    # Sentinel-fill so stray writes outside the indexer section are visible.
+    flat.fill_(0xAB)
+
+    num_tokens = 100
+    slots = torch.randperm(num_units * _MERGED_BLOCK, device=device)[:num_tokens]
+    k = (
+        torch.randn(
+            num_tokens, _MERGED_IDX_HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        / 4
+    )
+    indexer_k_quant_and_cache_triton(
+        k,
+        idx_view,
+        slots,
+        _MERGED_IDX_HEAD_DIM,
+        "ue8m0",
+        cache_layout="NORMAL",
+    )
+
+    # The merged indexer section is two regions: 64 x 128B data, then
+    # 64 x 4B scales. Read both straight out of the flat buffer.
+    section_off = _MERGED_BLOCK * _MERGED_MLA_ROW
+    data = flat.as_strided(
+        (num_units, _MERGED_BLOCK, _MERGED_IDX_HEAD_DIM),
+        (_MERGED_UNIT_BYTES, _MERGED_IDX_HEAD_DIM, 1),
+        storage_offset=section_off,
+    ).view(FP8_DTYPE)
+    scales = flat.as_strided(
+        (num_units, _MERGED_BLOCK, 4),
+        (_MERGED_UNIT_BYTES, 4, 1),
+        storage_offset=section_off + _MERGED_BLOCK * _MERGED_IDX_HEAD_DIM,
+    ).view(torch.float32)
+    flat_data = data.reshape(-1, _MERGED_IDX_HEAD_DIM)
+    flat_scale = scales.reshape(-1)
+
+    amax = k.float().abs().amax(dim=-1).clamp(min=1e-4)
+    ref_scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)))
+    assert torch.equal(flat_scale[slots], ref_scale), (
+        "inserted ue8m0 scales mismatch (wrong layout?)"
+    )
+    dequant = flat_data[slots].float() * ref_scale.unsqueeze(-1)
+    torch.testing.assert_close(dequant, k.float(), rtol=0.07, atol=0.07 * 0.25)
+
+    # Gather the whole cache back through a single identity-block-table
+    # request and compare against the inserted tokens.
+    total = num_units * _MERGED_BLOCK
+    k_fp8 = torch.empty(total, _MERGED_IDX_HEAD_DIM, dtype=FP8_DTYPE, device=device)
+    k_scale = torch.empty(total, 4, dtype=torch.uint8, device=device)
+    block_table = torch.arange(num_units, dtype=torch.int32, device=device).unsqueeze(0)
+    cu_seqlen = torch.tensor([0, total], dtype=torch.int32, device=device)
+    token_to_seq = torch.zeros(total, dtype=torch.int32, device=device)
+    cp_gather_indexer_k_quant_cache_triton(
+        idx_view,
+        k_fp8,
+        k_scale,
+        block_table,
+        cu_seqlen,
+        token_to_seq=token_to_seq,
+        cache_layout="NORMAL",
+    )
+    gathered = k_fp8[slots].float() * k_scale[slots].view(torch.float32)
+    torch.testing.assert_close(gathered, k.float(), rtol=0.07, atol=0.07 * 0.25)
+
+    # Insert and gather must not touch the MLA rows or the unit padding.
+    section_end = section_off + _MERGED_BLOCK * _MERGED_IDX_ROW
+    for start, length in (
+        (0, section_off),
+        (section_end, _MERGED_UNIT_BYTES - section_end),
+    ):
+        region = flat.as_strided(
+            (num_units, length), (_MERGED_UNIT_BYTES, 1), storage_offset=start
+        )
+        assert (region == 0xAB).all(), (
+            f"merged-cache bytes at unit offset {start} were clobbered"
+        )
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_indexer_insert_default_layout_unchanged() -> None:
+    """Without cache_layout, a standalone block_size>1 cache stays SHUFFLE."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        indexer_k_quant_and_cache_triton,
+    )
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    num_blocks, block_size, head_dim = 4, 64, 128
+    k = torch.randn(block_size, head_dim, dtype=torch.bfloat16, device=device)
+    slots = torch.arange(block_size, device=device)
+
+    def write(cache_layout: str | None) -> torch.Tensor:
+        cache = torch.zeros(
+            num_blocks, block_size, head_dim + 4, dtype=torch.uint8, device=device
+        )
+        indexer_k_quant_and_cache_triton(
+            k, cache, slots, head_dim, "ue8m0", cache_layout=cache_layout
+        )
+        return cache
+
+    default = write(None)
+    assert torch.equal(default, write("SHUFFLE"))
+    assert not torch.equal(default, write("NORMAL"))
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_mla_backend_forward_mqa_fp8_ds_mla_merged_cache() -> None:
+    """ROCMAiterMLASparseImpl reads the fp8_ds_mla section of a merged cache:
+    real cache writer in, forward_mqa over ragged top-k, fp32 reference."""
+    import vllm._C_stable_libtorch  # noqa: F401  (registers _C_cache_ops)
+
+    from vllm import _custom_ops as ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    num_units = 8
+    block = _MERGED_BLOCK
+    kv_lora_rank, rope_dim = 512, 64
+    d_qk = kv_lora_rank + rope_dim
+    num_heads = 16
+    topk = 256
+    scale = d_qk**-0.5
+
+    flat = torch.zeros(num_units * _MERGED_UNIT_BYTES, dtype=torch.uint8, device=device)
+    mla_view = flat.as_strided(
+        (num_units, block, _MERGED_MLA_ROW),
+        (_MERGED_UNIT_BYTES, _MERGED_MLA_ROW, 1),
+    ).view(torch.float8_e4m3fn)
+
+    # Write the MLA section through the real fp8_ds_mla cache writer.
+    num_slots = 300
+    kv_c = torch.randn(num_slots, kv_lora_rank, dtype=torch.bfloat16, device=device)
+    kv_c = kv_c / 8
+    k_pe = torch.randn(num_slots, rope_dim, dtype=torch.bfloat16, device=device)
+    slot_mapping = torch.arange(num_slots, dtype=torch.int64, device=device)
+    ops.concat_and_cache_mla(
+        kv_c,
+        k_pe,
+        mla_view,
+        slot_mapping,
+        kv_cache_dtype="fp8_ds_mla",
+        scale=torch.ones(1, dtype=torch.float32, device=device),
+    )
+
+    # Dequantized fp32 reference rows straight from the cache bytes.
+    mla_u8 = flat.as_strided(
+        (num_units, block, _MERGED_MLA_ROW),
+        (_MERGED_UNIT_BYTES, _MERGED_MLA_ROW, 1),
+    )
+    slot_ids = torch.arange(num_slots, device=device)
+    rows = mla_u8[slot_ids // block, slot_ids % block]  # [slots, 656]
+    lat = rows[:, :kv_lora_rank].view(torch.float8_e4m3fn).float()
+    lat_scale = (
+        rows[:, kv_lora_rank : kv_lora_rank + 16]
+        .view(torch.float32)
+        .repeat_interleave(128, dim=-1)
+    )
+    rope = rows[:, kv_lora_rank + 16 :].view(torch.bfloat16).float()
+    k_all = torch.cat([lat * lat_scale, rope], dim=-1)  # [slots, 576]
+
+    # Per-query top-k rows (local positions; identity block table).
+    lens = [5, 40, 130]
+    num_q = len(lens)
+    topk_buf = torch.full((num_q, topk), -1, dtype=torch.int32, device=device)
+    rows_sel = [
+        torch.randperm(num_slots, device=device)[:count].to(torch.int32)
+        for count in lens
+    ]
+    for i, sel in enumerate(rows_sel):
+        topk_buf[i, : sel.numel()] = sel
+    indptr = torch.tensor(
+        [0] + list(itertools.accumulate(lens)), dtype=torch.int32, device=device
+    )
+
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.kv_cache_dtype = "fp8_ds_mla"
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = rope_dim
+    impl.scale = scale
+    impl.sinks = None
+    impl.topk_indices_buffer = topk_buf
+    impl.owns_indexer = True
+    impl.index_epoch = 0
+
+    metadata = SimpleNamespace(
+        num_actual_tokens=num_q,
+        topk_tokens=topk,
+        req_id_per_token=torch.zeros(num_q, dtype=torch.int32, device=device),
+        block_table=torch.arange(num_units, dtype=torch.int32, device=device)[None],
+        paged_kv_indptr=indptr,
+        paged_kv_indices=torch.empty(num_q * topk, dtype=torch.int32, device=device),
+        block_size=block,
+        attn_out_dtype=torch.bfloat16,
+    )
+    q = torch.randn(num_q, num_heads, d_qk, dtype=torch.bfloat16, device=device) / 8
+
+    output, lse = impl.forward_mqa(q, mla_view, metadata, layer=None)
+    assert lse is None
+
+    ref = torch.empty(num_q, num_heads, kv_lora_rank, device=device)
+    for i in range(num_q):
+        idx = topk_buf[i, : lens[i]].long()
+        ki = k_all[idx]
+        s = (q[i].float() @ ki.T) * scale
+        ref[i] = torch.softmax(s, dim=-1) @ ki[:, :kv_lora_rank]
+
+    err = (output.float() - ref).abs()
+    assert err.max().item() < 0.02, f"max abs err {err.max().item()}"

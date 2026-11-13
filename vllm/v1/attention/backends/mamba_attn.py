@@ -8,7 +8,10 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.mamba import MambaBackendEnum
+from vllm.model_executor.layers.mamba.abstract import (
+    get_kv_cache_checkpoint_alignment,
+    get_mamba_num_speculative_blocks,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -69,14 +72,18 @@ class BaseMambaAttentionMetadata:
     token_chunk_offset_ptr: torch.Tensor | None = None
     # ReplaySSM standard decode — Triton: per-row ring cursor and flush flag,
     # plus (decode_rows, ngroups, replayssm_buffer_len) fp32 scratch for
-    # precomputed B·C products. All None when use_replayssm is disabled or
-    # the FlashInfer ReplaySSM backend is selected.
+    # precomputed B·C products. The first layer of each cache group fills the
+    # cursor and flag on the GPU from per-slot ring counters (see
+    # plan_replayssm_decode); align mode also reads the rows' sequence lengths.
+    # All None when use_replayssm is disabled or ReplaySSM trackers are used.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
     bc_pre_scratch: torch.Tensor | None = None
+    replayssm_seq_lens_d: torch.Tensor | None = None
+    replayssm_align_block_size: int = 0
     # ReplaySSM — FlashInfer checkpointing_ssu two-kernel scratch.
     replayssm_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-    # Contiguous cache-slot indices shared by all FlashInfer ReplaySSM layers.
+    # Contiguous cache-slot indices shared by all ReplaySSM tracker layers.
     replayssm_state_indices_d: torch.Tensor | None = None
 
 
@@ -98,6 +105,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.num_speculative_blocks = get_mamba_num_speculative_blocks(vllm_config)
+        self.checkpoint_alignment = get_kv_cache_checkpoint_alignment(
+            vllm_config, layer_names
+        )
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
@@ -106,10 +117,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.use_spec_decode = self.num_spec_tokens > 0
         self.use_replayssm = vllm_config.cache_config.use_replayssm
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
-        self.use_flashinfer_replayssm = (
-            self.use_replayssm
-            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-        )
+        self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
+        self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
 
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
@@ -139,23 +148,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         ) = None
         self.decode_replayssm_state_indices_d: torch.Tensor | None = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
-        if self.use_replayssm and not self.use_flashinfer_replayssm:
-            self.decode_write_pos_d: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
+        if self.use_replayssm and not self.use_replayssm_trackers:
+            # Filled on the GPU each step by plan_replayssm_decode; persistent
+            # so full CUDA graphs keep reading the same addresses.
+            bc_scratch_bs = max(
+                self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
             )
-            self.decode_is_flush_d: torch.Tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int8,
-                device=device,
+            self.decode_write_pos_d: torch.Tensor = torch.zeros(
+                (bc_scratch_bs,), dtype=torch.int32, device=device
+            )
+            self.decode_is_flush_d: torch.Tensor = torch.zeros(
+                (bc_scratch_bs,), dtype=torch.int8, device=device
             )
             # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
             # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
             bc_ngroups = kv_cache_spec.shapes[4][0]
-            bc_scratch_bs = max(
-                self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
-            )
             self.decode_bc_pre_scratch = torch.empty(
                 (
                     bc_scratch_bs,
@@ -165,22 +172,23 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.float32,
                 device=device,
             )
-        elif self.use_flashinfer_replayssm:
-            from flashinfer.mamba.checkpointing_ssu import (
-                allocate_checkpointing_ssu_scratch,
-            )
+        elif self.use_replayssm_trackers:
+            if self.use_flashinfer_replayssm:
+                from flashinfer.mamba.checkpointing_ssu import (
+                    allocate_checkpointing_ssu_scratch,
+                )
 
-            nheads = kv_cache_spec.shapes[2][0]
-            self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
-                batch_size=scheduler_config.max_num_seqs,
-                num_heads=nheads,
-                num_predicted_tokens=1 + self.num_spec_tokens,
-                max_window=self.replayssm_buffer_len,
-                dtype=vllm_config.model_config.dtype,
-                device=device,
-            )
+                nheads = kv_cache_spec.shapes[2][0]
+                self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
+                    batch_size=scheduler_config.max_num_seqs,
+                    num_heads=nheads,
+                    num_predicted_tokens=1 + self.num_spec_tokens,
+                    max_window=self.replayssm_buffer_len,
+                    dtype=vllm_config.model_config.dtype,
+                    device=device,
+                )
             # Full CUDA graphs retain capture-time tensor addresses. Keep the
-            # contiguous first-column view used by FlashInfer in a persistent
+            # contiguous first-column view used by ReplaySSM in a persistent
             # buffer and refresh its contents before each replay.
             self.decode_replayssm_state_indices_d = torch.empty(
                 (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
@@ -292,7 +300,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 this_new_tokens -= chunk_len
 
             n_chunks = cdiv(this_new_tokens, chunk_size)
-            for chunk in range(n_chunks):
+            for _ in range(n_chunks):
                 seq_idx.append(req_idx)
                 cu_chunk_seqlen.append(seqlen_pos)
                 chunk_len = min(chunk_size, this_new_tokens)
@@ -439,8 +447,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             prefill_to_decode |= padded_prompt_tail_rows
 
         if torch.any(prefill_to_decode).item():
-            # ReplaySSM handles these rows as single-token flushes (see the
-            # write-position derivation below), same as the baseline decode path.
+            # ReplaySSM appends these rows to the ring left empty by the
+            # previous prefill chunk, like any other decode step.
             is_prefilling = is_prefilling.clone()
             is_prefilling[prefill_to_decode] = False
             common_attn_metadata = common_attn_metadata.replace(
@@ -471,6 +479,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             common_attn_metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+            self.num_speculative_blocks,
         )
 
         if state_indices_tensor.dim() == 1:
@@ -518,74 +527,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     )
                 )
 
-        if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
-            decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-            async_spec_decode = (
-                self.vllm_config.scheduler_config.async_scheduling
-                and self.vllm_config.speculative_config is not None
-            )
-            if decode_base_cpu is None or seq_lens_cpu is None or async_spec_decode:
-                raise ValueError(
-                    "--use-replayssm requires exact CPU sequence lengths and "
-                    "decode-base counts to derive decode write positions"
-                )
-            query_lens_cpu = (
-                common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
-                - common_attn_metadata.query_start_loc_cpu[:num_decodes]
-            )
-            num_computed_d = seq_lens_cpu[:num_decodes] - query_lens_cpu
-            decode_base_d = decode_base_cpu[:num_decodes]
-            align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
-            block_size = self.kv_cache_spec.block_size
-            if align_mode:
-                # After a boundary the align copy leaves an exact checkpoint at
-                # the block start and the new block's ring restarts empty, so
-                # re-anchor there; max() keeps the prompt-end anchor for the
-                # first (partial) block.
-                effective_base = torch.maximum(
-                    decode_base_d, (num_computed_d // block_size) * block_size
-                )
-            else:
-                effective_base = decode_base_d
-            # write_pos counts decode steps since the ring's last full-state
-            # write (the anchor), so a resumed request re-anchors correctly.
-            decode_steps_cpu = num_computed_d - effective_base
-            valid_decode_rows = query_lens_cpu > 0
-            # A single-token prefill row replayed as decode (query_len==1 with
-            # prior state) has decode_steps < 0; force it to a one-token flush
-            # (write_pos=0, is_flush=1). The flush branch reads an empty history
-            # window, so it applies exactly one recurrence step off the checkpoint
-            # -- identical to the baseline decode kernel for that row. The split
-            # (treat_short_extends_as_decodes=False) admits only such rows here.
-            leftover_prompt = valid_decode_rows & (decode_steps_cpu < 0)
-            decode_steps_cpu = torch.where(
-                valid_decode_rows & ~leftover_prompt,
-                decode_steps_cpu,
-                torch.zeros_like(decode_steps_cpu),
-            )
-            write_pos_cpu = torch.remainder(decode_steps_cpu, self.replayssm_buffer_len)
-            is_flush_cpu = (
-                write_pos_cpu == self.replayssm_buffer_len - 1
-            ) | leftover_prompt
-            if align_mode:
-                # Force a flush on the step completing a mamba block so the exact
-                # boundary state is materialized for prefix caching.
-                is_flush_cpu = is_flush_cpu | (
-                    valid_decode_rows
-                    & ((num_computed_d + query_lens_cpu) % block_size == 0)
-                )
-            is_flush_cpu = is_flush_cpu.to(torch.int8)
-            write_pos_d = async_tensor_h2d(
-                write_pos_cpu.to(torch.int32).tolist(),
-                dtype=torch.int32,
-                device=common_attn_metadata.query_start_loc.device,
-            )
-            is_flush_d = async_tensor_h2d(
-                is_flush_cpu.tolist(),
-                dtype=torch.int8,
-                device=common_attn_metadata.query_start_loc.device,
-            )
+        replayssm_seq_lens_d = None
+        replayssm_align_block_size = 0
+        if self.use_replayssm and not self.use_replayssm_trackers and num_decodes > 0:
+            write_pos_d = self.decode_write_pos_d[:num_decodes]
+            is_flush_d = self.decode_is_flush_d[:num_decodes]
+            if self.vllm_config.cache_config.mamba_cache_mode == "align":
+                # All rows, so a padded full-CUDA-graph batch can reuse it.
+                replayssm_seq_lens_d = common_attn_metadata.seq_lens[:num_reqs]
+                replayssm_align_block_size = self.kv_cache_spec.block_size
 
         if self.use_flashinfer_replayssm and num_decodes > 0:
             assert self.decode_replayssm_scratch is not None
@@ -616,6 +566,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
+            replayssm_seq_lens_d=replayssm_seq_lens_d,
+            replayssm_align_block_size=replayssm_align_block_size,
             replayssm_scratch=replayssm_scratch,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
@@ -666,33 +618,22 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     1  # pad with 1st slot index
                 )
 
-            if self.use_replayssm and not self.use_flashinfer_replayssm:
-                assert write_pos_d is not None
-                assert is_flush_d is not None
-                self.decode_write_pos_d[: metadata.num_decodes].copy_(
-                    write_pos_d[: metadata.num_decodes],
-                    non_blocking=True,
-                )
+            if self.use_replayssm and not self.use_replayssm_trackers:
+                # Planned on the GPU inside the graph; padded rows have
+                # NULL_BLOCK_ID slots and are planned as no-ops.
                 write_pos_d = self.decode_write_pos_d[:padded_bs]
-                write_pos_d[metadata.num_decodes :] = 0
-
-                self.decode_is_flush_d[: metadata.num_decodes].copy_(
-                    is_flush_d[: metadata.num_decodes],
-                    non_blocking=True,
-                )
                 is_flush_d = self.decode_is_flush_d[:padded_bs]
-                is_flush_d[metadata.num_decodes :] = 0
 
                 if self.decode_bc_pre_scratch is not None:
                     bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
-            elif self.use_flashinfer_replayssm:
-                assert self.decode_replayssm_scratch is not None
-                cb_scaled, cumAdt_vec, cb_old = self.decode_replayssm_scratch
-                replayssm_scratch = (
-                    cb_scaled[:padded_bs],
-                    cumAdt_vec[:padded_bs],
-                    cb_old[:padded_bs],
-                )
+            elif self.use_replayssm_trackers:
+                if self.decode_replayssm_scratch is not None:
+                    cb_scaled, cumAdt_vec, cb_old = self.decode_replayssm_scratch
+                    replayssm_scratch = (
+                        cb_scaled[:padded_bs],
+                        cumAdt_vec[:padded_bs],
+                        cb_old[:padded_bs],
+                    )
                 assert self.decode_replayssm_state_indices_d is not None
                 self.decode_replayssm_state_indices_d[:padded_bs].copy_(
                     state_indices_tensor_d[:, 0], non_blocking=True
@@ -702,7 +643,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 ]
 
         if (
-            self.use_flashinfer_replayssm
+            self.use_replayssm_trackers
             and state_indices_tensor_d is not None
             and replayssm_state_indices_d is None
         ):
@@ -731,6 +672,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+            self.num_speculative_blocks,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)

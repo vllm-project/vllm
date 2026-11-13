@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end checks that ``backend_per_kind`` selects the requested attention
+"""End-to-end checks that `backend_per_kind` selects the requested attention
 backend for each KV-cache group at runtime.
 
-Uses ``google/gemma-3-1b-it``, which interleaves full-attention and
-sliding-window layers, so the model produces separate ``full_attention`` and
-``sliding_window`` KV-cache groups.
+Uses `google/gemma-3-1b-it`, which interleaves full-attention and
+sliding-window layers, so the model produces separate `full_attention` and
+`sliding_window` KV-cache groups.
 """
 
 import pytest
@@ -14,18 +14,21 @@ from vllm import LLM
 from vllm.config.attention import AttentionConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
 
 MODEL = "google/gemma-3-1b-it"
 
 
 def _collect_group_backends(worker) -> list[tuple[str, str]]:
     """Runs on the worker: returns (spec_kind, backend_name) per attn group."""
-    from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
-
+    kv_cache_groups = worker.model_runner.kv_cache_config.kv_cache_groups
     out: list[tuple[str, str]] = []
     for kv_group in worker.model_runner.attn_groups:
         for attn_group in kv_group:
-            kind = get_kv_cache_spec_kind(attn_group.kv_cache_spec)
+            group = kv_cache_groups[attn_group.kv_cache_group_id]
+            kind = get_kv_cache_kind(
+                group.manager_config, group.kv_cache_specs.values()
+            )
             out.append((kind.value, attn_group.backend.get_name()))
     return out
 
@@ -72,7 +75,7 @@ def test_backend_per_kind_splits_groups(backend_per_kind, monkeypatch):
     not current_platform.is_cuda(), reason="backend names are CUDA-specific"
 )
 def test_backend_per_kind_overrides_global_backend(monkeypatch):
-    """A per-kind entry wins over the global ``backend`` for its kind; other
+    """A per-kind entry wins over the global `backend` for its kind; other
     kinds fall back to the global backend."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     llm = LLM(
