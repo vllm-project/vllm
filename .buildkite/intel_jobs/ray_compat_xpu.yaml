@@ -8,7 +8,7 @@ steps:
   timeout_in_minutes: 10
   optional: true
   soft_fail: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7

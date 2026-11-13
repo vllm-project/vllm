@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -50,7 +50,7 @@ steps:
   timeout_in_minutes: 45
   num_devices: 1
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -81,7 +81,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 53
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -107,7 +107,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 53
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -133,7 +133,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 65
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -159,7 +159,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 50
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -188,7 +188,7 @@ steps:
   timeout_in_minutes: 90
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -233,7 +233,7 @@ steps:
   timeout_in_minutes: 25
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -277,7 +277,7 @@ steps:
   timeout_in_minutes: 35
   num_devices: 1
   optional: true
-  working_dir: .
+  working_dir: "."
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
