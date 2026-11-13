@@ -57,55 +57,43 @@ pub async fn generate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ValidatedJson(mut body): ValidatedJson<GenerateRequest>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     if body.content_parts.is_some() && body.features.is_some() {
-        return ApiError::invalid_request(
+        return Err(ApiError::invalid_request(
             "content_parts and features are mutually exclusive.",
             Some("features"),
-        )
-        .into_response();
+        ));
     }
     let mm_features = if let Some(parts) = body.content_parts.take() {
-        match state
+        state
             .chat
             .prepare_media(parts, &mut body.token_ids)
             .instrument(vllm_chat::mm_request_span(&request_context.request_id))
             .await
-        {
-            Ok(features) => features,
-            Err(e) => {
-                return ApiError::invalid_request(
+            .map_err(|e| {
+                ApiError::invalid_request(
                     format!("failed to resolve content_parts: {}", e.as_report()),
                     Some("content_parts"),
                 )
-                .into_response();
-            }
-        }
+            })?
     } else if let Some(features) = body.features.take() {
-        let features = match features.into_prepared() {
-            Ok(features) => features,
-            Err(error) => return error.into_response(),
-        };
-        match state
+        let features = features.into_prepared()?;
+        state
             .chat
             .prepare_media(
                 vllm_chat::multimodal::MultimodalInput::Preprocessed(features),
                 &mut body.token_ids,
             )
             .await
-        {
-            Ok(features) => features,
-            Err(e) => {
-                return ApiError::invalid_request(
+            .map_err(|e| {
+                ApiError::invalid_request(
                     format!("invalid features: {}", e.as_report()),
                     Some("features"),
                 )
-                .into_response();
-            }
-        }
+            })?
     } else {
         None
     };
@@ -115,11 +103,7 @@ pub async fn generate(
         .then(|| extract_mm_placeholders(mm_features.as_deref()))
         .flatten();
 
-    let prepared =
-        match prepare_generate_request(body, &lora_resolution, request_context, mm_features) {
-            Ok(prepared) => prepared,
-            Err(error) => return error.into_response(),
-        };
+    let prepared = prepare_generate_request(body, &lora_resolution, request_context, mm_features)?;
     let request_span = tracing::info_span!(
         "generate",
         request_id = %prepared.request_id,
@@ -129,13 +113,12 @@ pub async fn generate(
     if prepared.options.output_mode == GenerateOutputMode::Text
         && !state.chat.text().has_tokenizer()
     {
-        return ApiError::invalid_request(
+        return Err(ApiError::invalid_request(
             "output_mode='text' requires a tokenizer, but this server does not load one \
              (--skip-tokenizer-init). Send the request to a server that loads a tokenizer, \
              or use output_mode='tokens'.",
             Some("output_mode"),
-        )
-        .into_response();
+        ));
     }
 
     let api_server_options = state.api_server_options;
@@ -144,19 +127,15 @@ pub async fn generate(
     // Like Python's token-in-token-out route, record no render duration: lower
     // and submit directly rather than through `TextLlm::generate`.
     let text = state.chat.text();
-    let text_stream = match async {
+    let text_stream = async {
         let text_request = text.request_processor().prepare(prepared.text_request)?;
         text.generate_prepared_n(text_request, NonZeroU32::MIN).await
     }
     .instrument(request_span.clone())
     .await
-    {
-        Ok(mut streams) => streams.pop().expect("one output stream per sample"),
-        Err(error) => {
-            return text_submit_error("failed to submit raw generate request", error)
-                .into_response();
-        }
-    };
+    .map_err(|error| text_submit_error("failed to submit raw generate request", error))?
+    .pop()
+    .expect("one output stream per sample");
 
     if stream {
         let chunk_stream = generate_chunk_stream(
@@ -168,22 +147,26 @@ pub async fn generate(
         );
         let sse_stream = openai_sse_stream(chunk_stream).instrument(request_span);
 
-        return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
+        return Ok(sse_response(
+            sse_stream,
+            api_server_options.sse_keep_alive_interval,
+        ));
     }
 
-    let collected = match text_stream.collect_output().instrument(request_span.clone()).await {
-        Ok(collected) => collected,
-        Err(error) => {
-            return server_error!(
-                "failed to collect raw generate response: {}",
-                error.to_report_string()
-            )
-            .into_response();
-        }
-    };
+    let collected =
+        text_stream
+            .collect_output()
+            .instrument(request_span.clone())
+            .await
+            .map_err(|error| {
+                server_error!(
+                    "failed to collect raw generate response: {}",
+                    error.to_report_string()
+                )
+            })?;
 
     // Inside the request span, so the logs it emits carry the request ID.
-    let response = match request_span.in_scope(|| {
+    let response = request_span.in_scope(|| {
         collect_generate(
             collected,
             prepared.request_id,
@@ -193,12 +176,9 @@ pub async fn generate(
             prepared.options,
             mm_placeholders,
         )
-    }) {
-        Ok(response) => response,
-        Err(error) => return error.into_response(),
-    };
+    })?;
 
-    Json(response).into_response()
+    Ok(Json(response).into_response())
 }
 
 #[try_stream]

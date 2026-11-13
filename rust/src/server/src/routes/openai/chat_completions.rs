@@ -69,27 +69,19 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
-        Ok(prepared) => prepared,
-        Err(error) => return error.into_response(),
-    };
-    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
-    {
-        return error.into_response();
-    }
-    if let Err(error) = validate_max_output_tokens(
+    let prepared = prepare_chat_request(body, &lora_resolution, request_context)?;
+    validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)?;
+    validate_max_output_tokens(
         "max_completion_tokens",
         prepared.chat_request.sampling_params.max_tokens,
         state.llm().info().max_model_len,
-    ) {
-        return error.into_response();
-    }
+    )?;
     let request_span = tracing::info_span!(
         "chat_completions",
         request_id = %prepared.request_id,
@@ -103,17 +95,12 @@ pub async fn chat_completions(
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
 
     let n = prepared.n;
-    let chat_streams = match state
+    let chat_streams = state
         .chat
         .chat_n(prepared.chat_request, n)
         .instrument(request_span.clone())
         .await
-    {
-        Ok(streams) => streams,
-        Err(error) => {
-            return chat_submit_error("failed to submit chat request", error).into_response();
-        }
-    };
+        .map_err(|error| chat_submit_error("failed to submit chat request", error))?;
 
     if stream {
         let chunk_streams = chat_streams
@@ -136,7 +123,10 @@ pub async fn chat_completions(
         let sse_stream =
             openai_sse_stream(merge_choice_chunk_streams(chunk_streams)).instrument(request_span);
 
-        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
+        Ok(sse_response(
+            sse_stream,
+            api_server_options.sse_keep_alive_interval,
+        ))
     } else {
         let responses = future::try_join_all(chat_streams.into_iter().map(|chat_stream| {
             collect_chat_completion(
@@ -151,11 +141,8 @@ pub async fn chat_completions(
             )
         }))
         .instrument(request_span.clone())
-        .await;
-        match responses {
-            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
-            Err(error) => error.into_response(),
-        }
+        .await?;
+        Ok(Json(merge_choice_responses(responses)).into_response())
     }
 }
 

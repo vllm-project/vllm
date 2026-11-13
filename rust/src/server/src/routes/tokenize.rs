@@ -13,7 +13,6 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::{IntoResponse, Response};
 
 use crate::error::{ApiError, chat_submit_error, text_submit_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -43,29 +42,23 @@ pub async fn tokenize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<TokenizeRequest>,
-) -> Response {
+) -> Result<Json<TokenizeResponse>, ApiError> {
     let request_id = tokenize_request_id(&headers);
     let tokenizer = state.chat.text().tokenizer();
     let max_model_len = state.llm().info().max_model_len;
 
-    let result = match body {
-        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req),
-        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await,
+    let (tokens, want_strs) = match body {
+        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req)?,
+        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await?,
     };
 
-    match result {
-        Ok((tokens, want_strs)) => {
-            let token_strs = want_strs.then(|| token_strs(&tokenizer, &tokens));
-            Json(TokenizeResponse {
-                count: tokens.len(),
-                max_model_len,
-                tokens,
-                token_strs,
-            })
-            .into_response()
-        }
-        Err(error) => error.into_response(),
-    }
+    let token_strs = want_strs.then(|| token_strs(&tokenizer, &tokens));
+    Ok(Json(TokenizeResponse {
+        count: tokens.len(),
+        max_model_len,
+        tokens,
+        token_strs,
+    }))
 }
 
 fn tokenize_completion(
@@ -115,15 +108,13 @@ async fn tokenize_chat(
 pub async fn detokenize(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
-) -> Response {
-    if let Err(error) = state.base_model_names().check(body.model.as_deref()) {
-        return error.into_response();
-    }
+) -> Result<Json<DetokenizeResponse>, ApiError> {
+    state.base_model_names().check(body.model.as_deref())?;
     let tokenizer = state.chat.text().tokenizer();
-    match tokenizer.decode(&body.tokens, /* skip_special_tokens = */ false) {
-        Ok(prompt) => Json(DetokenizeResponse { prompt }).into_response(),
-        Err(error) => text_submit_error("detokenize failed", error.into()).into_response(),
-    }
+    let prompt = tokenizer
+        .decode(&body.tokens, /* skip_special_tokens = */ false)
+        .map_err(|error| text_submit_error("detokenize failed", error.into()))?;
+    Ok(Json(DetokenizeResponse { prompt }))
 }
 
 #[cfg(test)]
