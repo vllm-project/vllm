@@ -14,7 +14,7 @@ from vllm.utils import random_uuid
 
 class QuestionSpec(OpenAIBaseModel):
     type: str
-    instructions: Any = ""
+    instructions: Any = None
     criteria: Any = None
 
 
