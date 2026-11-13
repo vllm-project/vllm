@@ -36,19 +36,13 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-    get_block_table_width,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.worker.cpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
-    get_kv_cache_spec,
+    get_kv_cache_layer_configs,
     init_attn_backend,
     init_kv_cache,
 )
@@ -332,6 +326,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
     def get_draft_model(self) -> torch.nn.Module | None:
         return None
 
+    def on_target_weights_replaced(self) -> None:
+        """Called by the worker after a weight transfer; nothing derives from them."""
+
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
@@ -344,7 +341,6 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         reload_weights(
             vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
         )
-        self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
 
@@ -352,8 +348,8 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         encoder_runner = getattr(self.model_state, "encoder_runner", None)
         return encoder_runner.get_encoder_timing_stats() if encoder_runner else {}
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return get_kv_cache_spec(self.vllm_config)
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
+        return get_kv_cache_layer_configs(self.vllm_config)
 
     def initialize_kv_cache(
         self,
@@ -377,26 +373,14 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         slot_mapping_enabled = []
         sliding_window_reach = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            spec = kv_cache_group.kv_cache_spec
-            block_sizes.append(spec.block_size)
-            layer_spec = (
-                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+            block_sizes.append(kv_cache_group.block_size)
+            slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
+            sliding_window_reach.append(kv_cache_group.sliding_window_reach)
+            max_num_blocks_per_group.append(
+                kv_cache_group.block_table_width(
+                    self.vllm_config, block_table_max_model_len
+                )
             )
-            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
-            sliding_window_reach.append(
-                layer_spec.num_retained_tokens
-                if isinstance(layer_spec, SlidingWindowSpec)
-                else 0
-            )
-            max_num_blocks = spec.max_num_blocks_per_req(
-                self.vllm_config, block_table_max_model_len
-            )
-            max_num_blocks = get_block_table_width(
-                max_num_blocks,
-                spec.block_size,
-                token_alignment=spec.block_table_token_alignment,
-            )
-            max_num_blocks_per_group.append(max_num_blocks)
 
         with self.jit_warmup_registry.activate():
             self.attn_groups, self.kernel_block_sizes = init_attn_backend(
@@ -459,6 +443,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         uniform_decode: bool = False,
         is_profile: bool = False,
         randomize_inputs: bool = False,
+        num_active_loras: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
             raise ValueError(
@@ -500,13 +485,16 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
-        max_loras = self.lora_config.max_loras if self.lora_config is not None else 0
+        if num_active_loras is None:
+            num_active_loras = (
+                self.lora_config.max_loras if self.lora_config is not None else 0
+            )
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
             num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
             num_sampled_tokens=None,
             remove_lora=True,
-            num_active_loras=max_loras,
+            num_active_loras=num_active_loras,
         ):
             # Execute the model.
             self.execute_model(

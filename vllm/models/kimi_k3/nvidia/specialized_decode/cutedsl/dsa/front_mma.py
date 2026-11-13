@@ -3,11 +3,11 @@
 """Fused DSA indexer front on tcgen05: the wq_b projection (N 4096, K 1536) and
 DsaIndex (the FP8 indexer query, its folded head weights and the indexer key insert)
 in one kernel, from MlaQuery's normalized q_c rows (serial / wait query overlap) or
-(``normalized=False``) from the packed rows with the q_a RMSNorm in the kernel.
+(`normalized=False`) from the packed rows with the q_a RMSNorm in the kernel.
 
 A CTA owns one indexer head (its 128 wq_b rows: tcgen05 M = 128, swap-AB) for one
-tile of ``n`` rows (N) and one of ``split`` K slices; the K slices of a head and row
-tile, times ``group`` heads, form one cluster.
+tile of `n` rows (N) and one of `split` K slices; the K slices of a head and row
+tile, times `group` heads, form one cluster.
 
 - Warp 5 (TMA): the first stages' 128 x 64 weight blocks before the PDL wait (L2
   evict_first, a device tensor map), then the rows' 64-column blocks (zero past the
@@ -17,8 +17,8 @@ tile, times ``group`` heads, form one cluster.
 - Warps 0-3, from packed rows only: the RMSNorm factors (QueryNorm.tiled's packed FMA
   order; a cluster shares its rows' factors over DSMEM), then each block normalized
   in place (BF16 (x * rr) * gamma, as QueryNorm).
-- Warps 0-3 (thread = channel): with ``split`` > 1 the partial columns go to their K
-  slice's owner (DSMEM), which adds the ``split`` partials in a fixed order; each
+- Warps 0-3 (thread = channel): with `split` > 1 the partial columns go to their K
+  slice's owner (DSMEM), which adds the `split` partials in a fixed order; each
   column is rounded to BF16 (the projection's output) and quantized as DsaIndex
   does: the head amax over the 128 channels, a power-of-two scale (exact inverse),
   FP8 bytes and the folded BF16 head weight."""
@@ -76,7 +76,7 @@ SMEM_BUDGET = 200 * 1024  # shared memory for the stages and the mailbox (bytes)
 
 
 def front_tiling(batch: int):
-    """(n, tiles, split, group) of ``batch`` rows: the rows per tile (a multiple of
+    """(n, tiles, split, group) of `batch` rows: the rows per tile (a multiple of
     16), the row tiles, the K slices and the CTAs of a cluster along the heads. Up
     to 128 CTAs: K slices while the weights dominate, row tiles from there (clusters
     of at most 4: 8-CTA clusters of these ~200 KB CTAs do not all fit at once).
@@ -92,7 +92,7 @@ def front_tiling(batch: int):
 
 
 def load_columns(address, count):
-    """``count`` FP32 TMEM columns of this lane from ``address`` (power-of-two loads
+    """`count` FP32 TMEM columns of this lane from `address` (power-of-two loads
     of at most 64)."""
     values: list = []
     while count:
@@ -104,10 +104,10 @@ def load_columns(address, count):
 
 
 class IndexFrontMma:
-    """``batch`` rows; ``key``/``weight``: the wk and wv column offsets in the packed
-    projection row; ``mx``: key scales as packed UE8M0 (MX) bytes; the tiling
-    (n, tiles, split, group) is ``front_tiling``'s; ``normalized``: the
-    rows are the normalized q_c; ``row_pitch``: their pitch (elements)."""
+    """`batch` rows; `key`/`weight`: the wk and wv column offsets in the packed
+    projection row; `mx`: key scales as packed UE8M0 (MX) bytes; the tiling
+    (n, tiles, split, group) is `front_tiling`'s; `normalized`: the
+    rows are the normalized q_c; `row_pitch`: their pitch (elements)."""
 
     def __init__(
         self,
@@ -179,7 +179,7 @@ class IndexFrontMma:
     @cute.jit
     def normalize(self, tile, valid, k0, rr, gamma_s):
         """BF16 (x * rr) * gamma in place on this thread's chunks of a K block
-        (``k0``: the block's first column in this CTA's K slice; every chunk of a
+        (`k0`: the block's first column in this CTA's K slice; every chunk of a
         thread is the same 8 columns)."""
         tid, _, _ = cute.arch.thread_idx()
         chunk = tid % 8
@@ -376,7 +376,7 @@ class IndexFrontMma:
 
     @cute.jit
     def factors(self, rows_in, rr, bar_rr, rank, row0, valid, eps):
-        """Warps 0-3: the tile's RMSNorm factors into ``rr``: every row here (small
+        """Warps 0-3: the tile's RMSNorm factors into `rr`: every row here (small
         tiles, one-CTA clusters), else this CTA's share of the rows, sent to every
         CTA of the cluster."""
         tid, _, _ = cute.arch.thread_idx()
@@ -482,7 +482,7 @@ class IndexFrontMma:
     @cute.jit
     def reduced(self, lane_base, mailbox, s, c):
         """Columns c..c+3 of this thread's channel, BF16-rounded: TMEM (one K
-        slice) or the ``split`` partials in order."""
+        slice) or the `split` partials in order."""
         tid, _, _ = cute.arch.thread_idx()
         values = cute.make_rmem_tensor(4, Float32)
         if cutlass.const_expr(self.split == 1):

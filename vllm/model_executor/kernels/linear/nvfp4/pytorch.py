@@ -3,11 +3,17 @@
 
 import torch
 
-from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     pad_nvfp4_weight_for_cutlass,
     slice_nvfp4_output,
     swizzle_blockscale,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -16,12 +22,15 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class TorchNvFp4LinearKernel(NvFp4LinearKernel):
-    """NVFP4 GEMM implemented with PyTorch's native ``torch._scaled_mm``.
+    """NVFP4 GEMM implemented with PyTorch's native `torch._scaled_mm`.
 
     Eager execution uses PyTorch's native scaled-matmul implementation. Under
-    ``torch.compile``, TorchInductor may select any enabled scaled-GEMM backend,
+    `torch.compile`, TorchInductor may select any enabled scaled-GEMM backend,
     including NVGEMM on supported Blackwell systems.
     """
+
+    def input_quant_key(self) -> QuantKey:
+        return kNvfp4Dynamic
 
     @classmethod
     def is_supported(
@@ -52,26 +61,16 @@ class TorchNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
-        weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
-
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="cutlass",
-            padded_n=x.shape[-1] + weights_padding_bytes * 2,
-        )
+        qa = self.prepare_input(layer, x)
 
         # scaled_fp4_quant returns packed bytes, while torch._scaled_mm uses
         # the corresponding shell dtype to describe the two FP4 values stored
         # in each byte.
-        x_fp4 = x_fp4.view(torch.float4_e2m1fn_x2)
+        x_fp4 = qa.data.view(torch.float4_e2m1fn_x2)
         weight = layer.weight
         if weight.dtype != torch.float4_e2m1fn_x2:
             weight = weight.view(torch.float4_e2m1fn_x2)
@@ -79,9 +78,9 @@ class TorchNvFp4LinearKernel(NvFp4LinearKernel):
         out = torch._scaled_mm(
             x_fp4,
             weight.t(),
-            scale_a=x_blockscale.reshape(-1),
+            scale_a=qa.scale.reshape(-1),
             scale_b=layer.weight_scale.reshape(-1),
-            out_dtype=output_dtype,
+            out_dtype=qa.orig_dtype,
         )
 
         # ModelOpt stores the product of the activation and weight global
@@ -92,4 +91,4 @@ class TorchNvFp4LinearKernel(NvFp4LinearKernel):
 
         if bias is not None:
             out = out + bias
-        return out.view(*output_shape)
+        return out.view(*qa.orig_shape[:-1], output_size)

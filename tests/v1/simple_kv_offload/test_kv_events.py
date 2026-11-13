@@ -4,7 +4,7 @@
 
 Verifies that BlockStored/BlockRemoved events carry the correct storage
 medium (MEDIUM_CPU / MEDIUM_STORAGE) and per-group metadata when
-``enable_kv_cache_events`` is set, and that no events are emitted when it
+`enable_kv_cache_events` is set, and that no events are emitted when it
 is unset.
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
     BLOCK_SIZE,
@@ -49,14 +50,12 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
 )
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import (
@@ -73,19 +72,18 @@ def _make_mixed_kv_cache_config(
 ) -> KVCacheConfig:
     """Build a KVCacheConfig with a FullAttention group plus optional
     SlidingWindow and Mamba groups for per-group metadata tests."""
-    register_all_kvcache_specs(vllm_config=None)
     groups = []
     tensors = []
 
     # Group 0 is always FullAttention (the scheduler requires one FA group).
     fa_layers = ["layer_fa"]
-    fa_spec = FullAttentionSpec(
+    fa_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    groups.append(KVCacheGroupSpec(fa_layers, fa_spec))
+    groups.append(make_kv_cache_group(fa_layers, fa_spec))
     fa_bytes = _BYTES_PER_BLOCK * num_blocks
     tensors.append(
         KVCacheTensor(
@@ -98,14 +96,20 @@ def _make_mixed_kv_cache_config(
 
     if sliding_window is not None:
         sw_layers = ["layer_sw"]
-        sw_spec = SlidingWindowSpec(
+        sw_spec = AttentionSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=NUM_KV_HEADS,
             head_size=HEAD_SIZE,
             dtype=DTYPE,
-            sliding_window=sliding_window,
         )
-        groups.append(KVCacheGroupSpec(sw_layers, sw_spec))
+        groups.append(
+            make_kv_cache_group(
+                sw_layers,
+                sw_spec,
+                SlidingWindowManager,
+                SlidingWindowManager.config(sliding_window=sliding_window),
+            )
+        )
         sw_bytes = _BYTES_PER_BLOCK * num_blocks
         tensors.append(
             KVCacheTensor(
@@ -122,9 +126,15 @@ def _make_mixed_kv_cache_config(
             block_size=mamba_block_size,
             shapes=((NUM_KV_HEADS, HEAD_SIZE, HEAD_SIZE),),
             dtypes=(DTYPE,),
-            mamba_cache_mode="align",
         )
-        groups.append(KVCacheGroupSpec(m_layers, m_spec))
+        groups.append(
+            make_kv_cache_group(
+                m_layers,
+                m_spec,
+                MambaManager,
+                MambaManager.config(mamba_cache_mode="align"),
+            )
+        )
         m_bytes = _BYTES_PER_BLOCK * num_blocks
         tensors.append(
             KVCacheTensor(
@@ -197,7 +207,7 @@ def _do_eager_store(
     num_blocks: int = 2,
     lora_request: LoRARequest | None = None,
 ) -> tuple[object, Request]:
-    """Run an eager store of ``num_blocks`` and complete it.
+    """Run an eager store of `num_blocks` and complete it.
 
     Returns (meta, req) for further assertions.
     """

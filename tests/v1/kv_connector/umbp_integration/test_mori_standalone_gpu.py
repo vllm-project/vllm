@@ -5,10 +5,8 @@
 import multiprocessing as mp
 import os
 import signal
-import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import pytest
 import torch
@@ -23,7 +21,10 @@ from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
     _prompt,
     _reset_gpu_prefix_cache,
 )
-from tests.v1.kv_connector.umbp_test_utils import run_in_new_process
+from tests.v1.kv_connector.umbp_test_utils import (
+    run_in_new_process,
+    standalone_server,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVRange,
@@ -44,42 +45,10 @@ _LAYER_BYTES = 1 << 20
 _KEYS = ("standalone-block-0", "standalone-block-1")
 
 
-class _Server:
-    def __init__(self, address: str, process: subprocess.Popen):
-        self.address = address
-        self.process = process
-
-    def kill(self) -> None:
-        self.process.kill()
-        self.process.wait(10)
-
-
 @pytest.fixture
 def server(tmp_path, socket_dir):
-    import mori
-
-    binary = Path(mori.__file__).with_name("umbp_standalone_server")
-    assert binary.is_file(), f"MORI was built without UMBP: no {binary}"
-    address = f"unix://{socket_dir}/umbp.grpc.sock"
-    env = dict(
-        os.environ,
-        UMBP_STANDALONE_ADDRESS=address,
-        UMBP_DRAM_CAPACITY=str(256 * 1024 * 1024),
-    )
-    with open(tmp_path / "server.log", "w") as log:
-        process = subprocess.Popen(
-            [binary], env=env, stdout=log, stderr=subprocess.STDOUT
-        )
-        try:
-            yield _Server(address, process)
-        finally:
-            process.send_signal(signal.SIGCONT)
-            process.terminate()
-            try:
-                process.wait(10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(10)
+    with standalone_server(tmp_path, socket_dir, 256 * 1024 * 1024) as server:
+        yield server
 
 
 def _runtime(address: str, **options) -> StandaloneRuntime:
@@ -179,18 +148,21 @@ def _store_concurrently(address: str, writer: int, start) -> None:
 
 def _close_while_server_stopped(address: str, server_pid: int, scenario: str):
     torch.accelerator.set_device_index(0)
-    runtime = _runtime(address, timeout_ms=200, lookup_timeout_ms=200)
-    worker = runtime.create_worker_handle("ns", RankTopology(), None)
-    scheduler = runtime.create_scheduler_handle("ns", RankTopology(), None)
     source = torch.arange(_LAYER_BYTES, dtype=torch.uint8, device="cuda:0")
-    worker.register_buffers({"kv": source})
     kv_range = KVRange("kv", 0, 0, source.data_ptr(), _LAYER_BYTES, _LAYER_BYTES, 0)
     plan = BlockTransferPlan("stuck", 0, ranges=(kv_range,))
     if scenario == "load":
-        stored = worker.wait(worker.store([plan]))
+        writer = _runtime(address).create_worker_handle("ns", RankTopology(), None)
+        writer.register_buffers({"kv": source})
+        stored = writer.wait(writer.store([plan]))
         assert stored.status is TransferJobStatus.COMPLETED, stored.error
-        worker.publish(stored)
+        writer.publish(stored)
+        writer.close()
 
+    runtime = _runtime(address, timeout_ms=200, lookup_timeout_ms=200)
+    worker = runtime.create_worker_handle("ns", RankTopology(), None)
+    scheduler = runtime.create_scheduler_handle("ns", RankTopology(), None)
+    worker.register_buffers({"kv": source})
     os.kill(server_pid, signal.SIGSTOP)
     if scenario in ("store", "load"):
         job = getattr(worker, scenario)([plan])
@@ -198,8 +170,8 @@ def _close_while_server_stopped(address: str, server_pid: int, scenario: str):
         assert worker.poll(job) is None
     elif scenario == "lookup":
         started = time.monotonic()
-        assert list(scheduler.lookup(["stuck"])) == [False]
-        assert list(scheduler.lookup(["stuck"])) == [False]
+        assert list(scheduler.lookup(["stuck"])) == [None]
+        assert list(scheduler.lookup(["stuck"])) == [None]
         assert time.monotonic() - started < 5
     scheduler.close()
     worker.close()
