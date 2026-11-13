@@ -41,7 +41,7 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
 
     kernel: Any = staticmethod(mhc_pre_big_fuse_with_norm_tilelang)
 
-    def dispatch(self, *, n_splits, **fields) -> CompileKey:  # type: ignore[override]
+    def dispatch(self, *, n_splits, **fields) -> CompileKey:
         return self.CompileKey(n_splits=n_splits, **fields)
 
     def get_warmup_keys(

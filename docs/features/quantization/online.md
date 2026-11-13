@@ -1,9 +1,10 @@
 # Online Quantization
 
 Online quantization lets you take a BF16/FP16 model and quantize its Linear
-and MoE weights to lower precision (such as FP8) at load time, without needing
-a pre-quantized checkpoint or calibration data. Weights are converted during
-model loading and activations are dynamically scaled during each forward pass.
+and MoE weights, and optionally its lm_head, to lower precision (such as FP8)
+at load time, without needing a pre-quantized checkpoint or calibration data.
+Weights are converted during model loading and activations are dynamically
+scaled during each forward pass.
 
 ## Quick Start
 
@@ -283,5 +284,19 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
     - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
     - A layer name may not match both `targets` and `ignore`, raising an error.
     - A layer may not match more than one `targets` pattern, raising an error.
+    - The lm_head (`ParallelLMHead`) is neither a linear nor an MoE layer. It is
+      quantized only when the text of a `targets` pattern contains its module name
+      (`lm_head`), so `"re:.*"` and `"*"` do not select it, for example
+      weight-only FP8:
+      `"re:.*lm_head$": {"weight": "fp8_per_channel_static", "activation": None}`.
+    - The lm_head supports per-channel FP8 only: `fp8_per_channel` (W8A8) or
+      `fp8_per_channel_static` with `"activation": None` (weight-only; CUDA and
+      XPU only, use `fp8_per_channel` on ROCm). Other schemes, a tied lm_head and
+      one the checkpoint already quantizes raise an error. It cannot be combined
+      with `draft_lm_head_quantization` or with models that read `lm_head.weight`
+      directly (Gemma4 MTP, DiffusionGemma, K2Horizon). Models converted to
+      sequence classification raise an error.
+    - `"activation": None` on `fp8_per_channel_static` is valid for any linear
+      layer; MoE experts reject it.
     - fnmatch-style patterns are supported only by online quantization; they are
       not applied to Quark or compressed-tensors configurations.
