@@ -1500,7 +1500,10 @@ def multi_process_parallel(
     )
     init_start = time.monotonic()
     try:
-        ray.init(runtime_env={"env_vars": env_vars})
+        ray.init(
+            num_cpus=data_parallel_size * tp_size * pp_size,
+            runtime_env={"env_vars": env_vars},
+        )
     except Exception:
         sampler.kill()
         sampler.wait()
