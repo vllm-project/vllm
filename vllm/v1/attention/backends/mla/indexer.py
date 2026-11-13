@@ -688,6 +688,10 @@ class DeepseekV32IndexerPrefillMetadata:
     # tokens, gathered compactly in the order their top-k is written: the
     # indices of those tokens.
     shardq_gather_indices: torch.Tensor | None = None
+    # With gather_shardq_topk: the split, and its token ids on the device, which
+    # order the ranks' gathered top-k rows.
+    shardq_split: ShardQSplit | None = None
+    shardq_token_ids: torch.Tensor | None = None
 
 
 @dataclass
@@ -1020,6 +1024,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         layers = self.vllm_config.compilation_config.static_forward_context
         self.use_shardq = any(
             getattr(layers.get(name), "use_shardq", False) for name in self.layer_names
+        )
+        self.gather_shardq_topk = self.use_shardq and any(
+            getattr(layers.get(name), "gather_shardq_topk", False)
+            for name in self.layer_names
+        )
+        # 0 leaves the floor to sparse_mla_shard_q_min_tokens alone.
+        self.shardq_min_seq_len = max(
+            (
+                getattr(layers.get(name), "shardq_min_seq_len", 0)
+                for name in self.layer_names
+            ),
+            default=0,
         )
         # KV compression (DeepseekV4). Default to 1 for no compression.
         self.compress_ratio = 1
@@ -1560,9 +1576,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
+            max_prefill_seq_len = int(seq_lens_cpu[num_decodes:].max().item())
             positions = shardq_gather_indices = None
-            if self.use_shardq and (
-                split := build_shardq_split(common_attn_metadata, self.vllm_config)
+            shardq_split = shardq_token_ids = None
+            if (
+                self.use_shardq
+                and max_prefill_seq_len >= self.shardq_min_seq_len
+                and (
+                    split := build_shardq_split(common_attn_metadata, self.vllm_config)
+                )
             ):
                 # Tokens this builder counts as decodes stay in place there.
                 assert num_decode_tokens <= split.num_decode_tokens
@@ -1572,6 +1594,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 shardq_gather_indices, query_start_loc_cpu = upload_shardq_indices(
                     split, query_start_loc_cpu[: num_reqs + 1], self.device
                 )
+                if self.gather_shardq_topk:
+                    shardq_split = split
+                    shardq_token_ids = async_tensor_h2d(
+                        split.token_ids, device=self.device, dtype=torch.int64
+                    )
                 # Chunk only these tokens, each at its position, and renumber
                 # the requests' query ranges (the decodes' stay put).
                 token_to_req = torch.searchsorted(
@@ -1662,12 +1689,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     chunks.append(metadata)
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
-                max_prefill_seq_len=(
-                    int(seq_lens_cpu[num_decodes:].max().item())
-                    if num_prefills > 0
-                    else 0
-                ),
+                max_prefill_seq_len=max_prefill_seq_len,
                 shardq_gather_indices=shardq_gather_indices,
+                shardq_split=shardq_split,
+                shardq_token_ids=shardq_token_ids,
             )
 
         decode_metadata = None

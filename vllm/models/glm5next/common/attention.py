@@ -540,6 +540,8 @@ class Glm5NextMLAAttention(nn.Module):
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
+            if shardq_eligible and current_platform.is_rocm():
+                self.indexer.indexer_op.enable_shardq()
 
         else:
             self.indexer_rope_emb = None
