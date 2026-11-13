@@ -451,11 +451,11 @@ fn serve_args_merge_dotted_forms_of_frontend_flags() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--hf-overrides.rope_scaling.rope_type",
+        "--hf-overrides.rope_parameters.rope_type",
         "yarn",
         "--compilation-config.mode",
         "3",
-        "--hf-overrides.rope_scaling.factor=4",
+        "--hf-overrides.rope_parameters.factor=4",
         "--hf-overrides.max_position_embeddings",
         "32k",
         "--hf-overrides.sliding_window=4K",
@@ -475,7 +475,7 @@ fn serve_args_merge_dotted_forms_of_frontend_flags() {
         panic!("expected serve args");
     };
     let hf_overrides = serde_json::json!({
-        "rope_scaling": {"rope_type": "yarn", "factor": 4},
+        "rope_parameters": {"rope_type": "yarn", "factor": 4},
         "max_position_embeddings": 32000,
         "sliding_window": 4096,
         "note": "1.5K",

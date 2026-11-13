@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
+from functools import partial
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +60,12 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     resume_device_comms,
     suspend_device_comms,
+)
+from vllm.distributed.pp_transport import (
+    PPTransport,
+    RowSpec,
+    check_intermediate_tensors,
+    row_specs,
 )
 from vllm.distributed.utils import all_reduce_int
 from vllm.distributed.weight_transfer import (
@@ -178,7 +185,6 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
-    from vllm.distributed.pp_transport import PPTransport
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -276,6 +282,8 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
         # Chosen by VLLM_PP_TRANSPORT in load_model; None sends over NCCL.
         self._pp_transport: PPTransport | None = None
+        # What a non-first PP rank receives into; checked on the NCCL path.
+        self._pp_recv_specs: dict[str, RowSpec] = {}
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -621,13 +629,15 @@ class Worker(WorkerBase):
                 format_gib(self.requested_memory),
             )
 
+        persistent = self.model_runner.intermediate_tensors
+        if persistent is not None:
+            self._pp_recv_specs = row_specs(persistent.tensors)
+
         if envs.VLLM_PP_TRANSPORT != "nccl" and self._pp_transport is None:
             # After init_device, so memory profiling counts its buffers.
             from vllm.distributed.pp_transport import create_pp_transport
 
-            self._pp_transport = create_pp_transport(
-                self.vllm_config, self.model_runner.intermediate_tensors
-            )
+            self._pp_transport = create_pp_transport(self.vllm_config, persistent)
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -1511,6 +1521,10 @@ class Worker(WorkerBase):
                 )
             )
             assert tensor_dict is not None
+            # After the postprocessing that all-gathers and reshapes the tensors.
+            comm_postprocess.append(
+                partial(check_intermediate_tensors, tensor_dict, self._pp_recv_specs)
+            )
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
