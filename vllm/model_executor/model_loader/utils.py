@@ -277,14 +277,15 @@ def online_quantization_timing_context(
 
     assert isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
     quant_config = layer.quant_config
-    assert quant_config is not None
     online_quantization_config = (
         quant_config
-        if isinstance(quant_config, OnlineQuantizationConfig)
+        if quant_config is None or isinstance(quant_config, OnlineQuantizationConfig)
         else quant_config.online_quantization_config
     )
     # reload/layerwise.py's _layerwise_process calls this for experts_int8,
-    # whose online MoE method has no OnlineQuantizationConfig.
+    # whose online MoE method has no OnlineQuantizationConfig, and for layers
+    # built with an online method but no quant config (a drafter's own
+    # quantized lm_head).
     if online_quantization_config is None:
         yield
         return

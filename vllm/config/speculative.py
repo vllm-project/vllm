@@ -580,8 +580,9 @@ class SpeculativeConfig:
     same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
     """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
-    and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
-    activation scales on the platform's FP8 linear kernel; "nvfp4" is
+    and DeepSeek-V4/V4.1 DSpark), or, with "fp8", the Muse Spark DSpark
+    drafter's own lm_head and Markov head on ROCm. "fp8" uses per-row weight
+    and per-token activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The target verifies with its
     own head, so only the acceptance length can change."""
     use_local_argmax_reduction: bool = False

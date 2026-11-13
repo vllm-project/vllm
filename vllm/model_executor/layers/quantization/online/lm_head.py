@@ -3,6 +3,7 @@
 """Online-quantized copies of an already-loaded lm_head."""
 
 from itertools import chain
+from math import lcm
 from typing import Literal
 from weakref import WeakKeyDictionary
 
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
@@ -84,6 +86,19 @@ _LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
     "fp8": Fp8PtpcOnlineLinearMethod,
     "nvfp4": _LMHeadNvfp4Method,
 }
+
+
+def lm_head_quant_method(quantization: Literal["fp8", "nvfp4"]) -> OnlineLinearBase:
+    """The online method of a `quantization` lm_head, for a drafter that builds
+    its own head quantized (`ParallelLMHead(..., quant_method=...)`) instead of
+    sharing the target's."""
+    return _LM_HEAD_METHODS[quantization]()
+
+
+def lm_head_padding_size(tp_size: int) -> int:
+    """The vocabulary padding of a quantized lm_head sharded over `tp_size`
+    ranks: its GEMM kernels need a multiple of 16 output columns per rank."""
+    return lcm(DEFAULT_VOCAB_PADDING_SIZE, 16 * tp_size)
 
 
 def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead:
