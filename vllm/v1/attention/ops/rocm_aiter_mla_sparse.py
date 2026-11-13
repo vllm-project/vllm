@@ -2154,6 +2154,55 @@ def _mxfp8_wo_a_bmm_config(num_tokens: int, n_groups: int) -> tuple[int, ...]:
     return 128, 128, 128, 4, 2
 
 
+# AITER FlyDSL batched MXFP8 GEMMs for wo_a on its (16, 16)-preshuffled weight
+# (see the FlyDSL section of rocm_block32_gemm): (n_groups, o_lora_rank, group
+# K) -> [(max tokens, kernelName, or None for the Triton kernel), ...], tuned on
+# MI355X under HIP graphs; the last tier serves every larger token count.
+_FLYDSL_WO_A_TIERS: dict[tuple[int, int, int], list[tuple[int, str | None]]] = {
+    # DeepSeek-V4.1-Flash, TP1 (DP attention)
+    (8, 1024, 4096): [
+        (8, None),
+        (60, "flydsl_bmm_mxfp8_mfma_t64x32x512_w2x2_nb3_sk1_xcd"),
+        (144, "flydsl_bmm_mxfp8_mfma_t64x64x256_w2x2_nb4_sk1_xcd"),
+        (320, "flydsl_bmm_mxfp8_mfma_t64x64x256_w1x4_nb3_sk1_bd1_xcd"),
+        (2048, "flydsl_bmm_mxfp8_mfma_t128x128x128_w1x4_nb2_sk1_bd1_xcd"),
+        (1 << 62, "flydsl_bmm_mxfp8_mfma_t256x256x128_w1x4_nb2_sk1_bd1_xcd"),
+    ],
+}
+
+
+def _flydsl_wo_a_bmm(a, a_scale, weight_preshuffled, weight_scale, out, n_groups):
+    """FlyDSL wo_a into `out`; False when no tier covers this call."""
+    num_tokens, group_dim = a.shape[0], a.shape[1] // n_groups
+    o_lora_rank = out.shape[1] // n_groups
+    tiers = _FLYDSL_WO_A_TIERS.get((n_groups, o_lora_rank, group_dim))
+    if (
+        tiers is None
+        or weight_scale.shape[0] * 32 != weight_preshuffled.shape[0]
+        or not (a.is_contiguous() and a_scale.is_contiguous())
+    ):
+        return False
+    # Imported here to avoid an import cycle with the linear kernels package.
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
+        flydsl_kernel,
+    )
+
+    name = flydsl_kernel(tiers, num_tokens)
+    if name is None:
+        return False
+    from aiter.ops.flydsl.batched_gemm_a8w8_gfx950 import run_bmm_a8w8_mxfp8_gfx950
+
+    run_bmm_a8w8_mxfp8_gfx950(
+        a.view(num_tokens, n_groups, group_dim),
+        weight_preshuffled.view(n_groups, o_lora_rank, group_dim),
+        a_scale.view(num_tokens, n_groups, group_dim // 32),
+        weight_scale.view(n_groups, o_lora_rank // 32, group_dim // 32),
+        out.view(num_tokens, n_groups, o_lora_rank),
+        kernel_name=name,
+    )
+    return True
+
+
 def _rocm_mxfp8_wo_a_bmm_impl(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -2161,6 +2210,7 @@ def _rocm_mxfp8_wo_a_bmm_impl(
     weight_scale: torch.Tensor,
     n_groups: int,
     o_lora_rank: int,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_tokens = a.shape[0]
     group_dim = a.shape[1] // n_groups
@@ -2168,6 +2218,10 @@ def _rocm_mxfp8_wo_a_bmm_impl(
         (num_tokens, n_groups * o_lora_rank), dtype=torch.bfloat16, device=a.device
     )
     if num_tokens == 0:
+        return out
+    if weight_preshuffled is not None and _flydsl_wo_a_bmm(
+        a, a_scale, weight_preshuffled, weight_scale, out, n_groups
+    ):
         return out
     block_m, block_n, block_k, num_warps, num_stages = _mxfp8_wo_a_bmm_config(
         num_tokens, n_groups
@@ -2204,6 +2258,7 @@ def _rocm_mxfp8_wo_a_bmm_fake(
     weight_scale: torch.Tensor,
     n_groups: int,
     o_lora_rank: int,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return a.new_empty((a.shape[0], n_groups * o_lora_rank), dtype=torch.bfloat16)
 
@@ -2234,7 +2289,13 @@ def rocm_mxfp8_wo_a_bmm(
     Returns [T, G * R].
     """
     return torch.ops.vllm.rocm_dsv41_mxfp8_wo_a_bmm(
-        a, a_scale, wo_a.weight, wo_a.weight_scale, n_groups, o_lora_rank
+        a,
+        a_scale,
+        wo_a.weight,
+        wo_a.weight_scale,
+        n_groups,
+        o_lora_rank,
+        getattr(wo_a, "weight_preshuffled", None),
     )
 
 

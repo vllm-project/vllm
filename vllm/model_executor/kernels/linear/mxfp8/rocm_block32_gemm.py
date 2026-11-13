@@ -875,17 +875,137 @@ def _launch(
         )
 
 
+# --- AITER FlyDSL MXFP8 GEMMs -------------------------------------------------
+# On MI355X AITER's FlyDSL MXFP8 kernels beat the Triton ones above at most
+# shapes; they read the checkpoint's 32x32 E8M0 block scales as they are, but a
+# (16, 16)-preshuffled weight (`flydsl_preshuffle`, kept next to the original).
+# (N, K) -> [(max M, kernelName, or None for the Triton kernels), ...], tuned
+# under HIP graphs for the DeepSeek-V4.1-Flash TP1 (DP attention) linears; the
+# last tier serves every larger M. M <= 8 keeps the fused-quant Triton kernel.
+_ANY_M = 1 << 62
+_FLYDSL_TIERS: dict[tuple[int, int], list[tuple[int, str | None]]] = {
+    # wq_b, TP1
+    (32768, 1280): [
+        (8, None),
+        (60, "flydsl_mxpsh_64x64x256_F8_F8_B16_w0_x0_sk1_pf_nt"),
+        (96, "flydsl_mxpsh_96x128x128_F8_F8_B16_w0_x0_sk1_pf_nt"),
+        (192, "flydsl_mxpsh_192x128x128_F8_F8_B16_w2_x0_sk1_pf_nt"),
+        (320, "flydsl_mxpsh_192x128x128_F8_F8_B16_w2_x4_sk1"),
+        (512, "flydsl_mxpsh_128x256x128_F8_F8_B16_w2_x4_sk1"),
+        (1536, "flydsl_mxpsh_192x256x128_F8_F8_B16_w0_x4_sk1_pf"),
+        (_ANY_M, "flydsl_mxpsh_128x256x128_F8_F8_B16_w2_x4_sk1"),
+    ],
+    # wo_b, TP1
+    (5120, 8192): [
+        (8, None),
+        (96, "flydsl_mxpsh_96x128x128_F8_F8_B16_w4_x4_sk4_fsk_pf_nt"),
+        (120, "flydsl_mxpsh_128x128x128_F8_F8_B16_w4_x4_sk4_fsk_pf_nt"),
+        (320, "flydsl_mxpsh_64x64x512_F8_F8_B16_w2_x4_sk1_pf"),
+        (1536, "flydsl_mxpsh_128x128x128_F8_F8_B16_w0_x4_sk1_pf"),
+        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
+    ],
+    # shared expert gate_up, TP1
+    (4608, 5120): [
+        (8, None),
+        (48, "flydsl_mxpsh_48x32x512_F8_F8_B16_w0_x0_sk1_pf_nt"),
+        (144, "flydsl_mxpsh_48x64x512_F8_F8_B16_w2_x4_sk1_pf"),
+        (192, "flydsl_mxpsh_64x64x512_F8_F8_B16_w4_x4_sk1_pf"),
+        (320, "flydsl_mxpsh_48x64x512_F8_F8_B16_w0_x4_sk1_pf"),
+        (1536, "flydsl_mxpsh_96x192x128_F8_F8_B16_w0_x4_sk1_pf"),
+        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
+    ],
+    # shared expert down, TP1
+    (5120, 2304): [
+        (8, None),
+        (60, "flydsl_mxpsh_32x16x128_F8_F8_B16_w4_x4_sk1_pf"),
+        (96, "flydsl_mxpsh_32x64x128_F8_F8_B16_w0_x4_sk1_pf"),
+        (512, "flydsl_mxpsh_64x64x256_F8_F8_B16_w4_x4_sk1_pf"),
+        (1536, "flydsl_mxpsh_64x256x128_F8_F8_B16_w4_x4_sk1_pf"),
+        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
+    ],
+    # fused wq_a|wkv
+    (1792, 5120): [
+        (8, None),
+        (120, "flydsl_mxpsh_32x32x256_F8_F8_B16_w4_x4_sk1_pf"),
+        (1024, None),
+        (3072, "flydsl_mxpsh_128x128x128_F8_F8_B16_w4_x0_sk1_pf"),
+        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
+    ],
+    # indexer wq_b
+    (4096, 1280): [
+        (8, None),
+        (192, "flydsl_mxpsh_48x32x256_F8_F8_B16_w0_x4_sk1_pf"),
+        (512, None),
+        (3072, "flydsl_mxpsh_64x256x128_F8_F8_B16_w0_x4_sk1_pf"),
+        (_ANY_M, "flydsl_mxpsh_128x256x128_F8_F8_B16_w2_x4_sk1"),
+    ],
+    # engram, TP1
+    (25600, 6144): [
+        (8, None),
+        (96, "flydsl_mxpsh_96x128x256_F8_F8_B16_w0_x4_sk1_pf_nt"),
+        (120, "flydsl_mxpsh_128x128x128_F8_F8_B16_w4_x4_sk1_pf"),
+        (192, "flydsl_mxpsh_96x256x128_F8_F8_B16_w0_x4_sk1_pf"),
+        (240, "flydsl_mxpsh_128x128x128_F8_F8_B16_w4_x4_sk1_pf"),
+        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
+    ],
+}
+_FLYDSL_DEFAULT_TIERS: list[tuple[int, str | None]] = [
+    (4095, None),
+    (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
+]
+# The FlyDSL kernels index their buffers with 32 bits.
+_FLYDSL_MAX_BYTES = (1 << 31) - 1
+
+
+def flydsl_kernel(tiers: list[tuple[int, str | None]], M: int) -> str | None:
+    return next(name for max_m, name in tiers if max_m >= M)
+
+
+def flydsl_preshuffle(weight: torch.Tensor) -> torch.Tensor | None:
+    """The (16, 16)-preshuffled copy of an [N, K] e4m3 weight that the FlyDSL
+    kernels read, or None without AITER."""
+    try:
+        from aiter.ops.shuffle import shuffle_weight
+    except ImportError:
+        return None
+    return shuffle_weight(weight, layout=(16, 16)).contiguous()
+
+
+def _gemm(x, x_scale, weight, weight_scale, out, weight_preshuffled) -> None:
+    M, K = x.shape
+    N = weight.shape[0]
+    name = None
+    if weight_preshuffled is not None and out.dtype == torch.bfloat16:
+        name = flydsl_kernel(_FLYDSL_TIERS.get((N, K), _FLYDSL_DEFAULT_TIERS), M)
+    if name is None:
+        _launch(x, x_scale, weight, weight_scale, out, _config(M, N, K))
+        return
+    from aiter.ops.flydsl.mxscale_preshuffle_kernels import run_gemm_a8w8_mxfp8_gfx950
+
+    rows = _FLYDSL_MAX_BYTES // (out.element_size() * N) // 256 * 256
+    for m0 in range(0, M, rows):
+        run_gemm_a8w8_mxfp8_gfx950(
+            x[m0 : m0 + rows],
+            weight_preshuffled,
+            x_scale[m0 : m0 + rows],
+            weight_scale,
+            out[m0 : m0 + rows],
+            kernel_name=name,
+        )
+
+
 def _rocm_mxfp8_block32_gemm_impl(
     x: torch.Tensor,
     x_scale: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    M, K = x.shape
+    M = x.shape[0]
     out = torch.empty((M, weight.shape[0]), dtype=out_dtype, device=x.device)
     if M > 0:
-        _launch(x, x_scale, weight, weight_scale, out, _config(M, weight.shape[0], K))
+        _gemm(x, x_scale, weight, weight_scale, out, weight_preshuffled)
     return out
 
 
@@ -895,6 +1015,7 @@ def _rocm_mxfp8_block32_gemm_fake(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
 
@@ -914,6 +1035,7 @@ def rocm_mxfp8_block32_gemm(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """`x @ weight.T` for MXFP8 `x` and a 32x32 block-scaled MXFP8 weight.
 
@@ -923,13 +1045,15 @@ def rocm_mxfp8_block32_gemm(
         weight: [N, K] e4m3 weight, contiguous.
         weight_scale: [ceil(N / 32), K / 32] E8M0 (uint8) weight block scales.
         out_dtype: Output dtype.
+        weight_preshuffled: `flydsl_preshuffle(weight)`, which lets the
+            FlyDSL kernels serve the M tiers they are tuned for.
 
     Returns:
         The [M, N] product.
 
     """
     return torch.ops.vllm.rocm_mxfp8_block32_gemm(
-        x, x_scale, weight, weight_scale, out_dtype
+        x, x_scale, weight, weight_scale, out_dtype, weight_preshuffled
     )
 
 
@@ -951,6 +1075,7 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """`x @ weight.T` for raw bf16/fp16 `x` and a 32x32 block-scaled
     MXFP8 weight, quantizing `x` inside the GEMM at tiny M.
@@ -1005,7 +1130,7 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
         _launch(x, None, weight, weight_scale, out, fused_cfg, quant_in_kernel=True)
     else:
         x_q, x_scale = mxfp8_e4m3_quantize(x)
-        _launch(x_q, x_scale, weight, weight_scale, out, cfg)
+        _gemm(x_q, x_scale, weight, weight_scale, out, weight_preshuffled)
     return out
 
 
@@ -1014,6 +1139,7 @@ def _rocm_mxfp8_block32_gemm_quant_fake(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
 
@@ -1032,12 +1158,14 @@ def rocm_mxfp8_block32_gemm_quant(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """`x @ weight.T` for a raw bf16/fp16 `x` [M, K] and a 32x32
     block-scaled MXFP8 `weight` [N, K] with `weight_scale`
     [N / 32, K / 32]. Tiny-M batches quantize inside the packed GEMM (see
-    `_rocm_mxfp8_block32_gemm_quant_impl`).
+    `_rocm_mxfp8_block32_gemm_quant_impl`). `weight_preshuffled` as in
+    `rocm_mxfp8_block32_gemm`.
     """
     return torch.ops.vllm.rocm_mxfp8_block32_gemm_quant(
-        x, weight, weight_scale, out_dtype
+        x, weight, weight_scale, out_dtype, weight_preshuffled
     )

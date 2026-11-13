@@ -36,6 +36,7 @@ from vllm.triton_utils import tl, triton
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 from .rocm_block32_gemm import (
     BLOCK_ROWS,
+    flydsl_preshuffle,
     rocm_mxfp8_block32_gemm,
     rocm_mxfp8_block32_gemm_quant,
 )
@@ -482,6 +483,9 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale)
+        layer.weight_preshuffled = (
+            flydsl_preshuffle(layer.weight) if block_scale is not None else None
+        )
 
     def input_quant_key(self) -> QuantKey:
         # Row-major [M, K // 32] E8M0 scales, unlike FlashInfer's swizzled ones
@@ -525,7 +529,12 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             # One scale row per 32 weight rows (see process_weights_after_loading).
             if qa is not None:
                 out = rocm_mxfp8_block32_gemm(
-                    x_q, x_scale, layer.weight, layer.weight_scale, out_dtype
+                    x_q,
+                    x_scale,
+                    layer.weight,
+                    layer.weight_scale,
+                    out_dtype,
+                    getattr(layer, "weight_preshuffled", None),
                 )
             else:
                 # The op quantizes the activation itself: at tiny M (the
@@ -537,7 +546,11 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
                 # opaque op so a compiled caller cannot freeze the
                 # token-count decision.
                 out = rocm_mxfp8_block32_gemm_quant(
-                    x2d, layer.weight, layer.weight_scale, out_dtype
+                    x2d,
+                    layer.weight,
+                    layer.weight_scale,
+                    out_dtype,
+                    getattr(layer, "weight_preshuffled", None),
                 )
         elif qa is not None:
             out = _mxfp8_dot_scaled_gemm(
