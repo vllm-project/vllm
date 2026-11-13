@@ -323,6 +323,8 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         scatter_states.register_warmup(
             state_shape=recurrent_state_shape,
             state_dtype=recurrent_state_dtype,
+            # The prefill writes back the chunk kernel's FP32 final state.
+            src_dtype=torch.float32,
             indices_dtype=torch.int32,
             max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
         )
