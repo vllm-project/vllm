@@ -62,12 +62,14 @@ from .interfaces import (
 )
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 _GPT_OSS_STREAMED_EXPERT_SUFFIX_TO_SHARD = {
@@ -484,10 +486,13 @@ class GptOssModel(nn.Module, EagleModelMixin):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.embedding = VocabParallelEmbedding(
-            self.config.vocab_size,
-            self.config.hidden_size,
-        )
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
+            self.embedding = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.hidden_size,
+            )
+        else:
+            self.embedding = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: self.block_cls(
@@ -497,7 +502,10 @@ class GptOssModel(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+        else:
+            self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
         )
@@ -1421,11 +1429,14 @@ class GptOssForCausalLM(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
         )
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
