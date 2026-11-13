@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import Qwen3Config
+from transformers import PreTrainedConfig, Qwen3Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -115,6 +115,12 @@ class Qwen3MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+
+def use_qwen2_attention(config: PreTrainedConfig) -> None:
+    """Make Qwen3 layers build Qwen2 attention: QKV bias and no q/k-norm."""
+    config.attention_bias = True
+    config.qk_norm = False
 
 
 class Qwen3Attention(nn.Module):
@@ -262,6 +268,7 @@ class Qwen3DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
+            qk_norm=getattr(config, "qk_norm", True),
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,

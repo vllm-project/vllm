@@ -58,8 +58,7 @@ from vllm.model_executor.layers.resampler import (
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.layers.qwen2 import Qwen2ForCausalLM
-from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM, use_qwen2_attention
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -2150,7 +2149,8 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        return Qwen2ForCausalLM(vllm_config=vllm_config, prefix=prefix)
+        use_qwen2_attention(vllm_config.model_config.hf_config.get_text_config())
+        return Qwen3ForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
     def init_vision_module(
         self,

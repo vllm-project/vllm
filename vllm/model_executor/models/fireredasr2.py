@@ -52,7 +52,7 @@ from .interfaces import (
     SupportsTranscription,
     _require_is_multimodal,
 )
-from vllm.model_executor.layers.qwen2 import Qwen2ForCausalLM
+from .qwen3 import Qwen3ForCausalLM, use_qwen2_attention
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -144,7 +144,8 @@ class FireRedASR2Model(nn.Module):
             vllm_config.model_config.hf_config.encoder_downsample_rate,
         )
 
-        self.decoder = Qwen2ForCausalLM(
+        use_qwen2_attention(vllm_config.model_config.hf_config)
+        self.decoder = Qwen3ForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "decoder")
         )
 
@@ -407,7 +408,7 @@ class FireRedASR2ForConditionalGeneration(
 
         with self._mark_composite_model(
             vllm_config,
-            language_targets=Qwen2ForCausalLM,
+            language_targets=Qwen3ForCausalLM,
             tower_targets={"audio": (FireRedASR2Encoder, FireRedASR2Adapter)},
         ):
             self.model = FireRedASR2Model(
