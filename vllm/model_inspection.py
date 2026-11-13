@@ -205,7 +205,7 @@ def _format_layer_indices(indices: set[int], max_ranges: int = 3) -> str:
     return f"[{min(indices)}-{max(indices)} ({len(indices)})]"
 
 
-def _format_layer_names(names: list[str], max_patterns: int = 6) -> str:
+def _format_layer_names(names: list[str]) -> str:
     """Collapse layer names: `layers.[0-47].attn.{q_proj,k_proj}`."""
     # Layers that differ only in their numeric indices share a pattern.
     indices: dict[tuple[str, ...], list[set[int]]] = {}
@@ -230,9 +230,6 @@ def _format_layer_names(names: list[str], max_patterns: int = 6) -> str:
         if len(leaf_names) > 1:
             leaf = "{" + ",".join(leaf_names) + "}"
         formatted.append(".".join((*prefix, leaf)))
-    if len(formatted) > max_patterns:
-        hidden = len(formatted) - max_patterns + 1
-        formatted = [*formatted[: max_patterns - 1], f"... {hidden} more"]
     return ", ".join(formatted)
 
 
