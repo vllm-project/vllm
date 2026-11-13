@@ -131,6 +131,7 @@ def _build_common_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=torch.tensor(kv_lens, dtype=torch.int32),
         num_reqs=batch_size,
         num_actual_tokens=total_tokens,
         max_query_len=max_query_len,
