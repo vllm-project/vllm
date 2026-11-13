@@ -22,13 +22,18 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm required", allow_module_level=True)
 
 from vllm.models.deepseek_v41.amd import mhc as amd_mhc  # noqa: E402
+from vllm.platforms.rocm import get_cdna_version  # noqa: E402
 
 DEVICE = current_platform.device_type
 HC, HIDDEN = 4, 5120
 
-requires_seam = pytest.mark.skipif(
-    not amd_mhc.supports_mhc_seam(HIDDEN, HC), reason="AITER gfx942 mHC seam required"
-)
+requires_cdna3 = pytest.mark.skipif(get_cdna_version() != 3, reason="CDNA 3 only")
+
+
+@requires_cdna3
+def test_seam_supported():
+    """On CDNA 3 the seam tests run instead of skipping."""
+    assert amd_mhc.supports_mhc_seam(HIDDEN, HC)
 
 
 def _inputs(num_tokens, strided):
@@ -61,7 +66,7 @@ def _seam_args(num_tokens, strided, carried):
     return residual, fn, scale, base, x, post, comb, pre_mix
 
 
-@requires_seam
+@requires_cdna3
 @pytest.mark.parametrize("carried", [False, True])
 def test_seam_op(carried):
     """The registered op and its fake agree, with a strided residual."""
@@ -73,7 +78,7 @@ def test_seam_op(carried):
     )
 
 
-@requires_seam
+@requires_cdna3
 @pytest.mark.parametrize("num_tokens,strided", [(63, False), (64, False), (64, True)])
 @pytest.mark.parametrize("carried", [False, True])
 def test_seam_dispatch(num_tokens, strided, carried, default_vllm_config, monkeypatch):
@@ -120,7 +125,7 @@ def test_seam_dispatch(num_tokens, strided, carried, default_vllm_config, monkey
         torch.testing.assert_close(got, want.reshape(got.shape), atol=2e-2, rtol=8e-3)
 
 
-@requires_seam
+@requires_cdna3
 def test_write_kv_takes_seam(default_vllm_config, monkeypatch):
     """The replay KV write runs the seam from 64 tokens and hands its layer
     input to `forward_kv`."""
