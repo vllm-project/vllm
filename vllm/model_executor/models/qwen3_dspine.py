@@ -21,7 +21,7 @@ from vllm.v1.worker.gpu.spec_decode.dspine.config import DSpineSpeculatorConfig
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import WeightsMapper, maybe_prefix
 
-_TENCENT_METADATA = (
+_BRIDGE_METADATA = (
     "draft_block_causal_version",
     "last_write_refine_version",
     "selected_prefix_bridge.independent_write_version",
@@ -31,7 +31,7 @@ _TENCENT_METADATA = (
 
 
 class AdjacentCausalInjection(nn.Module):
-    """Tencent's BF16 adjacent injection and FP32 last-write refinement."""
+    """BF16 adjacent injection and FP32 last-write refinement."""
 
     def __init__(
         self,
@@ -290,8 +290,8 @@ class DSpineQwen3Model(DFlashQwen3Model):
         weights = list(weights)
         if not any(name.startswith("selected_prefix_bridge.") for name, _ in weights):
             return super().load_weights(weights)
-        self._validate_tencent_metadata(dict(weights))
-        mapped = list(self._tencent_weights(weights))
+        self._validate_bridge_metadata(dict(weights))
+        mapped = list(self._map_bridge_weights(weights))
         loaded = super().load_weights(mapped)
         required = {"transfer_codebook"} | {
             f"injection.{name}" for name, _ in self.injection.named_parameters()
@@ -300,10 +300,10 @@ class DSpineQwen3Model(DFlashQwen3Model):
             raise ValueError(f"Missing DSpine bridge weights: {sorted(missing)}")
         return loaded
 
-    def _validate_tencent_metadata(self, weights: dict[str, torch.Tensor]) -> None:
-        if missing := set(_TENCENT_METADATA[2:]) - weights.keys():
+    def _validate_bridge_metadata(self, weights: dict[str, torch.Tensor]) -> None:
+        if missing := set(_BRIDGE_METADATA[2:]) - weights.keys():
             raise ValueError(f"Missing DSpine bridge metadata: {sorted(missing)}")
-        for name in _TENCENT_METADATA[:-1]:
+        for name in _BRIDGE_METADATA[:-1]:
             if name in weights:
                 weight = weights[name]
                 if weight.numel() != 1 or weight.item() != 1:
@@ -316,7 +316,7 @@ class DSpineQwen3Model(DFlashQwen3Model):
         ):
             raise ValueError("DSpine requires a zero terminal projection")
 
-    def _tencent_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def _map_bridge_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         aliases = {
             "codebook": "transfer_codebook",
             "read_weight": f"injection.readouts.{self.injection.num_layers - 1}.weight",
@@ -326,7 +326,7 @@ class DSpineQwen3Model(DFlashQwen3Model):
             "prev.weight": "injection.message.weight",
         }
         for name, weight in weights:
-            if name in _TENCENT_METADATA:
+            if name in _BRIDGE_METADATA:
                 continue
             key = name.removeprefix("selected_prefix_bridge.")
             if key in ("early_read_weights", "feature_write_weights"):

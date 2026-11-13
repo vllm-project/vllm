@@ -35,7 +35,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; matches against prior responses too. |
 | Dynamic Speculative Decoding | High gain | Higher than base SD method | Useful for RL or workload with fluctuating QPS |
-| Adaptive Verification | High gain | Higher than base SD method | Sizes verification per request from drafter confidence; currently DSpark only. |
+| Adaptive Verification | High gain | Higher than base SD method | Sizes verification per request from estimated acceptance. |
 
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
@@ -44,23 +44,24 @@ or the [benchmark CLI guide](../../benchmarking/cli.md).
 ## DSpine
 
 DSpine drafts tokens in parallel with adjacent causal injection and
-predecessor-conditioned refinement. Tencent and Speculators DSpine checkpoints
-use the DFlash serving path; checkpoint metadata selects the DSpine model.
+predecessor-conditioned refinement. DSpine checkpoints use the DFlash serving
+path. Checkpoint metadata selects the DSpine model.
 
 ```bash
 vllm serve Qwen/Qwen3.8-27B \
   --language-model-only \
   --speculative-config '{
     "method": "dflash",
-    "model": "tencent/Qwen3.8-27B-DSpine-b16",
+    "model": "/path/to/Qwen3.8-27B-DSpine-b16",
     "num_speculative_tokens": 15
   }'
 ```
 
 Set `num_speculative_tokens` to the checkpoint's block size minus one.
 Draft sampling defaults to `greedy`; set `draft_sample_method` to
-`probabilistic` for probabilistic proposals. Adaptive verification is not
-supported.
+`probabilistic` for probabilistic proposals.
+Set `enable_adaptive_verification` to `true` in the speculative config to
+enable [adaptive verification](adaptive_verification.md).
 
 ## Custom Speculators (Experimental)
 

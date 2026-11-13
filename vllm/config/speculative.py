@@ -77,7 +77,12 @@ _NESTED_HF_CONFIG_KEYS = frozenset(
 def _maybe_override_dspine_config(config: PreTrainedConfig) -> None:
     draft = getattr(config, "dflash_config", None) or {}
     bridge = draft.get("selected_prefix_code_bridge")
-    if config.architectures != ["DFlashDraftModel"] or bridge is None:
+    architectures = config.architectures
+    if (
+        bridge is None
+        or not architectures
+        or architectures[0] not in ("DFlashDraftModel", "DSpineDraftModel")
+    ):
         return
     expected = {
         "draft_block_causal": True,

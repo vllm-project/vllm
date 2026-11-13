@@ -1,19 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
-
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 
 class DSpineSpeculator(DFlash2Speculator):
     _speculator_name = "DSpine"
     _candidate_top_k_key = "transition_top_k"
-
-    def __init__(self, vllm_config, device: torch.device):
-        super().__init__(vllm_config, device)
-        if self.enable_adaptive_verification:
-            raise ValueError("DSpine does not support adaptive verification.")
 
     def _prepare_candidates(self, model_output, num_reqs):
         hidden_states, final_pre_injection = model_output
