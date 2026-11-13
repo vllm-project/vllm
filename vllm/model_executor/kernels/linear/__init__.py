@@ -12,6 +12,7 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
+from collections.abc import Callable
 from typing import Any, TypeVar
 
 import torch
@@ -19,6 +20,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
+    LinearKernel,
     LinearKernelOracle,
     MMLinearKernel,
     MMLinearLayerConfig,
@@ -304,7 +306,7 @@ def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
 
 
 # Kernel classes covered by each --linear-backend value.
-_LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
+_LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
     "b12x": {
         B12xFp8BlockScaledMMKernel,
         B12xMxFp4LinearKernel,
@@ -672,17 +674,63 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
 # TODO make all kernels inherit from MMLinearKernel
 # then bound _KernelT only to MMLinearKernel
 _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
+_LinearKernelT = TypeVar("_LinearKernelT", bound=LinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
 def _check_activation_fallback(
-    kernel: type[Any], activation_quant_key: QuantKey | None
+    kernel: type[LinearKernel], activation_quant_key: QuantKey | None
 ) -> str | None:
     return check_activation_quant_fallback(
         kernel.__name__,
         activation_quant_key,
         kernel.executed_activation_key(activation_quant_key),
     )
+
+
+def _first_usable_kernel(
+    kernels: list[type[_LinearKernelT]],
+    config: Any,
+    activation_quant_key: QuantKey | None,
+    supports_quant_scheme: Callable[[type[_LinearKernelT]], str | None] | None = None,
+) -> tuple[type[_LinearKernelT] | None, list[str]]:
+    """The first of `kernels`, in priority order, that is enabled, runs on this
+    device, implements `config` and may run `activation_quant_key`.
+
+    Returns:
+        The kernel, or None, and why each kernel before it was passed over.
+
+    """
+    failure_reasons = []
+    for kernel_cls in kernels:
+        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel_cls.__name__} disabled by environment variable"
+            )
+            continue
+
+        is_supported, reason = kernel_cls.is_supported()
+        if not is_supported:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if supports_quant_scheme is not None and (
+            reason := supports_quant_scheme(kernel_cls)
+        ):
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        can_implement, reason = kernel_cls.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if reason := _check_activation_fallback(kernel_cls, activation_quant_key):
+            failure_reasons.append(reason)
+            continue
+
+        return kernel_cls, failure_reasons
+    return None, failure_reasons
 
 
 def _int8_activation_quant_key(config: Int8ScaledMMLinearLayerConfig) -> QuantKey:
@@ -1001,15 +1049,9 @@ def choose_mp_linear_kernel(
                 f" {kernel.__name__} disabled by environment variable"
             )
             continue
-        if (
-            compute_capability is not None
-            and kernel.get_min_capability() > compute_capability
-        ):
-            failure_reasons.append(
-                f"{kernel.__name__} requires capability "
-                f"{kernel.get_min_capability()}, current compute "
-                f" capability is {compute_capability}"
-            )
+        is_supported, failure_reason = kernel.is_supported(compute_capability)
+        if not is_supported:
+            failure_reasons.append(f"{kernel.__name__} {failure_reason}")
             continue
 
         can_implement, failure_reason = kernel.can_implement(config)
@@ -1072,28 +1114,10 @@ def init_mxfp8_linear_kernel(
         quantization="mxfp8",
     )
 
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
-
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        if reason := _check_activation_fallback(kernel_cls, activation_quant_key):
-            failure_reasons.append(reason)
-            continue
-
+    kernel_cls, failure_reasons = _first_usable_kernel(
+        possible, config, activation_quant_key
+    )
+    if kernel_cls is not None:
         logger.info_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
@@ -1167,35 +1191,17 @@ def init_mxfp4_linear_kernel(
         quantization="mxfp4",
     )
 
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
+    def supports_quant_scheme(kernel_cls: type[MxFp4LinearKernel]) -> str | None:
+        if kernel_cls._supports_quant_scheme(kMxfp4Static, activation_quant_key):
+            return None
+        return (
+            f"quantization scheme {kMxfp4Static}x{activation_quant_key} not supported"
+        )
 
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        if not kernel_cls._supports_quant_scheme(kMxfp4Static, activation_quant_key):
-            failure_reasons.append(
-                f"{kernel_cls.__name__}: quantization scheme "
-                f"{kMxfp4Static}x{activation_quant_key} not supported"
-            )
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        if reason := _check_activation_fallback(kernel_cls, activation_quant_key):
-            failure_reasons.append(reason)
-            continue
-
+    kernel_cls, failure_reasons = _first_usable_kernel(
+        possible, config, activation_quant_key, supports_quant_scheme
+    )
+    if kernel_cls is not None:
         logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
@@ -1237,28 +1243,10 @@ def init_mxfp6_linear_kernel(
             )
         possible = filtered
 
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
-
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        if reason := _check_activation_fallback(kernel_cls, activation_quant_key):
-            failure_reasons.append(reason)
-            continue
-
+    kernel_cls, failure_reasons = _first_usable_kernel(
+        possible, config, activation_quant_key
+    )
+    if kernel_cls is not None:
         logger.info_once("Using %s for MXFP6 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
@@ -1410,30 +1398,10 @@ def init_nvfp4_linear_kernel(
         quantization=quantization,
     )
 
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
-
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        if reason := _check_activation_fallback(
-            kernel_cls, None if use_a16 else kNvfp4Dynamic
-        ):
-            failure_reasons.append(reason)
-            continue
-
+    kernel_cls, failure_reasons = _first_usable_kernel(
+        possible, config, None if use_a16 else kNvfp4Dynamic
+    )
+    if kernel_cls is not None:
         if kernel_cls is EmulationNvFp4LinearKernel and failure_reasons:
             logger.warning_once(
                 "NVFP4 linear falling back to the slow and unoptimized "
@@ -1507,6 +1475,7 @@ def register_linear_kernel(
 
 
 __all__ = [
+    "LinearKernel",
     "HummingHadamardNvFp4LinearKernel",
     "fp8_scaled_mm_is_batch_invariant",
     "init_fp8_linear_kernel",
