@@ -184,6 +184,7 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     draft = SimpleNamespace(
         use_mega_gate=False,
         use_sequence_parallel=False,
+        fuse_mhc_all_reduce=False,
         hc_mult=hc_mult,
         layers=[make_layer(mix) for mix in mixes],
     )
