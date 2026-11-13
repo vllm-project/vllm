@@ -59,7 +59,7 @@ class Qwen3_5SlotDecisionModelState(MambaHybridModelState):
         ranged = ranges is not None and cudagraph_mode != CUDAGraphMode.FULL
         # With ranges, this state builds the full-attention groups.
         own = [
-            ranged and isinstance(group.kv_cache_spec, AttentionSpec)
+            ranged and isinstance(group.distinct_specs[0], AttentionSpec)
             for group in kv_cache_config.kv_cache_groups
         ]
         attn_metadata = super().prepare_attn(

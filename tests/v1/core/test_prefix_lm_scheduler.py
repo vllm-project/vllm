@@ -17,6 +17,7 @@ from vllm.v1.core.sched.prefix_lm_scheduler import (
     prefix_lm_salt,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
@@ -26,10 +27,8 @@ from .utils import EOS_TOKEN_ID, create_scheduler
 pytestmark = pytest.mark.cpu_test
 
 #: A Mamba backend that saves prefill checkpoints, as FlashInfer GDN does.
-MAMBA = MambaSpec(
-    block_size=16,
-    shapes=((1, 1),),
-    dtypes=(torch.float32,),
+MAMBA = MambaManager.layer_config(
+    MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
     mamba_cache_mode="align",
     num_prefill_checkpoint_blocks=1,
     prefill_checkpoint_alignment=16,
@@ -43,7 +42,7 @@ def make_scheduler(budget: int = 256, cls: type[Scheduler] = PrefixLMScheduler):
         max_model_len=budget,
         enable_prefix_caching=True,
         skip_tokenizer_init=True,
-        mamba_spec=MAMBA,
+        mamba_layer_config=MAMBA,
         scheduler_cls=cls,
     )
 
@@ -165,7 +164,7 @@ def test_async_scheduling_builds_the_async_twin(monkeypatch, async_scheduling):
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         skip_tokenizer_init=True,
-        mamba_spec=MAMBA,
+        mamba_layer_config=MAMBA,
         scheduler_cls=PrefixLMScheduler,
         async_scheduling=async_scheduling,
     )

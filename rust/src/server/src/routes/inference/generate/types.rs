@@ -17,7 +17,9 @@ use super::features::MultiModalFeatures;
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
-use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrArray, Usage};
+use crate::routes::openai::utils::types::{
+    ChatLogProbs, Normalizable, StreamOptions, StringOrArray, Usage,
+};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
@@ -95,13 +97,26 @@ pub struct GenerateRequest {
 impl Normalizable for GenerateRequest {}
 
 /// Response level of the generate API, mirroring Python's `OutputMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GenerateOutputMode {
     /// Token IDs only. The default when absent.
+    #[default]
     Tokens,
-    /// Token IDs plus detokenized text and decoded logprobs. Not supported.
+    /// Token IDs plus detokenized text and logprobs with decoded token
+    /// strings.
     Text,
+}
+
+/// Output logprobs of one choice, shaped by the response level.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(super) enum GenerateChoiceLogProbs {
+    /// `tokens`: integer token IDs, as Python's `GenerateLogProbs`.
+    Tokens(GenerateLogProbs),
+    /// `text`: decoded token strings with `bytes`, as Python's
+    /// `ChatCompletionLogProbs`.
+    Text(ChatLogProbs),
 }
 
 /// Mirrors the Python vLLM `GenerateResponseChoice` class.
@@ -111,7 +126,12 @@ pub enum GenerateOutputMode {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseChoice {
     pub index: u32,
-    pub logprobs: Option<GenerateLogProbs>,
+    /// The detokenized output, at the `text` level only. Excludes a matched
+    /// stop string unless `include_stop_str_in_output` is set, while
+    /// `token_ids` keeps every generated token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub logprobs: Option<GenerateChoiceLogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
@@ -127,7 +147,9 @@ pub(super) struct GenerateResponseChoice {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseStreamChoice {
     pub index: u32,
-    pub logprobs: Option<GenerateLogProbs>,
+    /// The text delta since the previous chunk, at the `text` level only.
+    pub text: Option<String>,
+    pub logprobs: Option<GenerateChoiceLogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
@@ -144,8 +166,7 @@ pub(super) struct GenerateResponseStreamChoice {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateStreamResponse {
     pub request_id: String,
-    /// Always `tokens`: the only supported level. Python serializes it on
-    /// every chunk.
+    /// Python serializes it on every chunk.
     pub output_mode: GenerateOutputMode,
     pub choices: Vec<GenerateResponseStreamChoice>,
     pub usage: Option<Usage>,
@@ -163,7 +184,6 @@ pub(super) struct GenerateResponse {
     /// Always present, as in Python, which reports token counts and cached
     /// prompt tokens here for disaggregated serving.
     pub usage: Usage,
-    /// Always `tokens`: the only supported level.
     pub output_mode: GenerateOutputMode,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
