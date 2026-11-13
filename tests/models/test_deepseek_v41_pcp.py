@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -45,9 +45,13 @@ def test_cache_specs_declare_tp_replication(cache_cls):
     )
     if cache_cls is CompressorStateCache:
         state.dtype = torch.float32
-    spec = cache_cls.get_kv_cache_spec(
+    elif cache_cls is attention_module.DeepseekV4Attention:
+        state.get_compressed_kv_cache_spec = MethodType(
+            cache_cls.get_compressed_kv_cache_spec, state
+        )
+    spec = cache_cls.get_kv_cache_config(
         state, SimpleNamespace(cache_config=cache_config)
-    )
+    ).spec
     assert spec.max_tp_shards == 1
 
 
