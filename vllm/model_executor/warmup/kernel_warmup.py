@@ -314,6 +314,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
     replayssm_lifecycle_warmup(worker.model_runner)
+    if enable_jit_warmup and worker.vllm_config.cache_config.enable_prefix_caching:
+        # Compile the block copy kernel, which copy-on-write first runs mid-serving.
+        from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+        from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
+
+        blocks = torch.zeros(2, 1, dtype=torch.int64, device=worker.device)
+        copy_kv_cache_blocks_inplace([blocks], 2, [KVCacheBlockCopy(0, 1)])
 
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])

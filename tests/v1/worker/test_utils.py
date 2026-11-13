@@ -556,12 +556,12 @@ def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_copy_kv_cache_blocks_inplace_cuda_allocates_no_temporary():
+def test_copy_kv_cache_blocks_inplace_cuda_skips_gather_temporary():
     """Gathering the source blocks into a temporary needs as much free memory
     as the copies span, which a copy-on-write wave over large state blocks may
     not have, so GPU copies must go straight between blocks."""
     num_blocks = 8
-    cache = torch.randn(num_blocks, 2, 3, device="cuda")
+    cache = torch.randn(num_blocks, 256, 1024, device="cuda")
     expected = cache.clone()
     expected[4:] = cache[:4]
 
@@ -572,7 +572,21 @@ def test_copy_kv_cache_blocks_inplace_cuda_allocates_no_temporary():
         [cache], num_blocks, [KVCacheBlockCopy(i, i + 4) for i in range(4)]
     )
 
-    assert torch.accelerator.max_memory_allocated() == allocated
+    assert torch.accelerator.max_memory_allocated() - allocated < cache[0].nbytes
+    torch.testing.assert_close(cache, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_copy_kv_cache_blocks_inplace_cuda_unaligned_blocks():
+    """Blocks whose bytes are not 8-byte aligned are copied in narrower words."""
+    cache = torch.arange(8 * 3, dtype=torch.uint8, device="cuda").view(8, 3)
+    expected = cache.clone()
+    expected[4:] = cache[:4]
+
+    copy_kv_cache_blocks_inplace(
+        [cache], 8, [KVCacheBlockCopy(i, i + 4) for i in range(4)]
+    )
+
     torch.testing.assert_close(cache, expected)
 
 

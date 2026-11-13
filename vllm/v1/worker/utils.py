@@ -10,7 +10,6 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -935,36 +934,39 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 setattr(layer, name, torch.empty(0, dtype=torch.int32))
 
 
-def _block_copy_runs(
-    blocks: torch.Tensor, src_blocks: np.ndarray, dst_blocks: np.ndarray
-) -> np.ndarray:
-    """Split block copies into contiguous byte runs.
+def _block_copy_runs(blocks: torch.Tensor, block_ids: np.ndarray) -> np.ndarray:
+    """Split copies between the `[2, num_copies]` source and destination
+    `block_ids` of `blocks` into contiguous runs.
 
     Returns:
-        An int64 array of shape `[num_runs, 3]` holding the source address,
-        destination address and size in bytes of each run.
+        An int64 array of shape `[3, num_runs]` holding source addresses,
+        destination addresses and sizes in bytes.
 
     """
-    shape, strides = blocks.shape[1:], blocks.stride()[1:]
+    shape, strides = list(blocks.shape[1:]), list(blocks.stride()[1:])
     run_len = 1
-    outer_dims = len(shape)
-    for dim in reversed(range(len(shape))):
-        if shape[dim] != 1 and strides[dim] != run_len:
-            break
-        run_len *= shape[dim]
-        outer_dims = dim
+    while shape and (shape[-1] == 1 or strides[-1] == run_len):
+        run_len *= shape.pop()
+        strides.pop()
     offsets = np.zeros(1, dtype=np.int64)
-    for size, stride in zip(shape[:outer_dims], strides[:outer_dims]):
-        offsets = (offsets[:, None] + np.arange(size) * stride).reshape(-1)
-    element_size = blocks.element_size()
-    offsets = blocks.data_ptr() + offsets * element_size
-    block_bytes = blocks.stride(0) * element_size
-    src_runs, dst_runs = (
-        (block_ids[:, None] * block_bytes + offsets).reshape(-1)
-        for block_ids in (src_blocks, dst_blocks)
-    )
-    sizes = np.full_like(src_runs, run_len * element_size)
-    return np.stack([src_runs, dst_runs, sizes], axis=1)
+    for size, stride in zip(shape, strides):
+        offsets = (offsets[:, None] + np.arange(size) * stride).ravel()
+    elements = (block_ids[:, :, None] * blocks.stride(0) + offsets).reshape(2, -1)
+    addresses = blocks.data_ptr() + elements * blocks.element_size()
+    sizes = np.full((1, addresses.shape[1]), run_len * blocks.element_size())
+    return np.concatenate([addresses, sizes])
+
+
+@triton.jit
+def _copy_runs_kernel(runs_ptr, num_runs, WORD: tl.constexpr, BLOCK: tl.constexpr):
+    # runs_ptr holds `[3, num_runs]` source addresses, destination addresses
+    # and sizes in words; program (i, j) copies the j-th BLOCK of run i.
+    run = tl.program_id(0)
+    offsets = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < tl.load(runs_ptr + 2 * num_runs + run)
+    src = tl.load(runs_ptr + run).to(tl.pointer_type(WORD))
+    dst = tl.load(runs_ptr + num_runs + run).to(tl.pointer_type(WORD))
+    tl.store(dst + offsets, tl.load(src + offsets, mask=mask), mask=mask)
 
 
 def copy_kv_cache_blocks_inplace(
@@ -1023,19 +1025,24 @@ def copy_kv_cache_blocks_inplace(
     if not block_views:
         return
     device = block_views[0].device
-    assert all(blocks.device == device for blocks in block_views)
-    src_blocks, dst_blocks = indices_np.T
-    # An indexed copy gathers every source block into a temporary, which can
-    # take GiBs for large state blocks, so GPU copies go straight between
-    # blocks in one batched memcpy. The batched copies run concurrently, so
-    # chained copies (a block that is both a source and a destination) keep
-    # the indexed copy, which reads all sources first.
-    if device.type == "cuda" and not np.intersect1d(src_blocks, dst_blocks).size:
+    block_ids = indices_np.T
+    # Copy GPU blocks directly in one kernel: gathering the sources into a
+    # temporary can take GiBs. The kernel copies runs concurrently, so chained
+    # copies keep the indexed copy, which reads all sources first.
+    if device.type == "cuda" and not np.intersect1d(*block_ids).size:
         runs = np.concatenate(
-            [_block_copy_runs(blocks, src_blocks, dst_blocks) for blocks in block_views]
+            [_block_copy_runs(blocks, block_ids) for blocks in block_views], axis=1
         )
-        ops.swap_blocks_batch(
-            *(torch.from_numpy(np.ascontiguousarray(col)) for col in runs.T)
+        # Copy in the widest word that divides every address and size.
+        bits = int(np.bitwise_or.reduce(runs, axis=None))
+        word_bytes = min(8, bits & -bits)
+        runs[2] //= word_bytes
+        block = 4096
+        _copy_runs_kernel[(runs.shape[1], triton.cdiv(int(runs[2].max()), block))](
+            async_tensor_h2d(runs, device=device),
+            runs.shape[1],
+            WORD={8: tl.int64, 4: tl.int32, 2: tl.int16, 1: tl.int8}[word_bytes],
+            BLOCK=block,
         )
         return
 
