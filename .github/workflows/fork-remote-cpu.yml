@@ -119,7 +119,7 @@ jobs:
             cbor2 einops requests aiohttp oss-harmony 'mcp>=2,<3' openai \
             partial-json-parser pillow==12.3.0 compressed-tensors==0.17.0 depyf==0.20.0 \
             opencv-python-headless 'fastapi>=0.133.0,<0.137.0' pybase64 \
-            uvloop prometheus-client xgrammar==0.2.8 'llguidance>=1.7,<1.8' \
+            uvloop prometheus-client xgrammar==0.2.9 'llguidance>=1.7,<1.8' \
             tiktoken 'mistral-common[image]>=1.11.6'
       - name: Prepare CPU source package metadata
         run: |
