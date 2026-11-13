@@ -942,7 +942,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         # Backends that read `csf` scales keep them compressed; the others get
         # the scales decoded at load.
-        self.csf_scales = scale_encoding == "csf" and (
+        self.csf_scales = (scale_encoding or "").lower() == "csf" and (
             nvfp4_backend_supports_csf_scales(
                 self.nvfp4_backend, self.moe, self.use_a16
             )
@@ -2109,18 +2109,6 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             mxfp8_config=mxfp8_config,
         )
 
-    def _resolve_scale_encoding(self, prefix: str) -> str | None:
-        """weight_scale_encoding of the quantized_layers entries under prefix."""
-        encodings = {
-            info.get("weight_scale_encoding")
-            for candidate in self._quantized_layer_prefix_candidates(prefix)
-            for key, info in self.quantized_layers.items()
-            if key == candidate or key.startswith(candidate + ".")
-        }
-        if len(encodings) > 1:
-            raise ValueError(f"Mixed weight_scale_encoding under {prefix}: {encodings}")
-        return next(iter(encodings), None)
-
     def _resolve_quant_algo(self, prefix: str) -> str | None:
         """Look up the upper-cased quant_algo for a vLLM-side layer prefix, or
         *None* if the prefix is not found."""
@@ -2297,13 +2285,17 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
                     moe_config=layer.moe_config,
-                    scale_encoding=self._resolve_scale_encoding(prefix),
+                    scale_encoding=self._resolve_layer_field(
+                        prefix, "weight_scale_encoding"
+                    ),
                 )
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.w4a16_nvfp4_config,
                     moe_config=layer.moe_config,
-                    scale_encoding=self._resolve_scale_encoding(prefix),
+                    scale_encoding=self._resolve_layer_field(
+                        prefix, "weight_scale_encoding"
+                    ),
                 )
             if quant_algo == "MXFP8":
                 return ModelOptMxFp8FusedMoE(

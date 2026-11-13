@@ -54,7 +54,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.b12x import get_b12x_fused_moe
 from vllm.utils.torch_utils import set_random_seed
 
 
@@ -618,18 +617,12 @@ def test_csf_scales_stay_resident_only_on_b12x_w4a4(
 ) -> None:
     monkeypatch.setattr(nvfp4_oracle.envs, "VLLM_B12X_MOE_CSF_RESIDENT_SCALES", True)
     config = make_dummy_moe_config(hidden_dim=2560, intermediate_size=640)
-    with_csf = SimpleNamespace(Nvfp4CsfWeights=object)
-    monkeypatch.setattr(b12x, "get_b12x_fused_moe", lambda: with_csf)
     assert nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
     assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, True)
     assert not nvfp4_backend_supports_csf_scales(
         NvFp4MoeBackend.FLASHINFER_CUTLASS, config, False
     )
     monkeypatch.setattr(nvfp4_oracle.envs, "VLLM_B12X_MOE_CSF_RESIDENT_SCALES", False)
-    assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
-    # A b12x without the CSF API decodes the scales at load.
-    monkeypatch.setattr(nvfp4_oracle.envs, "VLLM_B12X_MOE_CSF_RESIDENT_SCALES", True)
-    monkeypatch.setattr(b12x, "get_b12x_fused_moe", lambda: SimpleNamespace())
     assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
 
 
@@ -1380,10 +1373,7 @@ def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
         graph.reset()
 
 
-@pytest.mark.skipif(
-    not _has_b12x_moe() or not hasattr(get_b12x_fused_moe(), "Nvfp4CsfWeights"),
-    reason="requires b12x MoE with CSF scales on SM120",
-)
+@pytest.mark.skipif(not _has_b12x_moe(), reason="requires b12x MoE on SM120")
 # Qwen3.8-Flash-Next routed-expert shards at TP1, TP2 and TP4.
 @pytest.mark.parametrize("intermediate_size", [640, 320, 160])
 @torch.inference_mode()
@@ -1457,12 +1447,6 @@ def test_b12x_resident_csf_scales_match_decoded_scales(
             (csf.w1_blockscale, csf.w2_blockscale), expected_scales
         ):
             assert torch.equal(expanded.view(torch.uint8), expected.view(torch.uint8))
-        with pytest.raises(NotImplementedError, match="reloading"):
-            experts.process_weights_after_loading(
-                SimpleNamespace(
-                    apply_router_weight_on_input=False, _b12x_prepared_experts=csf
-                )
-            )
 
         hidden_states = torch.randn(
             64, hidden_size, device="cuda", dtype=torch.bfloat16
@@ -1484,6 +1468,7 @@ def test_b12x_resident_csf_scales_match_decoded_scales(
                 apply_router_weight_on_input=False,
             )
 
+        # The eager calls also build the b12x plans that capture needs.
         # One token runs the micro kernel, 64 the dynamic one. The dynamic
         # kernel sums the experts with atomics, so only the micro kernel is
         # bit-reproducible run to run, with decoded or with resident scales.

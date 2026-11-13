@@ -17,9 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    encode_csf_scales,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -222,13 +219,21 @@ def _csf_scale_scratch(
 
 def _csf_scale_planes(swizzled: torch.Tensor) -> Any:
     """Compress 128x4-swizzled expert block scales into b12x CSF planes."""
+    from flashinfer.quantization import encode_csf_scales
+
     experts, rows, cols = swizzled.shape
     logical = (
         swizzled.view(experts, rows // 128, cols // 4, 32, 4, 4)
         .permute(0, 1, 4, 3, 2, 5)
         .reshape(experts, rows, cols)
     )
-    return _require_b12x_fused_moe().CsfScalePlanes(*encode_csf_scales(logical))
+    csf = encode_csf_scales(logical)
+    bounds = csf.exc_offsets[:: rows // 16].tolist()
+    exceptions = csf.exceptions.cpu()
+    return _require_b12x_fused_moe().CsfScalePlanes(
+        tuple(csf.fixed.cpu()),
+        tuple(exceptions[a:b] for a, b in zip(bounds, bounds[1:])),
+    )
 
 
 def _canonicalize_fp4_zero_signs_(packed: torch.Tensor) -> None:
@@ -594,13 +599,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def supports_csf_scales(moe_config: mk.FusedMoEConfig) -> bool:
         """Whether NVFP4 W4A4 experts can keep `csf` scales resident."""
-        fused_moe = get_b12x_fused_moe()
         # b12x expands CSF scales into 128-row tiles of the hidden dimension.
-        return (
-            hasattr(fused_moe, "Nvfp4CsfWeights")
-            and moe_config.is_act_and_mul
-            and moe_config.hidden_dim % 128 == 0
-        )
+        return moe_config.is_act_and_mul and moe_config.hidden_dim % 128 == 0
 
     @staticmethod
     def _supports_quant_scheme(
