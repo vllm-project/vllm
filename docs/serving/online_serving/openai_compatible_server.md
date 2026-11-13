@@ -123,8 +123,11 @@ The `X-Request-Id` HTTP request header can be enabled with
 
 The Completions, Chat Completions, and Responses APIs also support the
 `X-Vllm-Priority` request header. Its value must be an integer and overrides
-the `priority` value in the JSON request body. Non-zero priorities require the
-server to use priority scheduling.
+the `priority` value in the JSON request body. The header and the body
+`priority` share the range `[-2**31, 2**31 - 1]`, and a body `priority` outside
+it is rejected. The Python frontend also rejects a header value outside it; the
+Rust frontend ignores such a header value and uses the body `priority`.
+Non-zero priorities require the server to use priority scheduling.
 
 ```python
 completion = client.chat.completions.create(
@@ -164,9 +167,9 @@ Resolution order is:
 4. A valid integer `u` member in the RFC 9218 `Priority` Dictionary, times ten.
 5. The request's default priority (`0`).
 
-The new `X-Priority` header accepts signed 64-bit integers
-(`-9223372036854775808` through `9223372036854775807`). Values outside this
-range follow the same fallback as malformed headers.
+`X-Priority` accepts signed 32-bit integers (`-2147483648` through
+`2147483647`), the same range as body priority. Values outside this range
+follow the same fallback as malformed `X-Priority` values.
 Malformed `X-Priority` values, including comma-joined values, are ignored;
 duplicate `X-Priority` field lines are also ignored, allowing fallback to
 `Priority`. Surrounding spaces/tabs and a leading sign are accepted. Unlike
@@ -186,8 +189,8 @@ change vLLM scheduling.
 These headers do not authenticate callers or enforce tenant quotas. At an
 untrusted ingress, strip or overwrite **all three** priority headers and
 enforce authorization for body priorities. Disabling the new headers alone
-does not disable the legacy override. Batch-chat and token-input endpoints
-retain their existing priority behavior; the Rust frontend is not covered.
+does not disable the legacy override. The new headers apply only to the
+three Python endpoints listed above.
 
 ```python
 completion = client.chat.completions.create(

@@ -1148,7 +1148,7 @@ class TestInitializeToolSessions:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "max_tool_calls,priority,follow_up_priority",
-        [(0, 0, -1), (2, 0, -1), (2, -(2**63), -(2**63))],
+        [(0, 0, -1), (2, 0, -1), (2, -(2**31), -(2**31))],
     )
     async def test_builtin_tool_loop_honors_max_tool_calls(
         self, serving_responses_instance, max_tool_calls, priority, follow_up_priority

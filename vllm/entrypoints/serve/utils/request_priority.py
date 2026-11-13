@@ -8,7 +8,7 @@ import regex as re
 from fastapi import Request
 from lark import Lark, Token, Tree, UnexpectedInput
 
-MIN_REQUEST_PRIORITY = -(1 << 63)
+from vllm.entrypoints.generate.base.protocol import PRIORITY_MAX, PRIORITY_MIN
 
 # RFC 8941 Dictionary syntax, including unknown members and item parameters.
 # Use the existing Lark dependency rather than matching only a substring `u=`.
@@ -90,7 +90,7 @@ def get_header_priority(raw_request: Request) -> int | None:
         if re.fullmatch(r"[+-]?[0-9]+", priority):
             try:
                 number = int(priority)
-                if MIN_REQUEST_PRIORITY <= number < (1 << 63):
+                if PRIORITY_MIN <= number <= PRIORITY_MAX:
                     return number
             except ValueError:
                 pass

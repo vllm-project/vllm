@@ -229,7 +229,7 @@ class TestMCPEnabled:
             tools=self._mcp_tools_payload(),
             temperature=0.0,
             extra_body={"enable_response_messages": True},
-            extra_headers={"X-Priority": str(-(2**63))},
+            extra_headers={"X-Priority": str(-(2**31))},
         )
 
         assert response.status == "completed"

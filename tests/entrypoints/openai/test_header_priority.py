@@ -18,8 +18,14 @@ from vllm.entrypoints.openai.completion.api_router import router as completion_r
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.scale_out.token_in_token_out.api_router import (
+    router as token_router,
+)
+from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -99,6 +105,7 @@ def priority_app(vllm_config):
     )
     app.include_router(chat_router)
     app.include_router(completion_router)
+    init_exception_handler(app)
     return app, priorities
 
 
@@ -189,10 +196,10 @@ async def test_header_priority_engine_handoff(
 @pytest.mark.parametrize(
     "value,expected",
     [
-        (-(1 << 63), -(1 << 63)),
-        ((1 << 63) - 1, (1 << 63) - 1),
-        (-(1 << 63) - 1, 20),
-        (1 << 63, 20),
+        (-(1 << 31), -(1 << 31)),
+        ((1 << 31) - 1, (1 << 31) - 1),
+        (-(1 << 31) - 1, 20),
+        (1 << 31, 20),
         (1 << 64, 20),
     ],
 )
@@ -206,6 +213,49 @@ async def test_x_priority_wire_range(priority_app, endpoint, value, expected):
         [("X-Priority", str(value)), ("Priority", "u=2")],
         expected,
     )
+
+
+@pytest.mark.asyncio
+async def test_token_generate_uses_only_legacy_priority_header(priority_app):
+    app, priorities = priority_app
+    app.state.args.allow_header_priority = True
+    completion = app.state.openai_serving_completion
+    app.state.serving_tokens = ServingTokens(
+        completion.engine_client,
+        completion.models,
+        completion.online_renderer,
+        online_derenderer=OnlineDerenderer(
+            model_config=completion.model_config,
+            renderer=completion.renderer,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="string",
+        ),
+        request_logger=None,
+    )
+    app.include_router(token_router)
+    payload = {
+        "model": MODEL,
+        "token_ids": [15496],
+        "sampling_params": {"max_tokens": 1},
+    }
+    headers = {"X-Priority": "-9", "Priority": "u=7"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        for extra in ({}, {"X-Vllm-Priority": "-4"}):
+            response = await client.post(
+                "/inference/v1/generate", json=payload, headers=headers | extra
+            )
+            assert response.status_code == 200, response.text
+        response = await client.post(
+            "/inference/v1/generate",
+            json=payload,
+            headers=headers | {"X-Vllm-Priority": str(1 << 31)},
+        )
+    assert response.status_code == 400, response.text
+    assert "X-Vllm-Priority" in response.json()["error"]["message"]
+    assert priorities == [0, -4]
 
 
 @pytest.mark.parametrize(

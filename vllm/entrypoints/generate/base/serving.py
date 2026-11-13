@@ -10,6 +10,8 @@ from fastapi import Request
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
+    PRIORITY_MAX,
+    PRIORITY_MIN,
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
 )
@@ -18,11 +20,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.request_priority import get_header_priority
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.tokenizers import TokenizerLike
@@ -230,17 +233,33 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
 
     @staticmethod
     def _get_priority(
-        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        request: (
+            ChatCompletionRequest
+            | CompletionRequest
+            | ResponsesRequest
+            | GenerateRequest
+        ),
         raw_request: Request | None,
     ) -> int:
         if raw_request is not None:
             priority = raw_request.headers.get(PRIORITY_HEADER)
             if priority is not None:
                 try:
-                    return int(priority)
+                    value = int(priority)
                 except ValueError:
                     return request.priority
-            if "priority" not in request.model_fields_set:
+                if not PRIORITY_MIN <= value <= PRIORITY_MAX:
+                    raise VLLMValidationError(
+                        f"{PRIORITY_HEADER} must be between {PRIORITY_MIN} "
+                        f"and {PRIORITY_MAX}.",
+                        parameter="priority",
+                        value=value,
+                    )
+                return value
+            if (
+                not isinstance(request, GenerateRequest)
+                and "priority" not in request.model_fields_set
+            ):
                 header_priority = get_header_priority(raw_request)
                 if header_priority is not None:
                     return header_priority

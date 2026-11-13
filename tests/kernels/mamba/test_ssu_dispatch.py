@@ -85,6 +85,7 @@ def _replayssm_mixer(kv_cache, ring_start, committed, A):
         replayssm_buffer_len=16,
         A=A,
         mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        use_flashinfer_replayssm=True,
     )
 
 
@@ -667,7 +668,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.ssm_state_size = 8
     mixer.num_spec = 3
     mixer.use_replayssm = True
-    mixer.use_flashinfer_replayssm = True
+    mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
     mixer.replayssm_buffer_len = 16
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
@@ -679,6 +680,8 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.D = torch.empty(2)
     mixer._replayssm_ring_start = torch.zeros(3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.zeros(3, dtype=torch.int32)
+    mixer._replayssm_rand_seed = None
+    mixer._replayssm_rand_seeds = None
     mixer.kv_cache = (
         torch.empty(3, 1),
         torch.empty(3, 2, 4, 8),
