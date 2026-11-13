@@ -12,7 +12,8 @@ everything in fp32 with one output rounding:
 - `silu_and_mul`: `bf16(g / (1 + exp(-g)) * u)` (precise `expf` and
   division).
 
-`rsqrt` is `rsqrt.approx.ftz.f32` (`rsqrtf` under fast math). The fused
+`rsqrt` is `rsqrt.approx.ftz.f32` (`rsqrtf` under fast math) on CUDA and
+`tl.math.rsqrt` elsewhere. The fused
 Flint kernels (`qkv_fused`, the decode MoE block's norm and shared expert, and
 the GEMV SiLU epilogue) follow the same rules; the routed experts use the
 approximate `ex2` / `rcp` SiLU of the TRTLLM MoE (see `moe`).

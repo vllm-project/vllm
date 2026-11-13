@@ -51,6 +51,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from .configs import FlintConfig
 from .gguf_nvfp4 import find_gguf_file, gguf_nvfp4_weights_iterator
@@ -306,30 +307,44 @@ class FlintAttention(nn.Module):
             sinks=self.softmax_offset,
         )
         # The fused kernel writes the KV cache itself (in the FlashInfer layout)
-        # and then calls the attention backend directly. Imported here so the
-        # module imports on platforms without FlashInfer.
-        try:
+        # and then calls the attention backend directly.
+        impl = self.attn.impl
+        if current_platform.is_rocm():
+            # No FlashInfer: the selected backend must page K|V the same way,
+            # packed in one slot per KV head.
+            spec = self.attn.attn_backend.customize_spec(
+                AttentionSpec(
+                    block_size=1,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_dim,
+                    dtype=torch.bfloat16,
+                )
+            )
+            assert spec.num_head_slots is None and spec.state_content_bytes is None, (
+                f"Flint does not support the {self.attn.attn_backend.get_name()} "
+                "KV cache layout"
+            )
+            self.flint_decode = False
+        else:
+            # Imported here so the module imports on platforms without
+            # FlashInfer.
             from vllm.v1.attention.backends.flashinfer import (
                 FlashInferImpl,
                 FlashInferMetadata,
                 FlashInferTrtllmAPIDecode,
             )
-        except ImportError:
-            # ROCm lacks FlashInfer support
-            FlashInferImpl = None  # type: ignore[assignment, misc]
 
-        impl = self.attn.impl
-        if FlashInferImpl is not None and isinstance(impl, FlashInferImpl):
+            assert isinstance(impl, FlashInferImpl), (
+                "Flint requires FlashInfer attention"
+            )
             self._metadata_cls = FlashInferMetadata
             self._decode_cls = FlashInferTrtllmAPIDecode
-            assert get_current_vllm_config().model_config.dtype == torch.bfloat16
-            assert self.attn.kv_cache_dtype in ("auto", "bfloat16")
-            assert impl.kv_sharing_target_layer_name is None
             self.impl = impl
             # Flint decode attention and the fused low-latency decode path.
             self.flint_decode = _flint_kernels(quant_config)
-        else:
-            self.flint_decode = False
+        assert get_current_vllm_config().model_config.dtype == torch.bfloat16
+        assert self.attn.kv_cache_dtype in ("auto", "bfloat16")
+        assert self.attn.kv_sharing_target_layer_name is None
         # Largest pure-decode batch served by the Flint kernel; beyond it
         # FlashInfer is faster on the full-attention layers at long context.
         self.max_decode_batch = 64 if is_sliding else 8
