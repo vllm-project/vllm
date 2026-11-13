@@ -1536,7 +1536,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     // self.compress_ratio
                 )
                 M = N + self.window_size + self.max_num_batched_tokens
-                current_workspace_manager().reserve(
+                current_workspace_manager().get_simultaneous(
                     ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
                 )
             output.zero_()

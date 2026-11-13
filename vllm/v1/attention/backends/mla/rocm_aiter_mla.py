@@ -541,7 +541,7 @@ def _reserve_triton_verify_workspace(
             if splits > 1:
                 max_rows = max(max_rows, reqs * splits * qlen)
     if max_rows:
-        current_workspace_manager().reserve(
+        current_workspace_manager().get_simultaneous(
             ((max_rows, num_heads, kv_lora_rank + 1), torch.float32),
         )
 
@@ -561,7 +561,7 @@ def _reserve_triton_dcp_verify_workspace(
         rows * _triton_dcp_verify_num_kv_splits(max_seq_len, rows, num_heads, sm_count)
         for rows in range(1, max_rows + 1)
     )
-    current_workspace_manager().reserve(
+    current_workspace_manager().get_simultaneous(
         ((max_row_splits, num_heads, kv_lora_rank + 1), torch.float32),
     )
 
@@ -1594,7 +1594,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             reservations.append(
                 ((max_num_batched_tokens, num_head_k, v_head_dim), attn_out_dtype)
             )
-        current_workspace_manager().reserve(*reservations)
+        current_workspace_manager().get_simultaneous(*reservations)
 
         logger.info(
             "FP8 MLA prefill PS buffers allocated "

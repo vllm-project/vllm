@@ -26,7 +26,10 @@ def _workspace_state(worker):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA graph regression")
-def test_mla_reserves_inactive_microbatch_before_serving(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("kv_cache_memory_bytes", [None, 32 * 1024**2])
+def test_mla_reserves_inactive_microbatch_before_serving(
+    vllm_runner, monkeypatch, kv_cache_memory_bytes
+):
     """An inactive DBO slot must have scratch before graph capture locks it."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -43,6 +46,7 @@ def test_mla_reserves_inactive_microbatch_before_serving(vllm_runner, monkeypatc
             max_num_batched_tokens=64,
             enable_chunked_prefill=True,
             gpu_memory_utilization=0.5,
+            kv_cache_memory_bytes=kv_cache_memory_bytes,
             enable_prefix_caching=False,
             attention_config={"backend": "TRITON_MLA"},
             enable_dbo=enable_dbo,

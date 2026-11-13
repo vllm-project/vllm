@@ -201,7 +201,11 @@ from vllm.v1.worker.utils import (
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
 )
-from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    lock_workspace,
+    use_workspace_lane,
+)
 
 logger = init_logger(__name__)
 
@@ -1117,6 +1121,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, sample_hidden_states
         self.reset_encoder_cache()
         gc.collect()
+        current_workspace_manager().reserve_ubatch_workspaces()
 
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:

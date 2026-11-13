@@ -201,10 +201,10 @@ DEVICE_TYPE = current_platform.device_type
         ("v41", 2, 0),
     ],
 )
-def test_deepseek_flashmla_profile_reserves_unwarmed_lane(
-    dist_init, workspace_init, version, compress_ratio, max_image_tokens
+def test_deepseek_flashmla_profile_reserves_unwarmed_microbatch(
+    dist_init, workspace_init, monkeypatch, version, compress_ratio, max_image_tokens
 ):
-    """Profiling one lane must reserve prefill scratch for an unwarmed peer."""
+    """Profile reservations must serve an unwarmed microbatch after locking."""
     from transformers import DeepseekV4Config
 
     from vllm.v1.worker.workspace import (
@@ -248,7 +248,11 @@ def test_deepseek_flashmla_profile_reserves_unwarmed_lane(
             }
         )
     config.kernel_config.enable_jit_warmup = False
-    init_workspace_manager(torch.device("cuda"), num_lanes=2)
+    active_ubatch = 0
+    monkeypatch.setattr(
+        "vllm.v1.worker.workspace.dbo_current_ubatch_id", lambda: active_ubatch
+    )
+    init_workspace_manager(torch.device("cuda"), num_ubatches=2)
     with set_current_vllm_config(config), torch.device("cuda"):
         layer = DeepseekV4FlashMLAAttention(
             config,
@@ -262,6 +266,7 @@ def test_deepseek_flashmla_profile_reserves_unwarmed_lane(
         assert torch.count_nonzero(output).item() == 0
 
         manager = current_workspace_manager()
+        manager.reserve_ubatch_workspaces()
         manager.lock()
         compressed_len = 0 if compress_ratio <= 1 else cdiv(256, compress_ratio)
         topk = 0 if compress_ratio <= 1 else 128
@@ -274,7 +279,8 @@ def test_deepseek_flashmla_profile_reserves_unwarmed_lane(
         with use_workspace_lane(0):
             original = manager.get_simultaneous(*specs)
             original[0].fill_(23)
-        with use_workspace_lane(1):
+        active_ubatch = 1
+        with use_workspace_lane(0):
             peer = manager.get_simultaneous(*specs)
             peer[0].fill_(17)
             assert peer[0].data_ptr() != original[0].data_ptr()

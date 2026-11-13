@@ -187,19 +187,20 @@ class WorkspaceManager:
             )
         return workspace
 
-    def reserve(self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]) -> None:
-        """Reserve simultaneous scratch capacity in every ubatch/lane slot.
+    def reserve_ubatch_workspaces(self) -> None:
+        """Grow each lane's other microbatch slots to microbatch 0's capacity.
 
-        Call during construction, before profiling and CUDA graph capture, when
-        no execution slot holds workspace views. Runtime requests must use
-        get_simultaneous so growth only affects the requesting slot.
+        Call after profiling, before measuring memory usage or capturing CUDA
+        graphs. Only scratch capacity is reserved; persistent resources still
+        need to be initialized separately in each execution slot.
         """
-        required_bytes = sum(
-            round_up(_compute_bytes(shape, dtype), 256)
-            for shape, dtype in shapes_and_dtypes
-        )
-        for workspace_id in range(len(self._current_workspaces)):
-            self._ensure_workspace_size(required_bytes, workspace_id)
+        for lane in range(self._num_lanes):
+            required_bytes = self._workspace_size_bytes(self._current_workspaces[lane])
+            for ubatch in range(1, self._num_ubatches):
+                if required_bytes:
+                    self._ensure_workspace_size(
+                        required_bytes, ubatch * self._num_lanes + lane
+                    )
 
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
@@ -309,8 +310,10 @@ class WorkspaceManager:
                     "Workspace growth is not allowed after locking."
                 )
 
-            # Runtime growth must only resize the requesting slot: other
-            # ubatches may still hold views into their workspace (DBO leak).
+            # Only resize the requesting ubatch/lane workspace. Other slots
+            # resize lazily on their next get_simultaneous call.
+            # Resizing all ubatches here would orphan the other ubatch's
+            # old tensor when it still holds views into it (DBO leak).
             self._current_workspaces[workspace_id] = None
             self._retained[workspace_id] = None
             del current_workspace
