@@ -25,7 +25,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
@@ -70,7 +69,6 @@ from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
-    extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -121,6 +119,15 @@ def use_qwen2_attention(config: PreTrainedConfig) -> None:
     """Make Qwen3 layers build Qwen2 attention: QKV bias and no q/k-norm."""
     config.attention_bias = True
     config.qk_norm = False
+    # Every layer gets the global sliding window, so it can't be per layer
+    if len(set(getattr(config, "layer_types", []))) > 1:
+        assert config.max_window_layers == config.num_hidden_layers, (
+            "Sliding window for some but all layers is not supported. "
+            "This model uses sliding window but `max_window_layers` = "
+            f"{config.max_window_layers} is less than `num_hidden_layers` = "
+            f"{config.num_hidden_layers}. Please open an issue "
+            "to discuss this feature."
+        )
 
 
 class Qwen3Attention(nn.Module):
@@ -139,7 +146,6 @@ class Qwen3Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
         per_layer_sliding_window: int | None = None,
         mrope_positions_factor: int = 4,
     ) -> None:
@@ -163,7 +169,6 @@ class Qwen3Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -186,7 +191,6 @@ class Qwen3Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             mrope_positions_factor=mrope_positions_factor,
         )
         attn_cls = (
@@ -194,12 +198,6 @@ class Qwen3Attention(nn.Module):
             if attn_type == AttentionType.ENCODER_ONLY
             else Attention
         )
-        attention_kwargs: dict[str, Any] = {}
-        if dual_chunk_attention_config:
-            attention_kwargs = {
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -210,7 +208,6 @@ class Qwen3Attention(nn.Module):
             per_layer_sliding_window=per_layer_sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
-            **attention_kwargs,
         )
         self.qk_norm = qk_norm
         if qk_norm:
@@ -248,9 +245,6 @@ class Qwen3DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
 
         # By default, Qwen3 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
@@ -275,7 +269,6 @@ class Qwen3DecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config,
             per_layer_sliding_window=per_layer_sliding_window,
             mrope_positions_factor=mrope_positions_factor,
         )
@@ -349,16 +342,6 @@ class Qwen3Model(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_config.get_text_config()
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        # TODO (@robertgshaw2): see if this can be moved out
-        if len(set(getattr(config, "layer_types", []))) > 1:
-            assert config.max_window_layers == config.num_hidden_layers, (
-                "Sliding window for some but all layers is not supported. "
-                "This model uses sliding window but `max_window_layers` = "
-                f"{config.max_window_layers} is less than `num_hidden_layers` = "
-                f"{config.num_hidden_layers}. Please open an issue "
-                "to discuss this feature."
-            )
 
         self.config = config
         self.quant_config = quant_config

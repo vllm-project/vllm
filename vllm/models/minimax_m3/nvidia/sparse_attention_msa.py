@@ -124,8 +124,9 @@ class MiniMaxM3SparseMSANvfp4Backend(MiniMaxM3SparseMSABackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
-        # Every head's K/V slots are one contiguous run of the page.
-        return (KVCacheLayout.LBHNC,)
+        # Every head's K/V slots are one contiguous run of the page; the
+        # kernels take the page stride from the cache view.
+        return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
 
 
 class MiniMaxM3SparseCutlassBackend(MiniMaxM3SparseMSABackend):

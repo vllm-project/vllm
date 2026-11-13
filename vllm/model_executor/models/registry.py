@@ -195,7 +195,6 @@ _TEXT_GENERATION_MODELS = {
     "Param2MoEForCausalLM": ("param2moe", "Param2MoEForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
-    "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "Qwen3_5ForCausalLM": ("vllm.models.qwen3_5", "Qwen3_5ForCausalLM"),
@@ -208,8 +207,6 @@ _TEXT_GENERATION_MODELS = {
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
-    "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
-    "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
@@ -243,7 +240,6 @@ _EMBEDDING_MODELS = {
     "NomicBertModel": ("bert_with_rope", "NomicBertModel"),
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
-    "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "VoyageQwen3BidirectionalEmbedModel": (
         "voyage",
         "VoyageQwen3BidirectionalEmbedModel",
@@ -711,7 +707,7 @@ _SPECULATIVE_DECODING_MODELS = {
         "K3DSparkForCausalLM",
     ),
     "MuseSparkDSparkModel": (
-        "vllm.models.muse_spark.common.dspark",
+        "vllm.models.muse_spark",
         "MuseSparkDSparkForCausalLM",
     ),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
@@ -788,6 +784,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "PhiForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Phi3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Qwen2ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Qwen2MoeForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "SeedOssForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "StableLmForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -931,6 +928,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "PrithviGeoSpatialMAE": "0.28.0",
     "KeyeForConditionalGeneration": "0.33.0",
     "KeyeVL1_5ForConditionalGeneration": "0.33.0",
+    "TeleChat2ForCausalLM": "0.34.0",
+    "TeleChat3ForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {

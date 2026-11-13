@@ -566,17 +566,17 @@ class PixtralEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         features = self.encoder_cudagraph_vision_tower.forward_packed(
-            inputs["patches"],
-            inputs["positions"],
-            inputs["cu_seqlens"],
-            inputs["max_seqlen"],
-            inputs.get("sequence_lengths"),
+            values["patches"],
+            values["positions"],
+            values["cu_seqlens"],
+            values["max_seqlen"],
+            values.get("sequence_lengths"),
         )
-        return self.project_packed_image_features(features, inputs.get("merge_indices"))
+        return self.project_packed_image_features(features, values.get("merge_indices"))
 
     def encoder_eager_forward(
         self,
