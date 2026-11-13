@@ -220,7 +220,6 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.eng_start_index = 0
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
     )
     return client
@@ -1162,7 +1161,7 @@ async def test_engine_core_client_util_method_nested_structures(
             )
             assert isinstance(result, dict) and len(result) == 2
             assert "list1" in result and "list2" in result
-            for key, lst in result.items():
+            for lst in result.values():
                 assert isinstance(lst, list) and len(lst) == 2
                 for item in lst:
                     assert isinstance(item, TestMessage) and item.message == "nested2"
@@ -1394,7 +1393,7 @@ async def test_kv_cache_events_dp(
 
         # Create and add 25 requests
         # NOTE: attempts to force routing to both dp groups but can be flaky
-        for i in range(25):
+        for _ in range(25):
             await asyncio.sleep(0.01)
             request = make_request(sampling_params, custom_tokens)
             await client.add_request_async(request)
@@ -1491,13 +1490,18 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         mock_executor = MagicMock()
 
         # Only implement the methods that are actually called during init
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+        from vllm.v1.kv_cache_interface import AttentionSpec
 
-        mock_spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+        mock_layer = FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+            )
         )
 
-        mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
+        mock_executor.get_kv_cache_layer_configs.return_value = [
+            {"default": mock_layer}
+        ]
         mock_executor.get_supported_kv_cache_layouts.return_value = [["LBNHC"]]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None

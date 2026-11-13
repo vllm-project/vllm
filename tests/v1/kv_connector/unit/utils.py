@@ -4,7 +4,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from itertools import chain, count
+from itertools import count
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
 
@@ -22,6 +22,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -38,12 +39,20 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    SingleTypeKVCacheManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
+    KVCacheSpec,
     MambaSpec,
-    SlidingWindowSpec,
+    ManagerConfig,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -82,6 +91,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._parked_reservations
     assert not scheduler._kv_fetch_stages
     assert not any(scheduler._kv_fetch_counts.values())
     assert not scheduler._aborted_kv_loads
@@ -206,6 +216,25 @@ def set_mtp_config(
     config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
 
 
+def make_kv_cache_group(
+    layer_names: list[str],
+    spec: KVCacheSpec,
+    manager_cls: type[SingleTypeKVCacheManager] | None = None,
+    manager_config: ManagerConfig | None = None,
+    **kwargs,
+) -> KVCacheGroup:
+    """A group whose layers all share `spec`. Defaults to full attention,
+    or Mamba for a `MambaSpec`."""
+    if manager_cls is None:
+        manager_cls = (
+            MambaManager if isinstance(spec, MambaSpec) else FullAttentionManager
+        )
+    if manager_config is None:
+        manager_config = manager_cls.config()
+    layer = KVCacheLayerConfig(manager_config, spec)
+    return KVCacheGroup.from_layers({name: layer for name in layer_names}, **kwargs)
+
+
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
@@ -219,9 +248,9 @@ def create_scheduler(
             num_blocks=num_blocks,  # A large number of blocks to hold all requests
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                make_kv_cache_group(
                     ["layer"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -321,7 +350,6 @@ def create_model_runner_output(
     """Make dummy model runner output for testing."""
     # Make request data.
     req_ids = [req.request_id for req in reqs]
-    req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
@@ -348,13 +376,28 @@ def create_model_runner_output(
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=None,
         kv_connector_output=kv_connector_output,
     )
+
+
+class RegistersKVCacheTestConnector(ExampleConnector):
+    """External connector that registers the device KV cache for RDMA."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.REGISTERS
+
+
+class ExportsKVCacheTestConnector(ExampleConnector):
+    """External connector that exports the device KV cache to another process."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.EXPORTS_FD
 
 
 class TestExampleConnector(ExampleConnector):
@@ -486,16 +529,8 @@ class MockKVConnector(KVConnectorBase_V1):
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         metadata = MockKVConnectorMetadata()
-        cached_reqs = scheduler_output.scheduled_cached_reqs
-        for req_id in chain(
-            (req.req_id for req in scheduler_output.scheduled_new_reqs),
-            (
-                req_id
-                for req_id in cached_reqs.req_ids
-                if req_id in cached_reqs.resumed_req_ids
-            ),
-        ):
-            metadata.requests.append({"req_id": req_id})
+        for req in scheduler_output.scheduled_new_reqs:
+            metadata.requests.append({"req_id": req.req_id})
         return metadata
 
     def start_load_kv(self, kv_caches, finished_req_ids):
@@ -529,9 +564,9 @@ def make_kv_cache_config(
     mamba_cache_mode: Literal["align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["layer0", "layer2"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=4,
                 head_size=16,
@@ -541,27 +576,29 @@ def make_kv_cache_config(
     ]
     if swa_enabled:
         kv_cache_groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer1", "layer3"],
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=4,
                     head_size=16,
                     dtype=torch.float16,
-                    sliding_window=sw_size,
                 ),
+                SlidingWindowManager,
+                SlidingWindowManager.config(sliding_window=sw_size),
             )
         )
     if mamba_enabled:
         kv_cache_groups.append(
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["mamba0", "mamba1"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
-                    mamba_cache_mode=mamba_cache_mode,
                 ),
+                MambaManager,
+                MambaManager.config(mamba_cache_mode=mamba_cache_mode),
             )
         )
     return KVCacheConfig(
@@ -636,9 +673,9 @@ def make_nixl_push_scheduler(
 ):
     """Create a NixlPushConnectorScheduler via __new__ (skipping __init__).
 
-    The push scheduler can't reuse :func:`make_nixl_scheduler` because it
-    is a different class (``NixlPushConnectorScheduler`` vs
-    ``NixlConnectorScheduler``) and carries push-specific state. Only the
+    The push scheduler can't reuse `make_nixl_scheduler` because it
+    is a different class (`NixlPushConnectorScheduler` vs
+    `NixlConnectorScheduler`) and carries push-specific state. Only the
     fields touched by the unit tests are populated.
     """
     from unittest.mock import MagicMock
@@ -705,7 +742,7 @@ def make_nixl_push_scheduler(
 def make_moriio_writer(fake_worker: Any) -> Any:
     """Build a MoRIIOWriter with internals stubbed for unit tests.
 
-    Bypasses ``__init__`` and wires only the write/finalize state the tests
+    Bypasses `__init__` and wires only the write/finalize state the tests
     touch, including the deferred-task fields used by the routing suite.
     """
     import threading
@@ -748,7 +785,7 @@ def region_pairs_by_index(
     groups: Sequence[int] | None = None,
     groups_match: bool = True,
 ) -> "_RegionPairs":
-    """NIXL region pairs where peer region ``i`` pairs with local region ``i``."""
+    """NIXL region pairs where peer region `i` pairs with local region `i`."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         _RegionPairs,
     )

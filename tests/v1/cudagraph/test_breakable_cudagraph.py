@@ -106,9 +106,9 @@ def _reset_breakable_tls():
 def cuda_capture_stream():
     """A non-default CUDA stream suitable for cudagraph capture.
 
-    ``CUDAGraph.capture_begin`` refuses to capture from the default
+    `CUDAGraph.capture_begin` refuses to capture from the default
     stream, so all capture-using tests need to run under
-    ``torch.cuda.stream(...)`` for a separate stream.
+    `torch.cuda.stream(...)` for a separate stream.
     """
     if not HAS_DEVICE_GRAPH:
         pytest.skip("CUDA or XPU graph required")
@@ -316,6 +316,35 @@ def test_capture_with_no_eager_break_records_one_graph(cuda_capture_stream):
     assert cap.num_eager_breaks == 0
 
 
+def test_shutdown_allows_recapture_with_live_outputs(cuda_capture_stream):
+    """A previous engine's graph outputs can outlive its graphs and shutdown."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.config import VllmConfig
+    from vllm.v1.worker.gpu.shutdown import free_before_shutdown
+
+    vllm_config = VllmConfig()
+    free_before_shutdown(vllm_config)
+    x = torch.ones(4, device=DEVICE_TYPE)
+    first = BreakableCUDAGraphCapture(pool=current_platform.get_global_graph_pool())
+    with first:
+        old_output = x + 1
+    first.replay()
+    torch.accelerator.synchronize()
+    del first
+
+    free_before_shutdown(vllm_config)
+    torch.accelerator.empty_cache()
+
+    second = BreakableCUDAGraphCapture(pool=current_platform.get_global_graph_pool())
+    with second:
+        new_output = x + 2
+    x.fill_(3)
+    second.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(old_output, torch.full_like(x, 2))
+    assert torch.equal(new_output, torch.full_like(x, 5))
+
+
 def test_add_eager_creates_alternating_graph_eager_graph(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
@@ -356,7 +385,7 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
     Note: during capture, the *captured* kernels are recorded but NOT
     executed (that's CUDA-graph semantics). Only the eager segments
     actually mutate state at capture time. So we check correctness after
-    ``replay()``, not after ``with cap:`` exits.
+    `replay()`, not after `with cap:` exits.
     """
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
@@ -599,7 +628,7 @@ def test_exception_in_body_clears_active(cuda_capture_stream):
 def test_nested_decorated_op_runs_inline(cuda_capture_stream):
     """A decorated op invoked from inside another decorated op's eager
     body must execute inline -- starting a second eager break mid-flight
-    corrupts the segment state and explodes ``_begin_segment``'s assert.
+    corrupts the segment state and explodes `_begin_segment`'s assert.
 
     This mirrors the deepseek_v4_attention case where the outer attention
     op's impl internally dispatches sparse_attn_indexer (also decorated).
