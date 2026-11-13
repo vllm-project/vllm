@@ -1496,23 +1496,13 @@ class KnowLineStrategy(ReadStrategy):
         self.question_types = knowline.knowline_question_types(self.labels)
         model_config = context.engine_client.model_config
         hf_config = getattr(model_config, "hf_config", None)
-        # init_decisions_state drops the ValueError message when it disables
-        # the decisions endpoints, so a malformed marker logs its reason.
         config = getattr(hf_config, "knowline_config", None)
         if config is None:
             config = {}
         if not isinstance(config, dict):
-            logger.error(
-                "KnowLine strategy: knowline_config must be a dict, got %r", config
-            )
             raise ValueError(f"knowline_config must be a dict, got {config!r}")
         cut = config.get("twice_max_tokens", self.TWICE_MAX_TOKENS)
         if isinstance(cut, bool) or not isinstance(cut, int) or cut < 0:
-            logger.error(
-                "KnowLine strategy: twice_max_tokens must be a non-negative "
-                "int, got %r",
-                cut,
-            )
             raise ValueError(
                 "knowline_config.twice_max_tokens must be a non-negative "
                 f"int, got {cut!r}"

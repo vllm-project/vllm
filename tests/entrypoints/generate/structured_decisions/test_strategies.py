@@ -1916,6 +1916,41 @@ def test_knowline_discovers_labels_the_reply_starts_with():
         knowline.discover_labels(CharTok(), KNOWLINE_KW)
 
 
+def test_knowline_disabled_endpoints_log_the_reason(caplog, monkeypatch):
+    class CharTok(KnowLineMockTok):
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            return [self._word_id(c) for c in text]
+
+    logger_name = "vllm.entrypoints.openai.decisions.state"
+    monkeypatch.setattr(logging.getLogger(logger_name), "propagate", True)
+    engine = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architecture="Qwen3_5MoeForConditionalGeneration",
+            logprobs_mode="raw_logprobs",
+            hf_config=SimpleNamespace(knowline_config={}),
+        )
+    )
+    state = State()
+    state.online_renderer = SimpleNamespace(
+        renderer=SimpleNamespace(get_tokenizer=CharTok, _executor=None)
+    )
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        strategy = init_decisions_state(
+            engine,
+            state,
+            Namespace(chat_template_content_format="auto"),
+            None,
+            None,
+            {},
+            ("generate",),
+        )
+    # The endpoints answer 501, so the log is where the operator finds why.
+    assert strategy is None and state.openai_serving_decisions is None
+    assert "Decisions endpoints disabled: KnowLine label discovery failed" in (
+        caplog.text
+    )
+
+
 def test_knowline_answers_match_the_checkpoint():
     noul = knowline_question("noul", {"true": "locked", "false": "other"})
     assert KNOWLINE_TYPES["noul"].answer(noul, [0.7, 0.3], 1.0) == {
