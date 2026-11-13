@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
 from types import SimpleNamespace
@@ -13,6 +13,7 @@ import torch
 
 import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -28,13 +29,14 @@ from vllm.config import (
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -202,13 +204,10 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.max_num_tokens = 2
     runner.device = torch.device("cuda")
 
-    raw_spec = CircularBufferSpec(
-        block_size=8,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
+    raw_layer = CircularBufferManager.layer_config(
+        AttentionSpec(block_size=8, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     )
-    compressed_spec = FullAttentionSpec(
+    compressed_spec = AttentionSpec(
         block_size=262144,
         num_kv_heads=1,
         head_size=128,
@@ -218,14 +217,8 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         num_blocks=1,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=["raw"],
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=8,
-                    kv_cache_specs={"raw": raw_spec},
-                ),
-            ),
-            KVCacheGroupSpec(layer_names=["compressed"], kv_cache_spec=compressed_spec),
+            new_kv_cache_group(["raw"], raw_layer),
+            new_kv_cache_group(["compressed"], compressed_spec),
         ],
     )
 
@@ -281,7 +274,7 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     attention_block_size = 1_536
     mamba_block_size = 16
     dcp_size = 8
-    full_attention_spec = FullAttentionSpec(
+    full_attention_spec = AttentionSpec(
         block_size=attention_block_size,
         num_kv_heads=1,
         head_size=1,
@@ -291,6 +284,8 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         shapes=((1,),),
         dtypes=(torch.bfloat16,),
         block_size=mamba_block_size,
+    )
+    mamba_config = MambaManager.config(
         mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
     )
@@ -298,8 +293,8 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         num_blocks=1,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["attention"], full_attention_spec),
-            KVCacheGroupSpec(["kda"], mamba_spec),
+            new_kv_cache_group(["attention"], full_attention_spec),
+            new_kv_cache_group(["kda"], mamba_spec, mamba_config),
         ],
     )
     parallel_config = SimpleNamespace(
@@ -328,7 +323,9 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
             raise _CapturedWidths
         return max_num_blocks
 
-    monkeypatch.setattr(model_runner_module, "get_block_table_width", capture_width)
+    monkeypatch.setattr(
+        "vllm.v1.kv_cache_interface.get_block_table_width", capture_width
+    )
 
     with pytest.raises(_CapturedWidths):
         GPUModelRunner.initialize_kv_cache(runner, kv_cache_config)
@@ -371,7 +368,7 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 @contextlib.contextmanager
 def _no_dummy_loras(
     lora_config: LoRAConfig | None, remove_lora: bool = True
-) -> Iterator[None]:
+) -> Generator[None]:
     """No-op stand-in for LoRAModelRunnerMixin.maybe_setup_dummy_loras."""
     yield
 
@@ -585,9 +582,6 @@ def test_standalone_draft_kv_dtype_override(
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
     monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
-    monkeypatch.setattr(
-        ar_module, "get_pp_safe_draft_load_config", lambda load_config: load_config
-    )
 
     speculator.load_draft_model(object(), set())
 
