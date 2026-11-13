@@ -217,14 +217,17 @@ class XpuCommunicator(DeviceCommunicatorBase):
             chunk_size = input_tensor.shape[0] // world_size
 
         if envs.VLLM_BATCH_INVARIANT:
-            # Uneven all-to-all uses oneCCL host tasks unsupported by native capture.
+            # Avoid uneven all-to-all during capture or with restricted visibility.
             if (
                 input_tensor.numel() * input_tensor.element_size()
                 <= _BATCH_INVARIANT_GATHER_MAX_BYTES
                 or (
                     sizes is not None
                     and sizes.count(sizes[0]) != world_size
-                    and torch.xpu.is_current_stream_capturing()
+                    and (
+                        torch.xpu.device_count() < world_size
+                        or torch.xpu.is_current_stream_capturing()
+                    )
                 )
             ):
                 reduced = self._fixed_rank_sum(input_tensor)
