@@ -12,11 +12,11 @@ import zmq
 
 from vllm.config import DeviceConfig, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import worker
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
     MooncakeLookupResult,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     encode_lookup_response,
 )
 
