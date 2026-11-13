@@ -5777,8 +5777,7 @@ steps:
 # fan-in of split heads and recurrent state that xGMI cannot run on one node,
 # compared exactly against WRITE fan-in. Needs RDMA NICs whose READ into GPU
 # memory works (not the case with the ionic driver on some MI355X nodes), so it
-# is optional. 10 cases, ~25 min per shard on MI355. It installs nothing at
-# runtime: the test image already pins what the E2E needs.
+# is optional. 10 cases, ~25 min per shard on MI355.
 - label: ":amd: (MI355) MoRIIO READ P/D Dummy-Weight Heterogeneous TP over RDMA"
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
