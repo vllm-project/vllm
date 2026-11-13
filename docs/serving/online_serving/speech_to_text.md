@@ -169,7 +169,8 @@ text without running the model.
 VAD is off by default and is enabled per request; it works for both the Transcriptions
 and Translations APIs.
 
-VAD needs the `silero-vad` and `onnxruntime` packages, which are part of the audio extra:
+VAD needs the `silero-vad` and `onnxruntime` packages, which are part of the audio extra
+(`onnxruntime` is skipped on ppc64le, s390x and riscv64, where it has no wheels):
 
 ```bash
 pip install vllm[audio]
