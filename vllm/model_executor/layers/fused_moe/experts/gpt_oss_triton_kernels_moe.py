@@ -104,7 +104,7 @@ _GFX942_BATCH_TILES = {"block_m": 64, "block_n": 256, "block_k": 128, "num_warps
 
 def _constrain_gfx942_tiles(num_rows: int) -> None:
     """Pin the matmul tiles for the following calls on gfx942 (triton_kernels 3.8)."""
-    if on_gfx942():
+    if get_cdna_version() == 3:
         update_opt_flags_constraints(
             _GFX942_DECODE_TILES
             if num_rows <= _GFX942_DECODE_MAX_ROWS
@@ -512,7 +512,7 @@ if triton_kernels_version is not None:
             )
             from triton_kernels.tensor import make_ragged_tensor_metadata
 
-            from vllm.platforms.rocm import on_gfx942, on_gfx950, on_rdna
+            from vllm.platforms.rocm import get_cdna_version, on_gfx950, on_rdna
 
             _TK38_SCATTER_COMBINE = current_platform.is_rocm() and on_rdna()
 
