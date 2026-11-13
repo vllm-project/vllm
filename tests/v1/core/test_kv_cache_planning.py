@@ -345,9 +345,14 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
     }
     layer_configs = resolve_hisparse_specs(worker_config, layer_configs, layers)
     assert worker_config.cache_config.kv_cache_layout is None
-    assert all(f"{name}.hisparse_hot" in layer_configs for name in source_names)
 
     groups = get_kv_cache_groups(config, layer_configs)
+    for group in groups:
+        for name, spec in group.kv_cache_specs.items():
+            if isinstance(spec, HiSparsePageSpec):
+                assert layer_configs[name] == KVCacheLayerConfig(
+                    group.manager_config, spec
+                )
     # The shared pool is sized by a main-K/V page (2048 B, or 1024 B for FP8).
     # At 128 tokens the compressed indexers use one BF16-pool block or two
     # FP8-pool blocks. The other groups need 2 x 8 resident + 2 x 5 hot

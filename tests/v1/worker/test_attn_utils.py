@@ -23,13 +23,21 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     dense_kv_cache_views,
 )
-from tests.v1.core.utils import full_layer, new_kv_cache_group, new_kv_cache_spec
+from tests.v1.core.utils import (
+    full_layer,
+    mamba_layer,
+    new_kv_cache_group,
+    new_kv_cache_spec,
+)
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.attention import HiSparseConfig
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
@@ -51,6 +59,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
     SparseFullAttentionSpec,
@@ -194,8 +203,7 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
             == main.page_size_bytes
         )
         assert len(resolved) == len(specs) + 2
-        groups = attn_utils_module.get_hisparse_kv_cache_groups(config, resolved)
-        assert groups is not None
+        groups = get_kv_cache_groups(config, resolved)
         grouped_names = [name for group in groups for name in group.layer_names]
         assert len(grouped_names) == len(set(grouped_names)) == len(resolved)
         assert set(grouped_names) == set(resolved)
@@ -206,6 +214,74 @@ def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
             )
             for name, spec in specs.items()
         }
+
+
+def test_resolve_hisparse_specs_before_kv_cache_layout():
+    """Workers derive HiSparse's resident/hot specs before the engine core
+    resolves the KV cache layout, even when the other layers have mixed page
+    sizes, and derive the specs the engine core lays out."""
+    specs: dict[str, KVCacheLayerConfig] = {}
+    for i in range(2):
+        specs[f"layers.{i}.attn"] = full_layer(
+            MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+                is_index_group_leader=True,
+                topk_buffer_width=128,
+            )
+        )
+        specs[f"layers.{i}.indexer"] = full_layer(
+            MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+                cache_role=SparseCacheRole.INDEXER,
+            )
+        )
+        specs[f"layers.{i}.tail"] = CircularBufferManager.layer_config(
+            AttentionSpec(
+                block_size=4,
+                num_kv_heads=2,
+                head_size=128,
+                head_size_v=0,
+                dtype=torch.bfloat16,
+            )
+        )
+        specs[f"layers.{i}.kda"] = mamba_layer(
+            MambaSpec(
+                shapes=((3, 6144), (16, 128, 128)),
+                dtypes=(torch.bfloat16, torch.float32),
+                block_size=64,
+            ),
+            num_speculative_blocks=0,
+        )
+    backend = SimpleNamespace(
+        get_name=lambda: "sparse",
+        get_supported_kernel_block_sizes=lambda _=None: [64],
+    )
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in specs}
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    assert vllm_config.cache_config.kv_cache_layout is None
+
+    resolved = attn_utils_module.resolve_hisparse_specs(vllm_config, specs, layers)
+
+    vllm_config.cache_config.kv_cache_layout = KVCacheLayout.BLHNC.name
+    planned = {
+        name: KVCacheLayerConfig(group.manager_config, spec)
+        for group in get_kv_cache_groups(vllm_config, resolved)
+        for name, spec in group.kv_cache_specs.items()
+        if isinstance(spec, HiSparsePageSpec)
+    }
+    assert len(planned) == 4
+    assert {
+        name: lc
+        for name, lc in resolved.items()
+        if isinstance(lc.spec, HiSparsePageSpec)
+    } == planned
 
 
 def test_get_kv_cache_layer_configs_tags_draft_layers(monkeypatch):
@@ -359,16 +435,24 @@ def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
     assert unsupported([[target, never]], config, 1) == ("_DraftBackend", None)
 
 
+@pytest.mark.parametrize(
+    "backend_qualname",
+    [
+        "flashinfer_mla_sparse.FlashInferMLASparseTRTLLMBackend",
+        "flashinfer_mla_sparse_sm90.FlashInferMLASparseSM90Backend",
+    ],
+)
 @pytest.mark.parametrize("num_speculative_tokens", [0, 7])
 def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
     num_speculative_tokens,
+    backend_qualname,
 ):
     """Prefill must fall back without disabling adaptive verification graphs."""
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseTRTLLMBackend,
-    )
+    from vllm.utils.import_utils import resolve_obj_by_qualname
 
-    backend = FlashInferMLASparseTRTLLMBackend
+    backend = resolve_obj_by_qualname(
+        f"vllm.v1.attention.backends.mla.{backend_qualname}"
+    )
     config: Any = SimpleNamespace(
         speculative_config=SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,

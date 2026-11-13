@@ -23,7 +23,7 @@ from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
-    get_hisparse_kv_cache_groups,
+    get_hisparse_page_layer_configs,
     is_hisparse_source_layer,
 )
 from vllm.v1.hisparse.runtime import (
@@ -35,7 +35,6 @@ from vllm.v1.hisparse.runtime import (
     release_pinned_state,
 )
 from vllm.v1.kv_cache_interface import (
-    HiSparsePageSpec,
     KVCacheConfig,
     KVCacheLayerConfig,
     KVCacheLayout,
@@ -98,21 +97,9 @@ def resolve_hisparse_specs(
         )
         for name, lc in sparse_layers.items()
     }
-    # Derive per-layer resident/hot specs before EngineCore resolves the layout.
-    # Packing the other layers belongs to the subsequent allocation pass.
-    groups = get_hisparse_kv_cache_groups(vllm_config, sparse_layers)
-    assert groups is not None
+    page_layer_configs = get_hisparse_page_layer_configs(vllm_config, sparse_layers)
     return fit_mamba_blocks_to_attention(
-        vllm_config,
-        layer_configs
-        | sparse_layers
-        | {
-            layer_name: KVCacheLayerConfig(group.manager_config, spec)
-            for group in groups
-            for layer_name, spec in group.kv_cache_specs.items()
-            if isinstance(spec, HiSparsePageSpec)
-        },
-        attn_layers,
+        vllm_config, layer_configs | sparse_layers | page_layer_configs, attn_layers
     )
 
 
