@@ -59,20 +59,16 @@ class Proxy:
         self.thread: threading.Thread | None = None
         self.running = True
 
-    def init(self, device, world, rank, qps_per_peer, sq_depth, sizes, fds):
+    def init(self, device, world, rank, qps_per_peer, sq_depth, ctrl_bytes, fds):
         self.device = dev = verbs.Device(device)
         # CPUs of another NUMA node post twice as slowly.
         if cpus := verbs.local_cpus(device) & os.sched_getaffinity(0):
             os.sched_setaffinity(0, cpus)
         self.world, self.rank = world, rank
-        self.ctrl = mmap.mmap(fds[0], sizes[0], flags=mmap.MAP_SHARED)
-        self.staging = mmap.mmap(fds[1], sizes[1], flags=mmap.MAP_SHARED)
-        for fd in fds:
-            os.close(fd)
+        self.ctrl = mmap.mmap(fds[0], ctrl_bytes, flags=mmap.MAP_SHARED)
+        os.close(fds[0])
         self.words = memoryview(self.ctrl).cast("B").cast("q")
         ctrl_va = ctypes.addressof(ctypes.c_char.from_buffer(self.ctrl))
-        staging_va = ctypes.addressof(ctypes.c_char.from_buffer(self.staging))
-        _, lkey, _ = dev.reg_host(staging_va, sizes[1])
         self.wr_va = ctrl_va + WR_OFFSET
         self.sq_depth = min(sq_depth, dev.max_qp_wr)
         # Chains a QP may have in flight before its SQ fills.
@@ -102,8 +98,6 @@ class Proxy:
             "address": [gid.hex(), lid],
             "qpns": qpns,
             "ctrl_va": ctrl_va,
-            "staging_va": staging_va,
-            "lkey": lkey,
             "device": dev.describe(),
         }
 
@@ -116,17 +110,15 @@ class Proxy:
                 )
 
     def register(self, kind, size, iova, fds):
-        """Register a shard for peers' READs; returns its address and rkey."""
+        """Register host memory or HBM; returns its address, lkey and rkey."""
         (fd,) = fds
         try:
             if kind == "host":
                 mapping = mmap.mmap(fd, size, flags=mmap.MAP_SHARED)
                 address = ctypes.addressof(ctypes.c_char.from_buffer(mapping))
                 self.keep.append(mapping)
-                _, _, rkey = self.device.reg_host(address, size)
-                return address, rkey
-            _, _, rkey = self.device.reg_dmabuf(fd, iova, size)
-            return iova, rkey
+                return address, *self.device.reg_host(address, size)[1:]
+            return iova, *self.device.reg_dmabuf(fd, iova, size)[1:]
         finally:
             os.close(fd)
 

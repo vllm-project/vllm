@@ -297,13 +297,16 @@ def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
 def _check_pool_tables(store_dir: str):
     """GPUs of independent engines split one table in an Engram pool and read
     each other's rows, over every transport this machine has."""
-    modes = [("nvlink", False)] if imex_channel_available() else []
+    modes = [("nvlink", False, 4)] if imex_channel_available() else []
     if verbs.active_devices():
-        modes += [("rdma", False), ("rdma", True)]
+        # GPUs of a node map each other's host shards; nodes of one use RDMA.
+        modes += [("rdma", False, 4), ("rdma", True, 4), ("rdma", True, 1)]
     weight, scale = _full_table(sum(HEAD_SIZES))
-    for transport, host in modes:
-        group = PeerGroup(WORLD_SIZE, f"{store_dir}/{transport}{host}/store")
+    for transport, host, node in modes:
+        group = PeerGroup(WORLD_SIZE, f"{store_dir}/{transport}{host}{node}/store")
         pool = EngramPool(group, transport, host, 9 * len(HEAD_SIZES), 72)
+        if node == 1:
+            pool.transport.node = str(group.rank_in_group)  # type: ignore[attr-defined]
         with torch.device("cuda"):
             table = ParallelEngramEmbedding(
                 sum(HEAD_SIZES), DIM, HEAD_SIZES, cpu_offload=host, pool=pool

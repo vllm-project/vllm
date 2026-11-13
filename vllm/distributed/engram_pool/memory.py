@@ -68,17 +68,21 @@ def _unregister(mapping: mmap.mmap, pointer: int) -> None:
 
 class SharedHost:
     """Pinned, GPU-mapped host bytes near the current GPU, in a memfd that the
-    RDMA proxy process maps too."""
+    RDMA proxy process maps too; with `fd`, another process's memfd."""
 
-    def __init__(self, num_bytes: int, name: str) -> None:
+    def __init__(self, num_bytes: int, name: str, fd: int | None = None) -> None:
         self.nbytes = round_up(max(num_bytes, 1), mmap.PAGESIZE)
-        self.fd = os.memfd_create(f"vllm_engram_{name}", os.MFD_CLOEXEC)
-        os.ftruncate(self.fd, self.nbytes)
+        created = fd is None
+        if fd is None:
+            fd = os.memfd_create(f"vllm_engram_{name}", os.MFD_CLOEXEC)
+            os.ftruncate(fd, self.nbytes)
+        self.fd = fd
         mapping = mmap.mmap(self.fd, self.nbytes, flags=mmap.MAP_SHARED)
         owner = np.frombuffer(mapping, dtype=np.uint8)
         pointer = owner.ctypes.data
-        _prefer_numa_node(pointer, self.nbytes, gpu_numa_node())
-        owner[:: mmap.PAGESIZE] = 0
+        if created:
+            _prefer_numa_node(pointer, self.nbytes, gpu_numa_node())
+            owner[:: mmap.PAGESIZE] = 0
         result = torch.cuda.cudart().cudaHostRegister(pointer, self.nbytes, 0)
         if result.value != 0:
             raise RuntimeError(f"cudaHostRegister({self.nbytes} B) failed: {result}")

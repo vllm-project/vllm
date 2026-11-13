@@ -77,10 +77,6 @@ logger = init_logger(__name__)
 # reads to all-to-all.
 ENGRAM_A2A_MIN_SLOT = 128
 
-# Pool fetches of this many tokens go one layer at a time, so the first Engram
-# layer waits only for its own rows.
-ENGRAM_POOL_SPLIT_MIN_TOKENS = 512
-
 # Cache value for tokens that take no part in an n-gram (image spans).
 DEAD_ID = -1
 
@@ -1735,22 +1731,19 @@ class EngramBatch:
 
     @eager_break_during_capture
     def _fetch(self, hashes: torch.Tensor) -> None:
-        """Fetch and unpack every layer's rows on the pool stream."""
+        """Fetch and unpack each layer's rows on the pool stream, one layer at a
+        time: a layer waits only for its own rows."""
         assert self.pool is not None
         stream = self.pool.stream
         stream.wait_stream(torch.cuda.current_stream())
         hashes.record_stream(stream)
         first, num_tokens = self.layers[0].layer_hash_index, hashes.shape[0]
-        step = 1 if num_tokens >= ENGRAM_POOL_SPLIT_MIN_TOKENS else len(self.layers)
-        for start in range(0, len(self.layers), step):
-            end = min(start + step, len(self.layers))
+        for index, table in enumerate(self.tables):
             with torch.cuda.stream(stream):
-                rows = self.pool.lookup(
-                    self.tables[start:end], hashes[:, first + start : first + end]
-                )
-                self._unpack(rows, num_tokens, 0, False, start, end)
-            for done in self._pool_done[start:end]:
-                done.record(stream)
+                column = first + index
+                rows = self.pool.lookup([table], hashes[:, column : column + 1])
+                self._unpack(rows, num_tokens, 0, False, index, index + 1)
+            self._pool_done[index].record(stream)
 
     @eager_break_during_capture
     def _wait_fetch(self, index: int) -> None:
@@ -1907,9 +1900,8 @@ class Engram(nn.Module):
                 engram_config.peer_group_store,
                 engram_config.peer_group_transport,
                 engram_config.cpu_offload,
-                vllm_config.scheduler_config.max_num_batched_tokens
-                * len(layout.layer_ids)
-                * n_hash_cols,
+                # Fetches go one layer at a time.
+                vllm_config.scheduler_config.max_num_batched_tokens * n_hash_cols,
                 pool_row_bytes(layout.row_bytes, layout.head_dim, 32),
             )
         return ParallelEngramEmbedding(
