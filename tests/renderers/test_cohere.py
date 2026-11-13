@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``vllm/renderers/cohere.py``.
+"""Unit tests for `vllm/renderers/cohere.py`.
 
 The tests focus on the pure-Python helpers that produce the render-config
-dicts passed to ``cohere_melody.render_cmd3`` / ``render_cmd4``. We also
+dicts passed to `cohere_melody.render_cmd3` / `render_cmd4`. We also
 include a class-level instantiation + async-non-blocking test that
-mirrors the analogous ``test_mistral.py`` pattern, exercising the
-:class:`CohereRenderer` end-to-end with mocked ``model_config`` /
+mirrors the analogous `test_mistral.py` pattern, exercising the
+`CohereRenderer` end-to-end with mocked `model_config` /
 tokenizer / melody bindings.
 """
 
@@ -215,7 +215,7 @@ class TestContentBlocks:
 
     def test_non_string_non_dict_part_rejected(self):
         with pytest.raises(TypeError, match="Unexpected content part"):
-            _content_blocks([42])  # type: ignore[list-item]
+            _content_blocks([42])
 
 
 # ======================================================================
@@ -313,7 +313,7 @@ class TestToolToMelody:
 class TestV2ToolContentToMelodyBlock:
     """Pins the v2 → melody mapping applied to every tool-message
     content block. The serving layer forwards the original v2 blocks
-    verbatim under :data:`TOOL_MESSAGE_V2_CONTENT_KEY`; the renderer
+    verbatim under `TOOL_MESSAGE_V2_CONTENT_KEY`; the renderer
     owns this mapping so cmd3 / cmd4 render each result field as its
     own entry rather than a single stringified-JSON blob.
     """
@@ -1048,7 +1048,11 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
         await asyncio.sleep(0.1)
 
     _, prompt = await task
-    assert prompt["prompt"] == expected_prompt, "Mocked blocking render was not called"
+    # ``.get`` because ``prompt`` is typed as any ``DictPrompt``, and the
+    # encoder-decoder member of that union has no top-level ``prompt``.
+    assert prompt.get("prompt") == expected_prompt, (
+        "Mocked blocking render was not called"
+    )
     assert blocked_count == 0, "Event loop blocked during rendering"
 
 
@@ -1066,7 +1070,7 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
 class TestRequestCitationsReachRenderedPrompt:
     """End-to-end verification that assistant-message citations on the
     request survive the OpenAI-shape round-trip and land in the melody-
-    rendered prompt as inline ``<co>...</co>`` markers.
+    rendered prompt as inline `<co>...</co>` markers.
 
     The chain covered here:
 
@@ -1077,7 +1081,7 @@ class TestRequestCitationsReachRenderedPrompt:
                         -> cohere_melody.render_cmd4 (renders <co>...</co>)
 
     A regression that drops the citations or mangles the melody
-    ``FilterCitation`` payload would remove the citation markers from
+    `FilterCitation` payload would remove the citation markers from
     the output, so a text-in / text-out assertion is enough.
     """
 
@@ -1100,14 +1104,14 @@ class TestRequestCitationsReachRenderedPrompt:
     def _openai_msgs_to_conversation(
         openai_messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Cheap stand-in for ``parse_chat_messages`` on text-only inputs.
+        """Cheap stand-in for `parse_chat_messages` on text-only inputs.
 
-        ``_convert_v2_to_chat_completion`` emits OpenAI-shape assistant
-        dicts with ``content`` as a plain string. The real chat-utils
-        pipeline calls ``parse_chat_messages`` (which requires a full
+        `_convert_v2_to_chat_completion` emits OpenAI-shape assistant
+        dicts with `content` as a plain string. The real chat-utils
+        pipeline calls `parse_chat_messages` (which requires a full
         model config / mm tracker), but for text-only content it's
-        essentially a passthrough -- we normalize ``content`` to the
-        list-of-parts shape ``_conversation_to_melody_messages`` expects
+        essentially a passthrough -- we normalize `content` to the
+        list-of-parts shape `_conversation_to_melody_messages` expects
         and preserve every other key the renderer reads.
         """
         conv: list[dict[str, Any]] = []

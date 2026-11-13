@@ -139,6 +139,7 @@ def test_hash_routing_backend_selection(
         monkeypatch, default_vllm_config, has_hash_routing, backend
     )
     _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    assert experts_cls is not None
     assert experts_cls.__name__ == expected_experts
     # Monolithic kernels route internally, so they read the table from the layer.
     assert (layer.routed_experts.hash_indices_table is not None) == has_hash_routing
@@ -166,6 +167,42 @@ def test_hash_routing_rejects_monolithic_without_support(
     )
     with pytest.raises(ValueError, match="hash routing"):
         select_deepseek_v4_mxfp4_moe_backend(config)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+@pytest.mark.parametrize(
+    "ep_config,supported",
+    [
+        ({"use_ep": True, "ep_size": 8}, True),
+        ({"use_ep": True, "ep_size": 8, "enable_eplb": True}, False),
+        ({"use_ep": True, "ep_size": 8, "dp_size": 2}, False),
+    ],
+    ids=["naive_ep", "eplb", "all2all"],
+)
+def test_aiter_w4a16_expert_parallel_selection(
+    dist_init, default_vllm_config, monkeypatch, ep_config, supported
+):
+    """Naive EP (no all2all, no EPLB) selects the AITER W4A16 monolithic kernel,
+    including on hash-routed layers."""
+    from dataclasses import replace
+
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    _, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
+    )
+    config = replace(
+        config, moe_parallel_config=replace(config.moe_parallel_config, **ep_config)
+    )
+    if supported:
+        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "AiterW4A16ExpertsMonolithic"
+    else:
+        with pytest.raises(ValueError, match="parallel config"):
+            select_deepseek_v4_mxfp4_moe_backend(config)
 
 
 def test_torch_topk_softplus_sqrt_breaks_ties_by_expert_id():
@@ -360,7 +397,7 @@ def test_dsv4_fast_topk(
     if use_padding:
         monkeypatch.setattr(
             "vllm.model_executor.layers.fused_moe.router."
-            "fused_topk_bias_router._get_padding_mask",
+            "fused_topk_bias_router.get_moe_padding_mask",
             lambda _: is_padding,
         )
         gating_output[is_padding] = float("nan")

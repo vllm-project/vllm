@@ -2,17 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import os
+import time
 
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
+from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
 from tests.v1.utils import check_request_balancing
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 DP_SIZE = os.getenv("DP_SIZE", "1")
+
+SCHEDULER_GAUGES = (
+    "vllm:num_requests_running",
+    "vllm:num_requests_waiting",
+    "vllm:kv_cache_usage_perc",
+)
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +52,26 @@ def server(default_server_args):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+# Runs first, while the server has not served any request yet.
+def test_scheduler_gauges_before_first_request(server: RemoteOpenAIServer) -> None:
+    engines = [str(rank) for rank in range(int(DP_SIZE))]
+    expected = {(name, engine): 0 for name in SCHEDULER_GAUGES for engine in engines}
+    # API server 0 records the engines' initial stats shortly after startup.
+    deadline = time.monotonic() + 30
+    while True:
+        text = requests.get(server.url_for("metrics"), timeout=10).text
+        samples = {
+            (sample.name, sample.labels["engine"]): sample.value
+            for family in text_string_to_metric_families(text)
+            for sample in family.samples
+            if sample.name in SCHEDULER_GAUGES
+        }
+        if samples == expected or time.monotonic() > deadline:
+            break
+        time.sleep(1)
+    assert samples == expected
 
 
 @pytest.mark.asyncio

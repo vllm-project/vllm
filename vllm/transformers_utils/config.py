@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -12,6 +11,7 @@ from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
 import torch
+import transformers
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
 from huggingface_hub.utils import HFValidationError, validate_repo_id
@@ -120,19 +120,18 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
+    alpamayo2_super="Alpamayo2SuperConfig",
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
     beam="BeamConfig",
     chatglm="ChatGLMConfig",
-    modernvbert="ColModernVBertConfig",
     ultravbert="ColUltraVBertConfig",
-    colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
-    cosmos3_edge="Cosmos3EdgeConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    dory="DoryConfig",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
@@ -143,18 +142,24 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
-    muse_glimmer="MuseGlimmerConfig",
-    muse_glimmer_text="MuseGlimmerTextConfig",
-    muse_glimmer_vision="MuseGlimmerVisionConfig",
-    muse_glimmer_assistant="MuseGlimmerAssistantConfig",
+    muse_spark_dspark="MuseSparkDSparkConfig",
+    muse_spark_text="MuseSparkTextConfig",
+    muse_spark_vision="MuseSparkVisionConfig",
+    muse_spark_audio="MuseSparkAudioConfig",
+    muse_spark="MuseSparkConfig",
     kimi_k3="KimiK3Config",
+    kimi_k31="KimiK3Config",
+    lfm3="Lfm3Config",
+    lfm3_audio="Lfm3AudioConfig",
+    lfm3_vl="Lfm3VlConfig",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     midashenglm="MiDashengLMConfig",
-    minimax_m3_vl="MiniMaxM3Config",
+    minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
     minimax_m3_mtp="MiniMaxM3MTPConfig",
+    ming_v3_asr="MingV3ASRConfig",
     moondream3="Moondream3Config",
-    moss_transcribe_diarize="MossTranscribeDiarizeConfig",
+    nemo_speechlm="Nemotron3_5TranscribeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     openvla="OpenVLAConfig",
@@ -162,12 +167,14 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
-    step3p5="Step3p5Config",
-    qianfan_ocr="QianfanOCRConfig",
-    qwen3_asr="Qwen3ASRConfig",
+    step3p5="Step3p7TextConfig",  # Upstream class, hub remote code fails validation
+    step5="Step5Config",
+    step5_vl="Step5VLConfig",
+    ricursive="RicursiveConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     unlimited_ocr="UnlimitedOCRConfig",
     **{"deepseek_v41": "DeepseekV41Config"},
+    flint="FlintConfig",
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
 )
@@ -243,13 +250,13 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
 def _install_hf_config_validator(
     name: str, validator: Callable, supersedes: Callable
 ) -> None:
-    """Replace a ``PreTrainedConfig`` validator on every ``@strict`` snapshot.
+    """Replace a `PreTrainedConfig` validator on every `@strict` snapshot.
 
-    ``@strict`` snapshots each ``validate_*`` method into ``__class_validators__``
-    at class creation and automatic post-``__init__`` validation dispatches off
+    `@strict` snapshots each `validate_*` method into `__class_validators__`
+    at class creation and automatic post-`__init__` validation dispatches off
     that frozen list, so assigning the class attribute alone only affects
-    explicit ``config.validate_*()`` calls. Every ``@strict``-decorated config
-    class owns a snapshot, so rewrite them all, matching ``supersedes`` by
+    explicit `config.validate_*()` calls. Every `@strict`-decorated config
+    class owns a snapshot, so rewrite them all, matching `supersedes` by
     identity to leave a genuine per-model override in place.
     """
     setattr(PreTrainedConfig, name, validator)
@@ -301,11 +308,11 @@ def _patch_hf_transformers_validate_rope():
 
 
 def _patch_hf_transformers_nested_rope_validation() -> None:
-    """Drop shared entries sitting alongside a nested ``rope_parameters`` dict.
+    """Drop shared entries sitting alongside a nested `rope_parameters` dict.
 
     Transformers validates a dict with any layer-type key by iterating all of
     its values, so a shared entry next to the per-layer dicts raises an
-    ``AttributeError``. The per-layer dicts already carry their own defaults by
+    `AttributeError`. The per-layer dicts already carry their own defaults by
     the time validation runs, so the shared entries can be dropped.
     """
     if hasattr(PreTrainedConfig.validate_rope, "__vllm_nested_rope_patched__"):
@@ -405,6 +412,34 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
+        elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
+            from transformers import Qwen3ASRConfig
+
+            # Original checkpoints nest their fields in `thinker_config`
+            thinker_config = config_dict.pop("thinker_config")
+            audio_config = thinker_config["audio_config"]
+            audio_config["model_type"] = "qwen3_asr_encoder"
+            config_dict = {**thinker_config, **config_dict}
+            if thinker_config["model_type"] == "qwen3_forced_aligner":
+                config_dict["architectures"] = [
+                    "Qwen3ASRForcedAlignerForTokenClassification"
+                ]
+                config_dict["num_labels"] = config_dict.pop("classify_num")
+            kwargs.setdefault("name_or_path", str(model))
+            config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+        elif (
+            model_type == "moss_transcribe_diarize"
+            and config_dict["audio_config"]["model_type"] == "whisper"
+            and hasattr(transformers, "MossTranscribeDiarizeConfig")
+        ):
+            from transformers import MossTranscribeDiarizeConfig, WhisperConfig
+
+            # Original checkpoints use a plain Whisper encoder
+            audio_config = WhisperConfig.from_dict(config_dict["audio_config"])
+            config_dict["audio_config"] = audio_config
+            config_dict.pop("adaptor_input_dim", None)
+            kwargs.setdefault("name_or_path", str(model))
+            config = MossTranscribeDiarizeConfig.from_dict(config_dict, **kwargs)
         elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
             from transformers import CONFIG_MAPPING
 
@@ -644,14 +679,6 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
                 )
             rope_parameters["rope_type"] = "default"
             logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
-        elif rope_parameters["rope_type"] == "telechat3-yarn":
-            # TeleChat3 is YaRN with 0.07 in place of YaRN's 0.1 attention
-            # scaling coefficient. Precompute it so the config is plain YaRN.
-            factor = rope_parameters["factor"]
-            rope_parameters["rope_type"] = "yarn"
-            rope_parameters["attention_factor"] = 0.07 * math.log(factor) + 1.0
-            rope_parameters.pop("type", None)
-            logger.warning("Replacing rope_type 'telechat3-yarn' with 'yarn'")
 
     # Handle nested rope_parameters in interleaved sliding attention models
     if is_rope_parameters_nested(rope_parameters):
@@ -820,6 +847,10 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
 
     """
+    # A single local file (e.g. a .gguf checkpoint) has no speculators config.
+    if os.path.isfile(model):
+        return model, tokenizer, vllm_speculative_config
+
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PreTrainedConfig.get_config_dict(
         model,
@@ -835,6 +866,9 @@ def maybe_override_with_speculators(
 
     # Speculators format detected - process overrides
     from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+        get_custom_speculator_config_class,
+    )
 
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
@@ -845,8 +879,17 @@ def maybe_override_with_speculators(
     if isinstance(vllm_speculative_config, dict):
         speculative_config.update(vllm_speculative_config)
 
-    # Lock fields dictated by the speculators format
-    speculative_config["method"] = speculators_method
+    # Lock fields dictated by the speculators format, except for a custom
+    # method based on the checkpoint's.
+    custom_config_cls = get_custom_speculator_config_class(speculative_config["method"])
+    if custom_config_cls is None:
+        speculative_config["method"] = speculators_method
+    elif custom_config_cls.base_method != speculators_method:
+        raise ValueError(
+            f"Speculative method '{speculative_config['method']}' is based on "
+            f"'{custom_config_cls.base_method}', but the speculators "
+            f"checkpoint {model} is for '{speculators_method}'."
+        )
     speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
@@ -903,7 +946,7 @@ def get_config(
         except Exception as e:
             error_message = (
                 "Invalid repository ID or local directory specified:"
-                " '{model}'.\nPlease verify the following requirements:\n"
+                f" '{model}'.\nPlease verify the following requirements:\n"
                 "1. Provide a valid Hugging Face repository ID.\n"
                 "2. Specify a local directory that contains a recognized "
                 "configuration file.\n"
@@ -911,7 +954,7 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-            ).format(model=model)
+            )
 
             raise ValueError(error_message) from e
 
@@ -1307,7 +1350,10 @@ def try_get_safetensors_metadata(
         return with_retry(
             get_safetensors_metadata_partial,
             "Error retrieving safetensors",
-            fatal_errors=(huggingface_hub.errors.NotASafetensorsRepoError,),
+            fatal_errors=(
+                huggingface_hub.errors.NotASafetensorsRepoError,
+                huggingface_hub.errors.OfflineModeIsEnabled,
+            ),
         )
     except Exception:
         return None

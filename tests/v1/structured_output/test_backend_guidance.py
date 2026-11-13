@@ -32,6 +32,25 @@ def mistral_tokenizer():
     )
 
 
+def test_backend_guidance_rejects_grammar_matcher_cannot_build():
+    # llguidance builds a matcher for a schema with unimplemented keywords
+    # but leaves it in an error state; compilation must fail the request.
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="guidance")
+    )
+    backend = GuidanceBackend(
+        vllm_config,
+        tokenizer=AutoTokenizer.from_pretrained(TOKENIZER),
+        vocab_size=50257,
+    )
+
+    with pytest.raises(ValueError, match="Grammar error: .*uniqueItems"):
+        backend.compile_grammar(
+            StructuredOutputOptions.JSON,
+            json.dumps({"type": "array", "uniqueItems": True}),
+        )
+
+
 def test_backend_guidance_rollback_terminated():
     # Test that the backend guidance successfully rollbacks from a
     # terminated state. This can happen with speculative decoding,
@@ -77,6 +96,29 @@ def test_backend_guidance_rollback_terminated():
     assert grammar.is_terminated()
     grammar.rollback(-1)
     assert grammar.is_terminated()
+
+
+@pytest.mark.parametrize("invalid_prefix", [False, True])
+def test_backend_guidance_eos_in_token_batch(invalid_prefix):
+    """Forced-length speculative batches must validate only through EOS."""
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    backend = GuidanceBackend(
+        VllmConfig(), tokenizer=tokenizer, vocab_size=len(tokenizer)
+    )
+    grammar = backend.compile_grammar(StructuredOutputOptions.REGEX, "a+")
+    valid = tokenizer.encode("a")
+    invalid = tokenizer.encode("1")
+    eos = [tokenizer.eos_token_id]
+    tokens = valid + (invalid if invalid_prefix else []) + eos + invalid
+    original_tokens = tokens.copy()
+
+    assert grammar.accept_tokens("", tokens) is not invalid_prefix
+    assert tokens == original_tokens
+    if invalid_prefix:
+        assert not grammar.is_terminated()
+        assert grammar.accept_tokens("", valid + eos + invalid)
+    assert grammar.is_terminated()
+    assert grammar.accept_tokens("", invalid + eos + invalid)
 
 
 def test_grammar_bitmask_with_specdec():
