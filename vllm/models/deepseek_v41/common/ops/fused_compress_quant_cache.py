@@ -356,7 +356,7 @@ def _copy_pipeline_cache_rows(
     valid = (slot >= 0) & ((position + 1) % COMPRESS_RATIO == 0)
     byte = tl.arange(0, BLOCK)
     row = slot % CACHE_BLOCK
-    # SM90 Main KV and indexer K segregate values and scales within each page.
+    # For split layouts, each page stores all values before all scales.
     offset = tl.where(
         byte < VALUE_BYTES,
         row * VALUE_BYTES + byte,
