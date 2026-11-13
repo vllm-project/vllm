@@ -211,12 +211,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                 )
             return CompressedTensorsEmbeddingWNA16Int(weight_quant)
 
-        # Every attention layer that owns a KV cache, not only `Attention`:
-        # also `MLAAttention` and model-specific layers such as Kimi's MLA.
-        # Only layers that set up KV-cache quantization (`_init_kv_cache_quant`)
-        # ask for a method for themselves; Mamba layers and indexer caches,
-        # which are also `AttentionLayerBase`, never reach this check.
-        if isinstance(layer, AttentionLayerBase):
+        # The attention layers that declare `supports_kv_cache_quant`:
+        # `Attention`, `MLAAttention`, Kimi's `MultiHeadLatentAttention` and
+        # `MiniMaxM3SparseAttention`.
+        if isinstance(layer, AttentionLayerBase) and layer.supports_kv_cache_quant:
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(

@@ -191,6 +191,11 @@ def _init_kv_cache_quant(
         prefix: Layer name prefix for quantization method lookup.
 
     """
+    # Quant configs give a KV-cache method only to layers that declare it.
+    assert getattr(layer, "supports_kv_cache_quant", False), (
+        f"{type(layer).__name__} sets up KV-cache quantization, so it must set "
+        "`supports_kv_cache_quant = True`"
+    )
     # Note [Register q/k/v/prob scales in state dict]
     # When calling model.to(device), only parameters/buffers in state dict are
     # moved. If not registering q/k/v/prob scales in state dict, there would
@@ -256,6 +261,8 @@ class Attention(nn.Module, AttentionLayerBase):
     2. Perform (multi-head/multi-query/grouped-query) attention.
     3. Return the output tensor.
     """
+
+    supports_kv_cache_quant: bool = True
 
     def __init__(
         self,

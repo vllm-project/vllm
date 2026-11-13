@@ -253,10 +253,9 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         # handle kv-cache first so we can focus only on weight quantization thereafter
-        # (any attention layer that owns a KV cache, including model-specific
-        # ones that are neither `Attention` nor `MLAAttention`; only layers that
-        # set up KV-cache quantization via `_init_kv_cache_quant` reach this)
-        if isinstance(layer, AttentionLayerBase):
+        # (the attention layers that declare `supports_kv_cache_quant`: `Attention`,
+        # `MLAAttention`, Kimi's `MultiHeadLatentAttention`, `MiniMaxM3SparseAttention`)
+        if isinstance(layer, AttentionLayerBase) and layer.supports_kv_cache_quant:
             return self.KVCacheMethodCls(self)
 
         # handle exclusion
@@ -2210,7 +2209,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         # KV-cache quantization, for the same layers as in
         # `ModelOptQuantConfigBase.get_quant_method` (this also covers
         # `MLAAttention`, which matched no branch here before)
-        if isinstance(layer, AttentionLayerBase):
+        if isinstance(layer, AttentionLayerBase) and layer.supports_kv_cache_quant:
             if self.kv_cache_quant_method:
                 return ModelOptKVCacheMethod(self)
             return None

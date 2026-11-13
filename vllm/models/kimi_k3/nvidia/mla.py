@@ -131,6 +131,8 @@ def _gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tenso
 class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
     """Kimi-K3 Multi-head Latent Attention with optional RoPE and output gate."""
 
+    supports_kv_cache_quant: bool = True
+
     def __init__(
         self,
         config: KimiLinearConfig,

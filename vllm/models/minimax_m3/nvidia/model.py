@@ -853,6 +853,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     `index_{v,o}_proj` are never created.
     """
 
+    supports_kv_cache_quant: bool = True
+
     def __init__(
         self,
         config: PreTrainedConfig,
