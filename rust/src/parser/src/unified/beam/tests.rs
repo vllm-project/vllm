@@ -870,7 +870,7 @@ fn lenient_arguments_come_in_declared_or_sorted_order() {
 
 #[test]
 fn other_names_match_every_name_but_the_given_ones() {
-    let regex = regex_automata::meta::Regex::new(&format!(
+    let regex = regex::Regex::new(&format!(
         "^(?:{})$",
         other_names(&["get", "get_time", "a.b"])
     ))
