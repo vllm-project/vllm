@@ -68,8 +68,8 @@ Note that you will want to configure your vLLM image based on your processor arc
 ??? console "Config"
 
     ```bash
-    VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest       # use this for x86_64
-    VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest # use this for arm64
+    VLLM_IMAGE=vllm/vllm-openai-cpu:latest-x86_64 # use this for x86_64
+    VLLM_IMAGE=vllm/vllm-openai-cpu:latest-arm64  # use this for arm64
     cat <<EOF |kubectl apply -f -
     apiVersion: apps/v1
     kind: Deployment
