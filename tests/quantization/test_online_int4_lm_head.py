@@ -103,6 +103,18 @@ def test_target_naming_the_head_selects_it():
     assert config.resolve_quant_method_cls(ReplicatedLinear, "proj") is None
 
 
+def test_nested_head_needs_a_pattern():
+    # Multimodal wrappers nest the head, e.g. `language_model.lm_head`.
+    prefix = "language_model.lm_head"
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(targets=LM_HEAD_TARGET))
+    assert config.resolve_quant_method_cls(ParallelLMHead, prefix) is None
+    args = QuantizationConfigArgs(targets={r"re:.*lm_head$": QuantSpec(weight=SCHEME)})
+    resolved = OnlineQuantizationConfig(args).resolve_quant_method_cls(
+        ParallelLMHead, prefix
+    )
+    assert resolved is not None and resolved[-1] is Int4PerGroup32AsymLMHeadMethod
+
+
 def test_broad_targets_do_not_select_the_head():
     # A catch-all pattern keeps meaning the linear and MoE layers.
     args = QuantizationConfigArgs(targets={"re:.*": "fp8_per_tensor"})

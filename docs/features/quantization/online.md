@@ -194,9 +194,11 @@ bandwidth-bound GPUs a full-precision head can be one of the largest per-token
 costs, even when a checkpoint quantizes every other linear layer.
 
 Select the lm_head with a [`targets`](#fine-grained-per-layer-quantization-schemes)
-pattern that contains its module name, such as `"lm_head"` or
-`"re:.*lm_head$"`. Broad patterns such as `"re:.*"`, and the `linear` field, do
-not select it. For example:
+pattern that contains its module name. Patterns match the full layer name, so
+`"lm_head"` only selects a top-level head; use `"re:.*lm_head$"` for models
+that nest it, such as `language_model.lm_head` in multimodal wrappers. Broad
+patterns such as `"re:.*"`, and the `linear` field, do not select it. For
+example:
 
 | Target value | Recipe | Notes |
 | ------------ | ------ | ----- |
@@ -204,9 +206,9 @@ not select it. For example:
 | `{"weight": "int4_per_group_32_asym"}` | uint4 data, one scale and zero point per 32 input channels, BF16 activations | lm_head only. Runs on the platform's mixed-precision (W4A16) linear kernel, e.g. `RDNAHybridW4A16LinearKernel` on gfx11/gfx12. |
 
 ```bash
-# Quark int4 checkpoint whose lm_head is left in bf16
+# Quark int4 checkpoint whose lm_head (language_model.lm_head) is left in bf16
 vllm serve amd/Qwen3.6-35B-A3B-Quark-UINT4-G128 \
-    --quantization-config '{"targets":{"lm_head":{"weight":"int4_per_group_32_asym"}}}'
+    --quantization-config '{"targets":{"re:.*lm_head$":{"weight":"int4_per_group_32_asym"}}}'
 ```
 
 - The checkpoint must leave the lm_head unquantized: online re-quantization of
@@ -227,6 +229,11 @@ vllm serve amd/Qwen3.6-35B-A3B-Quark-UINT4-G128 \
     copy next to it. It reduces the weight bytes read per decode step, but
     increases memory instead of saving it; the extra size is logged at load.
     The other online methods reject a tied lm_head.
+
+    A tied `int4_per_group_32_asym` lm_head is not updated by in-place weight
+    reloading (`reload_weights`, RL weight sync): the head keeps the copy
+    quantized at load while the embeddings take the new weights. Do not use it
+    with weight updates.
 
 ### Separate Schemes for Dense and MoE Layers
 
