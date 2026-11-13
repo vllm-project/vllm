@@ -16,6 +16,7 @@ Run as a script: only the standard library and `verbs.py` are imported.
 
 import ctypes
 import faulthandler
+import itertools
 import json
 import mmap
 import os
@@ -60,6 +61,9 @@ class Proxy:
 
     def init(self, device, world, rank, qps_per_peer, sq_depth, sizes, fds):
         self.device = dev = verbs.Device(device)
+        # CPUs of another NUMA node post twice as slowly.
+        if cpus := verbs.local_cpus(device) & os.sched_getaffinity(0):
+            os.sched_setaffinity(0, cpus)
         self.world, self.rank = world, rank
         self.ctrl = mmap.mmap(fds[0], sizes[0], flags=mmap.MAP_SHARED)
         self.staging = mmap.mmap(fds[1], sizes[1], flags=mmap.MAP_SHARED)
@@ -76,16 +80,22 @@ class Proxy:
         self.peers = [p for p in range(world) if p != rank]
         depth = self.capacity * qps_per_peer * max(len(self.peers), 1)
         self.cq = dev.create_cq(min(depth, dev.max_cqe))
+        # QPs by index: their handles, each peer's, and READ chains in flight.
+        self.qp_handles: list[int] = []
         self.qps: dict[int, list[int]] = {}
+        self.peer_of: list[int] = []
         qpns: list[list[int]] = [[] for _ in range(world)]
         self.qp_of: dict[int, int] = {}
         for peer in self.peers:
             self.qps[peer] = []
             for _ in range(qps_per_peer):
                 qp, qpn = dev.create_qp(self.cq, self.sq_depth)
-                self.qps[peer].append(qp)
+                self.qps[peer].append(len(self.qp_handles))
+                self.qp_of[qpn] = len(self.qp_handles)
+                self.qp_handles.append(qp)
+                self.peer_of.append(peer)
                 qpns[peer].append(qpn)
-                self.qp_of[qpn] = qp
+        self.inflight = [0] * len(self.qp_handles)
         self.wc = ctypes.create_string_buffer(verbs.WC_BYTES * 64)
         gid, lid = dev.address()
         return {
@@ -101,7 +111,9 @@ class Proxy:
         """`peers` lists each peer, its address and its QPs for this GPU."""
         for peer, (gid, lid), theirs in peers:
             for qp, remote in zip(self.qps[peer], theirs):
-                self.device.connect(qp, remote, (bytes.fromhex(gid), lid))
+                self.device.connect(
+                    self.qp_handles[qp], remote, (bytes.fromhex(gid), lid)
+                )
 
     def register(self, kind, size, iova, fds):
         """Register a shard for peers' READs; returns its address and rkey."""
@@ -140,12 +152,13 @@ class Proxy:
             idle = time.monotonic()
 
     def transfer(self) -> None:
-        words, post = self.words, self.device.post_send
-        starts = words[STARTS : STARTS + self.world + 1].tolist()
+        starts = self.words[STARTS : STARTS + self.world + 1].tolist()
+        post, bad, handles = self.device._post, self.device._bad_ref, self.qp_handles
+        inflight, capacity, wr_va = self.inflight, self.capacity, self.wr_va
         # Each peer's chains, interleaved so every peer starts at once.
         queues = [
-            (
-                self.qps[p],
+            zip(
+                itertools.cycle(self.qps[p]),
                 range(
                     starts[p], starts[p + 1], chain_length(starts[p + 1] - starts[p])
                 ),
@@ -153,26 +166,22 @@ class Proxy:
             for p in self.peers
             if starts[p + 1] > starts[p]
         ]
-        inflight = dict.fromkeys(self.qp_of.values(), 0)
-        pending = index = 0
-        while queues:
-            remaining = []
-            for qps, chunks in queues:
-                if index >= len(chunks):
+        pending = 0
+        for chains in itertools.zip_longest(*queues):
+            for chain in chains:
+                if chain is None:
                     continue
-                remaining.append((qps, chunks))
-                qp = qps[index % len(qps)]
-                while inflight[qp] >= self.capacity:
-                    pending -= self.poll(inflight)
-                post(qp, self.wr_va + chunks[index] * verbs.SEND_WR_BYTES)
+                qp, slot = chain
+                while inflight[qp] >= capacity:
+                    pending -= self.poll()
+                if error := post(handles[qp], wr_va + slot * verbs.SEND_WR_BYTES, bad):
+                    raise RuntimeError(f"ibv_post_send failed: {os.strerror(error)}")
                 inflight[qp] += 1
                 pending += 1
-            queues = remaining
-            index += 1
         while pending:
-            pending -= self.poll(inflight)
+            pending -= self.poll()
 
-    def poll(self, inflight) -> int:
+    def poll(self) -> int:
         count = self.device.poll_cq(self.cq, self.wc, 64)
         raw = self.wc.raw
         for i in range(count):
@@ -180,13 +189,11 @@ class Proxy:
                 "<IIIIII", raw, i * verbs.WC_BYTES + 8
             )
             if status:
-                qp = self.qp_of[qpn]
-                peer = next(p for p, qps in self.qps.items() if qp in qps)
                 raise RuntimeError(
-                    f"RDMA READ from peer {peer} failed: ibv_wc status {status}, "
-                    f"vendor error {vendor:#x}"
+                    f"RDMA READ from peer {self.peer_of[self.qp_of[qpn]]} failed: "
+                    f"ibv_wc status {status}, vendor error {vendor:#x}"
                 )
-            inflight[self.qp_of[qpn]] -= 1
+            self.inflight[self.qp_of[qpn]] -= 1
         return count
 
     def serve(self) -> None:

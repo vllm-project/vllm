@@ -14,15 +14,9 @@ import struct
 from functools import cache
 
 SEND_WR_BYTES = 128
-SGE_BYTES = 16
 WC_BYTES = 48
-WR_RDMA_READ = 4
-SEND_SIGNALED = 2
-# ibv_send_wr: next, sg_list, num_sge, opcode, send_flags, rdma.remote_addr, rdma.rkey
-WR_NEXT, WR_SG_LIST, WR_NUM_SGE, WR_OPCODE, WR_FLAGS = 8, 16, 24, 28, 32
-WR_REMOTE_ADDR, WR_RKEY = 40, 48
 
-_ACCESS = 1 | 2 | 4  # local write, remote write, remote read
+_ACCESS = 1 | 4  # local write, remote read
 _ACCESS_RELAXED_ORDERING = 1 << 20
 _QPT_RC = 2
 _QPS_INIT, _QPS_RTR, _QPS_RTS = 1, 2, 3
@@ -94,6 +88,15 @@ def device_numa_node(device: str) -> int:
     return int(_sysfs(device, "device", "numa_node"))
 
 
+def local_cpus(device: str) -> set[int]:
+    """CPUs on the device's NUMA node."""
+    cpus: set[int] = set()
+    for part in _sysfs(device, "device", "local_cpulist").split(","):
+        first, _, last = part.partition("-")
+        cpus.update(range(int(first), int(last or first) + 1))
+    return cpus
+
+
 def _pick_gid_index(device: str) -> int:
     """RoCE v2 with an IPv4-mapped address if present, else index 0 (IB)."""
     best = 0
@@ -155,6 +158,8 @@ class Device:
         ops = ctypes.cast(self.context, ctypes.POINTER(ctypes.c_void_p))
         self._post = _POST_SEND(ops[_OPS_POST_SEND // 8])
         self._poll = _POLL_CQ(ops[_OPS_POLL_CQ // 8])
+        self._bad = ctypes.c_void_p()
+        self._bad_ref = ctypes.byref(self._bad)
 
     def describe(self) -> str:
         kind = "InfiniBand" if self.is_ib else f"RoCE, GID index {self.gid_index}"
@@ -241,8 +246,7 @@ class Device:
             raise RuntimeError(f"QP RTS failed: {os.strerror(ctypes.get_errno())}")
 
     def post_send(self, qp: int, wr: int) -> None:
-        bad = ctypes.c_void_p()
-        if error := self._post(qp, wr, ctypes.byref(bad)):
+        if error := self._post(qp, wr, self._bad_ref):
             raise RuntimeError(f"ibv_post_send failed: {os.strerror(error)}")
 
     def poll_cq(self, cq: int, wc: ctypes.Array, num_entries: int) -> int:

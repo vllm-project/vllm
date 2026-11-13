@@ -111,9 +111,7 @@ def _wr_kernel(
     remote_addr,
     rkeys,
     wrs,
-    sges,
     wrs_proxy,
-    sges_proxy,
     staging_proxy,
     lkey,
     num_items,
@@ -140,22 +138,22 @@ def _wr_kernel(
     slot = start + position
     chain = tl.where(size >= LONG_FROM, LONG_CHAIN, SHORT_CHAIN)
     last = (position % chain == chain - 1) | (position == size - 1)
-    zero = tl.zeros_like(slot)
-    # ibv_send_wr as 64-bit words: wr_id, next, sg_list, num_sge | opcode << 32,
-    # send_flags, rdma.remote_addr, rdma.rkey.
-    wr = wrs + slot * 16
-    tl.store(wr, zero, mask=remote)
-    tl.store(wr + 1, tl.where(last, 0, wrs_proxy + (slot + 1) * 128), mask=remote)
-    tl.store(wr + 2, sges_proxy + slot * 16, mask=remote)
-    tl.store(wr + 3, zero + (1 | (4 << 32)), mask=remote)
-    tl.store(wr + 4, tl.where(last, 2, 0).to(tl.int64), mask=remote)
-    tl.store(wr + 5, tl.load(remote_addr + item, mask=remote, other=0), mask=remote)
-    rkey = tl.load(rkeys + item, mask=remote, other=0).to(tl.int64)
-    tl.store(wr + 6, rkey & 0xFFFFFFFF, mask=remote)
-    # ibv_sge: addr, length | lkey << 32.
-    sge = sges + slot * 2
-    tl.store(sge, staging_proxy + item * (WORDS * 8), mask=remote)
-    tl.store(sge + 1, zero + (WORDS * 8 | (lkey.to(tl.int64) << 32)), mask=remote)
+    wr_proxy = wrs_proxy + slot * 128
+    raddr = tl.load(remote_addr + item, mask=remote, other=0)
+    rkey = tl.load(rkeys + item, mask=remote, other=0).to(tl.int64) & 0xFFFFFFFF
+    # ibv_send_wr words: wr_id, next, sg_list, num_sge | opcode << 32, send_flags,
+    # rdma.remote_addr, rdma.rkey; RC READs ignore its tail, which holds the ibv_sge.
+    col = tl.arange(0, 16)[None, :]
+    wr = tl.where(col == 1, tl.where(last, 0, wr_proxy + 128)[:, None], 0)
+    wr = tl.where(col == 2, (wr_proxy + 112)[:, None], wr)
+    wr = tl.where(col == 3, 1 | (4 << 32), wr)
+    wr = tl.where(col == 4, tl.where(last, 2, 0).to(tl.int64)[:, None], wr)
+    wr = tl.where(col == 5, raddr[:, None], wr)
+    wr = tl.where(col == 6, rkey[:, None], wr)
+    wr = tl.where(col == 14, (staging_proxy + item * (WORDS * 8))[:, None], wr)
+    wr = tl.where(col == 15, WORDS * 8 | (lkey.to(tl.int64) << 32), wr)
+    # Whole 128 B records, so each one reaches host memory as one line.
+    tl.store(wrs + slot[:, None] * 16 + col, wr, mask=remote[:, None])
     # A later kernel raises go; its release orders only its own writes, so make
     # these WRs visible to the CPU before this thread exits.
     tl.inline_asm_elementwise(
@@ -239,9 +237,8 @@ class RdmaTransport:
         self.max_items = max_items
         # Bound the READs in flight per NIC: many QPs for few peers, few for many.
         qps_per_peer = qps_per_peer or min(16, max(2, 128 // max(self.world - 1, 1)))
-        wr_bytes = max_items * verbs.SEND_WR_BYTES
         self.ctrl = SharedHost(
-            proxy.WR_OFFSET + wr_bytes + max_items * verbs.SGE_BYTES, "ctrl"
+            proxy.WR_OFFSET + max_items * verbs.SEND_WR_BYTES, "ctrl"
         )
         self.staging = SharedHost(max_items * max_row_bytes, "staging")
         ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -288,12 +285,10 @@ class RdmaTransport:
         gpu = torch.device("cuda", torch.accelerator.current_device_index())
         self.lkey = info["lkey"]
         self.wrs_proxy = info["ctrl_va"] + proxy.WR_OFFSET
-        self.sges_proxy = self.wrs_proxy + wr_bytes
         self.staging_proxy = info["staging_va"]
         ctrl = self.ctrl.gpu
         self.ctrl_words = ctrl[: proxy.WR_OFFSET].view(torch.int64)
-        self.wrs = ctrl[proxy.WR_OFFSET : proxy.WR_OFFSET + wr_bytes].view(torch.int64)
-        self.sges = ctrl[proxy.WR_OFFSET + wr_bytes :].view(torch.int64)
+        self.wrs = ctrl[proxy.WR_OFFSET :].view(torch.int64)
         self.counts = torch.zeros(self.world, dtype=torch.int32, device=gpu)
         self.seq = torch.zeros(1, dtype=torch.int64, device=gpu)
         self.owner_pos = torch.empty(max_items, dtype=torch.int64, device=gpu)
@@ -370,9 +365,7 @@ class RdmaTransport:
             self.remote_addr,
             self.rkeys,
             self.wrs,
-            self.sges,
             self.wrs_proxy,
-            self.sges_proxy,
             self.staging_proxy,
             self.lkey,
             n,

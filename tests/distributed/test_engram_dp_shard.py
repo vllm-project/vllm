@@ -316,6 +316,21 @@ def _check_pool_tables(store_dir: str):
         ids[0, 0] = -1
         expected = _reference(weight.cuda(), scale.cuda(), ids)
         torch.testing.assert_close(table(ids), expected, atol=0, rtol=0)
+        # Replays carry no host state: each one fetches the ids now in `static`.
+        static, stream = ids.clone(), torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            table(static)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            out = table(static)
+        for seed in range(3):
+            static.copy_(
+                _make_ids(HEAD_SIZES, 9, seed=600 + 8 * seed + group.rank_in_group)
+            )
+            graph.replay()
+            expected = _reference(weight.cuda(), scale.cuda(), static)
+            torch.testing.assert_close(out, expected, atol=0, rtol=0)
+        del graph
         group.barrier()
         pool.close()
 

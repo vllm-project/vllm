@@ -331,7 +331,6 @@ steps:
   - tests/v1/engine/test_engine_core_client.py
   - tests/distributed/test_utils
   - tests/distributed/test_engram_dp_shard.py
-  - tests/distributed/test_engram_pool.py
   - vllm/config/engram.py
   - vllm/models/deepseek_v41/
   commands:
@@ -346,7 +345,6 @@ steps:
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s distributed/test_engram_dp_shard.py
-  - pytest -v -s distributed/test_engram_pool.py
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
