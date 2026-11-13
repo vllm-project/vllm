@@ -267,6 +267,19 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    enable_prefix_cache_miss_attribution: bool = False
+    """Collect optional per-request prefix-cache miss attribution.
+
+    For the first block after the longest prefix-cache hit, report whether its
+    hash was recently evicted (`evicted`), was probed and not found
+    (`no_match`), or was never probed because the hit reached the lookup cap
+    for recomputing the last prompt token (`lookup_limit`). Also reports the
+    *names* of extra hash keys (`cache_salt`, `lora`, `mm`,
+    `prompt_embeds`), never their values. Results are attached to the request
+    and logged at debug level. Disabled by default; enabling keeps a bounded
+    history of evicted block hashes. Currently supports single-group
+    full-attention models.
+    """
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:
 
@@ -437,6 +450,7 @@ class CacheConfig:
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
+            "enable_prefix_cache_miss_attribution",
             "prefix_caching_hash_algo",
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).

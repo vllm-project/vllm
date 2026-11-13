@@ -11,12 +11,18 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
+    UnitaryKVCacheCoordinator,
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
+from vllm.v1.core.prefix_cache_miss_attribution import (
+    RecentEvictions,
+    attribute_miss,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    FullAttentionManager,
     MambaManager,
     get_kv_cache_kind,
 )
@@ -146,6 +152,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
+        enable_prefix_cache_miss_attribution: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -196,6 +203,15 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+
+        # Opt-in per-request prefix-cache miss attribution (#60044). The
+        # bounded eviction history lives on the block pool, right next to
+        # the code that drops cached hashes, so no extra plumbing is needed.
+        self.enable_prefix_cache_miss_attribution = enable_prefix_cache_miss_attribution
+        if enable_prefix_cache_miss_attribution:
+            self.block_pool.recent_evictions = RecentEvictions(
+                max_size=max(1, kv_cache_config.num_blocks)
+            )
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -284,6 +300,53 @@ class KVCacheManager:
             preempted=request.num_preemptions > 0,
         )
 
+    def _record_prefix_cache_miss_attribution(
+        self,
+        request: Request,
+        num_cached_tokens: int,
+        max_cache_hit_length: int,
+    ) -> None:
+        """Record what was observed for the first uncached block (#60044).
+
+        Scope is deliberately narrow: single-group full-attention models with
+        one hash per cache block. Hybrid groups reconcile hits per spec and
+        fine-grained hashing probes interior boundaries, so both are left for
+        a follow-up rather than risking a misleading attribution.
+        """
+        if not isinstance(self.coordinator, UnitaryKVCacheCoordinator):
+            request.prefix_cache_miss_attributions = ()
+            return
+        manager = self.coordinator.single_type_managers[0]
+        if not isinstance(manager, FullAttentionManager):
+            request.prefix_cache_miss_attributions = ()
+            return
+
+        attribution = attribute_miss(
+            request,
+            group_id=manager.kv_cache_group_id,
+            num_cached_tokens=num_cached_tokens,
+            max_cache_hit_length=max_cache_hit_length,
+            hash_block_size=self.block_pool.hash_block_size,
+            block_size=manager.block_size,
+            recent_evictions=self.block_pool.recent_evictions,
+        )
+        if attribution is None:
+            request.prefix_cache_miss_attributions = ()
+            return
+
+        logger.debug(
+            "prefix-cache miss attribution: req=%s group=%d reason=%s "
+            "extra_key_kinds=%s cached_tokens=%d lookup_cap=%d block_index=%s",
+            request.request_id,
+            attribution.group_id,
+            attribution.reason,
+            attribution.extra_key_kinds,
+            attribution.num_cached_tokens,
+            attribution.max_cache_hit_length,
+            attribution.block_index,
+        )
+        request.prefix_cache_miss_attributions = (attribution,)
+
     def get_computed_blocks(
         self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int]:
@@ -326,6 +389,11 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+
+        if self.enable_prefix_cache_miss_attribution:
+            self._record_prefix_cache_miss_attribution(
+                request, num_new_computed_tokens, max_cache_hit_length
+            )
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers

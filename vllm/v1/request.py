@@ -227,6 +227,11 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
+        # Opt-in per-request prefix-cache miss attribution (#60044).
+        # Empty unless CacheConfig.enable_prefix_cache_miss_attribution
+        # is set; holds tuple[PrefixCacheMissAttribution, ...].
+        self.prefix_cache_miss_attributions = ()
+
         # Per-request speculative-decoding acceptance accumulator. Populated by
         # the scheduler when --per-request-spec-decode-metrics is set (eagerly on
         # add_request, then observed each verify step); stays None otherwise.
