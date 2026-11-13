@@ -45,7 +45,7 @@ use crate::error::{ApiError, chat_submit_error, engine_error, server_error};
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::{EventExt as _, resolve_request_context, sse_response, unix_timestamp};
 
 /// Create one response (`POST /v1/responses`).
 pub async fn create_responses(
@@ -406,8 +406,7 @@ async fn responses_sse_stream(
         trace!(?event, "responses emitting event");
         let sse_event = Event::default()
             .event(event.event_type())
-            .json_data(SequencedEvent::new(&event, sequence))
-            .expect("Responses stream event must serialize to JSON");
+            .json(&SequencedEvent::new(&event, sequence));
         y.yield_ok(sse_event).await;
         sequence += 1;
     }
