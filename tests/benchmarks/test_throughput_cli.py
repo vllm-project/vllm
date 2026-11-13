@@ -8,6 +8,7 @@ LoRA-assignment and MMVU cases below cover the pieces that are throughput-only
 serve-side dataset coverage.
 """
 
+import json
 import subprocess
 import warnings
 from argparse import Namespace
@@ -485,19 +486,28 @@ def test_get_requests_hf_dataset_with_mm_processor_args(
 
 
 @pytest.mark.benchmark
-def test_get_requests_prefix_repetition_without_prefix_flags(
-    hf_tokenizer: PreTrainedTokenizerBase,
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], 128),
+        (["--output-len", "64"], 64),
+        (["--output-len", "64", "--prefix-repetition-output-len", "32"], 32),
+    ],
+)
+def test_get_requests_prefix_repetition_output_len(
+    argv, expected, hf_tokenizer: PreTrainedTokenizerBase
 ) -> None:
-    """Unset --prefix-repetition-* flags fall back to the dataset defaults."""
+    """--prefix-repetition-output-len > --output-len > the dataset default."""
     args = _parse_throughput_args(
-        "--dataset-name", "prefix_repetition", "--num-prompts", "20"
+        "--dataset-name", "prefix_repetition", "--num-prompts", "20", *argv
     )
     requests = get_requests(args, hf_tokenizer)
 
     assert len(requests) == 20
-    assert all(r.expected_output_len == 128 for r in requests)
+    assert all(r.expected_output_len == expected for r in requests)
 
 
+@pytest.mark.benchmark
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -505,22 +515,25 @@ def test_get_requests_prefix_repetition_without_prefix_flags(
         (["--output-len", "64", "--custom-output-len", "32"], 32),
     ],
 )
-def test_custom_audio_output_len_follows_flag_precedence(argv, expected) -> None:
-    """custom_audio reads custom_output_len: --custom-output-len > --output-len."""
-    args = _parse_throughput_args("--dataset-name", "custom_audio", *argv)
+def test_get_requests_custom_audio_output_len(
+    argv, expected, hf_tokenizer: PreTrainedTokenizerBase, tmp_path
+) -> None:
+    """--custom-output-len > --output-len for custom_audio."""
+    row = {
+        "prompt": "Transcribe the audio.",
+        "audio": {"array": [0.0] * 160, "sampling_rate": 16000},
+    }
+    dataset_path = tmp_path / "audio.jsonl"
+    dataset_path.write_text(json.dumps(row) + "\n")
+    args = _parse_throughput_args(
+        "--dataset-name",
+        "custom_audio",
+        "--dataset-path",
+        str(dataset_path),
+        "--num-prompts",
+        "1",
+        *argv,
+    )
+    requests = get_requests(args, hf_tokenizer)
 
-    assert _to_serve_args(args).custom_output_len == expected
-
-
-@pytest.mark.parametrize(
-    ("argv", "expected"),
-    [
-        (["--output-len", "64"], 64),
-        (["--output-len", "64", "--prefix-repetition-output-len", "32"], 32),
-    ],
-)
-def test_prefix_repetition_output_len_follows_flag_precedence(argv, expected) -> None:
-    """--prefix-repetition-output-len > --output-len > the dataset default."""
-    args = _parse_throughput_args("--dataset-name", "prefix_repetition", *argv)
-
-    assert _to_serve_args(args).prefix_repetition_output_len == expected
+    assert [r.expected_output_len for r in requests] == [expected]

@@ -525,11 +525,16 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
-# --random-* length -> (legacy option it overrides, value when neither is set).
-_RANDOM_LEN_FALLBACKS = {
+# Dataset length -> (general option it overrides, value when neither is set).
+_DATASET_LEN_FALLBACKS = {
     "random_input_len": ("input_len", RandomDataset.DEFAULT_INPUT_LEN),
     "random_output_len": ("output_len", RandomDataset.DEFAULT_OUTPUT_LEN),
     "random_prefix_len": ("prefix_len", RandomDataset.DEFAULT_PREFIX_LEN),
+    "custom_output_len": ("output_len", None),
+    "prefix_repetition_output_len": (
+        "output_len",
+        PrefixRepetitionRandomDataset.DEFAULT_OUTPUT_LEN,
+    ),
 }
 
 
@@ -549,11 +554,11 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     """
     d = vars(args).copy()
-    # random_*: prefer --random-* over legacy --input/output/prefix-len, then
-    # the RandomDataset defaults. Callers without the legacy flags (e.g. bench
+    # Prefer the dataset-specific flag over legacy --input/output/prefix-len,
+    # then the dataset default. Callers without the legacy flags (e.g. bench
     # mm-processor) omit them, so read them optionally. Identity checks, not
     # truthiness: an explicit 0 must not fall through to them.
-    for name, (legacy, default) in _RANDOM_LEN_FALLBACKS.items():
+    for name, (legacy, default) in _DATASET_LEN_FALLBACKS.items():
         value = getattr(args, name, None)
         if value is None:
             value = getattr(args, legacy, None)
@@ -564,18 +569,6 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     # matching prior throughput behaviour of omitting output_len when unset.
     d["hf_output_len"] = output_len
     d["sharegpt_output_len"] = output_len
-    custom_output_len = getattr(args, "custom_output_len", None)
-    d["custom_output_len"] = (
-        output_len if custom_output_len is None else custom_output_len
-    )
-    prefix_output_len = getattr(args, "prefix_repetition_output_len", None)
-    if prefix_output_len is None:
-        prefix_output_len = output_len
-    d["prefix_repetition_output_len"] = (
-        PrefixRepetitionRandomDataset.DEFAULT_OUTPUT_LEN
-        if prefix_output_len is None
-        else prefix_output_len
-    )
     # Explicit --enable-multimodal-chat wins; otherwise auto-enable for the
     # multimodal chat backend (preserves today's vllm-chat handling). Callers
     # without a --backend flag (e.g. bench mm-processor) drive every request
@@ -1000,14 +993,15 @@ def add_cli_args(parser: FlexibleArgumentParser):
     # (random, random-mm, random-rerank)
     add_random_dataset_base_args(parser)
     # Unset unless passed, so the legacy --input-len/--output-len/--prefix-len
-    # apply when given; _to_serve_args falls back to the RandomDataset defaults.
+    # apply when given; _to_serve_args falls back to the dataset defaults.
     for action in parser._actions:
-        if action.dest in _RANDOM_LEN_FALLBACKS:
-            legacy, default = _RANDOM_LEN_FALLBACKS[action.dest]
+        if action.dest in _DATASET_LEN_FALLBACKS:
+            legacy, default = _DATASET_LEN_FALLBACKS[action.dest]
             action.default = None
+            fallback = "" if default is None else f"; if neither is set, {default}"
             action.help = (
                 f"{action.help} Takes precedence over "
-                f"--{legacy.replace('_', '-')}; if neither is set, {default}."
+                f"--{legacy.replace('_', '-')}{fallback}."
             )
     add_random_multimodal_dataset_args(parser)
 
