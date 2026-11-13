@@ -113,8 +113,11 @@ class KdaSplit:
     must be ready at launch; each run waits for prior cache restoration and slot
     publication.
 
-    `schedule` = (early, lanes per state row, minimum CTAs per SM, CTAs per head);
-    zeros keep the batch defaults. Two CTAs per head give each CTA 64 state rows and
+    `schedule` = (early, lanes per state row, minimum CTAs per SM, CTAs per head,
+    evict, lean); zeros keep the batch defaults. Lean (q > 1) computes each token's
+    inverse q and k norms on one lane and broadcasts them, and the output gate's
+    sigmoid only for the tokens the CTA normalizes (the same instructions per value,
+    so the same bits). Two CTAs per head give each CTA 64 state rows and
     each gate lane two decays. Early issues every load the predecessor does not
     produce (slot, state and conv rows, conv / F_B / norm weights) before the PDL
     wait, converts operands at first use, and syncs the cluster only before each
@@ -164,7 +167,9 @@ class KdaSplit:
         self.heads, self.gate_mode, self.has_bias = heads, gate_mode, has_bias
         assert tokens > 1 or not record
         self.record = record
-        early, lanes, self.occupancy, cluster, evict = (*schedule, 0, 0)[:5]
+        early, lanes, self.occupancy, cluster, evict, lean = (*schedule, 0, 0, 0)[:6]
+        self.lean = bool(lean) and tokens > 1
+        assert not self.lean or 2 * tokens <= 32  # one lane per token's q and k norm
         self.early, self.staged = bool(early), early >= 2
         self.gate_staged, self.tokens = early == 3, tokens
         assert gate_mode != 2 or not (early or cluster)
@@ -329,7 +334,8 @@ class KdaSplit:
                     k = self.silu(accum[3 * t + 1])
                     v = self.silu(accum[3 * t + 2])
                     betas[t] = self.sigmoid(Float32(betas[t]))
-                    gates[t] = self.sigmoid(Float32(gates[t]))
+                    if cutlass.const_expr(not self.lean):
+                        gates[t] = self.sigmoid(Float32(gates[t]))
                     shared_q[advance(thread, 128 * t)] = q
                     shared_k[advance(thread, 128 * t)] = k
                     if cutlass.const_expr(self.record):  # noqa: SIM102
@@ -365,8 +371,18 @@ class KdaSplit:
                     return mul_rn(value, scale) if query else value
 
                 if cutlass.const_expr(T > 1):  # normalize each token's q, k once
+                    if cutlass.const_expr(self.lean):  # lanes 2 t, 2 t + 1: q, k of t
+                        norm_at = 8 * ((lane // 2) % T) + 4 * (lane % 2)
+                        norm_sq = (reductions[norm_at] + reductions[norm_at + 2]) + (
+                            reductions[norm_at + 1] + reductions[norm_at + 3]
+                        )
+                        lane_norm = reciprocal(sqrt_approx(norm_sq + 1.0e-6))
                     for t in cutlass.range_constexpr(T):
-                        fq, fk = factors(t)
+                        if cutlass.const_expr(self.lean):
+                            fq = cute.arch.shuffle_sync(lane_norm, 2 * t)
+                            fk = cute.arch.shuffle_sync(lane_norm, 2 * t + 1)
+                        else:
+                            fq, fk = factors(t)
                         q_n = normalize(qks[2 * t], fq, True)
                         k_n = normalize(qks[2 * t + 1], fk, False)
                         shared_q[128 * t + thread] = q_n
@@ -471,7 +487,10 @@ class KdaSplit:
                         sumsq = (sums[0] + sums[2]) + (sums[1] + sums[3])
                         variance = sumsq * (1.0 / 128) + eps
                         rstd = reciprocal(sqrt_approx(variance))
-                        result = raw_o * rstd * nw * gates[t]
+                        gate_t = gates[t]
+                        if cutlass.const_expr(self.lean):
+                            gate_t = self.sigmoid(Float32(gate_t))
+                        result = raw_o * rstd * nw * gate_t
                         output[advance(token, t), qk_channel] = BFloat16(result)
                         if cutlass.const_expr(t == 0):
                             for section in cutlass.range_constexpr(2):
