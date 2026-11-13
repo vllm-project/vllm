@@ -183,8 +183,7 @@ guide: |
     --tool-call-parser hy_v3 \
     --reasoning-parser hy_v3 \
     --enable-auto-tool-choice \
-    --served-model-name hy3 \
-    --gpu-memory-utilization 0.90
+    --served-model-name hy3
   ```
 
   > **ROCm troubleshooting — AITER fused-MoE.** With `VLLM_ROCM_USE_AITER_MOE=1`
@@ -207,8 +206,7 @@ guide: |
     --tool-call-parser hy_v3 \
     --reasoning-parser hy_v3 \
     --enable-auto-tool-choice \
-    --served-model-name hy3 \
-    --gpu-memory-utilization 0.90
+    --served-model-name hy3
   ```
 
   ### Serving on 8×H200 or 8×H20-3e(141GB)

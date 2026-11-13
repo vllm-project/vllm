@@ -36,7 +36,7 @@ def _layer_spec(block_size: int = 64, latent: int = LATENT):
         cache_config=types.SimpleNamespace(block_size=block_size),
         model_config=types.SimpleNamespace(dtype=torch.bfloat16),
     )
-    return MLAAttention.get_kv_cache_spec(layer, config)
+    return MLAAttention.get_kv_cache_config(layer, config).spec
 
 
 def test_row_is_272_bytes_for_a_512_wide_latent():
