@@ -154,6 +154,10 @@ pub struct RenderArgs {
     /// HTTP bind port.
     #[arg(long, default_value_t = 8000)]
     port: u16,
+    /// TCP port for the gRPC Render service, bound on the HTTP host. When not
+    /// set, no gRPC server is started.
+    #[arg(long)]
+    grpc_port: Option<u16>,
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
@@ -275,6 +279,7 @@ impl RenderArgs {
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
             host: self.host,
             port: self.port,
+            grpc_port: self.grpc_port,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -662,6 +667,20 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub disable_request_id_randomization: bool,
 
+    /// Keep the API server running after the engine becomes permanently
+    /// unhealthy. Like Python, it is set only through
+    /// `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub keep_alive_on_engine_death: bool,
+
     /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
     /// the limit, like the Python frontend, which has none. It is set only
     /// through `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
@@ -932,6 +951,10 @@ impl SharedRuntimeArgs {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
             })?;
         }
+        if let Some(value) = lookup("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH") {
+            self.keep_alive_on_engine_death = parse_int_flag(&value)
+                .map_err(|error| format!("invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: {error}"))?;
+        }
         if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
             let size = parse_byte_count(&value)
                 .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
@@ -1035,6 +1058,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             // The engine is launched and supervised by another process.
             manages_engine: false,
@@ -1123,6 +1147,7 @@ impl SharedRuntimeArgs {
             custom_histogram_buckets: self.custom_histogram_buckets,
             log_stats_interval,
             disable_request_id_randomization: self.disable_request_id_randomization,
+            keep_alive_on_engine_death: self.keep_alive_on_engine_death,
             shutdown_timeout,
             manages_engine,
             keep_alive_timeout,
@@ -1412,8 +1437,8 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
-    /// TCP port for the gRPC Inference and Control services. When not set, no
-    /// gRPC server is started.
+    /// TCP port for the gRPC Inference, Control, and Render services. When not
+    /// set, no gRPC server is started.
     #[arg(long)]
     pub grpc_port: Option<u16>,
 
