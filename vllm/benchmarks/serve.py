@@ -388,6 +388,21 @@ class EmbedBenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
+def _get_server_metrics_results(
+    outputs: list[RequestFuncOutput],
+) -> dict[str, list[float | None]]:
+    if not any(
+        output.server_queue_time is not None or output.server_ttft is not None
+        for output in outputs
+    ):
+        return {}
+
+    return {
+        "server_queue_times": [output.server_queue_time for output in outputs],
+        "server_ttfts": [output.server_ttft for output in outputs],
+    }
+
+
 def _get_current_request_rate(
     ramp_up_strategy: Literal["linear", "exponential"] | None,
     ramp_up_start_rps: int | None,
@@ -466,7 +481,7 @@ async def get_request(
 
     # if the traces have timing info then:
     if not self_timed:
-        for request_index, request in enumerate(input_requests):
+        for request_index in range(len(input_requests)):
             current_request_rate = _get_current_request_rate(
                 ramp_up_strategy,
                 ramp_up_start_rps,
@@ -510,7 +525,7 @@ async def get_request(
             normalize_factor = target_total_delay_s / delay_ts[-1]
             delay_ts = [delay * normalize_factor for delay in delay_ts]
     else:
-        for request_index, request in enumerate(input_requests):
+        for request in input_requests:
             # this is cumulative running ts, from which sleep is calculated later
             if request.timestamp is not None:
                 delay_ts.append(request.timestamp)
@@ -707,7 +722,7 @@ def calculate_metrics(
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
 
-        for i, output in enumerate(successful_outputs):
+        for output in successful_outputs:
             # Calculate token generation timestamp using
             # start_time, ttft, and itl
             token_times = [output.start_time + output.ttft]
@@ -1339,6 +1354,8 @@ async def benchmark(
             "errors": [output.error for output in outputs],
         }
 
+    result.update(_get_server_metrics_results(outputs))
+
     queue_times: list[float] | None = None
     e2els_including_queue: list[float] | None = None
     if max_concurrency is not None:
@@ -1447,7 +1464,7 @@ async def benchmark(
             value = diffusion_stats[key]
             if value_fmt.endswith("d}"):
                 value = int(value)
-            print("{:<40} ".format(label) + value_fmt.format(value))
+            print(f"{label:<40} " + value_fmt.format(value))
 
     if spec_decode_stats is not None and diffusion_stats is None:
         print("{s:{c}^{n}}".format(s="Speculative Decoding", n=50, c="-"))
@@ -1551,7 +1568,14 @@ def save_to_pytorch_benchmark_format(
     ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
-    ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
+    ignored_metrics = [
+        "ttfts",
+        "itls",
+        "generated_texts",
+        "errors",
+        "server_queue_times",
+        "server_ttfts",
+    ]
     pt_records = convert_to_pytorch_benchmark_format(
         args=redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS),
         metrics={k: [results[k]] for k in metrics if k in results},
@@ -2411,6 +2435,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "itls",
             "generated_texts",
             "errors",
+            "server_queue_times",
+            "server_ttfts",
         ]:
             if field in result_json:
                 del result_json[field]

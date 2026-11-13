@@ -198,7 +198,9 @@ def test_swa_decode_meta_matches_vllm_ops(noncausal):
     )
 
 
-def _topk_case(g, max_rows):
+def _topk_case(
+    g, max_rows
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor]:
     """A decode batch of top-512 rows as the indexer writes them: valid local
     indices first and -1 after them, some rows shorter than 512, some rows
     with a -1 inside the valid entries, and padded tokens."""

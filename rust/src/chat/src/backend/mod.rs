@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use vllm_text::backend::hf::HfOverrides;
+use vllm_text::backend::hf::{HfOverrides, ModelSource};
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
@@ -16,6 +16,7 @@ use crate::request::ChatRequest;
 use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection, ToolStrictLevel};
 
 pub mod hf;
+mod tokenizerless;
 
 /// Options for creating a new chat output processor.
 pub struct NewChatOutputProcessorOptions<'a> {
@@ -67,6 +68,13 @@ pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 pub struct LoadModelBackendsOptions {
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
+    /// Source of the tokenizer files and the chat template, or `None` for the model.
+    pub tokenizer: Option<ModelSource>,
+    /// Source of `config.json` and `generation_config.json`, or `None` for the model.
+    pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only, rejecting chat requests and
+    /// text prompts (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
     /// JSON Merge Patch applied to the model config before loading any backend.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
@@ -81,6 +89,8 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default chat template override, provided either as an
     /// inline template or as a path to a template file.
     pub chat_template: Option<String>,
+    /// Whether requests may override the chat template.
+    pub trust_request_chat_template: bool,
     /// Server-default keyword arguments. HF merges these before request kwargs;
     /// native renderers inherit supported reasoning controls below request controls.
     pub default_chat_template_kwargs: HashMap<String, Value>,

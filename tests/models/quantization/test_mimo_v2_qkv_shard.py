@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit test for MiMo-V2 fused fp8 ``qkv_proj`` sharding.
+"""Unit test for MiMo-V2 fused fp8 `qkv_proj` sharding.
 
-The checkpoint stores the fused QKV pre-sharded at ``num_key_value_heads``
-chunks (``ckpt_tp``), each holding that slice's ``[Q_c | K_c | V_c]`` rows with
-its own block scale grid. ``ckpt_tp`` is not the layer's KV-head count: a
+The checkpoint stores the fused QKV pre-sharded at `num_key_value_heads`
+chunks (`ckpt_tp`), each holding that slice's `[Q_c | K_c | V_c]` rows with
+its own block scale grid. `ckpt_tp` is not the layer's KV-head count: a
 MiMo-V2.5 SWA layer has 8 KV heads but 4 chunks of 3712 rows (= 29 blocks), so
 each chunk carries two KV heads. Reading the scales as one slice per KV head
 expands 14 x 128 = 1792 rows for an 1856-row slice and fails.
 
 These tests build such checkpoints for the GA, SWA and Pro geometries and check
 that every rank gets exactly the weights it should own, for TP sizes below,
-equal to and above ``ckpt_tp`` (the last case replicating KV heads).
+equal to and above `ckpt_tp` (the last case replicating KV heads).
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -324,7 +326,7 @@ def test_exact_padded_layout_matches_checkpoint(geometry, tp_size):
 def test_split_qkv_round_trips_the_padded_layout(geometry, tp_size):
     """The forward split inverts the padded gather, byte for byte.
 
-    The writer and the reader each encode the ``[Q | K V pad]`` chunk order,
+    The writer and the reader each encode the `[Q | K V pad]` chunk order,
     so a one-sided change would keep every shape intact while attention reads
     swapped K and V rows.
     """
@@ -374,7 +376,7 @@ def test_wrong_chunk_count_is_detected():
     """Reading SWA scales as one slice per KV head must not look correct.
 
     This is the regression the fix addresses: 116 scale rows are 4 x 29 (29 =
-    ceil(3712 / 128)), not 8 x 15, so ``ckpt_tp = num_kv_heads`` pairs every
+    ceil(3712 / 128)), not 8 x 15, so `ckpt_tp = num_kv_heads` pairs every
     weight row with the wrong scale.
     """
     num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["swa"]
@@ -405,3 +407,63 @@ def test_wrong_chunk_count_is_detected():
     )
     assert _relative_l2(_dequantize(*correct), expected) <= TOL
     assert _relative_l2(_dequantize(*wrong), expected) > 5 * TOL
+
+
+def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypatch):
+    """Through `MiMoV2Model.load_weights`: a layer's fused fp8 `qkv_proj`
+    weight and scale arriving in separate calls (AutoWeightsLoader groups, #58142)
+    still load; the pair for a layer the instance does not have (checkpoint
+    deeper than `num_hidden_layers`) is skipped; nothing is left pending.
+    """
+    from vllm.model_executor.models import mimo_v2
+
+    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["ga"]
+    rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
+    truth = torch.randn(ckpt_tp * rows_per_chunk, COLS)
+    weight, scale = _quantize_chunks(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp
+    )
+
+    attn = torch.nn.Module()
+    attn.total_num_heads, attn.total_num_kv_heads = num_heads, num_kv_heads
+    attn.head_dim, attn.v_head_dim = head_dim, v_head_dim
+    attn.qkv_proj = torch.nn.Module()
+    rows = weight.shape[0]
+    attn.qkv_proj.weight = torch.nn.Parameter(
+        torch.empty(rows, COLS, dtype=FP8_DTYPE), requires_grad=False
+    )
+    attn.qkv_proj.weight_scale_inv = torch.nn.Parameter(
+        torch.empty(cdiv(rows, BLOCK), scale.shape[1]), requires_grad=False
+    )
+    layer = torch.nn.Module()
+    layer.self_attn = attn
+
+    model = mimo_v2.MiMoV2Model.__new__(mimo_v2.MiMoV2Model)
+    torch.nn.Module.__init__(model)
+    model.layers = torch.nn.ModuleList([layer])
+    model.config = SimpleNamespace(num_key_value_heads=ckpt_tp)
+    monkeypatch.setattr(model, "get_expert_mapping", lambda: [])
+
+    present, absent = "layers.0.self_attn.qkv_proj", "layers.7.self_attn.qkv_proj"
+    loaded = mimo_v2.MiMoV2Model.load_weights(
+        model,
+        [
+            (f"{present}.weight", weight),
+            (f"{absent}.weight", weight),
+            (f"{absent}.weight_scale_inv", scale),
+        ],
+    )
+    loaded |= mimo_v2.MiMoV2Model.load_weights(
+        model, [(f"{present}.weight_scale_inv", scale)]
+    )
+
+    assert loaded == {f"{present}.weight", f"{present}.weight_scale_inv"}
+    assert model._pending_fp8_qkv_proj == {}
+    expected = _owned_rows(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, 0, 1
+    )
+    got = _dequantize(attn.qkv_proj.weight.data, attn.qkv_proj.weight_scale_inv.data)
+    assert _relative_l2(got, expected) <= TOL

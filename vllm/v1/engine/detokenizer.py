@@ -15,6 +15,7 @@ from vllm.tokenizers.detokenizer_utils import (
     detokenize_incrementally,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import gc_untrack, untracked_list
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -30,7 +31,8 @@ def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
 
 class IncrementalDetokenizer:
     def __init__(self):
-        self.token_ids: list[int] = []
+        # The request's output token ids, only ever modified in place.
+        self.token_ids: list[int] = untracked_list()
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -285,6 +287,8 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             self.tokens = [""] * self.prompt_len
             self.prefix_offset = 0
             self.read_offset = 0
+        # Grows by one string per output token, in place.
+        gc_untrack(self.tokens)
 
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 

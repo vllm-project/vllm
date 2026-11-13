@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -23,6 +23,8 @@ logger = init_logger(__name__)
 
 
 _S = TypeVar("_S", list[int], "torch.Tensor")
+
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 # Prompt keys whose entry i describes token i of the prompt, so they must be
 # reduced with the same slice as the prompt tokens themselves. Anything added
@@ -46,6 +48,17 @@ def merge_kwargs(
         overrides = {}
 
     return defaults | {k: v for k, v in overrides.items() if v not in unset_values}
+
+
+def map_reasoning_effort(
+    effort: str | None,
+    effort_map: dict[str, str] | None,
+) -> str | None:
+    """Rewrite a requested effort to the one the chat template supports."""
+    if effort is None or not effort_map:
+        return effort
+
+    return effort_map.get(effort, effort)
 
 
 def recursively_merge_kwargs(
@@ -153,7 +166,7 @@ class TokenizeParams:
     """
 
     max_output_tokens: int | None = 0
-    """Maximum requested output tokens; ``None`` means no explicit limit.
+    """Maximum requested output tokens; `None` means no explicit limit.
 
     Zero indicates a request that does not need generated tokens, such as pooling.
     """
@@ -174,10 +187,10 @@ class TokenizeParams:
 
     truncation_side: Literal["left", "right"] | None = None
     """
-    Which side to truncate from when ``truncate_prompt_tokens`` is active:
-    - ``"right"`` keeps the first N tokens (truncate from the end).
-    - ``"left"``  keeps the last  N tokens (truncate from the start).
-    - ``None``    falls back to the tokenizer default.
+    Which side to truncate from when `truncate_prompt_tokens` is active:
+    - `"right"` keeps the first N tokens (truncate from the end).
+    - `"left"`  keeps the last  N tokens (truncate from the start).
+    - `None`    falls back to the tokenizer default.
     """
 
     do_lower_case: bool = False
@@ -212,10 +225,10 @@ class TokenizeParams:
     def max_input_tokens(self) -> int | None:
         """Maximum allowed number of input tokens.
 
-        ``max_output_tokens`` is *not* subtracted here: the value represents the
+        `max_output_tokens` is *not* subtracted here: the value represents the
         actual model context length, not a reservation of output space.
-        Downstream clamping of the sampling ``max_tokens`` is handled by
-        ``get_max_tokens()`` in the entrypoint layer.
+        Downstream clamping of the sampling `max_tokens` is handled by
+        `get_max_tokens()` in the entrypoint layer.
         """
         if self.max_total_tokens is None:
             return None
@@ -411,7 +424,7 @@ class TokenizeParams:
     ) -> int:
         """Return the number of source characters removed from the left.
 
-        ``_text_len_check`` pre-truncates long text before tokenization when
+        `_text_len_check` pre-truncates long text before tokenization when
         an explicit truncation side is requested. Fast-tokenizer offsets are
         then relative to that shortened string, so callers need this prefix
         length to map them back to the original prompt.
@@ -554,6 +567,20 @@ class TokenizeParams:
 
         return tokens
 
+    @overload
+    def apply_post_tokenization(
+        self,
+        tokenizer: TokenizerLike | None,
+        prompt: TokensPrompt,
+    ) -> TokensPrompt: ...
+
+    @overload
+    def apply_post_tokenization(
+        self,
+        tokenizer: TokenizerLike | None,
+        prompt: EmbedsPrompt,
+    ) -> EmbedsPrompt: ...
+
     def apply_post_tokenization(
         self,
         tokenizer: TokenizerLike | None,
@@ -565,9 +592,9 @@ class TokenizeParams:
         This method is run after tokenization occurs.
         """
         if "prompt_token_ids" in prompt:
-            prompt["prompt_token_ids"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
+            prompt["prompt_token_ids"] = self._validate_tokens(
                 tokenizer,
-                prompt["prompt_token_ids"],  # type: ignore[typeddict-item]
+                prompt["prompt_token_ids"],
             )
         if "prompt_embeds" in prompt:
             prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]

@@ -148,7 +148,7 @@ def test_b12x_module_lookup_is_dynamo_safe(monkeypatch) -> None:
     def forward(x: torch.Tensor) -> torch.Tensor:
         blockscaled = b12x_utils.get_b12x_blockscaled()
         assert blockscaled is not None
-        return blockscaled.run(x)  # type: ignore[attr-defined]
+        return blockscaled.run(x)
 
     x = torch.ones(1)
     torch.testing.assert_close(forward(x), x + 1)
@@ -387,7 +387,7 @@ def test_b12x_mxfp8_support_check_reports_missing_import(monkeypatch) -> None:
     is_supported, reason = B12xMxfp8LinearKernel.is_supported()
 
     assert not is_supported
-    assert reason == "Install the B12X backend with `pip install vllm[b12x]`"
+    assert reason == "The b12x backend requires flashinfer-python>=0.7.2"
 
 
 def test_b12x_mxfp8_support_respects_runtime_probe(monkeypatch) -> None:
