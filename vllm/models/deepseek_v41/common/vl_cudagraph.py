@@ -298,18 +298,18 @@ class DeepseekV4VLEncoderCudaGraphMixin:
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         vit_out = self.vision.forward_packed(
-            inputs["patches"],
-            inputs["vit_cos"],
-            inputs["vit_sin"],
-            inputs["cu_seqlens"],
-            inputs["max_seqlen"],
+            values["patches"],
+            values["vit_cos"],
+            values["vit_sin"],
+            values["cu_seqlens"],
+            values["max_seqlen"],
         )
         return self.aligner.forward_packed(
-            vit_out, inputs["merge_idx"], inputs["merge_mask"]
+            vit_out, values["merge_idx"], values["merge_mask"]
         )
 
     def encoder_eager_forward(

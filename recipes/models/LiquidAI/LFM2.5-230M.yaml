@@ -173,7 +173,6 @@ guide: |
   ## Configuration Tips
   - At 230M the model fits any GPU; raise `--max-num-seqs` to push batch throughput.
   - Set `--max-model-len` to match your workload (up to 32K).
-  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache capacity.
   - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
 
   ## References
