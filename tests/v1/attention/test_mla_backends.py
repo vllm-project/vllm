@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
     get_block_table_width,
+    is_quantized_kv_cache,
 )
 
 BACKENDS_TO_TEST = [
@@ -257,7 +258,6 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         head_size=kv_lora_rank + rope_dim,
         topk_buffer_width=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
         sliding_window=None,
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
@@ -265,7 +265,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         cache_config=SimpleNamespace(block_size=64), model_config=None
     )
 
-    spec = MLAAttention.get_kv_cache_spec(layer, vllm_config)
+    spec = MLAAttention.get_kv_cache_config(layer, vllm_config).spec
 
     assert isinstance(spec, MLAAttentionSpec)
     assert spec.cache_dtype_str == cache_dtype
@@ -827,7 +827,7 @@ class MockSparseMLAAttentionLayer:
     ) -> torch.Tensor:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
-        fp8_attention = kv_cache_dtype.startswith("fp8")
+        fp8_attention = is_quantized_kv_cache(kv_cache_dtype)
 
         # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
         if kv_cache.ndim == 4:
@@ -844,7 +844,7 @@ class MockSparseMLAAttentionLayer:
                 scale=self._k_scale,
             )
 
-        if fp8_attention and kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla"):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         num_tokens = q.shape[0]
@@ -927,6 +927,7 @@ class MockMLAAttentionLayer(MLAAttention):
         self.v_head_dim = v_head_dim
         self.q_lora_rank = None
         self.kv_lora_rank = kv_lora_rank
+        self.sliding_window = None
 
         # Compute weight matrices from kv_b_proj (like MLAAttention does)
         # This replicates MLAAttention.process_weights_after_loading logic
@@ -960,7 +961,7 @@ class MockMLAAttentionLayer(MLAAttention):
     def get_attn_backend(self):
         raise NotImplementedError
 
-    def get_kv_cache_spec(self, vllm_config):
+    def get_kv_cache_config(self, vllm_config):
         raise NotImplementedError
 
     # test replica takes only the arguments the test passes
@@ -2201,7 +2202,6 @@ def _run_backend_correctness(
             ),
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
-            sliding_window=vllm_config.model_config.get_sliding_window(),
             cache_dtype_str=kv_cache_dtype,
         )
 

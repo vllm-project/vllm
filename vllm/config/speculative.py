@@ -1869,6 +1869,25 @@ class SpeculativeConfig:
                 "FLy verification is a lossy speculative decoding method and "
                 "may degrade model outputs."
             )
+        elif (
+            self.rejection_sample_method == "synthetic"
+            and self.fly_window_size is not None
+        ):
+            # FLy cost overlay: pays FLy's per-step compute while acceptance
+            # stays exactly the synthetic one.
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires num_speculative_tokens >= 2."
+                )
+            if self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy cost-on-synthetic requires fly_window_size < "
+                    "num_speculative_tokens."
+                )
+            logger.warning_once(
+                "FLy cost overlay enabled with synthetic acceptance: "
+                "entropy is computed but never used to defer rejections."
+            )
 
         self.verify_equal_vocab_size_if_draft_model()
         return self
