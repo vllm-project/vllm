@@ -26,6 +26,8 @@ ARG ROCM_SDK_VERSION=10.0.0
 
 # Build configuration
 ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+# Same arches as PYTORCH_ROCM_ARCH, as torch/torchvision/rocm pip extras.
+ARG ROCM_DEVICE_EXTRAS="device-gfx90a,device-gfx942,device-gfx950,device-gfx1100,device-gfx1101,device-gfx1200,device-gfx1201,device-gfx1150,device-gfx1151"
 ARG AITER_ROCM_ARCH="gfx942;gfx950"
 # FlashAttention arches; empty: PYTORCH_ROCM_ARCH. CI builds only the arches it tests (bake file).
 ARG FA_ROCM_ARCH=""
@@ -94,38 +96,24 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch wheels (nightly for latest torch, release as fallback)
+SHELL ["/bin/bash", "-c"]
+# Install PyTorch wheels (nightly for latest torch, release as fallback) together
+# with the AMD-compiled device code for every arch in ROCM_DEVICE_EXTRAS. The
+# device-<arch> extras also pull the family packages (e.g. amd-torch-device-gfx110x,
+# which carries the AOTriton kernels for gfx1100/gfx1101) and the torchvision
+# device code. torchaudio has no device extras.
 ARG TORCH_VERSION
 ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
+ARG ROCM_DEVICE_EXTRAS
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
     --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
-    "torch==${TORCH_VERSION}" \
+    "torch[${ROCM_DEVICE_EXTRAS}]==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}"
-
-# Install the AMD-compiled device kernels corresponding to PYTORCH_ROCM_ARCH:
-
-# Possible values that can be in PYTORCH_ROCM_ARCH:
-#
-# gfx90a (MI210/250), gfx942 (MI300), gfx950 (MI350), gfx1100 (7900XTX),
-# gfx1101 (7800XT), gfx1200 (9070XT), gfx1201 (9070), gfx1150/1151 (Strix APU)
-
-# For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
-# PyTorch needs to run on that specific chip.
-SHELL ["/bin/bash", "-c"]
-RUN --mount=type=cache,target=/root/.cache/pip \
-    TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
-    && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
-        echo "Installing device packages for ${arch}" \
-        && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-            --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
-            "torch[device-${arch}]==${TORCH_VER}" \
-            "torchvision[device-${arch}]==${TORCHVISION_VERSION}" \
-            "rocm[device-${arch}]==${ROCM_SDK_VERSION}"; \
-    done
+    "torchvision[${ROCM_DEVICE_EXTRAS}]==${TORCHVISION_VERSION}" \
+    "rocm[${ROCM_DEVICE_EXTRAS}]==${ROCM_SDK_VERSION}"
 
 # Remove gfx90a xnack kpacks (ASAN artifacts that cause hipErrorInvalidImage on MI250)
 RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \

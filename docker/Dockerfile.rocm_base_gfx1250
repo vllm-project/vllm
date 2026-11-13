@@ -26,6 +26,8 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 FROM ${BASE_IMAGE} AS base
 
 ARG PYTORCH_ROCM_ARCH=gfx1250
+# Same arches as PYTORCH_ROCM_ARCH, as torch/torchvision/rocm pip extras.
+ARG ROCM_DEVICE_EXTRAS=device-gfx1250
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV AITER_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV MORI_GPU_ARCHS=gfx942;gfx950
@@ -119,10 +121,10 @@ ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
 # which keeps the set consistent and avoids pip backtracking.
 RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
     --extra-index-url https://pypi.org/simple \
-    "torch[device-gfx1250]==${TORCH_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}" \
+    "torch[${ROCM_DEVICE_EXTRAS}]==${TORCH_VERSION}" \
+    "torchvision[${ROCM_DEVICE_EXTRAS}]==${TORCHVISION_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
-    "rocm[libraries,devel,device-gfx1250]==${ROCM_SDK_VERSION}" && \
+    "rocm[libraries,devel,${ROCM_DEVICE_EXTRAS}]==${ROCM_SDK_VERSION}" && \
     rocm-sdk init
  
 # Torch runtime deps that may not be published on the ROCm wheel index;
