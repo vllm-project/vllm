@@ -25,7 +25,7 @@ _TRANSFORMERS_LEGACY_MODULES = (
 
 
 @dataclass
-class ForbiddenImport:
+class ForbiddenString:
     pattern: str
     tip: str
     allowed_pattern: re.Pattern = re.compile(r"^$")  # matches nothing by default
@@ -33,15 +33,15 @@ class ForbiddenImport:
     allowed_dirs: set[str] = field(default_factory=set)
 
 
-CHECK_IMPORTS = {
-    "pickle/cloudpickle": ForbiddenImport(
+CHECK_STRINGS = {
+    "pickle/cloudpickle": ForbiddenString(
         pattern=(
             r"^\s*(import\s+(pickle|cloudpickle)(\s|$|\sas)"
             r"|from\s+(pickle|cloudpickle)\s+import\b)"
         ),
         tip=(
             "Avoid using pickle or cloudpickle or add this file to "
-            "tools/pre_commit/check_forbidden_imports.py."
+            "tools/pre_commit/check_forbidden_strings.py."
         ),
         allowed_files={
             # pickle
@@ -82,7 +82,7 @@ CHECK_IMPORTS = {
             "vllm/v1/serial_utils.py",
         },
     ),
-    "base64": ForbiddenImport(
+    "base64": ForbiddenString(
         pattern=r"^\s*(?:import\s+base64(?:$|\s|,)|from\s+base64\s+import)",
         tip=(
             "Replace 'import base64' with 'import pybase64' "
@@ -90,7 +90,7 @@ CHECK_IMPORTS = {
         ),
         allowed_pattern=re.compile(r"^\s*import\s+pybase64(\s*|\s+as\s+base64\s*)$"),
     ),
-    "re": ForbiddenImport(
+    "re": ForbiddenString(
         # regex has no equivalent of the private sre modules
         pattern=(
             r"^\s*(?:import\s+re(?:$|\s|,)"
@@ -100,7 +100,7 @@ CHECK_IMPORTS = {
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
         allowed_files={"setup.py"},
     ),
-    "triton": ForbiddenImport(
+    "triton": ForbiddenString(
         pattern=r"^(from|import)\s+triton(\s|\.|$)",
         tip="Use 'from vllm.triton_utils import triton' instead.",
         allowed_pattern=re.compile(
@@ -108,7 +108,7 @@ CHECK_IMPORTS = {
         ),
         allowed_files={"vllm/triton_utils/importing.py"},
     ),
-    "tilelang": ForbiddenImport(
+    "tilelang": ForbiddenString(
         pattern=r"^(from|import)\s+tilelang(\s|\.|$)",
         tip="Use 'from vllm.tilelang_utils import tilelang, T' instead.",
         allowed_pattern=re.compile(
@@ -117,7 +117,7 @@ CHECK_IMPORTS = {
         ),
         allowed_files={"vllm/tilelang_utils/__init__.py"},
     ),
-    "huggingface_hub repo API": ForbiddenImport(
+    "huggingface_hub repo API": ForbiddenString(
         # Catch `from huggingface_hub import <fn>`, including parenthesized,
         # multi-line imports.
         pattern=(
@@ -134,7 +134,7 @@ CHECK_IMPORTS = {
         allowed_files={"vllm/transformers_utils/repo_utils.py"},
         allowed_dirs={"examples/"},
     ),
-    "transformers legacy names": ForbiddenImport(
+    "transformers legacy names": ForbiddenString(
         pattern=(
             r"^\s*from\s+transformers(?:\.[\w.]+)?\s+import\s*\([^)]*\b(?:"
             + _TRANSFORMERS_LEGACY_NAMES
@@ -154,14 +154,14 @@ CHECK_IMPORTS = {
             "tokenization_utils_sentencepiece and image_processing_backends."
         ),
     ),
-    "rope_scaling": ForbiddenImport(
+    "rope_scaling": ForbiddenString(
         pattern=r"\brope_scaling\b",
         tip=(
             "`rope_scaling` is deprecated in Transformers v5, use `rope_parameters`. "
             "`PreTrainedConfig.__init__` already converts the legacy checkpoint key."
         ),
         allowed_files={
-            "tools/pre_commit/check_forbidden_imports.py",
+            "tools/pre_commit/check_forbidden_strings.py",
             # Flattens `text_config` itself, so the base class never sees the key
             "vllm/transformers_utils/configs/deepseek_v41.py",
             # Legacy checkpoint loading tests
@@ -177,17 +177,17 @@ def check_file(path: str) -> int:
         content = f.read()
     return_code = 0
     # Check all patterns in the whole file
-    for import_name, forbidden_import in CHECK_IMPORTS.items():
-        # Skip files that are allowed for this import
-        if path in forbidden_import.allowed_files:
+    for name, forbidden_string in CHECK_STRINGS.items():
+        # Skip files that are allowed for this rule
+        if path in forbidden_string.allowed_files:
             continue
-        # Skip directories that are allowed for this import
-        if any(path.startswith(prefix) for prefix in forbidden_import.allowed_dirs):
+        # Skip directories that are allowed for this rule
+        if any(path.startswith(prefix) for prefix in forbidden_string.allowed_dirs):
             continue
-        # Search for forbidden imports
-        for match in re.finditer(forbidden_import.pattern, content, re.MULTILINE):
+        # Search for forbidden strings
+        for match in re.finditer(forbidden_string.pattern, content, re.MULTILINE):
             # Check if it's allowed
-            if forbidden_import.allowed_pattern.match(match.group()):
+            if forbidden_string.allowed_pattern.match(match.group()):
                 continue
             # Skip matches inside a comment
             line_start = content.rfind("\n", 0, match.start()) + 1
@@ -198,7 +198,7 @@ def check_file(path: str) -> int:
             print(
                 f"{path}:{line_num}: "
                 "\033[91merror:\033[0m "  # red color
-                f"Found forbidden import: {import_name}. {forbidden_import.tip}"
+                f"Found forbidden string: {name}. {forbidden_string.tip}"
             )
             return_code = 1
     return return_code
@@ -213,7 +213,7 @@ def main():
 
 def test_regex():
     def matches(rule: str, content: str) -> bool:
-        return bool(re.search(CHECK_IMPORTS[rule].pattern, content, re.MULTILINE))
+        return bool(re.search(CHECK_STRINGS[rule].pattern, content, re.MULTILINE))
 
     pickle_cases = [
         # Should match
