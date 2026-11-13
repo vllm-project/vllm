@@ -81,6 +81,17 @@ SPARSE_MLA_ARCHS = (
     "GlmMoeDsaForCausalLM",
 )
 
+
+def _sparse_mla_supported() -> bool:
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.platforms.rocm import on_gfx950
+
+        # The ROCm sparse attention indexer has no other path.
+        return rocm_aiter_ops.is_enabled() or on_gfx950()
+    return current_platform.has_device_capability(90)
+
+
 ModelRegistry.fill_model_info_cache()
 # Examples that need remote code are left out until a CI run shows their status.
 PP_ARCHS = sorted(
@@ -260,8 +271,9 @@ def _marks(arch: str) -> list[pytest.MarkDecorator]:
     if arch in SPARSE_MLA_ARCHS:
         marks.append(
             pytest.mark.skipif(
-                not current_platform.has_device_capability(90),
-                reason="Sparse MLA needs compute capability 9.0 or newer",
+                not _sparse_mla_supported(),
+                reason="Sparse MLA needs compute capability 9.0 or newer, "
+                "or AITER or gfx950 on ROCm",
             )
         )
     return marks
