@@ -9,10 +9,14 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     get_humming_linear_compute_config,
+    humming_executed_input_quant_key,
     prepare_humming_linear_layer_config,
     quant_key_to_input_schema,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+)
 from vllm.model_executor.utils import (
     move_parameter,
     replace_parameter,
@@ -31,6 +35,15 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
     """Humming GEMM Kernel for NVFP4."""
 
     allow_input_schema_fallback = True
+    # Reuse the CT loader for packed FP4 weights and tensor scales.
+    weight_quant_config = {
+        "quant_method": "compressed-tensors",
+        "format": "nvfp4-pack-quantized",
+        "type": "float",
+        "num_bits": 4,
+        "strategy": "group",
+        "group_size": 16,
+    }
 
     @classmethod
     def is_supported(
@@ -51,16 +64,18 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
     def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return humming_executed_input_quant_key(
+            cls.weight_quant_config,
+            activation_quant_key,
+            allow_fallback=cls.allow_input_schema_fallback,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Reuse the CT loader for packed FP4 weights and tensor scales.
-        quant_config = {
-            "quant_method": "compressed-tensors",
-            "format": "nvfp4-pack-quantized",
-            "type": "float",
-            "num_bits": 4,
-            "strategy": "group",
-            "group_size": 16,
-        }
+        quant_config = dict(self.weight_quant_config)
         # CT pack-quantized reads `weight_packed`: make it the weight's runtime name
         # (a CT checkpoint already has it as an alias of `weight`).
         move_parameter(layer, "weight", "weight_packed")
