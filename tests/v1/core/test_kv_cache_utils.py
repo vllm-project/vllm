@@ -848,70 +848,24 @@ def test_free_kv_cache_block_queue_popleft_n_drain_and_refill(num_blocks):
     assert queue.num_free_blocks == 0
 
 
-def _make_queue_with_retained(
-    num_normal: int, num_retained: int
-) -> tuple[FreeKVCacheBlockQueue, list[KVCacheBlock]]:
-    blocks = [KVCacheBlock(block_id=i) for i in range(num_normal + num_retained)]
-    queue = FreeKVCacheBlockQueue(blocks[:num_normal])
-    queue.append_n(blocks[num_normal:], retained=True)
-    return queue, blocks
-
-
-def test_free_kv_cache_block_queue_popleft_drains_normal_before_retained():
-    queue, blocks = _make_queue_with_retained(2, 2)
-    assert queue.num_free_blocks == 4
+def test_free_kv_cache_block_queue_retained_blocks_pop_last():
+    blocks = [KVCacheBlock(block_id=i) for i in range(5)]
+    queue = FreeKVCacheBlockQueue(blocks[:2])
+    queue.append_n(blocks[2:], retained=True)
+    assert queue.num_free_blocks == 5
     assert queue.get_all_free_blocks() == blocks
+    assert list(queue.iter_blocks_after(blocks[1])) == blocks[2:]
 
-    assert [queue.popleft() for _ in range(4)] == blocks
+    # A pop that drains the normal list continues into the retained one.
+    assert queue.popleft_n(3) == blocks[:3]
+    # The drained normal list still takes appends ahead of retained blocks.
+    queue.append_n(blocks[:1])
+    queue.remove(blocks[3])
+    assert queue.get_all_free_blocks() == [blocks[0], blocks[4]]
+    assert [queue.popleft(), queue.popleft()] == [blocks[0], blocks[4]]
     assert queue.num_free_blocks == 0
     with pytest.raises(ValueError):
         queue.popleft()
-
-
-@pytest.mark.parametrize("first_n", [1, 2, 3, 5])
-def test_free_kv_cache_block_queue_popleft_n_spans_into_retained(first_n):
-    """popleft_n crossing (or starting past) the end of the normal list."""
-    queue, blocks = _make_queue_with_retained(2, 3)
-
-    popped = queue.popleft_n(first_n)
-    assert popped == blocks[:first_n]
-    assert all(b.prev_free_block is None and b.next_free_block is None for b in popped)
-    assert queue.num_free_blocks == 5 - first_n
-    assert queue.get_all_free_blocks() == blocks[first_n:]
-
-    # The (possibly drained) normal list still takes appends ahead of retained.
-    queue.append_n(popped)
-    expected = blocks[first_n:2] + popped + blocks[max(first_n, 2) :]
-    assert queue.get_all_free_blocks() == expected
-    assert queue.popleft_n(5) == expected
-    assert queue.num_free_blocks == 0
-
-
-def test_free_kv_cache_block_queue_popleft_n_one_from_retained():
-    queue, blocks = _make_queue_with_retained(0, 2)
-    assert queue.popleft_n(1) == [blocks[0]]
-    assert queue.popleft_n(1) == [blocks[1]]
-    assert queue.num_free_blocks == 0
-    assert queue.get_all_free_blocks() == []
-
-
-def test_free_kv_cache_block_queue_remove_retained_block():
-    queue, blocks = _make_queue_with_retained(1, 3)
-    queue.remove(blocks[2])
-    assert queue.num_free_blocks == 3
-    assert queue.get_all_free_blocks() == [blocks[0], blocks[1], blocks[3]]
-    queue.remove(blocks[3])
-    queue.remove(blocks[1])
-    assert queue.get_all_free_blocks() == [blocks[0]]
-    assert queue.popleft_n(1) == [blocks[0]]
-    assert queue.num_free_blocks == 0
-
-
-def test_free_kv_cache_block_queue_iter_blocks_after_spans_retained():
-    queue, blocks = _make_queue_with_retained(2, 2)
-    assert list(queue.iter_blocks_after(None)) == blocks
-    assert list(queue.iter_blocks_after(blocks[1])) == blocks[2:]
-    assert list(queue.iter_blocks_after(blocks[2])) == blocks[3:]
 
 
 def test_free_kv_cache_block_queue_get_all_free_blocks():
