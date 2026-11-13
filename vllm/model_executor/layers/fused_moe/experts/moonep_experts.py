@@ -124,6 +124,10 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         )
 
     @staticmethod
+    def _supports_bias() -> bool:
+        return False
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
