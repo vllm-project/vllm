@@ -13,6 +13,7 @@ use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::SamplingParams;
 
+use super::features::MultiModalFeatures;
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
@@ -34,11 +35,19 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrA
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
-    /// Stop strings. Not supported yet: the route does not detokenize.
+    /// Stop strings, matched against the decoded output text. The output's
+    /// token IDs end with the token that completes the match.
     pub stop: Option<StringOrArray>,
-    /// Whether to include the matched stop string in the output. Only
-    /// meaningful with `stop`.
+    /// Whether the stop string belongs to the output text. With token IDs
+    /// only, it decides whether a terminal stop token's text is matched
+    /// against `stop`, as in Python.
     pub include_stop_str_in_output: Option<bool>,
+    /// Whether to decode the output, which `stop` requires. Only token IDs are
+    /// returned either way.
+    pub detokenize: Option<bool>,
+    /// Whether special tokens are left out of the text matched against
+    /// `stop`.
+    pub skip_special_tokens: Option<bool>,
     /// Decode token IDs to replay instead of sampling, gated by
     /// `--enable-trace-replay` in Python. Not supported.
     pub trace_decode_token_ids: Option<Vec<u32>>,
@@ -67,6 +76,9 @@ pub struct GenerateRequest {
     pub ec_transfer_params: Option<HashMap<String, Value>>,
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
+    /// Multimodal items already preprocessed by render, aligned with the
+    /// expanded placeholders in `token_ids`.
+    pub features: Option<MultiModalFeatures>,
     pub return_token_ids: Option<bool>,
     pub output_mode: Option<GenerateOutputMode>,
     /// Whether reasoning has ended before the first generated token, as
@@ -171,10 +183,14 @@ pub(super) struct PerRequestMetrics<T> {
 
 pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInfo>>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(super) struct PlaceholderRangeInfo {
+/// Mirrors the Python vLLM `PlaceholderRangeInfo` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaceholderRangeInfo {
     pub offset: usize,
     pub length: usize,
+    /// Which placeholder positions receive embeddings, for models with sparse
+    /// masks such as Qwen-VL; omitted means all.
     pub is_embed: Option<Vec<bool>>,
 }
 

@@ -66,9 +66,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     KeyMetadata,
     MambaStoreLayout,
     PoolKey,
+    RankLocalStoreLayout,
     StoreLayout,
     StoreShardId,
     TokenMajorStoreLayout,
+    group_compact_kernel_blocks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.mamba_snapshot import (  # noqa: E501
     MambaSnapshotConfig,
@@ -548,6 +550,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         record_operation: Callable[..., None] | None = None,
         group_participates: Sequence[bool] | None = None,
         mamba_snapshot_config: MambaSnapshotConfig | None = None,
+        mamba_snapshot_key_prefixes: Sequence[Sequence[str]] | None = None,
     ):
         super().__init__(
             store,
@@ -595,7 +598,23 @@ class KVCacheStoreSendingThread(KVTransferThread):
             block_size
         )
         self._keep_mamba_prompt_boundary = mamba_snapshot_config.keep_prompt_boundary
-        self._mamba_snapshot_boundaries: dict[str, dict[int, int]] = {}
+        self._mamba_snapshot_boundaries: dict[str, dict[int, set[int]]] = {}
+        self._confirmed_mamba_snapshots: dict[str, int] = {}
+        self._mamba_snapshot_key_prefixes: Sequence[Sequence[str]] | None = None
+        if (
+            self._mamba_snapshot_interval is not None
+            and mamba_snapshot_key_prefixes is not None
+        ):
+            assert len(mamba_snapshot_key_prefixes) == len(token_databases)
+            for group_id in self.coord.mamba_group_ids:
+                layout = token_databases[group_id].store_layout
+                local_prefixes = {
+                    layout.key_for(shard, BlockHash(b"")).rsplit("@", 1)[0]
+                    for shard in layout.local_shard_ids
+                }
+                if set(mamba_snapshot_key_prefixes[group_id]) - local_prefixes:
+                    self._mamba_snapshot_key_prefixes = mamba_snapshot_key_prefixes
+                    break
         # Retained only after a failed store so retry events can recover the
         # token suffix without full snapshots on the normal path.
         self._retry_token_ids: dict[str, tuple[int, list[int]]] = {}
@@ -622,6 +641,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.discard(req_id)
             self._saved_offset.pop(req_id, None)
             self._mamba_snapshot_boundaries.pop(req_id, None)
+            self._confirmed_mamba_snapshots.pop(req_id, None)
             self._retry_token_ids.pop(req_id, None)
 
     def finish_store_job(self, req_meta: ReqMeta) -> None:
@@ -711,6 +731,59 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
+    def _get_confirmed_mamba_snapshots(
+        self, req_meta: ReqMeta
+    ) -> dict[int, int] | None:
+        """Confirm all Mamba shards before suppressing later states on other ranks."""
+        interval = self._mamba_snapshot_interval
+        assert interval is not None
+        with self.done_task_lock:
+            if req_meta.store_job_id not in self.stored_requests.get(
+                req_meta.req_id, ()
+            ):
+                return None
+            local = {
+                group_id: boundaries.copy()
+                for group_id, boundaries in self._mamba_snapshot_boundaries.get(
+                    req_meta.req_id, {}
+                ).items()
+            }
+            confirmed = self._confirmed_mamba_snapshots.get(req_meta.req_id, 0)
+        if self._mamba_snapshot_key_prefixes is None:
+            return {group_id: max(boundaries) for group_id, boundaries in local.items()}
+        keys: list[str] = []
+        candidates: list[tuple[int, int]] = []
+        for boundary in sorted(
+            {b for boundaries in local.values() for b in boundaries}
+        ):
+            if boundary // interval <= confirmed // interval:
+                continue
+            hash_hex = req_meta.block_hashes[
+                boundary // self.coord.hash_block_size - 1
+            ].hex()
+            start_index = len(keys)
+            for group_id in self.coord.mamba_group_ids:
+                keys.extend(
+                    PoolKey.build_key_string(prefix, hash_hex)
+                    for prefix in self._mamba_snapshot_key_prefixes[group_id]
+                )
+            candidates.append((boundary, len(keys) - start_index))
+        if keys:
+            exists = self._check_keys_exist(req_meta.req_id, keys)
+            if exists is not None and len(exists) == len(keys):
+                offset = 0
+                for boundary, count in candidates:
+                    if all(value == 1 for value in exists[offset : offset + count]):
+                        confirmed = max(confirmed, boundary)
+                    offset += count
+        with self.done_task_lock:
+            if req_meta.store_job_id not in self.stored_requests.get(
+                req_meta.req_id, ()
+            ):
+                return None
+            self._confirmed_mamba_snapshots[req_meta.req_id] = confirmed
+        return dict.fromkeys(self.coord.mamba_group_ids, confirmed) if confirmed else {}
+
     def _boundary_puts(
         self, req_meta: ReqMeta
     ) -> tuple[list[tuple[str, list[int], list[int], KeyMetadata]], dict[int, int]]:
@@ -724,14 +797,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         snapshots: dict[int, int] = {}
         prompt_boundary = None
         if interval is not None:
-            with self.done_task_lock:
-                if req_meta.store_job_id not in self.stored_requests.get(
-                    req_meta.req_id, ()
-                ):
-                    return [], snapshots
-                snapshots = self._mamba_snapshot_boundaries.get(
-                    req_meta.req_id, {}
-                ).copy()
+            confirmed = self._get_confirmed_mamba_snapshots(req_meta)
+            if confirmed is None:
+                return [], snapshots
+            snapshots = confirmed
             if (
                 self._keep_mamba_prompt_boundary
                 and req_meta.num_prompt_tokens is not None
@@ -802,13 +871,57 @@ class KVCacheStoreSendingThread(KVTransferThread):
     ) -> None:
         if not snapshots:
             return
+        interval = self._mamba_snapshot_interval
+        assert interval is not None
         with self.done_task_lock:
             if req_meta.store_job_id in self.stored_requests.get(req_meta.req_id, ()):
                 current = self._mamba_snapshot_boundaries.setdefault(
                     req_meta.req_id, {}
                 )
                 for group_id, boundary in snapshots.items():
-                    current[group_id] = max(current.get(group_id, 0), boundary)
+                    # A lagging peer may complete an earlier candidate in this interval.
+                    boundaries = current.setdefault(group_id, set())
+                    boundaries.add(boundary)
+                    bucket = max(boundaries) // interval
+                    current[group_id] = {
+                        b for b in boundaries if b // interval == bucket
+                    }
+
+    def _check_keys_exist(self, req_id: str, keys: list[str]) -> list[int] | None:
+        start = time.perf_counter()
+        try:
+            results = self.store.batch_is_exist(keys)
+        except Exception as e:
+            self._record_operation(
+                "save_exists",
+                start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.warning(
+                "Mooncake existence check failed for request %s: %s", req_id, e
+            )
+            return None
+
+        failed = [result for result in results if result < 0]
+        status = "ok"
+        if failed:
+            status = "error" if len(failed) == len(keys) else "partial_failure"
+        self._record_operation(
+            "save_exists", start, len(keys), status=status, num_failed_keys=len(failed)
+        )
+        if failed:
+            logger.warning(
+                "Mooncake existence check failed for request %s: "
+                "%d/%d keys failed (codes=%s)",
+                req_id,
+                len(failed),
+                len(keys),
+                set(failed),
+            )
+            return None
+        return results
 
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist this job's boundary puts, deduped against the store.
@@ -838,24 +951,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if self.enable_group_semantics and self.supports_group_ids
             else None
         )
-        exists_start = time.perf_counter()
-        try:
-            exists = self.store.batch_is_exist(keys)
-        except Exception as e:
-            self._record_operation(
-                "save_exists",
-                exists_start,
-                len(keys),
-                status="error",
-                num_failed_keys=len(keys),
-            )
-            logger.error(
-                "Failed to check boundary-state keys for request %s: %s",
-                req_meta.req_id,
-                e,
-            )
+        exists = self._check_keys_exist(req_meta.req_id, keys)
+        if exists is None:
             return False
-        self._record_operation("save_exists", exists_start, len(keys))
         missing = [i for i, e in enumerate(exists) if e != 1]
         if not missing:
             self._record_mamba_snapshots(req_meta, snapshots)
@@ -1047,23 +1145,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             # Check which blocks already exist (dedup)
-            save_exists_start = time.perf_counter()
-            try:
-                exists_states = self.store.batch_is_exist(keys)
-            except Exception:
-                self._record_operation(
-                    "save_exists",
-                    save_exists_start,
-                    len(keys),
-                    status="error",
-                    num_failed_keys=len(keys),
-                )
-                raise
-            self._record_operation(
-                "save_exists",
-                save_exists_start,
-                len(keys),
-            )
+            exists_states = self._check_keys_exist(req_id, keys)
+            if exists_states is None:
+                return
             missing_indices = [
                 i for i, exists in enumerate(exists_states) if exists != 1
             ]
@@ -2190,11 +2274,10 @@ class MooncakeStoreWorker:
                 for layer_name in group.layer_names
             }
             seen_storage_ptrs: set[int] = set()
+            # Kernel-block views: RankLocalStoreLayout groups them itself,
+            # after checking that each manager block is one gapless byte run.
             cache_by_layer = {
-                layer_name: [
-                    group_kernel_blocks(view, self.num_blocks)
-                    for view in _layer_views(cache)
-                ]
+                layer_name: _layer_views(cache)
                 for layer_name, cache in kv_caches.items()
                 if layer_name in store_layer_names
             }
@@ -2236,9 +2319,13 @@ class MooncakeStoreWorker:
                     group_tensors = [views[0] for views in group_views]
                 else:
                     group_tensors = [cache for views in group_views for cache in views]
-                db.store_layout.register_kv_caches(
-                    group_tensors or cache_tensors, self.num_blocks
-                )
+                group_tensors = group_tensors or cache_tensors
+                if not isinstance(db.store_layout, RankLocalStoreLayout):
+                    group_tensors = [
+                        group_kernel_blocks(cache, self.num_blocks)
+                        for cache in group_tensors
+                    ]
+                db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
@@ -2271,7 +2358,7 @@ class MooncakeStoreWorker:
                     assert num_blocks is not None
                 else:
                     num_blocks = self._kv_cache_config.num_blocks
-                cache = group_kernel_blocks(cache, num_blocks)
+                cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
                 cache_storage = cache.untyped_storage()
                 if is_host_resident:
                     base_addr = cache.data_ptr()
@@ -2305,7 +2392,7 @@ class MooncakeStoreWorker:
                     )
 
                 regions: list[tuple[int, int]] = []
-                if not is_non_overlapping_and_dense(cache[0]):
+                if not block_compact:
                     for head_idx in range(cache.shape[1]):
                         head_cache = cache[:, head_idx]
                         assert is_non_overlapping_and_dense(head_cache[0])
@@ -2366,6 +2453,11 @@ class MooncakeStoreWorker:
                     for group in self._kv_cache_groups
                 ],
                 mamba_snapshot_config=self.mamba_snapshot_config,
+                mamba_snapshot_key_prefixes=(
+                    self._lookup_key_prefixes
+                    if self.mamba_snapshot_config.interval_blocks > 1
+                    else None
+                ),
             )
             self.kv_send_thread.start()
 
@@ -2441,6 +2533,11 @@ class MooncakeStoreWorker:
         if self._capacity_only or not self.can_put:
             return
 
+        # A request may be re-admitted in the step reporting its preemption.
+        assert self.kv_send_thread is not None
+        for req_id in metadata.preempted_req_ids:
+            self.kv_send_thread.delete_finished_stored_request(req_id)
+
         current_event = None
         for request in metadata.requests:
             if request.can_save:
@@ -2452,7 +2549,6 @@ class MooncakeStoreWorker:
             if not request.can_save:
                 continue
             request.current_event = current_event
-            assert self.kv_send_thread is not None
             self.kv_send_thread.add_request(request)
 
     def get_finished(
@@ -2544,16 +2640,12 @@ class MooncakeStoreWorker:
         finished_req_ids: set[str],
         meta: MooncakeStoreConnectorMetadata,
     ) -> None:
-        """Retire the ledger entries of requests that finished or were preempted.
+        """Retire the ledger entries of finished requests.
 
         An entry may only go once its jobs have drained, because they still read
-        the resume offset it owns; a request that comes back after preemption
-        then saves from the start rather than from where the last attempt got to.
+        the resume offset it owns.
         """
         assert self.kv_send_thread is not None
-
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(req_id)
 
         pending_save_req_ids = {
             request.req_id for request in meta.requests if request.can_save

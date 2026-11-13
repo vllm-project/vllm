@@ -11,6 +11,7 @@ import queue
 import sys
 import threading
 import types
+from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -199,6 +200,7 @@ def _make_store_sending_thread(
     supports_group_ids: bool = False,
     kv_role: str = "kv_producer",
     enable_kv_event: bool = False,
+    record_operation: Callable[..., None] | None = None,
 ) -> mooncake_store_worker.KVCacheStoreSendingThread:
     if coord is None:
         coord = _default_send_coord()
@@ -220,6 +222,7 @@ def _make_store_sending_thread(
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
+        record_operation=record_operation,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -1166,7 +1169,21 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
 
 @pytest.fixture
 def snapshot_sender():
-    def make(config, *, shards=1, eagle=False, lookahead=0, partial=True, put_step=1):
+    def make(
+        config,
+        *,
+        shards=1,
+        eagle=False,
+        lookahead=0,
+        partial=True,
+        put_step=1,
+        tp_rank=0,
+        tp_size=1,
+        pp_rank=0,
+        pp_size=1,
+        dcp_size=1,
+        stored=None,
+    ):
         from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
         conv_shape = (24, 3) if get_conv_state_layout() == "DS" else (3, 24)
@@ -1191,7 +1208,9 @@ def snapshot_sender():
         )
         databases, buffers = [], []
         for group in range(3):
-            metadata = KeyMetadata("snapshot-test", 0, 0, 0, 0, group_id=group)
+            metadata = KeyMetadata(
+                "snapshot-test", tp_rank, 0, tp_rank % dcp_size, pp_rank, group_id=group
+            )
             if group == 0:
                 tensor = torch.zeros((16, 1, 16, 2), dtype=torch.uint8)
                 layout = HeadMajorStoreLayout(
@@ -1205,12 +1224,18 @@ def snapshot_sender():
                 )
                 for block in range(16):
                     tensor[block].fill_(group * 32 + block)
-                layout = MambaStoreLayout(metadata, 16, 4, 1, shards, 0, [state])
+                layout = (
+                    RankLocalStoreLayout(metadata, 16, 4)
+                    if dcp_size > 1
+                    else MambaStoreLayout(
+                        metadata, 16, 4, tp_size, tp_size * shards, tp_rank, [state]
+                    )
+                )
                 layout.register_kv_caches([tensor], 16)
                 db = ChunkedTokenDatabase(metadata, 16, 4, layout)
             databases.append(db)
             buffers.append(tensor)
-        stored = {}
+        stored = {} if stored is None else stored
         store = MagicMock()
         store.batch_is_exist.side_effect = lambda keys: [int(k in stored) for k in keys]
 
@@ -1228,11 +1253,21 @@ def snapshot_sender():
             coord,
             databases,
             16,
-            0,
+            tp_rank,
             [put_step] * 3,
             "kv_producer",
             threading.Event(),
             mamba_snapshot_config=config,
+            mamba_snapshot_key_prefixes=[
+                db.store_layout.lookup_key_prefixes(
+                    [
+                        (rank, 0, rank % dcp_size, stage)
+                        for rank in range(tp_size)
+                        for stage in range(pp_size)
+                    ]
+                )
+                for db in databases
+            ],
         )
         return sender, store, stored, buffers
 
@@ -1367,6 +1402,152 @@ def test_mamba_snapshot_interval_existing_keys_advance_without_put(snapshot_send
     assert set(stored) == _snapshot_keys(sender, req, 1, [80])
     store.batch_put_from_multi_buffers.assert_not_called()
     assert store.batch_is_exist.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "tp_size,pp_size,shards,dcp_size",
+    [(2, 1, 1, 1), (1, 2, 1, 1), (2, 2, 2, 1), (2, 1, 1, 2)],
+)
+@pytest.mark.parametrize("failure", ["exists", "put", "partial", "confirm"])
+def test_mamba_snapshot_interval_rank_failure_recovers_at_next_state(
+    snapshot_sender, tp_size, pp_size, shards, dcp_size, failure
+):
+    stored = {}
+    ranks = [
+        snapshot_sender(
+            MambaSnapshotConfig(4),
+            tp_rank=rank,
+            tp_size=tp_size,
+            pp_rank=stage,
+            pp_size=pp_size,
+            dcp_size=dcp_size,
+            shards=shards,
+            stored=stored,
+        )
+        for stage in range(pp_size)
+        for rank in range(tp_size)
+    ]
+    _, failing_store, _, _ = ranks[-1]
+    exists = failing_store.batch_is_exist.side_effect
+    put = failing_store.batch_put_from_multi_buffers.side_effect
+    if failure == "exists":
+        failing_store.batch_is_exist.side_effect = RuntimeError(
+            "one rank exists failed"
+        )
+    elif failure == "partial":
+
+        def partial(keys, addrs, sizes, config):
+            return put(keys[:-1], addrs[:-1], sizes[:-1], config) + [-1]
+
+        failing_store.batch_put_from_multi_buffers.side_effect = partial
+    else:
+        failing_store.batch_put_from_multi_buffers.side_effect = RuntimeError(
+            "one rank put failed"
+        )
+
+    def send(position):
+        job = next(_TEST_SAVE_SEQ)
+        for sender, _, _, _ in ranks:
+            _run_store_req(
+                sender,
+                _snapshot_req(
+                    [(group, position // 16, position) for group in (1, 2)], job=job
+                ),
+            )
+
+    send(64)
+    failing_store.batch_is_exist.side_effect = exists
+    failing_store.batch_put_from_multi_buffers.side_effect = put
+    if failure == "confirm":
+        first_store = ranks[0][1]
+        first_exists = first_store.batch_is_exist.side_effect
+
+        def failed_confirmation(keys):
+            first_store.batch_is_exist.side_effect = first_exists
+            raise RuntimeError("peer confirmation failed")
+
+        first_store.batch_is_exist.side_effect = failed_confirmation
+    send(80)
+    for sender, _, _, buffers in ranks:
+        for group in (1, 2):
+            keys = _snapshot_keys(sender, _snapshot_req([]), group, [80])
+            assert sum(len(stored[key]) for key in keys) == buffers[group].shape[-1]
+            for key in keys:
+                assert set(stored[key]) == {group * 32 + 5}
+    put_counts = [
+        store.batch_put_from_multi_buffers.call_count for _, store, _, _ in ranks
+    ]
+    send(96)
+    confirmed_counts = [store.batch_is_exist.call_count for _, store, _, _ in ranks]
+    send(112)
+    assert [
+        store.batch_put_from_multi_buffers.call_count for _, store, _, _ in ranks
+    ] == put_counts
+    assert [
+        store.batch_is_exist.call_count for _, store, _, _ in ranks
+    ] == confirmed_counts
+
+
+def test_mamba_snapshot_interval_lagging_rank_confirms_earlier_candidate(
+    snapshot_sender,
+):
+    stored = {}
+    ranks = [
+        snapshot_sender(MambaSnapshotConfig(4), tp_rank=rank, tp_size=2, stored=stored)
+        for rank in range(2)
+    ]
+
+    def send(sender, position):
+        _run_store_req(
+            sender,
+            _snapshot_req([(group, position // 16, position) for group in (1, 2)]),
+        )
+
+    for sender, _, _, _ in ranks:
+        send(sender, 64)
+        send(sender, 80)
+    counts = [store.batch_put_from_multi_buffers.call_count for _, store, _, _ in ranks]
+    for sender, store, _, _buffers in ranks:
+        for group in (1, 2):
+            assert (
+                _snapshot_keys(sender, _snapshot_req([]), group, [64]) <= stored.keys()
+            )
+        send(sender, 96)
+        calls = store.batch_is_exist.call_count
+        send(sender, 112)
+        assert store.batch_is_exist.call_count == calls
+    assert [
+        store.batch_put_from_multi_buffers.call_count for _, store, _, _ in ranks
+    ] == counts
+
+
+def test_mamba_snapshot_interval_stale_confirmation_cannot_mark_reused_id(
+    snapshot_sender,
+):
+    stored = {}
+    ranks = [
+        snapshot_sender(MambaSnapshotConfig(4), tp_rank=rank, tp_size=2, stored=stored)
+        for rank in range(2)
+    ]
+    for sender, _, _, _ in ranks:
+        _run_store_req(sender, _snapshot_req([(group, 4, 64) for group in (1, 2)]))
+    sender, store, _, buffers = ranks[0]
+    exists = store.batch_is_exist.side_effect
+    newer = _snapshot_req(
+        [(group, 6, 96) for group in (1, 2)], job=next(_TEST_SAVE_SEQ)
+    )
+
+    def retire_while_confirming(keys):
+        sender.delete_finished_stored_request("snapshot")
+        sender.add_request(newer)
+        return exists(keys)
+
+    store.batch_is_exist.side_effect = retire_while_confirming
+    _run_store_req(sender, _snapshot_req([(group, 5, 80) for group in (1, 2)]))
+    store.batch_is_exist.side_effect = exists
+    sender._handle_request(sender.request_queue.get())
+    for group in (1, 2):
+        assert _snapshot_keys(sender, newer, group, [96]) <= stored.keys()
 
 
 def test_mamba_snapshot_interval_old_job_cannot_mark_reused_id(snapshot_sender):
@@ -2279,6 +2460,48 @@ def test_store_sending_thread_reports_job_when_store_raises(failing_call):
     assert thread.take_completed_saves() == {req.store_job_id: 1}
 
 
+@pytest.mark.parametrize("boundary_save", [False, True])
+@pytest.mark.parametrize(
+    ("results", "status"),
+    [([-900, -900], "error"), ([-901, -901], "error"), ([0, -900], "partial_failure")],
+)
+def test_failed_existence_check_skips_put_and_completes_save(
+    boundary_save: bool, results: list[int], status: str
+) -> None:
+    store = MagicMock()
+    store.batch_is_exist.return_value = results
+    stats = MooncakeStoreConnectorStats()
+    thread = _make_store_sending_thread(store, record_operation=stats.record_operation)
+    req = _make_store_req("failed-exists", [b"a0", b"a1"])
+    if boundary_save:
+        req.token_len_chunk = 0
+        req.boundary_puts = [BoundaryPut(0, 1, 16), BoundaryPut(0, 2, 32)]
+
+    _run_store_req(thread, req)
+
+    assert store.batch_put_from_multi_buffers.call_count == 0
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
+    assert stats.reduce()["save_exists_failed_keys"] == sum(r < 0 for r in results)
+    assert stats.data["save_exists"][0]["status"] == status
+
+
+@pytest.mark.parametrize("error", [-900, -901, -1401])
+def test_failed_put_still_completes_save(error: int) -> None:
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [error, error]
+    stats = MooncakeStoreConnectorStats()
+    thread = _make_store_sending_thread(store, record_operation=stats.record_operation)
+    req = _make_store_req("failed-put", [b"a0", b"a1"])
+
+    _run_store_req(thread, req)
+
+    assert store.batch_put_from_multi_buffers.call_count == 1
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
+    assert stats.reduce()["save_put_failed_keys"] == 2
+    assert stats.data["save_put"][0]["status"] != "ok"
+
+
 def test_store_sending_thread_reports_job_when_the_preamble_raises():
     # The report has to survive a failure before the first store call too, so
     # every dequeue leaves through the same exit.
@@ -2320,6 +2543,25 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
     assert "req-a" not in thread._skip_store_requests
     assert thread._get_retry_token_ids(stale) is None
     assert thread._get_retry_token_ids(live) == (32, list(range(32, 64)))
+
+
+def test_wait_for_save_retires_preempted_attempt_before_queueing():
+    w = _make_bare_worker()
+    w.kv_send_thread = _make_store_sending_thread(MagicMock())
+    stale = _make_store_req("req-a", [b"a0", b"a1"])
+    stale.store_job_id = 1
+    w.kv_send_thread.add_request(stale)
+    live = _make_store_req("req-a", [b"a0", b"a1"])
+    live.store_job_id = 2
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), {"req-a"})
+    meta.add_request(live)
+
+    with patch.object(torch.cuda, "Event"):
+        w.wait_for_save(meta)
+    w.get_finished(set(), meta)
+
+    assert w.kv_send_thread.is_live_store_job(live)
+    assert not w.kv_send_thread.is_live_store_job(stale)
 
 
 def test_store_recving_thread_reports_failed_block_ids():

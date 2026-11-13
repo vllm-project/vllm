@@ -171,24 +171,6 @@ steps:
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
-- label: ":amd: (MI355) MiniMax M3 MonoKernel"
-  key: minimax-m3-monokernel-mi355
-  automatic_shard: true
-  dind: false
-  timeout_in_minutes: 45
-  device: mi355_4
-  num_devices: 4
-  working_dir: "/vllm-workspace/tests"
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - vllm/models/minimax_m3/amd/
-  - tests/models/minimax_m3/amd_specialized_decode/
-  - tests/models/minimax_m3/test_dspark_drafter.py
-  commands:
-  - pytest -v -s models/minimax_m3/amd_specialized_decode
-  - pytest -v -s models/minimax_m3/test_dspark_drafter.py
-
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
   automatic_shard: true
@@ -241,15 +223,20 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/kimi_k3/
+  - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   commands:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
+    # amd_specialized_decode/ is gated on gfx950, so on B200 only its CPU-side
+    # runtime tests run, and :amd: (MI355) Kimi-K3 Specialized Decode already
+    # runs those. Same treatment the MiniMax MegaMoE job gives its AMD dir.
     - >-
       pytest -v -s
       models/kimi_k3
       --ignore=models/kimi_k3/test_prefix_cache.py
+      --ignore=models/kimi_k3/amd_specialized_decode
       kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   mirror:
     amd:
@@ -264,13 +251,22 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/models/kimi_k3/
+      - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
       - tests/models/kimi_k3/
       - vllm/platforms/rocm.py
       commands:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
       # The kernels/ file the NVIDIA job adds is CUDA-only (it imports
       # cuda.bindings.driver), so it is deliberately left out here.
-      - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
+      # amd_specialized_decode/ needs 8 GPUs for its numerics and fault cases;
+      # on this 1-GPU agent only the CPU-side runtime tests and the six
+      # single-GPU numerics cases run, and the dedicated mi355_8 step
+      # :amd: (MI355) Kimi-K3 Specialized Decode already runs all of them.
+      - >-
+        pytest -v -s
+        models/kimi_k3
+        --ignore=models/kimi_k3/test_prefix_cache.py
+        --ignore=models/kimi_k3/amd_specialized_decode
 
 - label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
   key: kimi-k3-prefix-cache-4xb200
@@ -298,6 +294,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Kimi K3 Prefix Cache"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 60
@@ -434,6 +431,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Qwen4 Exp HC Kernels"
+      automatic_shard: true
       dind: false
       device: mi355_1
       depends_on:
@@ -555,89 +553,6 @@ steps:
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
 
-- label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
-  key: dsv41-mono-decode-numerics-amd
-  automatic_shard: true
-  dind: false
-  device: mi355_4
-  num_devices: 4
-  timeout_in_minutes: 40
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - docker/Dockerfile.rocm_base
-  - vllm/models/deepseek_v41/amd/
-  - vllm/models/deepseek_v41/nvidia/model_state.py
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
-  commands:
-  - pytest -v -s tests/models/test_dsv41_mono_numerics.py
-  - pytest -v -s tests/models/test_dsv41_mono_layers.py
-
-- label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics TP8'
-  key: dsv41-mono-decode-numerics-tp8-amd
-  automatic_shard: true
-  dind: false
-  device: mi355_8
-  num_devices: 8
-  timeout_in_minutes: 60
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - docker/Dockerfile.rocm_base
-  - vllm/models/deepseek_v41/amd/
-  - vllm/models/deepseek_v41/nvidia/model_state.py
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
-  commands:
-  # only the TP8 cases; the 4-GPU step above runs TP2/TP4 (TP8 skips there)
-  - pytest -v -s "tests/models/test_dsv41_mono_numerics.py::test_mono_decode_layer_matches_vllm[8]"
-  - >-
-    pytest -v -s
-    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-8]"
-    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-28]"
-
-- label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
-  key: dsv4-mono-decode-numerics-amd
-  automatic_shard: true
-  dind: false
-  device: mi355_8
-  num_devices: 8
-  timeout_in_minutes: 60
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - docker/Dockerfile.rocm_base
-  - vllm/models/deepseek_v4/amd/
-  - tests/models/test_dsv4_mono_numerics.py
-  - tests/models/test_dsv4_mono_layers.py
-  commands:
-  - pytest -v -s tests/models/test_dsv4_mono_numerics.py
-  - pytest -v -s tests/models/test_dsv4_mono_layers.py
-
-- label: ':amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Layers'
-  key: dsv41-mono-decode-layers-gfx942-amd
-  automatic_shard: true
-  dind: false
-  device: mi300_4
-  num_devices: 4
-  timeout_in_minutes: 40
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - docker/Dockerfile.rocm_base
-  - vllm/models/deepseek_v41/amd/
-  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
-  commands:
-  - pytest -v -s tests/models/test_dsv41_mono_numerics.py
-  - pytest -v -s tests/models/test_dsv41_mono_layers.py
-
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 NVIDIA Kernels"
   key: dsv41-nvidia-kernels-4xb200
   automatic_shard: true
@@ -679,6 +594,7 @@ steps:
 
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
+  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40
@@ -692,19 +608,3 @@ steps:
   # decode_backend=latency_specialized is for GB300 (SM103); no CI agent has four of them.
   # B200 runs the kernels and the TP4 boundary, draft norm and logits gather tests.
   - pytest -v -s models/glm5next -k specialized_decode
-
-- label: ':amd: (MI355) Kimi-K3 Specialized Decode'
-  key: kimi-k3-specialized-decode-amd
-  automatic_shard: true
-  dind: false
-  device: mi355_8
-  num_devices: 8
-  timeout_in_minutes: 60
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - vllm/models/kimi_k3/amd/
-  - tests/models/kimi_k3/amd_specialized_decode/
-  commands:
-  - pytest -v -s tests/models/kimi_k3/amd_specialized_decode

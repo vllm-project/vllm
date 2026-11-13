@@ -137,12 +137,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return KVCacheAccess.REGISTERS
 
     @classmethod
-    def supports_lookahead_block_hashes(
-        cls, kv_transfer_config: KVTransferConfig
-    ) -> bool:
-        return True
-
-    @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         extra_config = kv_transfer_config.kv_connector_extra_config
         if extra_config.get("reuse_pd_transfer_engine") is True:
