@@ -65,6 +65,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 )
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -416,6 +417,36 @@ class TestChunkedPushScheduler:
     def test_mamba_state_rides_on_the_last_chunk_job(self):
         sched, request, output = self._scheduler_with_request(
             make_kv_cache_config(block_size=16, num_blocks=8, mamba_enabled=True),
+            block_ids=([1, 2, 3], [7]),
+        )
+        assert self._jobs(sched, output, request, 0, 32) == [
+            (([1, 2], []), ((0, 3), None), False)
+        ]
+        assert self._jobs(sched, output, request, 32, 8) == [
+            (([3], [7]), ((2, 3), None), True)
+        ]
+
+    def test_circular_buffer_rides_on_the_last_chunk_job(self):
+        groups = [
+            KVCacheGroupSpec(
+                ["attn"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=4, head_size=16, dtype=torch.float16
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["compressor"],
+                CircularBufferSpec(
+                    block_size=8,
+                    num_kv_heads=1,
+                    head_size=16,
+                    head_size_v=0,
+                    dtype=torch.float32,
+                ),
+            ),
+        ]
+        sched, request, output = self._scheduler_with_request(
+            KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=groups),
             block_ids=([1, 2, 3], [7]),
         )
         assert self._jobs(sched, output, request, 0, 32) == [

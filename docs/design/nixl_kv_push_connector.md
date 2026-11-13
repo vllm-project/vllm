@@ -33,11 +33,11 @@ instead of waiting for the request to finish. Enable it on the producer with:
 }
 ```
 
-The option is off by default. Chunked push is used only in the configurations
-it is tested in: a device KV buffer, PP1, PCP1, DCP1, a full-attention
-transfer group and otherwise only Mamba and sliding-window groups, and P and D
-with the same TP. In other configurations a warning is logged and requests are
-pushed whole.
+The option is off by default. Chunked push is used only in the configurations it
+is tested in: a device KV buffer, PP1, PCP1, DCP1, a full-attention transfer
+group and otherwise only Mamba, sliding-window and circular-buffer groups, and P
+and D with the same TP. In other configurations a warning is logged and requests
+are pushed whole.
 
 Chunked push changes only when blocks are written. Block lifetimes are those of
 whole-request push: a running request owns its blocks, preemption and abort
@@ -45,16 +45,16 @@ release them, and a finished request holds them under the KV lease
 (`kv_lease_duration`), which D's heartbeats extend.
 
 - While the request runs, each step's newly computed prompt blocks are written
-  to D once the step's event completes. D decodes once the normal
-  completion notification arrives, so it must follow all of the request's
-  data: it rides on the WRITE of the last prompt block, which is submitted only
-  after the request's earlier WRITEs have completed successfully. Each
-  full-attention group is split by its own block size: page-size unification
-  can give groups different block sizes, e.g. a draft model's attention layers
-  next to the target model's. The other groups (Mamba, sliding window, and
-  DeepSeek-V4 compressor state) hold state that only the last prefill step
-  completes, so their blocks ride on the last WRITE, clipped and paired with
-  D's blocks as in a whole-request push.
+  to D once the step's event completes. D decodes once the normal completion
+  notification arrives, so it must follow all of the request's data: it rides on
+  the WRITE of the last prompt block, which is submitted only after the
+  request's earlier WRITEs have completed successfully. Each full-attention
+  group is split by its own block size: page-size unification can give groups
+  different block sizes, e.g. a draft model's attention layers next to the
+  target model's. The other groups (Mamba, sliding window, DeepSeek-V4
+  compressor state and the DeepSeek-V4.1 compressor's circular buffer) hold
+  state that only the last prefill step completes, so their blocks ride on the
+  last WRITE, clipped and paired with D's blocks as in a whole-request push.
 - When the request finishes, the existing whole-request path reports it once
   its last chunk WRITE completed. If a chunk was not written (an incompatible
   peer or a failed WRITE), the whole request is written instead; if D has not

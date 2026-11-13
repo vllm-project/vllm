@@ -43,6 +43,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     MambaSpec,
     SlidingWindowSpec,
     is_full_attention_spec,
@@ -57,6 +58,12 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# KV cache group types besides full attention that chunked push supports: their
+# state is complete only after the last prefill step, so their blocks go with the
+# last chunk job, clipped and paired as in whole-request push. Other group types
+# fall back to whole-request push.
+_LAST_JOB_SPEC_TYPES = (MambaSpec, SlidingWindowSpec, CircularBufferSpec)
 
 
 @dataclass
@@ -138,11 +145,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 or parallel_config.decode_context_parallel_size != 1
                 or not any(block_sizes)
                 or not all(
-                    block_size
-                    or isinstance(group.kv_cache_spec, (MambaSpec, SlidingWindowSpec))
-                    for block_size, group in zip(
-                        block_sizes, transfer_groups, strict=True
-                    )
+                    is_full_attention_spec(group.kv_cache_spec)
+                    or isinstance(group.kv_cache_spec, _LAST_JOB_SPEC_TYPES)
+                    for group in transfer_groups
                 )
             ):
                 # Chunked push is used only in the configurations it is tested
@@ -150,8 +155,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 logger.warning(
                     "NIXL chunked push needs a device KV buffer, PP=1, PCP=1, "
                     "DCP=1, a full-attention KV cache group, and otherwise only "
-                    "Mamba and sliding-window groups. Falling back to "
-                    "whole-request push."
+                    "KV cache group types it supports (Mamba, sliding window, "
+                    "circular buffer). Falling back to whole-request push."
                 )
                 self._chunked_push = False
             else:
@@ -434,8 +439,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             last = computed_after == request.num_prompt_tokens
             all_block_ids = block_state.get_block_ids(req_id)
             assert all_block_ids is not None
-            # The groups other than full attention hold state that the last
-            # step completes; it is clipped as in a whole-request push.
+            # The groups other than full attention (_LAST_JOB_SPEC_TYPES) hold
+            # state that the last step completes; it is clipped as in a
+            # whole-request push.
             if last:
                 # A sliding-window block table can extend past the prompt into
                 # lookahead blocks; clip the window that ends at the prompt.
