@@ -110,8 +110,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of blocking time spent in a per-chunk tier lookup "
-                    "that resolved as a hit or miss, labeled by tier, in seconds."
+                    "Histogram of total blocking time a request spent in tier "
+                    "lookups that resolved as a hit or miss, labeled by tier, in "
+                    "seconds."
                 ),
                 labelnames=(TIER_LABEL,),
                 buckets=(
