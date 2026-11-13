@@ -171,6 +171,12 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # Blocks keyed in the current step; their KV is not written until after
+        # this step's copy-on-write copies run.
+        self.hashed_this_step: set[int] = set()
+
+    def new_step_starts(self) -> None:
+        self.hashed_this_step.clear()
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -659,6 +665,7 @@ class BlockPool:
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+        self.hashed_this_step.add(block.block_id)
 
     def move_block_hashes(
         self,
@@ -881,6 +888,7 @@ class BlockPool:
         # new map created after the startup gc.freeze() would not be frozen.
         self.cached_block_hash_to_block.clear()
         self.cached_block_hashes_by_block.clear()
+        self.hashed_this_step.clear()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]

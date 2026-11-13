@@ -365,6 +365,10 @@ class SingleTypeKVCacheManager(ABC):
             new_computed_blocks[num_skipped_new_computed_blocks:]
         )
         if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
+            if new_computed_blocks[-1].block_id in self.block_pool.hashed_this_step:
+                # The CoW source is written by this step's forward, after the
+                # copy runs: defer to the next step.
+                return self.block_pool.num_gpu_blocks + 1
             # Reserve the extra block that allocate_new_blocks pulls for the
             # partial-hit CoW redirect.
             num_new_blocks += 1

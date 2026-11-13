@@ -2891,3 +2891,34 @@ def test_checkpoint_reservation_matches_worker(
         request.num_computed_tokens = end
         manager.new_step_starts()
         start = end
+
+
+def test_partial_hit_cow_source_keyed_this_step_is_deferred():
+    """A partial hit whose CoW source block was keyed in the current step is
+    deferred: the step's CoW copies run before its forward writes that block."""
+    hash_block_size = 2
+    manager = make_full_mamba_manager(dcp_world_size=1, hash_block_size=hash_block_size)
+    prompt = list(range(100, 140))
+    # Leaves a Mamba checkpoint key at 6 tokens.
+    first = make_request("first", prompt[:7], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
+    assert manager.allocate_slots(first, 6, num_computed, computed_blocks)
+    manager.free(first)
+    manager.new_step_starts()
+
+    # Computes [0, 12) without a cache lookup and keys its full blocks.
+    writer = make_request("writer", prompt[:13], hash_block_size, sha256)
+    assert manager.allocate_slots(writer, 12, 0, manager.empty_kv_cache_blocks)
+    source_block_id = manager.get_blocks("writer").get_block_ids()[0][1]
+
+    reader = make_request("reader", prompt[:9], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(reader)
+    assert num_computed == 6
+    assert computed_blocks.blocks[0][-1].block_id == source_block_id
+    assert manager.allocate_slots(reader, 3, num_computed, computed_blocks) is None
+
+    manager.new_step_starts()
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(reader)
+    assert manager.allocate_slots(reader, 3, num_computed, computed_blocks)
+    copies, _ = manager.take_kv_cache_block_copies()
+    assert any(copy.src_block_id == source_block_id for copy in copies)
