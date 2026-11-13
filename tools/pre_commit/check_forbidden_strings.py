@@ -162,8 +162,6 @@ CHECK_STRINGS = {
         ),
         allowed_files={
             "tools/pre_commit/check_forbidden_strings.py",
-            # Flattens `text_config` itself, so the base class never sees the key
-            "vllm/transformers_utils/configs/deepseek_v41.py",
             # Legacy checkpoint loading tests
             "tests/model_executor/test_bailing_mrope.py",
             "tests/transformers_utils/test_bailing_moe_v3_vl_config.py",
