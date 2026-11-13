@@ -909,7 +909,6 @@ steps:
   - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
   env:
-    VLLM_HOST_IP: "127.0.0.1"
     WITH_NVIDIA_PEERMEM: "0"
   commands:
   # Mooncake ships in the CI image (hash-locked); verify, never install.
@@ -917,4 +916,6 @@ steps:
   - >-
     pytest -v -s
     model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e
+  - >-
+    pytest -v -s
     model_executor/model_loader/test_weight_cache.py::test_d2d_weight_seeding_cross_host

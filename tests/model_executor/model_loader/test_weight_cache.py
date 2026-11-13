@@ -672,6 +672,7 @@ def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
     if not (has_flashinfer() and current_platform.has_device_capability(90)):
         pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
 
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
     # tp=2 for the v1 per-rank path; small token budget keeps the sweep short.
     case = replace(
         K3_CASE,
