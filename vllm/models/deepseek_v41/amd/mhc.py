@@ -158,8 +158,8 @@ MHC_SEAM_MIN_TOKENS = 64
 
 @functools.cache
 def supports_mhc_seam(hidden_size: int, hc_mult: int) -> bool:
-    """True when AITER's probe accepts this shape."""
-    if not HAS_AITER_MHC:
+    """True on gfx942 when AITER's probe accepts this shape."""
+    if not HAS_AITER_MHC or get_cdna_version() != 3:
         return False
     from aiter.ops.mhc import mhc_fused_post_pre_delayed_asm_supported
 
@@ -234,7 +234,7 @@ def _mhc_seam_fake(
 
 
 direct_register_custom_op(
-    op_name="mhc_fused_post_pre_delayed_aiter",
+    op_name="deepseek_v41_mhc_fused_post_pre_delayed_aiter",
     op_func=_mhc_seam,
     mutates_args=[],
     fake_impl=_mhc_seam_fake,
@@ -292,7 +292,7 @@ def mhc_pre_delayed_seam(
             post_layer_mix=post_layer_mix,
             comb_res_mix=comb_res_mix,
         )
-    return torch.ops.vllm.mhc_fused_post_pre_delayed_aiter(
+    return torch.ops.vllm.deepseek_v41_mhc_fused_post_pre_delayed_aiter(
         residual,
         fn,
         hc_scale,

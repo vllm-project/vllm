@@ -304,7 +304,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
-        # Elsewhere (gfx942), seams with a post block run as one AITER call
+        # On gfx942, seams with a post block run as one AITER call
         # from MHC_SEAM_MIN_TOKENS tokens.
         self.mhc_seam = (
             partial(mhc_pre_delayed_seam, self.mhc_pre_delayed)
