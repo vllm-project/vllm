@@ -2596,18 +2596,24 @@ def _make_pp_attn_worker(
     draft = [_PP_DRAFT_LAYER] if _PP_DRAFT_LAYER in layer_names else []
     spec = AttentionSpec(**kwargs)
     full = FullAttentionManager.config()
+
+    def make_group(names, manager_config):
+        # As projected onto a PP stage: it keeps the whole group's specs, so a
+        # stage holding none of the group's layers still knows its cache kind.
+        return KVCacheGroup(
+            dict.fromkeys(names, spec),
+            manager_config,
+            block_size,
+            unprojected_specs=(spec,),
+        )
+
     if hma:
-        # Built directly: a stage may hold no draft layer, an empty group.
         groups = [
-            KVCacheGroup(dict.fromkeys(target, spec), full, block_size),
-            KVCacheGroup(
-                dict.fromkeys(draft, spec),
-                SlidingWindowManager.config(sliding_window=8),
-                block_size,
-            ),
+            make_group(target, full),
+            make_group(draft, SlidingWindowManager.config(sliding_window=8)),
         ]
     else:
-        groups = [KVCacheGroup(dict.fromkeys(target + draft, spec), full, block_size)]
+        groups = [make_group(target + draft, full)]
     page = spec.page_size_bytes
     raw: torch.Tensor | None = None
     tensors: list[KVCacheTensor] = []
