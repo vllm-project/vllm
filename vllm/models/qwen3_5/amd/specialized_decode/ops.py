@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Device primitives of the wide kernels: global accesses through buffer
-descriptors with explicit cache policies, LDS vectors, wave reductions,
-activations, bf16 packing and the clock.
+# Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM) at a526f0d, MIT License,
+# Copyright (C) 2026, Advanced Micro Devices, Inc.:
+# atom/mono/device/ops.py
+"""Device primitives of the kernels: global accesses through buffer
+descriptors with explicit cache policies, LDS vectors, wave reductions and
+shuffles, activations, bf16 packing and the clock. Every function is traced
+inside a `@flyc.kernel` body.
 
 Kernels take raw `Int64` byte addresses. A buffer descriptor's offset is 32
 bits, so a pool past 4 GiB (the GDN state) is addressed from a 64-bit base per
@@ -19,7 +23,6 @@ from __future__ import annotations
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from aiter.ops.flydsl.kernels.dpp_utils import update_dpp_i32
-from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import math as fmath
@@ -77,14 +80,17 @@ def st(addr, i, value, cm=0, nbytes=None):
     )
 
 
-def ld_bf8(addr, i, cm=0):
-    """Eight bf16 at bf16 element `i` (a multiple of 8) as a bf16 Vector."""
-    w = fx.Vector(
-        bo.buffer_load(
-            rsrc(addr), fx.Int32(i) // 2, vec_width=4, dtype=T.i32, cache_modifier=cm
-        )
+def ld_i32(addr, i):
+    """Word `i`, a plain Int32 load."""
+    return ld(addr, i)
+
+
+def ld_dev(addr, i, words=1):
+    """`words` i32 (1, 2 or 4) from word `i` at device scope, as the buffer
+    load returns them."""
+    return bo.buffer_load(
+        rsrc(addr), i, vec_width=words, dtype=T.i32, cache_modifier=CM_DEV
     )
-    return w.bitcast(fx.BFloat16)
 
 
 def ld_i32x4(addr, i, cm=0):
@@ -94,10 +100,6 @@ def ld_i32x4(addr, i, cm=0):
             rsrc(addr), fx.Int32(i), vec_width=4, dtype=T.i32, cache_modifier=cm
         )
     )
-
-
-def st_i32x4(addr, i, words, cm=0, nbytes=None):
-    st(addr, i, fx.Vector(words), cm, nbytes)
 
 
 def _gptr(addr, dtype, n):
@@ -154,13 +156,6 @@ def uniform(v):
     return fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(v).ir_value()))
 
 
-def uniform_i64(v):
-    v = fx.Int64(v)
-    lo = uniform(fx.Int32(v & fx.Int64(0xFFFFFFFF)))
-    hi = uniform(fx.Int32(v >> fx.Int64(32)))
-    return (fx.Int64(hi) << fx.Int64(32)) | fx.Int64(fx.Uint32(lo))
-
-
 def ld_ptr64(table, i):
     """Entry `i` of an i64 table in memory, wave-uniform."""
     w = ld(table, fx.Int32(i) * 2, fx.Int32, 2)
@@ -190,7 +185,10 @@ def lds_st(ptr, value):
 # --------------------------------------------------------------------------
 
 
-def _permlane_swap(off, x, y):
+def permlane_swap(off, x, y):
+    """v_permlane{32,16}_swap on registers (x, y): off 32 trades x's upper-half
+    lanes with y's lower-half lanes; off 16 trades x's odd 16-lane rows with y's
+    even rows (each within its half). -> (x', y')."""
     swap = rocdl.permlane32_swap if off == 32 else rocdl.permlane16_swap
     pr = swap(
         llvm.StructType.get_literal([T.i32, T.i32]),
@@ -202,8 +200,10 @@ def _permlane_swap(off, x, y):
     return tuple(fx.Int32(llvm.extractvalue(T.i32, pr, [j])) for j in range(2))
 
 
-def _xshfl(v, off):
-    """Lane `lane ^ off`'s value for off 1..8 (DPP); 16 / 32 via shuffle."""
+def xshfl(v, off):
+    """Lane `lane ^ off`'s value: offsets 1..8 via DPP (VALU latency, not
+    LDS), 16 / 32 via shuffle. Powers of two only."""
+    assert off in (1, 2, 4, 8, 16, 32), off
     if off >= 16:
         return v.shuffle_xor(off, 64)
     is_f = isinstance(v, fx.Float32)
@@ -221,12 +221,13 @@ def _xshfl(v, off):
     return y.bitcast(fx.Float32) if is_f else y
 
 
-def _xred(v, off, op):
+def xred(v, off, op):
+    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap."""
     if off < 16:
-        return op(v, _xshfl(v, off))
+        return op(v, xshfl(v, off))
     is_f = isinstance(v, fx.Float32)
     x = v.bitcast(fx.Int32) if is_f else fx.Int32(v)
-    a, b = _permlane_swap(off, x, x)
+    a, b = permlane_swap(off, x, x)
     if is_f:
         return op(a.bitcast(fx.Float32), b.bitcast(fx.Float32))
     return op(type(v)(a), type(v)(b))
@@ -238,9 +239,11 @@ def _add(a, b):
 
 def butterfly(v, offsets, op=_add):
     """Butterfly reduction over the xor `offsets` in order: every lane of the
-    covered group receives the result."""
+    covered group receives the result. The order is the numerical contract:
+    the aiter per-head norm reduces 32 lanes with offsets 16, 8, 4, 2, 1, and
+    matching it keeps rstd bit-exact."""
     for off in offsets:
-        v = _xred(v, off, op)
+        v = xred(v, off, op)
     return v
 
 
@@ -250,6 +253,37 @@ def wave_sum(v):
 
 def wave_max(v):
     return butterfly(v, (32, 16, 8, 4, 2, 1), fx.max)
+
+
+def _xpartner(v, off, lane):
+    """Lane `lane ^ off`'s v: DPP within a row, v_permlane*_swap across rows
+    (`xshfl` takes `shuffle_xor` there)."""
+    if off < 16:
+        return xshfl(v, off)
+    a, b = permlane_swap(off, v, v)
+    return ((lane & off) != 0).select(a, b)
+
+
+def wave_incl_scan(v, lane):
+    """Inclusive prefix sum of an Int32 over the wave, in lane order."""
+    blk = v
+    for off in (1, 2, 4, 8, 16, 32):
+        o = _xpartner(blk, off, lane)
+        v = v + ((lane & off) != 0).select(o, 0)
+        blk = blk + o
+    return v
+
+
+def readlane(v, src_lane):
+    """Lane `src_lane`'s value of v (wave-uniform)."""
+    bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
+    r = fx.Int32(rocdl.readlane(T.i32, bits, fx.Int32(src_lane)))
+    return r.bitcast(fx.Float32) if isinstance(v, fx.Float32) else r
+
+
+def ballot(pred):
+    """The wave's lanes where `pred` holds, a bit a lane."""
+    return fx.Int64(rocdl.ballot(T.i64, as_ir_value(pred)))
 
 
 # --------------------------------------------------------------------------
@@ -272,7 +306,16 @@ def hw_rcp(x):
 
 
 def hw_rsq(x):
+    """v_rsq_f32 (~1 ulp, no libm range fixups)."""
     return _hw_f32("llvm.amdgcn.rsq.f32", x)
+
+
+def div_rn(x, d, r):
+    """`x / d` rounded to nearest, bit-identical to the IEEE division, given
+    `r = 1.0 / d` from one true division per divisor (Markstein: a quotient
+    within 1 ulp plus its exact fma residual times RN(1/d) rounds correctly)."""
+    q = x * r
+    return fx.Float32(fmath.fma(fx.Float32(fmath.fma(-q, d, x)), r, q))
 
 
 def sigmoid(x):
@@ -308,7 +351,22 @@ def bf_lo(w):
 
 
 def bf_hi(w):
+    """The f32 of a packed bf16 pair word's high half."""
     return (fx.Int32(w) & fx.Int32(-65536)).bitcast(fx.Float32)
+
+
+def bf2_f32(w):
+    """Packed bf16 pair word -> (f32 low, f32 high)."""
+    return bf_lo(w), bf_hi(w)
+
+
+def bf16_pair(a, b):
+    """Two f32 -> one f32-typed word holding (bf16(a), bf16(b))."""
+    return (
+        fx.Vector.from_elements([a, b], fx.Float32)
+        .to(fx.BFloat16)
+        .bitcast(fx.Float32)[0]
+    )
 
 
 def pack_bf16(a, b):
@@ -356,34 +414,6 @@ def mfma_bf16(a, b, acc):
     )
 
 
-def mfma_bf16_k16(a, b, acc):
-    """`acc + A @ B.T` over 16 K: `a`, `b` a lane's 4 bf16 as Int16
-    (16x16x16): lane `l` holds row `l % 16`, K `4 (l / 16) + [0, 4)`."""
-    return fx.Vector(
-        rocdl.mfma_f32_16x16x16bf16_1k(
-            T.vec(4, T.f32),
-            [
-                fx.Vector(a).ir_value(),
-                fx.Vector(b).ir_value(),
-                fx.Vector(acc).ir_value(),
-                0,
-                0,
-                0,
-            ],
-        )
-    )
-
-
-def lds_ld_tr16(ptr):
-    """ds_read_b64_tr_b16 at LDS pointer `ptr` (a bf16 iterator plus an
-    element offset): four bf16 transposed across the lanes, as Int16."""
-    return fx.Vector(
-        rocdl.ds_read_tr16_b64(
-            fx.Vector.make_type(4, fx.BFloat16), fx.to_llvm_ptr(ptr)
-        ).result
-    ).bitcast(fx.Int16)
-
-
 def mfma_f4(a, b, acc, sa, sb, opsel_a=0):
     """`acc + A @ B.T` over 128 K of e2m1: `a` / `b` a lane's four Int32 (32
     codes), `sa` / `sb` its E8M0 scale codes (`opsel_a` picks A's byte of
@@ -424,16 +454,3 @@ def sched_barrier():
     """Keep issued loads where they are (the scheduler would sink them to their
     use)."""
     rocdl.sched_barrier(0)
-
-
-def unlikely(cond):
-    """`cond` marked cold (llvm.expect)."""
-    return fx.Boolean(
-        llvm.call_intrinsic(
-            ir.IntegerType.get_signless(1),
-            "llvm.expect.i1",
-            [as_ir_value(cond), as_ir_value(fx.Boolean(False))],
-            [],
-            [],
-        )
-    )

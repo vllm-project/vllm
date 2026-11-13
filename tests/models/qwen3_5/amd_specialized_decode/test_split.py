@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The split widths (`wide.layer.SPLIT_MAX` rows and fewer) at TP8 on 8
+"""The split widths (`layout.SPLIT_MAX` rows and fewer) at TP8 on 8
 MI355X: a layer is the wide GDN (or attention) launch up to its core (or
 qkv_proj), then `mono.blocks.layer_block`. GDN layer 0 (the step's first)
 to its core, then layer_block; attention layer 1's input combine and
@@ -45,17 +45,14 @@ def rel(a, b):
 def _worker(rank, S, variant, port, out_q):
     import torch.distributed as dist
 
+    from vllm.models.qwen3_5.amd.specialized_decode import layout as L
+    from vllm.models.qwen3_5.amd.specialized_decode.abi import FAILED, health_words
+    from vllm.models.qwen3_5.amd.specialized_decode.abi import PEER_HEAD as MONO_HEAD
     from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
-    from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as ML
-    from vllm.models.qwen3_5.amd.specialized_decode.mono.abi import (
-        PEER_HEAD as MONO_HEAD,
-    )
-    from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import HEALTH_WORDS
+    from vllm.models.qwen3_5.amd.specialized_decode.mono.common import HEALTH_WORDS
     from vllm.models.qwen3_5.amd.specialized_decode.runtime.peer import PeerBuffer
     from vllm.models.qwen3_5.amd.specialized_decode.wide import layer as K
-    from vllm.models.qwen3_5.amd.specialized_decode.wide import layout as L
-    from vllm.models.qwen3_5.amd.specialized_decode.wide.abi import FAILED, health_words
-    from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
+    from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import (
         FOLD_BASE,
         SLOT_WORDS,
         launch_slots,
@@ -165,7 +162,7 @@ def _worker(rank, S, variant, port, out_q):
 
     # ---- layer_block's
     mpeers = PeerBuffer(
-        MONO_HEAD + blocks.peer_bytes(ML.MAX_TOKENS), group, rank, TP, dev
+        MONO_HEAD + blocks.peer_bytes(L.SPLIT_MAX), group, rank, TP, dev
     )
     mpeers.bytes.zero_()
     mtable = (mpeers.addresses + MONO_HEAD).clone()
@@ -198,7 +195,6 @@ def _worker(rank, S, variant, port, out_q):
             out=fmt,
             out_shuffled=shuffled,
             first_q4=q4,
-            split=True,
         )
         a = dict.fromkeys(K.ABI.names, 0)
         a |= dict(
@@ -233,7 +229,7 @@ def _worker(rank, S, variant, port, out_q):
         check_health()
 
     def attn_launch(seq, i, n_in, h_in, res_in):
-        key = K.LayerBuild(kind="attn", tokens=S, tp=TP, split=True)
+        key = K.LayerBuild(kind="attn", tokens=S, tp=TP)
         a = dict.fromkeys(K.ABI.names, 0)
         a |= dict(
             scratch=scratch,
@@ -471,10 +467,10 @@ def test_split_gdn_quant(rows, variant):
     from aiter import per_1x32_f4_quant_hip
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
+    from vllm.models.qwen3_5.amd.specialized_decode import layout as L
+    from vllm.models.qwen3_5.amd.specialized_decode.abi import FAILED, health_words
     from vllm.models.qwen3_5.amd.specialized_decode.wide import layer as K
-    from vllm.models.qwen3_5.amd.specialized_decode.wide import layout as L
-    from vllm.models.qwen3_5.amd.specialized_decode.wide.abi import FAILED, health_words
-    from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
+    from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import (
         FOLD_BASE,
         SLOT_WORDS,
         launch_slots,
@@ -550,7 +546,6 @@ def test_split_gdn_quant(rows, variant):
         out=fmt,
         out_shuffled=shuffled,
         first_q4=q4,
-        split=True,
     )
     a = dict.fromkeys(K.ABI.names, 0)
     a |= dict(

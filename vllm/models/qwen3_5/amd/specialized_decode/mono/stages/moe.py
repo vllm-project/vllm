@@ -24,31 +24,31 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
 from vllm.models.qwen3_5.amd.specialized_decode.mono import mx_layout as L
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ops import (
+from vllm.models.qwen3_5.amd.specialized_decode.mono.common import (
+    BLOCKS,
+    THREADS,
+    WAVES,
+    block_excl_scan,
+    row_sum,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.mono.stages import gemv
+from vllm.models.qwen3_5.amd.specialized_decode.mono.sync import POLL_MAX
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
     CM_NT,
     bf16_pair,
     bf16_round,
     bf_hi,
     bf_lo,
-    block_excl_scan,
     div_rn,
     hw_exp2,
     ld_i32,
     mfma_bf16,
-    row_sum,
     rsrc,
     traced,
     uniform,
     wave_max,
     xred,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import (
-    BLOCKS,
-    THREADS,
-    WAVES,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.sync import POLL_MAX
-from vllm.models.qwen3_5.amd.specialized_decode.mono.stages import gemv
 
 E = 512
 TOPK = 10
@@ -306,7 +306,7 @@ def fp4_gemv(lane, wave, xl, xrow, k, s, rg, ops, shuffled=True):
 
 def fp4q_gemv(lane, wave, xl, k, s, rg, ops, shuffled=True):
     """The `fp4_gemv_loads` operands against the x rows' MXFP4 codes at LDS
-    `xl` (`quant_x_fp4`'s layout), one scaled fp4 MFMA a step -> this
+    `xl` (`norm.x_fp4_to_lds`'s layout), one scaled fp4 MFMA a step -> this
     wave's fp32 partial MFMA tile. K's steps split evenly over the waves."""
     n = k // L.FP4_STEP
     t = fx.min(lane % 16, s - 1)
@@ -420,50 +420,6 @@ def xq_scales(s, k):
     """Dword of LDS `xl` where the fp4 x rows' e8m0 codes start (a dword a
     1 x 32 block, token-major)."""
     return s * xq_row(k) // 4
-
-
-@traced
-def quant_x_fp4(c, k):
-    """The x rows in LDS (bf16, K `k`) -> MXFP4 codes over them,
-    `quant_x`'s arithmetic and lanes (the routed experts' input, as the stock
-    decode MoE quantizes it): token t's block b at byte t `xq_row` + 16 b
-    (element 2 j in byte j's low nibble; a lane's 8 elements one word), its
-    code at dword `xq_scales` + t (k / 32) + b. Every thread reads before
-    any writes."""
-    s, tid, xl = c["S"], c["tid"], c["xl"]
-    xrow = k + gemv.LDS_PAD
-    kq = k // 8
-    nq = s * kq
-    rounds = (nq + THREADS - 1) // THREADS
-    # four rounds read, then their words written: a word lands below every
-    # later round's x, so only its own group's reads must precede it; the
-    # codes (four rounds' a register) after every read
-    codes = []
-    for g0 in range_constexpr(0, rounds, 4):
-        words = []
-        for i in range_constexpr(g0, min(g0 + 4, rounds)):
-            e = fx.min(tid + THREADS * i, nq - 1)
-            wv, code = _quad_scale(xl + ((e // kq) * xrow + 8 * (e % kq)) // 2)
-            w = fx.Int32(0)
-            for d in range_constexpr(4):
-                w = pk_fp4_bf16(w, wv[d], pow2(code), d)
-            words.append(w)
-            if const_expr(i % 4 == 0):
-                codes.append(code)
-            else:
-                codes[-1] = codes[-1] | (code << (8 * (i % 4)))
-        gpu.barrier()
-        for i in range_constexpr(g0, min(g0 + 4, rounds)):
-            e = fx.min(tid + THREADS * i, nq - 1)
-            if tid + THREADS * i < nq:
-                fx.ptr_store(words[i - g0], xl + ((e // kq) * xq_row(k) // 4 + e % kq))
-    gpu.barrier()
-    for i in range_constexpr(rounds):
-        e = fx.min(tid + THREADS * i, nq - 1)
-        if (tid + THREADS * i < nq) & (e % 4 == 0):
-            code = (codes[i // 4] >> (8 * (i % 4))) & 0xFF
-            fx.ptr_store(code, xl + (xq_scales(s, k) + e // 4))
-    gpu.barrier()
 
 
 # ---------------------------------------------------------------- o_proj

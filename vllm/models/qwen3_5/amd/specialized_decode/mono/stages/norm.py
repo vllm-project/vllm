@@ -20,8 +20,25 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 
-from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as L
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ops import (
+from vllm.models.qwen3_5.amd.specialized_decode import layout as L
+from vllm.models.qwen3_5.amd.specialized_decode.mono.common import (
+    THREADS,
+    WAVES,
+    sum_partials,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.mono.stages import gemv
+from vllm.models.qwen3_5.amd.specialized_decode.mono.stages.moe import (
+    f32_of,
+    mx_scale,
+    mx_scale_round,
+    pk_fp4_bf16,
+    pow2,
+    sigmoid,
+    xq_row,
+    xq_scales,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.mono.sync import publish
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
     CM_DEV,
     bf16_pair,
     bf16_round,
@@ -33,25 +50,6 @@ from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ops import (
     traced,
     wave_sum,
     xred,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import (
-    THREADS,
-    WAVES,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ranks import (
-    sum_partials,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.sync import publish
-from vllm.models.qwen3_5.amd.specialized_decode.mono.stages import gemv
-from vllm.models.qwen3_5.amd.specialized_decode.mono.stages.moe import (
-    f32_of,
-    mx_scale,
-    mx_scale_round,
-    pk_fp4_bf16,
-    pow2,
-    sigmoid,
-    xq_row,
-    xq_scales,
 )
 
 H = L.HIDDEN
@@ -240,11 +238,10 @@ def x_rows_to_lds(c, src, klen, k0):
 
 @traced
 def x_fp4_to_lds(c, src, rceil=True):
-    """Every token's x (bf16) through MXFP4 -> LDS `xl`, as `quant_x_fp4`
-    lays it out (token t's block b at byte t `xq_row` + 16 b, its e8m0 code
-    at dword `xq_scales` + t (H / 32) + b), 8 columns a lane, a block on 4
-    adjacent lanes. `rceil`: the RCEIL scale of the stock decode MoE's and
-    the ASM FP4 GEMM's activation quant, else the Triton FP4 GEMM's
+    """Every token's x (bf16) through MXFP4 -> LDS `xl` (token t's block b at byte t
+    `xq_row` + 16 b, its e8m0 code at dword `xq_scales` + t (H / 32) + b), 8 columns a
+    lane, a block on 4 adjacent lanes. `rceil`: the RCEIL scale of the stock decode
+    MoE's and the ASM FP4 GEMM's activation quant, else the Triton FP4 GEMM's
     (`mx_scale_round`). `LOAD_GROUP` rounds' loads go out together."""
     s, tid = c["S"], c["tid"]
     kq = H // 8

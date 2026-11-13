@@ -14,13 +14,13 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import gpu, range_constexpr
 from flydsl.expr.typing import T
 
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ops import (
+from vllm.models.qwen3_5.amd.specialized_decode.mono.common import THREADS, WAVES
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
     CM_NT,
     mfma_bf16,
     rsrc,
     traced,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import THREADS, WAVES
 
 ROWS = 16
 KCH = 128

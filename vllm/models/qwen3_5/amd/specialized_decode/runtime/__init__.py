@@ -13,7 +13,7 @@ states at every KV cache bind (`decode.SpecializedDecode.bind_caches`)."""
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
-from vllm.models.qwen3_5.amd.specialized_decode.wide import layout as L
+from vllm.models.qwen3_5.amd.specialized_decode import layout as L
 
 logger = init_logger(__name__)
 

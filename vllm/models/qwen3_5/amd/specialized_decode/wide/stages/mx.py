@@ -8,7 +8,7 @@ AITER's `per_1x32_f4_quant_hip` (the ASM FP4 GEMM's, and `fused_moe`'s
 input and inter-stage) the smallest power of two at least `amax / 6`
 (`rceil`); the Triton FP4 GEMM's `dynamic_mxfp4_quant` `amax` rounded
 on its top mantissa bits (`+ 0x200000`, the mantissa then dropped) minus 2,
-so values past 6 x scale saturate. `mfma_f4` (`common.ops`) multiplies two
+so values past 6 x scale saturate. `mfma_f4` (`ops`) multiplies two
 16 x 128 operands of such groups: a lane holds row (token) `lane % 16` and
 the 32 values of K block `lane // 16`, the block's scale code in the low byte
 of a register.
@@ -59,28 +59,6 @@ def _pack_f32(word, a, b, scale, byte: int):
             T.i32, word.ir_value(), a.ir_value(), b.ir_value(), scale.ir_value(), byte
         )
     )
-
-
-def _pack_bf16(word, pair, scale, byte: int):
-    v = fx.Vector.from_elements([pair], fx.Int32).bitcast(fx.BFloat16)
-    return fx.Int32(
-        rocdl.cvt_scalef32_pk_fp4_bf16(
-            T.i32, word.ir_value(), v.ir_value(), scale.ir_value(), byte
-        )
-    )
-
-
-def quant_bf16_group(pairs, code):
-    """Sixteen packed bf16 pairs (Int32) of a 32-value group as four Int32 words
-    of e2m1 codes over `scale_value(code)`."""
-    scale = scale_value(code)
-    words = []
-    for w in range(4):
-        word = i32(0)
-        for j in range(4):
-            word = _pack_bf16(word, pairs[4 * w + j], scale, j)
-        words.append(word)
-    return words
 
 
 def quant_f32_word(values, scale):

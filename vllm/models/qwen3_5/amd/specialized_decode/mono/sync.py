@@ -8,19 +8,21 @@ between GPUs (system scope), every address a named region (`Addr`)."""
 
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass
+from enum import Enum
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
-from vllm.models.qwen3_5.amd.specialized_decode.mono.abi import (
+from vllm.models.qwen3_5.amd.specialized_decode.abi import (
     FAILED,
     RECORD_WORDS,
-    WAIT_SECONDS,
+    WAIT_TICKS,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ops import (
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
     CM_DEV,
     CM_SYS,
     bf16_pair,
@@ -28,11 +30,24 @@ from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ops import (
     rsrc,
     traced,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import Space
 
 POLL_MAX = 12  # mailbox specs polled per batch (bounds live registers)
 
-WAIT_TICKS = WAIT_SECONDS * 100_000_000  # s_memrealtime ticks at 100 MHz
+
+class Space(Enum):
+    SCRATCH = "scratch"  # this GPU's memory: device-scope hand-off between CTAs
+    PEER = "peer"  # a peer-symmetric region: system-scope hand-off between GPUs
+
+
+def region_id(name: str) -> int:
+    """A mailbox region's id in a wait record: its name's CRC-32 (31 bits), the
+    same in every kernel and table that names it."""
+    return zlib.crc32(name.encode()) & 0x7FFFFFFF
+
+
+def region_ids(names) -> dict[str, int]:
+    """Name -> `region_id`: a `Mailbox`'s table."""
+    return {n: region_id(n) for n in names}
 
 
 @traced

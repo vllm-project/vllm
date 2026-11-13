@@ -12,16 +12,10 @@ GEMM, whose last arriving unit pushes it), a line eight tokens of one group,
 a multiple of eight ends each group with a partial line: only its rows'
 tokens are stored and read, at the same addresses as in a whole line.
 
-An exchange's `mode`:
-
-- `sum` (one-shot, up to `ONE_SHOT_MAX` rows): every rank pushes every
-  group to every rank; a reader adds the ranks' copies in rank order. Every
-  link carries the whole tensor, one hop.
-- `scatter` then `gather` (two-shot, wider steps): group `g`'s owner
-  is rank `g // OWNED`; every rank pushes `g` to its owner only, the
-  owner adds the copies in rank order (`reduce_lines`) and pushes the sum,
-  rounded to bf16, to every rank. A link carries an eighth of the tensor
-  each way, two hops.
+Two-shot: group `g`'s owner is rank `g // OWNED`; in the `scatter`
+every rank pushes `g` to its owner only, the owner adds the copies in rank
+order (`reduce_lines`) and pushes the sum, rounded to bf16, to every rank in
+the `gather`. A link carries an eighth of the tensor each way, two hops.
 
 After its payload a wave drains its stores and sets the line's flag to the
 use's tag in each destination's mailbox; a reader polls the flags of the lines
@@ -29,7 +23,7 @@ it needs and gates its payload loads on them.
 
 A rank's mailbox (uncached, peer-mapped): a region per (exchange kind of a
 layer, mode, layer parity), a row per source rank in each, sized for the
-widest step the mode serves: payload, then one flag a line at a fixed offset,
+widest step: payload, then one flag a line at a fixed offset,
 so a flag word only ever holds a tag. A tag carries the step's epoch, so a
 flag of an earlier step, or of another width's layout, never passes. A rank
 can be at most one layer ahead of a peer, so a region is never rewritten
@@ -41,13 +35,14 @@ from __future__ import annotations
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
 
-from vllm.models.qwen3_5.amd.specialized_decode.wide.abi import SITE_PEER, WAIT_TICKS
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
-    TraceInvariant,
-    failed,
-    give_up,
+from vllm.models.qwen3_5.amd.specialized_decode.abi import SITE_PEER, WAIT_TICKS
+from vllm.models.qwen3_5.amd.specialized_decode.layout import (
+    HIDDEN,
+    MAX_TOKENS,
+    TP,
+    WAVES,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
     CM_SYS,
     drain_stores,
     ld,
@@ -60,20 +55,18 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
     traced,
     unpack_bf16x8,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.wide.layout import (
-    HIDDEN,
-    MAX_TOKENS,
-    TP,
-    WAVES,
+from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import (
+    TraceInvariant,
+    failed,
+    give_up,
 )
 
 COLS = 64  # columns of a line group
 TOKENS = 8  # tokens of a line
 LINE_DWORDS = 256  # a bf16 line
 GROUPS = HIDDEN // COLS  # 128
-OWNED = GROUPS // TP  # groups a rank owns in a two-shot exchange: 16
-ONE_SHOT_MAX = 16  # widest step whose exchanges are one-shot
-MODES = ("sum", "scatter", "gather")
+OWNED = GROUPS // TP  # groups a rank owns: 16
+MODES = ("scatter", "gather")
 KINDS = 2  # a layer's exchanges: the attention / GDN output, the MLP's
 PARITIES = 2
 
@@ -82,52 +75,22 @@ def lines_per_group(rows: int) -> int:
     return -(-rows // TOKENS)
 
 
-def one_shot(rows: int) -> bool:
-    return rows <= ONE_SHOT_MAX
-
-
-def _area_groups(mode: str) -> int:
-    """Groups of a source row: every group (sum), the owned ones (two-shot)."""
-    return GROUPS if mode == "sum" else OWNED
-
-
-def _area_rows(mode: str) -> int:
-    return ONE_SHOT_MAX if mode == "sum" else MAX_TOKENS
-
-
-def payload_words(mode: str) -> int:
-    return _area_groups(mode) * lines_per_group(_area_rows(mode)) * LINE_DWORDS
-
-
-def flag_words(mode: str) -> int:
-    return _area_groups(mode) * lines_per_group(_area_rows(mode))
-
-
-def row_words(mode: str) -> int:
-    """A source rank's row of a region: payload, flags, padded to 64 dwords."""
-    return (payload_words(mode) + flag_words(mode) + 63) // 64 * 64
-
-
-def _region_words(mode: str, tp: int) -> int:
-    return tp * row_words(mode)
+PAYLOAD_WORDS = OWNED * lines_per_group(MAX_TOKENS) * LINE_DWORDS
+FLAG_WORDS = OWNED * lines_per_group(MAX_TOKENS)
+# a source rank's row of a region: payload, flags, padded to 64 dwords
+ROW_WORDS = (PAYLOAD_WORDS + FLAG_WORDS + 63) // 64 * 64
 
 
 def region_base(kind: int, mode: str, parity, tp: int = TP):
     """Word offset of region (kind, mode, parity) in a mailbox; `parity` may
     be traced."""
-    base = 0
-    for k in range(KINDS):
-        for m in MODES:
-            if k == kind and m == mode:
-                return fx.Int32(base) + fx.Int32(parity) * fx.Int32(
-                    _region_words(m, tp)
-                )
-            base += PARITIES * _region_words(m, tp)
-    raise ValueError((kind, mode))
+    region = tp * ROW_WORDS
+    index = (kind * len(MODES) + MODES.index(mode)) * PARITIES
+    return fx.Int32(index * region) + fx.Int32(parity) * fx.Int32(region)
 
 
 def mailbox_words(tp: int = TP) -> int:
-    return KINDS * PARITIES * sum(_region_words(m, tp) for m in MODES)
+    return KINDS * len(MODES) * PARITIES * tp * ROW_WORDS
 
 
 def mailbox_bytes(tp: int = TP) -> int:
@@ -149,8 +112,8 @@ class Exchange(TraceInvariant):
     ):
         if mode not in MODES:
             raise ValueError(f"exchange mode {mode!r}: one of {MODES}")
-        if rows > _area_rows(mode):
-            raise ValueError(f"{rows} rows past the {mode} region's")
+        if rows > MAX_TOKENS:
+            raise ValueError(f"{rows} rows past the regions' {MAX_TOKENS}")
         self.bases, self.own, self.rank, self.tp = (
             bases,
             fx.Int64(own),
@@ -162,19 +125,17 @@ class Exchange(TraceInvariant):
         self.tag = fx.Int32(tag)
         self.lpg = lines_per_group(rows)
         self.partial = rows % TOKENS != 0
-        self.row_words = row_words(mode)
-        self.flags_at = payload_words(mode)
 
     def _row(self, src):
-        return self.region + fx.Int32(src) * fx.Int32(self.row_words)
+        return self.region + fx.Int32(src) * fx.Int32(ROW_WORDS)
 
     def line(self, group, blk):
         """The (group, token block) line's index in a source row."""
-        local = group if self.mode == "sum" else fx.Int32(group) % fx.Int32(OWNED)
-        return fx.Int32(local) * fx.Int32(self.lpg) + blk
+        local = fx.Int32(group) % fx.Int32(OWNED)
+        return local * fx.Int32(self.lpg) + blk
 
     def flag_index(self, src, group, blk):
-        return self._row(src) + fx.Int32(self.flags_at) + self.line(group, blk)
+        return self._row(src) + fx.Int32(PAYLOAD_WORDS) + self.line(group, blk)
 
     def _word(self, group, token):
         blk = fx.Int32(token) // fx.Int32(TOKENS)
@@ -214,7 +175,7 @@ class Exchange(TraceInvariant):
 
     def flag(self, group, blk):
         """Lane 0's flag of line `blk` of `group`, after the drain."""
-        at = self._row(self.rank) + fx.Int32(self.flags_at) + self.line(group, blk)
+        at = self._row(self.rank) + fx.Int32(PAYLOAD_WORDS) + self.line(group, blk)
         for base, to in self.dests(group):
             if const_expr(to is None):
                 st(base, at, self.tag, cm=CM_SYS)

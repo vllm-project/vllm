@@ -10,8 +10,8 @@ from typing import NamedTuple
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.qwen3_5.amd.specialized_decode import layout as L
 from vllm.models.qwen3_5.amd.specialized_decode.runtime import NAME
-from vllm.models.qwen3_5.amd.specialized_decode.wide import layout as L
 
 FP4 = (torch.uint8, torch.float4_e2m1fn_x2)
 
@@ -313,8 +313,8 @@ def cache_reasons(model, tp: int) -> list[str]:
 
 class FailStop:
     """Stops every TP rank at the same step once any of them gave up an in-kernel
-    wait (a FAILED health word: the wide launches', `wide.abi`, and the
-    split widths' `layer_block`'s, `mono.abi`). Each step queues a D2H copy of
+    wait (a FAILED health word, `abi`: the wide launches' and the split
+    widths' `layer_block`'s). Each step queues a D2H copy of
     this rank's word and keeps the newest copy that has landed, without blocking;
     every CHECK_EVERY steps the ranks agree on those over the TP CPU group and all
     raise together. A rank that raised alone would leave the others in the next

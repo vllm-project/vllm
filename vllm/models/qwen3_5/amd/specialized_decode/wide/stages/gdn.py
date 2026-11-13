@@ -26,9 +26,10 @@ every row of the step.
   two K slices a 64-column group, folded by the group's last arriver, which
   pushes the group to the TP exchange.
 
-Up to `tiled.RESIDENT_MAX` rows (and a bf16 `out_proj`) the three are one
-phase: the projection's outputs and the recurrence's reach their consumers as
-tagged pairs (`tagged`) instead of through grid barriers.
+Up to `tiled.RESIDENT_MAX` rows (the split launch, `layout.SPLIT_MAX`) the
+projection and the recurrence are one phase: the projection's outputs reach
+the recurrence as tagged pairs (`tagged`) instead of through a grid
+barrier; `out` runs only past it, in the MLP half's launch below.
 """
 
 from __future__ import annotations
@@ -38,12 +39,22 @@ import math
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
 
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import TraceInvariant
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
+from vllm.models.qwen3_5.amd.specialized_decode.layout import (
+    BA,
+    BLOCKS,
+    CONV_DIM,
+    GDN_DK,
+    GDN_DV,
+    HIDDEN,
+    KEY_DIM,
+    NK,
+    NV,
+    QKVZ,
+    VALUE_DIM,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
     CM_DEV,
     CM_NT,
-    _permlane_swap,
-    _xshfl,
     bf16_round,
     bf_hi,
     bf_lo,
@@ -57,6 +68,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
     lds_st,
     pack_bf16,
     pack_bf16x8,
+    permlane_swap,
     rsqrt,
     sigmoid,
     silu,
@@ -65,20 +77,9 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
     traced,
     uniform,
     unpack_bf16x8,
+    xshfl,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.wide.layout import (
-    BA,
-    BLOCKS,
-    CONV_DIM,
-    GDN_DK,
-    GDN_DV,
-    HIDDEN,
-    KEY_DIM,
-    NK,
-    NV,
-    QKVZ,
-    VALUE_DIM,
-)
+from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import TraceInvariant
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import exchange as ex_
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import (
     mx,
@@ -95,9 +96,6 @@ L2_EPS = 1e-6  # the in-kernel q / k L2 norm's
 # widths past tiled.RESIDENT_MAX up to which a projection group's conv loads
 # are issued by its last arriver alone
 CONV_LATE_ROWS = 48
-# the out_proj input's format; "bf16_h32": Hadamard-rotated bf16 rows, for an
-# MXFP4 out_proj that quantizes them itself (``LayerBuild.split``)
-CORE_MODES = ("bf16", "bf16_h32", "mxfp4", "mxfp4_h32", "mxfp4_t", "mxfp4_h32_t")
 
 
 def proj_plan():
@@ -173,9 +171,8 @@ def proj(g, gemm, w, b, rows: int, fold0: int, pending=None, tag=None):
     rows `x4` / `x4s`), `qkv`, `z`, `ba` (partials), `part`,
     `st_idx`, `conv_state` (a slot [3, CONV_DIM] bf16, slots
     `conv_stride` elements apart). Fold counters `fold0 ..`.
-    `pending`: the first unit's weights, at the resident widths
-    `proj_issue`'s, else the CTA's `tiled.unit_preload` of
-    `proj_weights`. With `tag` (resident widths) the outputs are tagged
+    `pending`: the first unit's weights (`proj_issue`'s), or None.
+    With `tag` (resident widths) the outputs are tagged
     pairs the recurrence polls, with no grid barrier between: `qkv` holds
     `[rows, QKVZ / 2]` (bf16 pair, tag) pairs, z included, `ba` the
     partials' (value, tag) pairs."""
@@ -262,8 +259,8 @@ def _proj_streamed(g, gemm, w, b, rows: int, fold0: int, pending):
         epilogue(unit, split, first_row, lane, acc)
         stage(first_row, lane)
 
-    # the staged loads are the CTA's one unit's (its one weight tile)
-    assert late or (plan.units <= BLOCKS and plan.mtiles == 1), plan.units
+    # the staged loads are the CTA's one unit's
+    assert late or plan.units <= BLOCKS, plan.units
     tiled.gemm_units(
         g.bid,
         BLOCKS,
@@ -465,20 +462,19 @@ def recur_first(g, b, rows: int):
 
 
 @traced
-def recur(
-    g, w, b, lds, rows: int, eps: float, core: str, h=None, tag=None, tag_core=True
-):
+def recur(g, w, b, lds, rows: int, eps: float, core: str, h=None, tag=None):
     """`w`: `a_log` (f32), `dt_bias` (bf16), `norm` ([GDN_DV] bf16);
     `b`: `qkv`, `z`, `ba` (partials), `st_idx`, `ssm` (a slot [NV,
     DV, DK] f32, slots `ssm_stride` apart), `core` ([rows, VALUE_DIM]
     bf16, or for `core` "mxfp4*" the codes with `core_s` the scale
     words); `lds`: `recur_lds_words()` f32 words. CTA `bid` takes
     units (row, value head) `bid, bid + BLOCKS, ..`, the next unit's state
-    loads in flight while one computes. With `tag` (resident widths, bf16
-    core) the projection's outputs are tagged pairs (`proj`) and `core`
-    is published as (bf16 pair, tag) pairs, unless `tag_core` is False (a
-    plain `core` another launch reads). `h`: the first unit's state
-    loads (`recur_first`), or None."""
+    loads in flight while one computes. With `tag` (resident widths) the
+    projection's outputs are tagged pairs (`proj`). `core`: its format,
+    "bf16", "bf16_h32" (Hadamard-rotated bf16 rows, for an MXFP4 out_proj
+    that quantizes them itself), "mxfp4" or "mxfp4_h32", "_t" for the
+    Triton GEMM's quantization. `h`: the first unit's state loads
+    (`recur_first`), or None."""
     kq = g.lane % 32
     k0 = kq * 4
     rp = g.lane // 32
@@ -503,7 +499,7 @@ def recur(
             if g.tid < GDN_DV:
                 lds_st(lds + Y_AT + g.tid, fx.Float32(0.0))
             fx.barrier()
-        publish(g, b, lds, row, vh, core, tag if tag_core else None)
+        publish(g, b, lds, row, vh, core)
         h = nxt
         fx.barrier()
 
@@ -595,13 +591,13 @@ def _halve(v, lane):
         for j in range(n):
             keep = hi.select(v[j + n], v[j])
             send = hi.select(v[j], v[j + n])
-            out.append(keep + _xshfl(send, level))
+            out.append(keep + xshfl(send, level))
         v = out
-    return v[0] + _xshfl(v[0], 1)
+    return v[0] + xshfl(v[0], 1)
 
 
 def _permlane16(x, y):
-    a, b = _permlane_swap(16, x.bitcast(fx.Int32), y.bitcast(fx.Int32))
+    a, b = permlane_swap(16, x.bitcast(fx.Int32), y.bitcast(fx.Int32))
     return a.bitcast(fx.Float32), b.bitcast(fx.Float32)
 
 
@@ -653,9 +649,9 @@ def head(g, nw, h, hb, at, q, k, lds, rp, kq, eps):
 
 
 @traced
-def publish(g, b, lds, row, vh, core: str, tag):
+def publish(g, b, lds, row, vh, core: str):
     """The head's 128 gated-norm outputs (`Y_AT`) to `core`: bf16 (a
-    thread four, or with `tag` as tagged pairs), or for an MXFP4
+    thread four), or for an MXFP4
     `out_proj` a thread a 32-group rounded to bf16 (the stock norm's
     output), Hadamard-rotated for "mxfp4_h32" (rounded again), quantized
     (`mx.scale_code`; "_t": as the Triton FP4 GEMM does); "bf16_h32"
@@ -666,10 +662,7 @@ def publish(g, b, lds, row, vh, core: str, tag):
             ys = lds_ld(lds + Y_AT + g.tid * 4, 4, fx.Float32)
             words = [pack_bf16(ys[0], ys[1]), pack_bf16(ys[2], ys[3])]
             first = (row * VALUE_DIM + vh * GDN_DV) // 2 + g.tid * 2
-            if const_expr(tag is None):
-                st(b.core, first, fx.Vector.from_elements(words, fx.Int32), CM_DEV)
-            else:
-                tagged.put(b.core, first, words, tag)
+            st(b.core, first, fx.Vector.from_elements(words, fx.Int32), CM_DEV)
     elif const_expr(core == "bf16_h32"):
         if g.tid < GDN_DV // mx.GROUP:
             vals = []
@@ -730,12 +723,10 @@ def out_weights(w_out, w_out_s, fmt: str, shuffled: bool, k: int = VALUE_DIM):
     return tiled.Fp4Weights(w_out, w_out_s, HIDDEN, k, shuffled)
 
 
-def out(g, gemm, weights, source, part, tile, xch, k: int, fold0: int, pending=None):
+def out(g, gemm, weights, source, part, tile, xch, k: int, fold0: int):
     """`source @ weights.T` (K = `k`) to the exchange `xch`: each
     64-column group's last arriving unit sums its slices into the LDS
-    `tile` and pushes the group's lines. `pending`: the first unit's
-    weights, at the resident widths `tiled.issue_unit`'s of `weights` and
-    `out_plan(k)`, else the CTA's `tiled.unit_preload` of them."""
+    `tile` and pushes the group's lines."""
     plan = out_plan(k)
 
     def finish(group, first, lane, acc):
@@ -747,6 +738,4 @@ def out(g, gemm, weights, source, part, tile, xch, k: int, fold0: int, pending=N
         fx.barrier()
 
     epilogue, after = tiled.fold(g, gemm, plan, part, fold0, finish, done)
-    tiled.gemm_units(
-        g.bid, BLOCKS, gemm, source, weights, plan, epilogue, after, pending=pending
-    )
+    tiled.gemm_units(g.bid, BLOCKS, gemm, source, weights, plan, epilogue, after)

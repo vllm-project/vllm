@@ -1,17 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from the Kimi-K3 decode's ``mono/common/plan.py`` (after ROCm/ATOM
-# a526f0d, MIT License, Copyright (C) 2026, Advanced Micro Devices, Inc.).
-"""A kernel build's parameters, all of them in FlyDSL's JIT cache key, and a
-kernel's argument list, named once.
+# Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM) at a526f0d, MIT License,
+# Copyright (C) 2026, Advanced Micro Devices, Inc.:
+# atom/mono/plan/build_key.py
+# atom/mono/runtime/abi.py
+"""What the kernels and the host share: the health words, a build's JIT
+cache key and a kernel's argument list.
+
+A rank's health words: word FAILED is set once any in-kernel wait of the rank
+gave up (sticky: its later waits exit at once, so a failed step runs to its
+end), then a record a CTA of the first wait it gave up on: flag, the wide
+kernels' site (`SITE_*`) or `mono`'s mailbox region id and pair index, the
+counter or tag seen, the target, CTA, clock.
+
+The output rank's flags: one int32 word a TP rank in the first PEER_HEAD bytes
+of rank 0's peer buffer. A rank whose wait gives up raises its word there and
+drains the store before it sets FAILED. `runtime.guards.FailStop` reads
+them after every step.
 
 FlyDSL keys a compiled kernel by the scalars its launcher's closures capture;
 a parameter used only by build-time Python would not be keyed, and two builds
-differing only there would share one binary. So a build's parameters are one
-frozen dataclass of scalars, `key_tuple` turns it into one (name, value)
-tuple, and the launcher references that tuple. The tuple also carries the
-digest of the kernel sources (`source_digest`): FlyDSL does not reach every
-helper's source when it hashes a kernel.
+differing only there would share one binary (every TP rank once ran rank 3's
+kernel that way). So a build's parameters are one frozen dataclass of
+scalars, `key_tuple` turns it into one (name, value) tuple, and the launcher
+references that tuple. The tuple also carries the digest of the kernel
+sources (`source_digest`): FlyDSL does not reach every helper's source when it
+hashes a kernel.
 
 A FlyDSL kernel and its launcher each spell out their positional parameters
 and the host passes them by position, so `KernelAbi` is the one list of
@@ -25,13 +39,30 @@ import inspect
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+RECORD_WORDS = 8
+FAILED = 0
+PEER_HEAD = 256  # bytes: the output rank's flags, a word a rank
+WAIT_SECONDS = 10  # an in-kernel wait gives up after this long
+WAIT_TICKS = WAIT_SECONDS * 100_000_000  # s_memrealtime ticks at 100 MHz
+
+# the wide kernels' wait sites a record names
+SITE_GRID = 1  # a grid barrier
+SITE_PEER = 2  # a TP exchange line
+SITE_FOLD = 3  # a split-K fold's arrival count
+
+
+def health_words(ctas: int) -> int:
+    """A rank's health words for a grid of `ctas`: the header, a record a CTA."""
+    return (ctas + 1) * RECORD_WORDS
+
+
 _SCALARS = (int, float, bool, str, enum.Enum)
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parent
 
 
 @functools.cache
 def source_digest() -> str:
-    """sha256 of every `.py` file of the `wide` package, path and contents."""
+    """sha256 of every `.py` file of the package, path and contents."""
     h = hashlib.sha256()
     for f in sorted(_ROOT.rglob("*.py")):
         h.update(str(f.relative_to(_ROOT)).encode())
@@ -56,6 +87,8 @@ def key_tuple(key) -> tuple:
 
 
 def _python_params(fn) -> tuple[str, ...]:
+    """Parameter names of a `@flyc.kernel` / `@flyc.jit` object's Python
+    function (FlyDSL keeps it as `_func` / `func`)."""
     py = getattr(fn, "func", None) or getattr(fn, "_func", None)
     if py is None:
         raise TypeError(f"no Python function behind {fn!r}")

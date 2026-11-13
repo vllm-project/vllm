@@ -17,19 +17,15 @@ from __future__ import annotations
 
 import flydsl.expr as fx
 
-from vllm.models.qwen3_5.amd.specialized_decode.wide.abi import SITE_FOLD, WAIT_TICKS
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
-    failed,
-    give_up,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
+from vllm.models.qwen3_5.amd.specialized_decode.abi import SITE_FOLD, WAIT_TICKS
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
     CM_DEV,
     ld,
     memrealtime,
     st,
     traced,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import tiled
+from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import failed, give_up
 
 
 def i32(v):
@@ -95,20 +91,3 @@ def poll(g, specs, tag):
             i += 1
         out.append(words)
     return out
-
-
-class Pairs(tiled.Source):
-    """GEMM activations published as (bf16 pair, tag) pairs, a `[tokens, ld /
-    2]` pair matrix at `addr`: a resident stage's items of a thread are
-    polled together (`tiled.Gemm.fill_resident`)."""
-
-    def __init__(self, g, addr, ld_elems: int, tag):
-        self.g, self.addr, self.ld, self.tag = g, fx.Int64(addr), ld_elems, tag
-
-    def issue_batch(self, coords):
-        firsts = [(token * i32(self.ld) + k) // i32(2) for token, k in coords]
-        got = poll(self.g, [(self.addr, f, 4) for f in firsts], self.tag)
-        return [[fx.Vector.from_elements(w, fx.Int32)] for w in got]
-
-    def convert(self, raw):
-        return raw[0]

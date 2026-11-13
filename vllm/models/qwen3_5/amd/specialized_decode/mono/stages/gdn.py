@@ -33,24 +33,9 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 
-from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as L
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ops import (
-    bf16_round,
-    bf_hi,
-    bf_lo,
-    butterfly,
-    hw_exp2,
-    hw_rsq,
-    ld_i32,
-    row_sum,
-    rsrc,
-    traced,
-    uniform,
-    wave_sum,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import (
-    BLOCKS,
-)
+from vllm.models.qwen3_5.amd.specialized_decode import layout as L
+from vllm.models.qwen3_5.amd.specialized_decode.mono import mx_layout as QL
+from vllm.models.qwen3_5.amd.specialized_decode.mono.common import BLOCKS, row_sum
 from vllm.models.qwen3_5.amd.specialized_decode.mono.stages import gemv
 from vllm.models.qwen3_5.amd.specialized_decode.mono.stages.moe import (
     f32_of,
@@ -59,11 +44,24 @@ from vllm.models.qwen3_5.amd.specialized_decode.mono.stages.moe import (
     tiled,
     tok,
 )
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
+    bf16_round,
+    bf_hi,
+    bf_lo,
+    butterfly,
+    hw_exp2,
+    hw_rsq,
+    ld_i32,
+    rsrc,
+    traced,
+    uniform,
+    wave_sum,
+)
 
-ROWS, HD = L.ROWS, L.HD
+ROWS, HD = QL.ROWS, L.GDN_DK
 VCH = 16  # state rows a GDN task
 NVCH = HD // VCH  # 8
-SL = L.CONV_W - 1  # conv state entries (no spec decode)
+SL = L.CONV_TAPS - 1  # conv state entries (no spec decode)
 SOFTPLUS_THRESHOLD = 20.0
 # rounds from which a CTA polls each hand-off for all its rounds at once
 BATCH_ROUNDS = 4

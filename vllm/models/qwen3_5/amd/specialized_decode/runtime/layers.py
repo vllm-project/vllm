@@ -5,7 +5,7 @@ kernels' arguments out (`Launcher`), and `attention_core`, the part of a
 full-attention layer that stays vLLM's (q / k norms, RoPE and the attention on
 the qkv rows the previous launch projected).
 
-Up to `K.SPLIT_MAX` rows a layer's MLP half is `mono.blocks.layer_block`
+Up to `L.SPLIT_MAX` rows a layer's MLP half is `mono.blocks.layer_block`
 (`Launcher.mono_layer`) after the layer's split launch (`LayerBuild.split`)
 and the final norm is vLLM's (`gemma_norm`); up to `MONO_GDN_MAX` rows a
 GDN layer whose in_proj_qkvz is plain MXFP4 runs `mono.blocks.gdn_block`
@@ -13,7 +13,7 @@ instead of its split launch (`Launcher.mono_gdn`).
 
 `Launcher` holds the per-rank state every launch reads: the scratch every
 width shares (launches of a step run in order), the two barrier slots the
-launches of a step alternate (`wide.common.grid`), the fold counters, the
+launches of a step alternate (`wide.grid`), the fold counters, the
 step epoch (bumped once a step; a CUDA graph captures the bump, and the TP
 exchange and tagged hand-off tags carry it), the health words and the peer
 mailboxes of the TP exchange."""
@@ -22,6 +22,8 @@ import torch
 
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
+from vllm.models.qwen3_5.amd.specialized_decode import layout as L
+from vllm.models.qwen3_5.amd.specialized_decode.abi import PEER_HEAD, health_words
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
     checked_format,
     experts_rip,
@@ -30,12 +32,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
     router_gate,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.wide import layer as K
-from vllm.models.qwen3_5.amd.specialized_decode.wide import layout as L
-from vllm.models.qwen3_5.amd.specialized_decode.wide.abi import (
-    PEER_HEAD,
-    health_words,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
+from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import (
     FOLD_BASE,
     SLOT_WORDS,
     SLOTS,
@@ -101,7 +98,6 @@ class Launcher:
         self.peer_table = torch.zeros(L.TP, dtype=torch.int64, device=dev)
         self.peer_table[:tp] = self.peers.addresses + PEER_HEAD
         self.alarm = int(self.peers.addresses[0].item()) + 4 * rank
-        self.flags = self.peers.bytes[: 4 * tp].view(torch.int32)
         base = self.sync.data_ptr()
         self.slots = tuple(base + 4 * SLOT_WORDS * i for i in range(SLOTS))
         self.folds = base + 4 * FOLD_BASE
@@ -111,7 +107,7 @@ class Launcher:
         )
         self.args = [self._static_args(i) for i in range(len(model.layers))]
         self.launches = len(model.layers)
-        self.split_widths = tuple(s for s in widths if s <= K.SPLIT_MAX)
+        self.split_widths = tuple(s for s in widths if s <= L.SPLIT_MAX)
         # the wide launches of a step at each width (their barrier slots)
         self.launch_count = {}
         for s in widths:
@@ -124,17 +120,14 @@ class Launcher:
 
     def _init_split(self, group, dev) -> None:
         """The state of the split widths' `layer_block` launches: its scratch
-        a width, its peer buffer and health words (`mono.abi`), and the
+        a width, its peer buffer and health words (`abi`), and the
         hand-off rows between the launches (`h` the MLP half's output,
         `res` the residual, `core` the GDN launch's)."""
-        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
-        from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as ML
-        from vllm.models.qwen3_5.amd.specialized_decode.mono.abi import (
+        from vllm.models.qwen3_5.amd.specialized_decode.abi import (
             PEER_HEAD as MONO_HEAD,
         )
-        from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import (
-            HEALTH_WORDS,
-        )
+        from vllm.models.qwen3_5.amd.specialized_decode.mono import blocks
+        from vllm.models.qwen3_5.amd.specialized_decode.mono.common import HEALTH_WORDS
         from vllm.models.qwen3_5.amd.specialized_decode.runtime.peer import PeerBuffer
 
         def nbytes(s: int) -> int:
@@ -147,7 +140,7 @@ class Launcher:
         }
         self.mono_health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device=dev)
         self.mono_peers = PeerBuffer(
-            MONO_HEAD + blocks.peer_bytes(ML.MAX_TOKENS),
+            MONO_HEAD + blocks.peer_bytes(L.SPLIT_MAX),
             group,
             self.rank,
             self.tp,
@@ -156,8 +149,8 @@ class Launcher:
         self.mono_peers.bytes.zero_()
         self.mono_peer_table = self.mono_peers.addresses + MONO_HEAD
         self.mono_alarm = int(self.mono_peers.addresses[0].item()) + 4 * self.rank
-        if self.rip != ML.RIP:
-            raise ValueError(f"experts of {self.rip} rows a rank ({ML.RIP} only)")
+        if self.rip != L.RI:
+            raise ValueError(f"experts of {self.rip} rows a rank ({L.RI} only)")
         n = max(self.split_widths)
         bf = torch.bfloat16
         self.h = torch.empty(n, L.HIDDEN, dtype=bf, device=dev)
@@ -254,7 +247,7 @@ class Launcher:
         """Layer `i`'s build at `rows`."""
         layers = self.model.layers
         layer = layers[i]
-        if rows <= K.SPLIT_MAX:
+        if rows <= L.SPLIT_MAX:
             return self._split_key(i, rows)
         nxt = layers[i + 1] if i + 1 < len(layers) else None
         next_q4 = "none"
@@ -299,7 +292,6 @@ class Launcher:
                 tp=self.tp,
                 eps=eps,
                 trace=self.traced,
-                split=True,
             )
         g = layer.linear_attn
         qkvz, out = checked_format(g.in_proj_qkvz), checked_format(g.out_proj)
@@ -317,7 +309,6 @@ class Launcher:
             eps=eps,
             gdn_eps=g.norm.eps,
             trace=self.traced,
-            split=True,
         )
 
     def mono_key(self, i: int, rows: int):

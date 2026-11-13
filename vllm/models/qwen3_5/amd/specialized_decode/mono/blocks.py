@@ -35,35 +35,20 @@ import torch
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64
 
-from vllm.models.qwen3_5.amd.specialized_decode.mono import layout as L
-from vllm.models.qwen3_5.amd.specialized_decode.mono import mx_layout as QL
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.debug import region_ids
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ops import (
-    CM_DEV,
-    bf16_round,
-    ld_i32,
-    load_ptr64,
-    row_sum,
-    traced,
-    uniform,
+from vllm.models.qwen3_5.amd.specialized_decode import layout as L
+from vllm.models.qwen3_5.amd.specialized_decode.abi import (
+    KernelAbi,
+    key_tuple,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.plan import (
+from vllm.models.qwen3_5.amd.specialized_decode.mono import mx_layout as QL
+from vllm.models.qwen3_5.amd.specialized_decode.mono.common import (
     BLOCKS,
     THREADS,
     WAVES,
-    KernelAbi,
-    key_tuple,
     pair_layout,
-    source_digest,
+    peer_bases,
+    row_sum,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.ranks import peer_bases
-from vllm.models.qwen3_5.amd.specialized_decode.mono.common.sync import (
-    Mailbox,
-    preg,
-    shift,
-    sreg,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.mono.layout import need
 from vllm.models.qwen3_5.amd.specialized_decode.mono.stages import gdn as G
 from vllm.models.qwen3_5.amd.specialized_decode.mono.stages import gemv, moe
 from vllm.models.qwen3_5.amd.specialized_decode.mono.stages import norm as N
@@ -77,11 +62,30 @@ from vllm.models.qwen3_5.amd.specialized_decode.mono.stages.moe import (
     step_tag,
     xq_scales,
 )
+from vllm.models.qwen3_5.amd.specialized_decode.mono.sync import (
+    Mailbox,
+    preg,
+    region_ids,
+    shift,
+    sreg,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
+    CM_DEV,
+    bf16_round,
+    ld_i32,
+    ld_ptr64,
+    traced,
+    uniform,
+)
 
-H, ROWS, HD, TP = L.HIDDEN, L.ROWS, L.HD, L.TP
-E, TOPK, EPR = L.E, L.TOPK, L.EPR
+H, ROWS, HD, TP = L.HIDDEN, QL.ROWS, L.GDN_DK, L.TP
+E, TOPK = L.EXPERTS, L.TOPK
+EPR = E // TP  # router logits a rank computes: 64
+RIP = L.RI  # the experts' intermediate rows as the weights hold them
+MOE = QL.MoeDims(H, L.RI, RIP)
+GDN = QL.GdnDims(L.NK, L.NV, L.QKVZ)
 KT = TOPK + 1  # picks a token: the top-10 and the fused shared expert
-MAXT = L.MAX_TOKENS
+MAXT = L.SPLIT_MAX
 NRED = N.NRED  # 64: the norm / final tasks, CTAs 0 ..
 OTASKS = H // ROWS  # 512: o_proj / down row groups, bid and bid + 256
 # in_proj_qkvz: row group 255 - bid, and 511 - bid on CTAs QQ0 ..
@@ -108,14 +112,21 @@ LAYER_XQ_MIN = 5
 # last round (needs the fused shared expert's tasks first: ``ps``)
 SPLIT_MIN = 8
 # mailbox tag slots: gdn ``layer``, layer LAYER_SLOT + ``layer``
-LAYER_SLOT = L.MAX_LAYERS
+LAYER_SLOT = moe.TAG_SLOTS // 2
 
 assert SPLIT_MIN >= PS_MIN and GDN_LOCAL_MAX < GDN_XQ_MIN
 assert OTASKS == 2 * BLOCKS and BLOCKS < QTASKS <= 2 * BLOCKS
 assert BA_TASKS <= NRED and PS0 + L.RI // moe.UG_COLS <= BLOCKS
-assert LAYER_SLOT + L.MAX_LAYERS <= moe.TAG_SLOTS
+assert L.MAX_LAYERS <= LAYER_SLOT and RIP % 128 == 0
 
 _STREAM = fx.Stream(None)
+
+
+def need(ok: bool, what: str) -> None:
+    """A launch argument check that `python -O` keeps: the kernels read
+    out-of-bounds memory silently where a fault would be wanted."""
+    if not ok:
+        raise ValueError(f"Qwen3.8 specialized decode: {what}")
 
 
 @dataclass(frozen=True)
@@ -266,7 +277,7 @@ def layer_scratch_layout(key: LayerBuild) -> dict:
             "rpart": R_TASKS * s * ROWS,
             "sgate": s,
             "route": s * 2 * TOPK,
-            "inter": s * KT * moe.inter_pairs(L.MOE),
+            "inter": s * KT * moe.inter_pairs(MOE),
         }.items()
     )
     lay |= pair_layout([("xbuf", s * H * 2 // 8)], 16, scratch_bytes(lay))
@@ -305,7 +316,7 @@ def _peers(peers, rank, epoch):
     half = peer_bytes(MAXT) // 2
     par = uniform(ld_i32(epoch, 0)) % 2
     bases = peer_bases(peers, TP)
-    own = load_ptr64(peers, rank)
+    own = ld_ptr64(peers, rank)
     peer = {}
     for region in PEER_REGIONS:
         off = play[region][0]
@@ -383,7 +394,7 @@ def build_gdn(key: GdnBuild):
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
         rs: fx.Array[fx.Float32, 16, 16]
 
-    keyed = key_tuple(key, source_digest())
+    keyed = key_tuple(key)
     name = f"qwen38_sd_gdn_s{s}_f{int(key.first)}_w{int(key.shuffled)}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -423,7 +434,7 @@ def build_gdn(key: GdnBuild):
         mb = Mailbox(step_tag(epoch, layer) - 1, health, alarm, region_ids(scr))
         c = {
             "S": s,
-            "gdn": L.GDN,
+            "gdn": GDN,
             "shuffled": key.shuffled,
             "ba_of": lambda c, t, h: G.ba_sums(c, t, h, BA_PARTS),
             "ba_parts": BA_PARTS,
@@ -610,7 +621,10 @@ def gdn_block(
     )
     need(res_out.shape == rows and res_out.dtype == bf, "res_out: bf16 [S, H]")
     need(ln_w.dtype == bf and ln_w.numel() == H, "input_layernorm weight")
-    need(core.shape == (s, L.CORE) and core.dtype == bf, f"core: bf16 [S, {L.CORE}]")
+    need(
+        core.shape == (s, L.VALUE_DIM) and core.dtype == bf,
+        f"core: bf16 [S, {L.VALUE_DIM}]",
+    )
     need(
         w_qkvz.shape == (L.QKVZ, H // 2)
         and w_qkvz.dtype in (torch.uint8, torch.float4_e2m1fn_x2),
@@ -624,10 +638,13 @@ def gdn_block(
     need(
         w_ba.shape == (L.BA, H) and w_ba.dtype == bf, f"in_proj_ba: bf16 [{L.BA}, {H}]"
     )
-    need(conv_w.numel() == L.CONV * L.CONV_W and conv_w.dtype == bf, "conv1d weight")
     need(
-        conv_state.dtype == bf and conv_state.shape[1:] == (L.CONV, G.SL),
-        f"conv state: bf16 [slots, {L.CONV}, {G.SL}]",
+        conv_w.numel() == L.CONV_DIM * L.CONV_TAPS and conv_w.dtype == bf,
+        "conv1d weight",
+    )
+    need(
+        conv_state.dtype == bf and conv_state.shape[1:] == (L.CONV_DIM, G.SL),
+        f"conv state: bf16 [slots, {L.CONV_DIM}, {G.SL}]",
     )
     need(
         rstate.dtype == torch.float32 and rstate.shape[1:] == (L.NV, HD, HD),
@@ -744,7 +761,7 @@ def build_layer(key: LayerBuild):
     need(1 <= s <= MAXT, f"{s} rows, the kernels take 1..{MAXT}")
     scr = layer_scratch_layout(key)
     max_u = s * TOPK + 1  # distinct experts the step can touch + the fused shared
-    d = L.MOE
+    d = MOE
 
     @fx.struct
     class RouteLds:
@@ -756,7 +773,9 @@ def build_layer(key: LayerBuild):
 
     @fx.struct
     class XLds:
-        xl: fx.Array[fx.Int32, max(_xwords(s), s * (L.CORE + gemv.LDS_PAD) // 2), 16]
+        xl: fx.Array[
+            fx.Int32, max(_xwords(s), s * (L.VALUE_DIM + gemv.LDS_PAD) // 2), 16
+        ]
 
     @fx.struct
     class DownLds:
@@ -773,7 +792,7 @@ def build_layer(key: LayerBuild):
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
         rs: fx.Array[fx.Float32, 16, 16]
 
-    keyed = key_tuple(key, source_digest())
+    keyed = key_tuple(key)
     name = f"qwen38_sd_layer_s{s}_o{int(key.oq)}_a{int(key.og)}_w{int(key.shuffled)}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -880,7 +899,7 @@ def build_layer(key: LayerBuild):
         src = (c["xbuf"], CM_DEV, residual)
         is_r = (bid >= R0) & (bid < RT0)
         is_g = (bid >= RT0) & (bid < RT0 + s)
-        ck = L.CORE
+        ck = L.VALUE_DIM
         # ---- o_proj (both tasks' weights in flight first; a router CTA's
         # router weights behind them), then the AR + residual add + norm sums,
         # the router and the shared gate
@@ -1016,7 +1035,7 @@ def layer_block(
     AITER_MXFP4_MXFP4 backend holds them (shuffled, e8m0 scales), the shared
     expert fused as expert 512."""
     s = key.tokens
-    k = L.CORE
+    k = L.VALUE_DIM
     bf = torch.bfloat16
     fp4s = (torch.uint8, torch.float4_e2m1fn_x2)
     ne = E + 1
@@ -1042,19 +1061,19 @@ def layer_block(
     need(w_gate.shape == (E, H) and w_sg.numel() == H, "router shape")
     need(all(t.dtype == bf for t in (w_gate, w_sg)), "router weights: bf16")
     need(
-        w13.shape == (ne, 2 * L.RIP, H // 2) and w13.dtype in fp4s,
-        f"w13: fp4x2 [{ne}, {2 * L.RIP}, {H // 2}]",
+        w13.shape == (ne, 2 * RIP, H // 2) and w13.dtype in fp4s,
+        f"w13: fp4x2 [{ne}, {2 * RIP}, {H // 2}]",
     )
     need(
-        w2.shape == (ne, H, L.RIP // 2) and w2.dtype in fp4s,
-        f"w2: fp4x2 [{ne}, {H}, {L.RIP // 2}]",
+        w2.shape == (ne, H, RIP // 2) and w2.dtype in fp4s,
+        f"w2: fp4x2 [{ne}, {H}, {RIP // 2}]",
     )
     need(
-        w13s.numel() == ne * 2 * L.RIP * QL.scale_cols(H) and w13s.element_size() == 1,
+        w13s.numel() == ne * 2 * RIP * QL.scale_cols(H) and w13s.element_size() == 1,
         "w13 scales: e8m0, one a 32-block, shuffled",
     )
     need(
-        w2s.numel() == ne * H * QL.scale_cols(L.RIP) and w2s.element_size() == 1,
+        w2s.numel() == ne * H * QL.scale_cols(RIP) and w2s.element_size() == 1,
         "w2 scales: e8m0, one a 32-block, shuffled (K blocks padded to 8)",
     )
     used = [core, gate, residual, w_o, w_os, ln_w, w_gate, w_sg, w13, w13s, w2, w2s]

@@ -13,11 +13,9 @@ full-attention layer after vLLM's attention (`LayerBuild.kind`):
           -> the MLP half as above
 
 Phases are separated by grid barriers; an exchange's readers wait on its line
-flags instead. Up to `tiled.RESIDENT_MAX` rows GDN proj -> recurrence ->
-out_proj is one phase: their hand-offs are tagged pairs (`stages.tagged`).
-A launch reads the residual and the normed rows `x` the previous one left in
-its scratch and leaves the next ones there; the step's last leaves the final
-norm's rows in `x`.
+flags instead. A launch reads the residual and the normed rows `x` the
+previous one left in its scratch and leaves the next ones there; the step's
+last leaves the final norm's rows in `x`.
 
 Up to `SPLIT_MAX` rows a layer is two launches (`LayerBuild.split`), its
 MLP half `mono.blocks.layer_block` (out_proj / o_proj -> all-reduce ->
@@ -28,6 +26,9 @@ barriers) after:
           -> GDN proj + conv -> recurrence + gated norm -> core
     attn  the previous layer's output + residual -> input norm -> qkv_proj
           (then vLLM's attention)
+
+where GDN proj -> recurrence is one phase: its hand-offs are tagged pairs
+(`stages.tagged`).
 """
 
 from dataclasses import dataclass
@@ -38,32 +39,24 @@ import torch
 from flydsl.expr import const_expr
 from flydsl.expr.typing import Int32, Int64
 
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
-    FOLD_COUNTERS,
-    Grid,
-    TraceInvariant,
-    grid_sync,
-    prologue,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
-    ld,
-    ld_ptr64,
-    memrealtime,
-    st,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.plan import (
-    KernelAbi,
-    key_tuple,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.wide.layout import (
+from vllm.models.qwen3_5.amd.specialized_decode.abi import KernelAbi, key_tuple
+from vllm.models.qwen3_5.amd.specialized_decode.layout import (
     ATTN_CORE,
     BLOCKS,
     HIDDEN,
     MAX_TOKENS,
     QKV,
+    SPLIT_MAX,
     THREADS,
     VALUE_DIM,
     WAVES,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.ops import ld, ld_ptr64, memrealtime, st
+from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import (
+    Grid,
+    TraceInvariant,
+    grid_sync,
+    prologue,
 )
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import attn as attn_
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import exchange as ex_
@@ -71,7 +64,6 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import (
     gdn,
     moe,
     norm,
-    tagged,
     tiled,
 )
 
@@ -79,9 +71,8 @@ KINDS = ("gdn", "attn")
 ATTN, MLP = 0, 1  # a layer's two exchanges
 FORMATS = ("bf16", "mxfp4", "mxfp4_h32")  # a GDN projection's weight format
 # fold counter bases: the GDN projection's and out_proj's share a phase
-FOLD_PROJ, FOLD_OUT, FOLD_PIECES = 0, 128, 256
+FOLD_PROJ, FOLD_OUT = 0, 128
 TAG_LAYERS = 256  # tags a step: (layer, use) pairs below it
-SPLIT_MAX = 16  # rows up to which a layer's MLP half is mono.blocks.layer_block
 
 
 def q4_of(fmt: str, shuffled: bool = True):
@@ -108,12 +99,15 @@ class LayerBuild:
     eps: float = 1e-6
     gdn_eps: float = 1e-6
     trace: bool = False  # CTA 0 stamps the clock at every phase end (``phase_names``)
-    # the launch ends at the GDN core (``core_out`` [rows, VALUE_DIM] bf16,
-    # Hadamard-rotated for an "mxfp4_h32" out_proj), or for "attn" at its
-    # qkv_proj (``qkv_out`` in the scratch, of ``w_qkv``); its input combine
-    # adds ``emb`` to ``res_in`` (the first layer: ``emb`` alone), its MXFP4
-    # rows ``first_q4``
-    split: bool = False
+
+    @property
+    def split(self) -> bool:
+        """The launch ends at the GDN core (`core_out` [rows, VALUE_DIM]
+        bf16, Hadamard-rotated for an "mxfp4_h32" out_proj), or for "attn"
+        at its qkv_proj (`qkv_out` in the scratch, of `w_qkv`); its input
+        combine adds `emb` to `res_in` (the first layer: `emb` alone), its
+        MXFP4 rows `first_q4`."""
+        return self.tokens <= SPLIT_MAX
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -127,8 +121,6 @@ class LayerBuild:
         for q in (self.first_q4, self.next_q4):
             if q != "none" and q not in norm.Q4_MODES:
                 raise ValueError(f"MXFP4 rows {q!r}")
-        if self.split and self.tokens > SPLIT_MAX:
-            raise ValueError(f"split launches: up to {SPLIT_MAX} rows")
 
 
 def core_of(key: LayerBuild) -> str:
@@ -199,24 +191,14 @@ def phase_names(key) -> list[str]:
         ]
     out = ["start"] + (["first_combine"] if key.first else [])
     if key.kind == "gdn":
-        if fused_gdn(key):
-            out += ["gdn+out"]
-        elif tiled.resident(key.tokens):
-            out += ["gdn_proj+recur", "out"]
-        else:
-            out += ["gdn_proj+conv", "gdn_recur", "out"]
+        out += ["gdn_proj+conv", "gdn_recur", "out"]
     else:
         out += ["o_proj"]
     out += ["allreduce+combine"]
-    out += moe.phase_names(key.tokens) + ["allreduce+combine"]
+    out += moe.PHASES + ["allreduce+combine"]
     if key.qkv_tail:
         out += ["qkv_proj"]
     return out
-
-
-def fused_gdn(key) -> bool:
-    """GDN proj -> recurrence -> out_proj as one phase (tagged hand-offs)."""
-    return tiled.resident(key.tokens) and key.out == "bf16"
 
 
 # --------------------------------------------------------------------------
@@ -264,8 +246,9 @@ def scratch_layout(rows: int, rip: int = 256) -> dict[str, tuple[int, int]]:
         "part": _part_words(rows) * 4,
         "qkv_out": rows * QKV * 2,
     }
-    for k, n in moe.scratch_words(moe.Shape(rows, rip)).items():
-        sizes[k] = n * 4
+    if rows > SPLIT_MAX:
+        for k, n in moe.scratch_words(moe.Shape(rows, rip)).items():
+            sizes[k] = n * 4
     out, off = {}, 0
     for name, n in sizes.items():
         out[name] = (off, n)
@@ -302,7 +285,6 @@ def build(key: LayerBuild):
         return _BUILDS[key]
     S, tp = key.tokens, key.tp
     shape = moe.Shape(S, key.rip)
-    MoeLds = moe.lds_struct(shape)
     aux_words = max(ex_.GroupTile.words(S), gdn.recur_lds_words(), norm.LDS_WORDS)
     chunks = _resident_chunks()
 
@@ -311,10 +293,15 @@ def build(key: LayerBuild):
         stage: fx.Array[fx.Int32, tiled.stage_words(S, chunks), 16]
         aux: fx.Array[fx.Int32, aux_words, 16]
 
-    @fx.union
-    class PhaseLds:
-        gemm: GemmLds
-        moe: MoeLds  # type: ignore[valid-type]
+    if key.split:
+        PhaseLds = GemmLds
+    else:
+        MoeLds = moe.lds_struct(shape)
+
+        @fx.union
+        class PhaseLds:  # type: ignore[no-redef]
+            gemm: GemmLds
+            moe: MoeLds  # type: ignore[valid-type]
 
     @fx.struct
     class Smem:
@@ -376,7 +363,7 @@ def build(key: LayerBuild):
         alloc = fx.SharedAllocator()
         sm = alloc.allocate(Smem).peek()
         ph = alloc.allocate(PhaseLds)
-        gl, ml = ph.gemm.peek(), ph.moe.peek()
+        gl = ph.peek() if key.split else ph.gemm.peek()
         g = Grid(tid, bid, sync, sync_next, folds, health, alarm, sm.word.ptr)
         prologue(g)
         scr = Scratch(scratch, S, key.rip)
@@ -396,14 +383,13 @@ def build(key: LayerBuild):
                 names.append(name)
 
         def end_phase(name, issue=None):
-            """The phase's grid barrier; at resident widths `issue()` (the
-            next phase's first weights) runs inside it, its result returned."""
-            out = grid_sync(g, issue if tiled.resident(S) else None)
+            """The phase's grid barrier; `issue()` (the next phase's first
+            weights, a split launch's) runs inside it, its result returned."""
+            out = grid_sync(g, issue)
             stamp(name)
             return out
 
         stamp("start")
-        two_shot = not ex_.one_shot(S)
         tag0 = ep * TAG_LAYERS + layer * 2
 
         def exchange(kind: int, mode: str):
@@ -413,18 +399,13 @@ def build(key: LayerBuild):
 
         def all_reduce(kind: int):
             """The exchange a producer pushes to, and the one its combine reads."""
-            if const_expr(two_shot):
-                return exchange(kind, "scatter"), exchange(kind, "gather")
-            x = exchange(kind, "sum")
-            return x, x
+            return exchange(kind, "scatter"), exchange(kind, "gather")
 
         def reduce(push):
-            """The owner half of a two-shot exchange, after the producers'
-            pushes (every wave of the grid)."""
-            if const_expr(two_shot):
-                ex_.reduce_lines(
-                    g, push, all_reduce(push.kind)[1], g.spread, BLOCKS * WAVES
-                )
+            """The owner half of the exchange, after the producers' pushes
+            (every wave of the grid)."""
+            gather = all_reduce(push.kind)[1]
+            ex_.reduce_lines(g, push, gather, g.spread, BLOCKS * WAVES)
 
         def combine(xch, weight, q4, first=False):
             out = norm.Out(scr.res, scr.x, scr.x4, scr.x4s, q4)
@@ -443,7 +424,7 @@ def build(key: LayerBuild):
             combine(None, n_in, _q4(key.first_q4), first=True)
             end_phase("first_combine")
 
-        def mlp_half(pre=None):
+        def mlp_half():
             mw = moe.Weights(w_gate, w13, w13s, w2, w2s)
             b = moe.Bufs(
                 part=scr.part,
@@ -451,26 +432,11 @@ def build(key: LayerBuild):
                 x4s=scr.x4s,
                 **{k: getattr(scr, k) for k in moe.scratch_words(shape)},
             )
-            if shape.ks > 1 and FOLD_PIECES + shape.max_pieces > FOLD_COUNTERS:
-                raise ValueError(
-                    f"{shape.max_pieces} gate/up pieces overrun the fold counters"
-                )
             push, read = all_reduce(MLP)
-            moe.mlp(
-                g,
-                shape,
-                gemm,
-                ml,
-                scr.x,
-                mw,
-                b,
-                push,
-                end_phase,
-                (FOLD_PROJ, FOLD_PIECES),
-                pre,
-            )
+            ml = ph.moe.peek()
+            moe.mlp(g, shape, gemm, ml, scr.x, mw, b, push, end_phase)
             if const_expr(key.trace):
-                end_phase(moe.phase_names(S)[-1])
+                end_phase(moe.PHASES[-1])
             reduce(push)
             combine(read, n_next, _q4(key.next_q4))
             if const_expr(key.trace or key.qkv_tail):
@@ -482,23 +448,16 @@ def build(key: LayerBuild):
                 if const_expr(key.trace):
                     end_phase("qkv_proj")
 
-        def back(weights, source, k, pending=None, name="out+allreduce+combine"):
+        def back(weights, source, k, name="out+allreduce+combine"):
             push, read = all_reduce(ATTN)
             tile = ex_.GroupTile(gl.aux.ptr, S)
-            gdn.out(
-                g, gemm, weights, source, scr.part, tile, push, k, FOLD_OUT, pending
-            )
+            gdn.out(g, gemm, weights, source, scr.part, tile, push, k, FOLD_OUT)
             if const_expr(key.trace):
                 end_phase(name.removesuffix("+allreduce+combine"))
             reduce(push)
             combine(read, n_post, "plain")
-            # the router's first weights, in the barrier's wait
-            return end_phase(
-                "allreduce+combine" if key.trace else name,
-                lambda: tiled.issue_unit(
-                    bid, tid, moe.router_weights(w_gate), moe.router_plan()
-                ),
-            )
+            end_phase("allreduce+combine" if key.trace else name)
+            mlp_half()
 
         if const_expr(key.kind == "gdn"):
             w = gdn.Bufs(
@@ -548,47 +507,17 @@ def build(key: LayerBuild):
                     core_fmt,
                     None,
                     gtag,
-                    tag_core=False,
                 )
                 stamp("gdn_proj+recur")
-            elif const_expr(tiled.resident(S)):
-                # the recurrence polls the projection's tagged outputs; with a
-                # bf16 core out_proj polls the recurrence's too (its weights
-                # issued before the recurrence, to land under it), an MXFP4
-                # core is quantized a 32-group a thread and waits a barrier
-                gtag = tag0 + 1
-                gdn.proj(g, gemm, w, b, S, FOLD_PROJ, None, gtag)
-                if const_expr(fused_gdn(key)):
-                    pending = tiled.issue_unit(bid, tid, out_w, gdn.out_plan())
-                    gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, "bf16", None, gtag)
-                    source: tagged.Pairs | tiled.Source | tiled.Mx4Source = (
-                        tagged.Pairs(g, scr.core, VALUE_DIM, gtag)
-                    )
-                    pre = back(
-                        out_w, source, VALUE_DIM, pending, "gdn+out+allreduce+combine"
-                    )
-                else:
-                    gdn.recur(
-                        g, w, b, aux_f32, S, key.gdn_eps, core_of(key), None, gtag
-                    )
-                    pending = end_phase(
-                        "gdn_proj+recur",
-                        lambda: tiled.issue_unit(bid, tid, out_w, gdn.out_plan()),
-                    )
-                    source = tiled.Mx4Source(scr.core, scr.core_s, VALUE_DIM)
-                    pre = back(out_w, source, VALUE_DIM, pending)
             else:
                 gdn.proj(g, gemm, w, b, S, FOLD_PROJ)
                 end_phase("gdn_proj+conv")
                 gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, core_of(key))
                 end_phase("gdn_recur")
-                if const_expr(key.out == "bf16"):
-                    source = tiled.Source(scr.core, VALUE_DIM)
-                else:
+                source: tiled.Source = tiled.Source(scr.core, VALUE_DIM)
+                if const_expr(key.out != "bf16"):
                     source = tiled.Mx4Source(scr.core, scr.core_s, VALUE_DIM)
-                pre = back(out_w, source, VALUE_DIM)
-            if const_expr(not key.split):
-                mlp_half(pre)
+                back(out_w, source, VALUE_DIM)
         if const_expr(key.kind == "attn" and key.split):
             out = norm.Out(scr.res, scr.x, scr.x4, scr.x4s, None)
             norm.combine(g, None, out, n_in, aux_f32, S, key.eps, emb, res_in)
@@ -602,13 +531,12 @@ def build(key: LayerBuild):
             )
             stamp("qkv_proj")
         if const_expr(key.kind == "attn" and not key.split):
-            pre = back(
+            back(
                 tiled.Bf16Weights(w_out, HIDDEN, ATTN_CORE),
                 gdn.GatedCore(attn, gate, ATTN_CORE),
                 ATTN_CORE,
                 name="o_proj+allreduce+combine",
             )
-            mlp_half(pre)
         if const_expr(key.trace):
             assert names == phase_names(key), (names, phase_names(key))
 

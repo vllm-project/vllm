@@ -23,8 +23,13 @@ import math
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
 
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import TraceInvariant
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
+from vllm.models.qwen3_5.amd.specialized_decode.layout import (
+    BLOCKS,
+    HIDDEN,
+    THREADS,
+    WAVES,
+)
+from vllm.models.qwen3_5.amd.specialized_decode.ops import (
     CM_DEV,
     bf16_round,
     ld_i32x4,
@@ -37,12 +42,7 @@ from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
     unpack_bf16x8,
     wave_sum,
 )
-from vllm.models.qwen3_5.amd.specialized_decode.wide.layout import (
-    BLOCKS,
-    HIDDEN,
-    THREADS,
-    WAVES,
-)
+from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import TraceInvariant
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import exchange as ex_
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import mx
 

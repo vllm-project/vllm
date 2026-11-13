@@ -13,17 +13,8 @@ from __future__ import annotations
 import flydsl.expr as fx
 from flydsl.expr import range_constexpr
 
-from vllm.models.qwen3_5.amd.specialized_decode.wide.common.ops import (
-    CM_DEV,
-    pack_bf16,
-    st,
-    traced,
-)
-from vllm.models.qwen3_5.amd.specialized_decode.wide.layout import (
-    BLOCKS,
-    HIDDEN,
-    QKV,
-)
+from vllm.models.qwen3_5.amd.specialized_decode.layout import BLOCKS, HIDDEN, QKV
+from vllm.models.qwen3_5.amd.specialized_decode.ops import CM_DEV, pack_bf16, st, traced
 from vllm.models.qwen3_5.amd.specialized_decode.wide.stages import tiled
 
 QKV_SPLITS = 3  # 72 row groups x 3 = 216 units

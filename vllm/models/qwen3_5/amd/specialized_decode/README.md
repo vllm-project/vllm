@@ -10,7 +10,7 @@ per decoder layer (`wide/layer.py`):
 | GDN (69) | `gdn` | [embedding →] input norm, GDN projections + conv, gated delta rule + gated norm, out_proj + all-reduce + post-attention norm, router, routing + MXFP4 quantization, experts, MoE combine + all-reduce + the next layer's input norm [→ the next layer's qkv_proj] |
 | attention (23) | vLLM's attention, `attn` | q / k norms, RoPE and attention stay vLLM's; then o_proj (gated) + all-reduce + post-attention norm and the MoE as above |
 
-Up to 16 rows (`wide.layer.SPLIT_MAX`) each layer's MLP half is
+Up to 16 rows (`layout.SPLIT_MAX`) each layer's MLP half is
 `mono.blocks.layer_block` after the layer's split launch: a GDN layer's
 residual add, input norm and GDN to the core output, an attention layer's
 input norm and qkv_proj. Up to 2 rows (`runtime.layers.MONO_GDN_MAX`) a GDN
@@ -30,7 +30,7 @@ width that holds it (vLLM's graph padding).
   graphs for decode (PIECEWISE steps run vLLM's forward);
 - pure decode of 1-64 rows (graph padding rows are inert: their GDN state
   slot is the null block);
-- the checkpoint's shapes (`wide/layout.py`, `SHAPES`); GDN projections
+- the checkpoint's shapes (`layout.py`, `SHAPES`); GDN projections
   (`linear_attn.in_proj_qkv`, `in_proj_z`, `out_proj`) bf16, online MXFP4
   or online MXFP4 with a 32-block Hadamard rotation (`mxfp4_hadamard32`),
   on either AITER FP4 GEMM layout (ASM: shuffled; Triton: row-major,
@@ -76,14 +76,16 @@ FAILED after every step and the ranks raise together.
   (`routing`), model and cache refusals and `FailStop` (`guards`), the per-rank
   launch state and the layer launches (`layers`), the executor (`decode`), peer
   memory (`peer`).
-- `wide/`: the build key, ABI and scratch layout (`layer`), the shapes
-  (`layout`), the health words (`abi`); `common/`: device primitives (`ops`),
-  the grid barrier and fold counters (`grid`), build keys (`plan`);
-  `stages/`: the batch-tiled GEMM (`tiled`), tagged hand-offs (`tagged`),
-  norms and combines (`norm`), the gated delta net (`gdn`), the MoE (`moe`),
-  MXFP4 activations (`mx`), the TP exchange (`exchange`).
-- `mono/`: the narrow steps' blocks, `gdn_block` and `layer_block`, on their
-  own common code (`mono/common/`) and stages.
+- shared by both kernel families: the shapes (`layout`), the health words,
+  build keys and argument lists (`abi`), device primitives (`ops`).
+- `wide/`: the build key, ABI and scratch layout (`layer`), the grid barrier
+  and fold counters (`grid`); `stages/`: the batch-tiled GEMM (`tiled`),
+  tagged hand-offs (`tagged`), norms and combines (`norm`), the gated delta
+  net (`gdn`), the MoE (`moe`), MXFP4 activations (`mx`), the TP exchange
+  (`exchange`).
+- `mono/`: the narrow steps' blocks, `gdn_block` and `layer_block`, their
+  execution model and CTA helpers (`common`), the tagged mailbox (`sync`),
+  the MXFP4 weight layouts (`mx_layout`) and stages.
 
 For profiling, `runtime.layers.TRACE = True` (set in the worker before the
 model is built) builds every wide launch with per-phase clock stamps

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The wide decode's layer kernels at TP8 on 8 MI355X against the float64
-references (`reference`) with the stock path's rounding points: three
+"""The wide decode's layer kernels at the widths past `layout.SPLIT_MAX`, at
+TP8 on 8 MI355X against the float64 references (`reference`) with the stock
+path's rounding points: three
 launches on synthetic per-rank weights, a GDN layer that is the step's first
 (the embedding's input norm, the next attention layer's qkv_proj), an
 attention layer (o_proj and the MLP half) and a GDN layer closing with the
@@ -22,7 +23,7 @@ import torch
 from vllm.platforms import current_platform
 
 TP = 8
-WIDTHS = [1, 2, 8, 16, 17, 32, 64]
+WIDTHS = [17, 32, 64]
 # GDN projection formats: "mxfp4t" the MXFP4 weights unshuffled (AITER's
 # Triton GEMM layout)
 VARIANTS = ["bf16", "mxfp4", "mxfp4t", "h32"]
@@ -49,15 +50,15 @@ def rel(a, b):
 def _worker(rank, rows, variant, port, out_q):
     import torch.distributed as dist
 
-    from vllm.models.qwen3_5.amd.specialized_decode.runtime.peer import PeerBuffer
-    from vllm.models.qwen3_5.amd.specialized_decode.wide import layer as K
-    from vllm.models.qwen3_5.amd.specialized_decode.wide import layout as L
-    from vllm.models.qwen3_5.amd.specialized_decode.wide.abi import (
+    from vllm.models.qwen3_5.amd.specialized_decode import layout as L
+    from vllm.models.qwen3_5.amd.specialized_decode.abi import (
         FAILED,
         PEER_HEAD,
         health_words,
     )
-    from vllm.models.qwen3_5.amd.specialized_decode.wide.common.grid import (
+    from vllm.models.qwen3_5.amd.specialized_decode.runtime.peer import PeerBuffer
+    from vllm.models.qwen3_5.amd.specialized_decode.wide import layer as K
+    from vllm.models.qwen3_5.amd.specialized_decode.wide.grid import (
         FOLD_BASE,
         SLOT_WORDS,
         sync_words,

@@ -23,7 +23,7 @@ a full-attention layer's after vLLM's attention:
 The embedding stays vLLM's; the last launch's closing norm is the final
 norm.
 
-A step of up to `K.SPLIT_MAX` rows runs each layer's MLP half on
+A step of up to `L.SPLIT_MAX` rows runs each layer's MLP half on
 `mono.blocks.layer_block` instead:
 
     GDN layer   gdn   [embedding or] residual add + input norm, GDN -> core
@@ -46,6 +46,8 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.models.qwen3_5.amd.specialized_decode import layout as L
+from vllm.models.qwen3_5.amd.specialized_decode.abi import FAILED
 from vllm.models.qwen3_5.amd.specialized_decode.runtime import NAME, DecodeConfig
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.guards import (
     FailStop,
@@ -59,8 +61,6 @@ from vllm.models.qwen3_5.amd.specialized_decode.runtime.layers import (
 )
 from vllm.models.qwen3_5.amd.specialized_decode.runtime.routing import step_reason
 from vllm.models.qwen3_5.amd.specialized_decode.wide import layer as K
-from vllm.models.qwen3_5.amd.specialized_decode.wide import layout as L
-from vllm.models.qwen3_5.amd.specialized_decode.wide.abi import FAILED
 
 logger = init_logger(__name__)
 
@@ -256,7 +256,7 @@ class SpecializedDecode:
         la.epoch.add_(1)
         if inputs_embeds is None:
             inputs_embeds = model.embed_input_ids(input_ids)
-        if rows <= K.SPLIT_MAX:
+        if rows <= L.SPLIT_MAX:
             return self._run_split(step, inputs_embeds, positions)
         keys = self.keys[rows]
         seq = 0
@@ -278,7 +278,7 @@ class SpecializedDecode:
         return out
 
     def _run_split(self, step: Step, emb: torch.Tensor, positions) -> torch.Tensor:
-        """A split width's forward (`K.SPLIT_MAX`): each layer's split
+        """A split width's forward (`L.SPLIT_MAX`): each layer's split
         launch (or `gdn_block`: `Launcher.mono_gdn_layer`), then its
         `layer_block`."""
         model, la, md, rows = self.model, self.launch, step.attn_metadata, step.width
