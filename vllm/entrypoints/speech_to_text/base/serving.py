@@ -23,7 +23,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
+from vllm.entrypoints.serve.engine.types import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
