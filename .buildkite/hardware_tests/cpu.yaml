@@ -232,19 +232,34 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 40m "
       VLLM_CI_ENV=0 pytest -x -v -s tests/models/multimodal/generation/test_qwen2_5_vl.py"
 
-- label: "Arm CPU Test Shard %N"
+- label: Arm CPU Tests
   key: arm-cpu-test
   depends_on:
   - cpu-arm64-image-build
   soft_fail: false
   device: arm_cpu
-  no_plugin: true
+  working_dir: /vllm-workspace/tests
+  automatic_shard: true
+  timeout_in_minutes: 90
   commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-cpu-test-arm.sh
-    "$$BUILDKITE_PARALLEL_JOB"
-    "$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64-cpu"
-  parallelism: 3
+  - pytest -x -v -s kernels/test_onednn.py
+  - pytest -x -v -s kernels/test_cpu_fused_sampling.py
+  - pytest -x -v -s kernels/attention/test_cpu_attn.py
+  - pytest -x -v -s kernels/core/test_cpu_activation.py
+  - pytest -x -v -s kernels/moe/test_cpu_fused_moe.py
+  - pytest -x -v -s kernels/mamba/cpu/test_cpu_gdn_ops.py
+  - pytest -x -v -s kernels/moe/test_cpu_int4_moe.py
+  - pytest -x -v -s kernels/mamba/test_cpu_short_conv.py
+  - pytest -x -v -s kernels/mamba/test_causal_conv1d.py
+  - pytest -x -v -s kernels/mamba/test_mamba_ssm.py
+  - pytest -x -v -s v1/worker/cpu
+  - pytest -x -v -s "examples/test_offline_examples.py::test_offline_example[basic-generate-opt-125m]"
+  - pytest -x -v -s models/multimodal/generation/test_whisper.py -m cpu_model
+  - pytest -x -v -s v1/e2e/test_cpu_linear_attn_chunked_prefix.py
+  - pytest -x -v -s "models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]"
+  - pytest -x -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs
+  - pytest -x -v -s quantization/test_cpu_int8_w4a8.py
+  - pytest -x -v -s v1/e2e/test_cpu_serve_bench.py
 
 - label: ":docker: Build Zen CPU image"
   key: zen-cpu-image-build
