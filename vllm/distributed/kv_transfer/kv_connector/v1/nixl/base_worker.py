@@ -1272,7 +1272,9 @@ class NixlBaseConnectorWorker:
                         f"Prefill and decode instances have incompatible "
                         f"configurations. This may be due to: different vLLM versions,"
                         f" models, dtypes, KV cache layouts, attention backends, etc. "
-                        f"Both instances must use identical configurations."
+                        f"Both instances must use identical configurations. "
+                        f"With enforce_kv_identity, compare the components of "
+                        f"`GET /kv_identity` on both instances. "
                         f"Disable this check using "
                         f'--kv-transfer-config \'{{"kv_connector_extra_config": '
                         f'{{"enforce_handshake_compat": false}}}}\''

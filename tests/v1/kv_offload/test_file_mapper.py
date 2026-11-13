@@ -39,6 +39,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         model=OffloadingModelConfig(
             name=kwargs.get("model_name", "test-model"),
             dtype=kwargs.get("dtype", "float16"),
+            kv_identity=kwargs.get("kv_identity"),
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=kwargs.get("tokens_per_hash", 16),
@@ -326,3 +327,15 @@ def test_replicated_layout_run_config_tp_invariant():
     tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=0, **shared)
     tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=2, **shared)
     assert tp2.get_run_config() == tp4.get_run_config()
+
+
+def test_kv_identity_namespaces_files():
+    """Engines with different KV identities must not read each other's files,
+    and engines without one keep their existing paths."""
+    plain = make_mapper_from_offloading_spec(root_dir="/tmp/kv")
+    first = make_mapper_from_offloading_spec(root_dir="/tmp/kv", kv_identity="a")
+    second = make_mapper_from_offloading_spec(root_dir="/tmp/kv", kv_identity="b")
+
+    assert "kv_identity" not in plain.get_run_config()
+    assert first.get_run_config()["kv_identity"] == "a"
+    assert len({plain.base_path, first.base_path, second.base_path}) == 3

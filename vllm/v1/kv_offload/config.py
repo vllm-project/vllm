@@ -29,6 +29,9 @@ class OffloadingModelConfig:
     dtype: str
     # Longest request the engine accepts, in tokens. 0 when not known.
     max_model_len: int = 0
+    # KV identity of the engine (CacheConfig.kv_identity), set only when
+    # enforce_kv_identity is in kv_connector_extra_config.
+    kv_identity: str | None = None
 
 
 @dataclass(frozen=True)
