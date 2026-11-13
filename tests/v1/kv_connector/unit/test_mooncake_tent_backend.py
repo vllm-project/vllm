@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import enum
 import json
 import os
@@ -23,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.factory impo
     resolve_transfer_engine,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent import (
+    DEFAULT_TRANSFER_TIMEOUT_S,
     MAX_MERGED_LENGTH,
     TentTransferBackend,
 )
@@ -33,18 +33,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent_config 
 
 
 class _StatusEnum(enum.Enum):
-    INITIAL = 0
-    PENDING = 1
-    INVALID = 2
-    CANCELED = 3
-    COMPLETED = 4
+    COMPLETED = 0
+    FAILED = 1
+    CANCELED = 2
+    INVALID = 3
+    PENDING = 4
     TIMEOUT = 5
-    FAILED = 6
 
 
 class _OpCode(enum.Enum):
-    READ = 0
     WRITE = 1
+    READ = 2
 
 
 class _Status:
@@ -52,16 +51,15 @@ class _Status:
         self.state = state
 
 
-class _TentError(Exception):
-    """Base of the exceptions the tent module exports."""
-
-
-class _TentNotImplemented(_TentError):
-    """Mirrors `tent.NotImplementedError`, which is not Python's builtin."""
-
-
 class _Request:
-    def __init__(self, opcode, source, target_id, target_offset, length) -> None:
+    def __init__(
+        self,
+        opcode: _OpCode,
+        source: int,
+        target_id: int,
+        target_offset: int,
+        length: int,
+    ) -> None:
         self.opcode = opcode
         self.source = source
         self.target_id = target_id
@@ -70,19 +68,22 @@ class _Request:
 
 
 class _Control:
-    """Settings the fake module reads while a backend starts."""
-
     def __init__(self) -> None:
-        self.segment_name = "10.0.0.1:9100"
-        self.rpc_port = 9100
+        self.calls: list[tuple[Any, ...]] = []
+        self.configs: list[dict[str, Any]] = []
+        self.paths: list[str] = []
         self.available = True
-        self.polls: list[list[_StatusEnum]] = [[_StatusEnum.COMPLETED]]
-        self.overall: list[_StatusEnum] | None = None
-        self.cancel_error: BaseException | None = None
-        self.cancel_settles = False
-        self.submit_error: BaseException | None = None
-        self.free_error: BaseException | None = None
-        self.allocate_fails = False
+        self.rpc_port = 16000
+        self.segment_name: str | None = None
+        self.open_error: Exception | None = None
+        self.submit_error: Exception | None = None
+        self.wait_error: Exception | None = None
+        self.allocate_returns = 1
+        self.wait_statuses: list[list[_StatusEnum]] = []
+        self.batches = 0
+
+    def reset(self) -> None:
+        self.__init__()
 
 
 _CONTROL = _Control()
@@ -90,115 +91,72 @@ _CONTROL = _Control()
 
 class _FakeEngine:
     def __init__(self, config_path: str) -> None:
-        with open(config_path) as handle:
-            self.config = json.load(handle)
-        self.rpc_port = _CONTROL.rpc_port
-        self.segment_name = _CONTROL.segment_name
-        self.calls: list[tuple] = []
-        self.batches: dict[int, list[list[_StatusEnum]]] = {}
-        self._next_batch = 0
-        self._next_segment = 100
+        with open(config_path) as config_file:
+            self.config = json.load(config_file)
+        self.config_path = config_path
+        _CONTROL.configs.append(self.config)
+        _CONTROL.paths.append(config_path)
+        self.segments: dict[str, int] = {}
 
     def available(self) -> bool:
         return _CONTROL.available
 
     def get_rpc_server_port(self) -> int:
-        return self.rpc_port
+        return _CONTROL.rpc_port
 
     def get_segment_name(self) -> str:
-        return self.segment_name
+        if _CONTROL.segment_name is not None:
+            return _CONTROL.segment_name
+        return format_peer_address(self.config["rpc_server_hostname"], _CONTROL.rpc_port)
 
     def register_local_memory_batch(self, addresses, lengths) -> None:
-        self.calls.append(("register", list(addresses), list(lengths)))
+        _CONTROL.calls.append(("register", list(addresses), list(lengths)))
 
     def unregister_local_memory_batch(self, addresses, lengths) -> None:
-        self.calls.append(("unregister", list(addresses), list(lengths)))
-
-    def allocate_transfer_batch(self, size: int) -> int:
-        if _CONTROL.allocate_fails:
-            self.calls.append(("allocate-failed", size))
-            return 0
-        self._next_batch += 1
-        self.batches[self._next_batch] = [list(script) for script in _CONTROL.polls]
-        self.calls.append(("allocate", self._next_batch, size))
-        return self._next_batch
-
-    def free_transfer_batch(self, batch_id: int) -> None:
-        if _CONTROL.free_error is not None:
-            raise _CONTROL.free_error
-        self.calls.append(("free", batch_id))
+        _CONTROL.calls.append(("unregister", list(addresses), list(lengths)))
 
     def open_segment(self, segment_name: str) -> int:
-        self._next_segment += 1
-        self.calls.append(("open", segment_name, self._next_segment))
-        return self._next_segment
+        if _CONTROL.open_error is not None:
+            raise _CONTROL.open_error
+        handle = len(self.segments) + 1
+        self.segments[segment_name] = handle
+        _CONTROL.calls.append(("open", segment_name, handle))
+        return handle
 
     def close_segment(self, segment: int) -> None:
-        self.calls.append(("close", segment))
+        _CONTROL.calls.append(("close", segment))
+
+    def allocate_transfer_batch(self, size: int) -> int:
+        if _CONTROL.allocate_returns == 0:
+            _CONTROL.calls.append(("allocate", size, 0))
+            return 0
+        _CONTROL.batches += 1
+        _CONTROL.calls.append(("allocate", size, _CONTROL.batches))
+        return _CONTROL.batches
 
     def submit_transfer(self, batch_id: int, requests) -> None:
         if _CONTROL.submit_error is not None:
             raise _CONTROL.submit_error
-        self.calls.append(("submit", batch_id, list(requests)))
+        _CONTROL.calls.append(("submit", batch_id, list(requests)))
 
-    def cancel_transfer(self, batch_id: int, index: int) -> None:
-        if _CONTROL.cancel_error is not None:
-            raise _CONTROL.cancel_error
-        self.calls.append(("cancel", batch_id, index))
-        if _CONTROL.cancel_settles:
-            # A real engine reports the canceled tasks on the next poll.
-            settled = [_StatusEnum.CANCELED for _ in self.batches[batch_id][0]]
-            self.batches[batch_id] = [settled]
-
-    def get_transfer_status_list(self, batch_id: int) -> list[_Status]:
-        script = self.batches[batch_id]
-        states = script.pop(0) if len(script) > 1 else script[0]
+    def wait_transfer(self, batch_id: int, timeout_ms: int) -> list[_Status]:
+        _CONTROL.calls.append(("wait", batch_id, timeout_ms))
+        if _CONTROL.wait_error is not None:
+            raise _CONTROL.wait_error
+        states = _CONTROL.wait_statuses.pop(0) if _CONTROL.wait_statuses else []
         return [_Status(state) for state in states]
 
-    def get_transfer_status_overall(self, batch_id: int) -> _Status:
-        """Reports the batch as a whole and lets the script run ahead."""
-        if _CONTROL.overall:
-            overall_script = _CONTROL.overall
-            head = (
-                overall_script.pop(0) if len(overall_script) > 1 else overall_script[0]
-            )
-            return _Status(head)
-        steps = self.batches[batch_id]
-        states = steps[0]
-        settled = {
-            _StatusEnum.COMPLETED,
-            _StatusEnum.FAILED,
-            _StatusEnum.TIMEOUT,
-            _StatusEnum.INVALID,
-            _StatusEnum.CANCELED,
-        }
-        if all(state in settled for state in states):
-            worst = next(
-                (state for state in states if state is not _StatusEnum.COMPLETED),
-                _StatusEnum.COMPLETED,
-            )
-            return _Status(worst)
-        if len(steps) > 1:
-            steps.pop(0)
-        return _Status(_StatusEnum.PENDING)
+    def free_transfer_batch(self, batch_id: int) -> None:
+        _CONTROL.calls.append(("free", batch_id))
 
 
-def _install_fake_tent(**settings: Any) -> types.ModuleType:
-    global _CONTROL
-    _CONTROL = _Control()
-    for name, value in settings.items():
-        setattr(_CONTROL, name, value)
+def _install_fake_tent() -> types.ModuleType:
+    _CONTROL.reset()
     module = types.ModuleType("tent")
-    module.__dict__.update(
-        {
-            "TransferEngine": _FakeEngine,
-            "TransferStatusEnum": _StatusEnum,
-            "OpCode": _OpCode,
-            "Request": _Request,
-            "TentException": _TentError,
-            "NotImplementedError": _TentNotImplemented,
-        }
-    )
+    module.TransferEngine = _FakeEngine  # type: ignore[attr-defined]
+    module.Request = _Request  # type: ignore[attr-defined]
+    module.OpCode = _OpCode  # type: ignore[attr-defined]
+    module.TransferStatusEnum = _StatusEnum  # type: ignore[attr-defined]
     sys.modules["tent"] = module
     return module
 
@@ -214,7 +172,7 @@ def _build(
     hostname: str = "10.0.0.1",
     protocol: str = "tcp",
     device_name: str = "",
-    transfer_timeout_s: float = 60.0,
+    transfer_timeout_s: float = DEFAULT_TRANSFER_TIMEOUT_S,
     overrides: dict[str, Any] | None = None,
 ) -> TentTransferBackend:
     return TentTransferBackend(
@@ -227,202 +185,239 @@ def _build(
     )
 
 
-def _ranges(count: int) -> list[RangeRequest]:
+def _ranges(count: int, length: int = 4096) -> list[RangeRequest]:
+    """Ranges that cannot merge: both sides advance by twice their length."""
     return [
-        RangeRequest(local_addr=0x1000 + index, remote_addr=0x2000 + index, length=64)
+        RangeRequest(local_addr=index * 2 * length, remote_addr=index * 2 * length, length=length)
         for index in range(count)
     ]
 
 
-def test_backend_removes_the_config_file_after_construction(monkeypatch):
+def _calls(kind: str) -> list[tuple[Any, ...]]:
+    return [call for call in _CONTROL.calls if call[0] == kind]
+
+
+def test_backend_removes_the_config_file_after_construction():
     _install_fake_tent()
-    seen: dict[str, Any] = {}
 
-    class _RecordingEngine(_FakeEngine):
-        def __init__(self, config_path: str) -> None:
-            super().__init__(config_path)
-            seen["existed_during_init"] = os.path.exists(config_path)
-            seen["path"] = config_path
+    backend = _build()
 
-    monkeypatch.setattr(sys.modules["tent"], "TransferEngine", _RecordingEngine)
-    _build()
-
-    assert seen["existed_during_init"] is True
-    assert not os.path.exists(seen["path"])
+    assert backend.rpc_port == 16000
+    assert not os.path.exists(backend._engine.config_path)
 
 
 def test_backend_rejects_an_unavailable_engine():
-    _install_fake_tent(available=False)
+    _install_fake_tent()
+    _CONTROL.available = False
 
-    with pytest.raises(RuntimeError, match="not available over 'tcp'"):
+    with pytest.raises(RuntimeError, match="not available"):
         _build()
 
 
 def test_backend_rejects_a_segment_name_peers_cannot_reach():
-    _install_fake_tent(segment_name="other:1234")
+    _install_fake_tent()
+    _CONTROL.segment_name = "peer-alias:16000"
 
-    with pytest.raises(RuntimeError, match="advertises segment 'other:1234'"):
+    with pytest.raises(RuntimeError, match="advertises segment"):
+        _build()
+
+
+def test_backend_advertises_the_hostname_from_the_config():
+    _install_fake_tent()
+
+    backend = _build(overrides={"rpc_server_hostname": "localhost"})
+
+    assert backend._engine.config["rpc_server_hostname"] == "localhost"
+    assert backend.rpc_port == 16000
+
+
+def test_backend_rejects_a_negative_timeout():
+    _install_fake_tent()
+
+    with pytest.raises(RuntimeError, match="must not be negative"):
+        _build(transfer_timeout_s=-1)
+
+
+def test_backend_reports_a_missing_tent_module(monkeypatch):
+    sys.modules.pop("tent", None)
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."
+        "importlib.util.find_spec",
+        lambda name: None,
+    )
+
+    with pytest.raises(RuntimeError, match="requires the 'tent' Python module"):
         _build()
 
 
 def test_transfer_reports_completion_for_every_range():
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED, _StatusEnum.COMPLETED]])
+    _install_fake_tent()
+    _CONTROL.wait_statuses.append([_StatusEnum.COMPLETED] * 3)
     backend = _build()
 
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(2))
+    events = backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(3))
 
-    assert [event.state for event in events] == [
-        TransferState.COMPLETED,
-        TransferState.COMPLETED,
-    ]
-    engine = backend._engine
-    assert ("free", 1) in engine.calls
-    submitted = [call for call in engine.calls if call[0] == "submit"][0]
-    assert [request.length for request in submitted[2]] == [64, 64]
+    assert [event.state for event in events] == [TransferState.COMPLETED] * 3
+    assert _calls("wait") == [("wait", 1, int(DEFAULT_TRANSFER_TIMEOUT_S * 1000))]
 
 
-def test_transfer_reports_each_range_outcome_separately():
-    _install_fake_tent(
-        polls=[[_StatusEnum.COMPLETED, _StatusEnum.FAILED, _StatusEnum.TIMEOUT]]
-    )
-    backend = _build()
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.READ, _ranges(3))
-
-    assert [event.state for event in events] == [
-        TransferState.COMPLETED,
-        TransferState.FAILED,
-        TransferState.FAILED,
-    ]
-    assert events[0].error is None
-    assert "FAILED" in events[1].error
-
-
-def test_transfer_waits_while_ranges_are_pending():
-    _install_fake_tent(
-        polls=[
-            [_StatusEnum.PENDING, _StatusEnum.INITIAL],
-            [_StatusEnum.COMPLETED, _StatusEnum.PENDING],
-            [_StatusEnum.COMPLETED, _StatusEnum.COMPLETED],
+def test_transfer_maps_every_engine_state():
+    _install_fake_tent()
+    _CONTROL.wait_statuses.append(
+        [
+            _StatusEnum.COMPLETED,
+            _StatusEnum.FAILED,
+            _StatusEnum.INVALID,
+            _StatusEnum.TIMEOUT,
+            _StatusEnum.CANCELED,
+            _StatusEnum.PENDING,
         ]
     )
     backend = _build()
 
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(2))
-
-    assert [event.state for event in events] == [
-        TransferState.COMPLETED,
-        TransferState.COMPLETED,
-    ]
-
-
-def test_transfer_keeps_range_order_when_a_later_task_settles_first():
-    _install_fake_tent(
-        polls=[
-            [_StatusEnum.PENDING, _StatusEnum.FAILED],
-            [_StatusEnum.COMPLETED, _StatusEnum.FAILED],
-        ],
-        # The aggregated status reports the failure while the first task runs,
-        # which is when a reader that appended events as they settled would
-        # hand the caller the two outcomes in the wrong order.
-        overall=[_StatusEnum.FAILED, _StatusEnum.FAILED],
-    )
-    backend = _build()
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(2))
+    events = backend.transfer("10.0.0.2:16000", TransferOp.READ, _ranges(6))
 
     assert [event.state for event in events] == [
         TransferState.COMPLETED,
         TransferState.FAILED,
+        TransferState.FAILED,
+        TransferState.FAILED,
+        TransferState.CANCELED,
+        TransferState.IN_FLIGHT,
     ]
+    assert events[1].error == "FAILED"
+    assert events[5].error == "PENDING"
+
+
+def test_transfer_merges_contiguous_ranges():
+    _install_fake_tent()
+    _CONTROL.wait_statuses.append([_StatusEnum.COMPLETED])
+    backend = _build()
+    length = 4096
+
+    events = backend.transfer(
+        "10.0.0.2:16000",
+        TransferOp.WRITE,
+        [
+            RangeRequest(index * length, index * length, length)
+            for index in range(3)
+        ],
+    )
+
+    submitted = _calls("submit")[0][2]
+    assert [request.length for request in submitted] == [3 * length]
+    assert [event.state for event in events] == [TransferState.COMPLETED] * 3
+
+
+def test_transfer_stops_merging_at_the_limit():
+    _install_fake_tent()
+    _CONTROL.wait_statuses.append([_StatusEnum.COMPLETED] * 2)
+    backend = _build()
+    half = MAX_MERGED_LENGTH // 2
+
+    backend.transfer(
+        "10.0.0.2:16000",
+        TransferOp.WRITE,
+        [
+            RangeRequest(index * half, index * half, half)
+            for index in range(3)
+        ],
+    )
+
+    submitted = _calls("submit")[0][2]
+    assert [request.length for request in submitted] == [MAX_MERGED_LENGTH, half]
+
+
+def test_transfer_reports_failed_ranges_when_the_segment_cannot_open():
+    _install_fake_tent()
+    _CONTROL.open_error = RuntimeError("peer is gone")
+    backend = _build()
+
+    events = backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(2))
+
+    assert [event.state for event in events] == [TransferState.FAILED] * 2
+    assert "peer is gone" in events[0].error
+    assert _calls("allocate") == []
+
+
+def test_transfer_frees_the_batch_when_submission_raises():
+    _install_fake_tent()
+    _CONTROL.submit_error = RuntimeError("transport down")
+    backend = _build()
+
+    events = backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(2))
+
+    assert [event.state for event in events] == [TransferState.FAILED] * 2
+    assert "transport down" in events[0].error
+    assert ("free", 1) in _CONTROL.calls
+
+
+def test_transfer_reports_failed_ranges_when_no_batch_is_available():
+    _install_fake_tent()
+    _CONTROL.allocate_returns = 0
+    backend = _build()
+
+    events = backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(1))
+
+    assert [event.state for event in events] == [TransferState.FAILED]
+    assert "no free transfer batch" in events[0].error
+    assert _calls("free") == []
+
+
+def test_transfer_keeps_ranges_in_flight_when_the_wait_raises():
+    _install_fake_tent()
+    _CONTROL.wait_error = RuntimeError("wait did not settle")
+    backend = _build()
+
+    events = backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(2))
+
+    assert [event.state for event in events] == [TransferState.IN_FLIGHT] * 2
+    assert "did not settle" in events[0].error
+    assert _calls("close") != []
+    assert ("free", 1) in _CONTROL.calls
+
+
+def test_transfer_closes_the_segment_after_a_failed_task():
+    _install_fake_tent()
+    _CONTROL.wait_statuses.append([_StatusEnum.FAILED])
+    backend = _build()
+
+    backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(1))
+
+    assert _calls("close") == [("close", 1)]
 
 
 def test_transfer_reuses_the_peer_segment():
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED]])
+    _install_fake_tent()
+    _CONTROL.wait_statuses.extend(
+        [[_StatusEnum.COMPLETED], [_StatusEnum.COMPLETED]]
+    )
     backend = _build()
 
-    backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-    backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
+    backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(1))
+    backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(1))
 
-    opens = [call for call in backend._engine.calls if call[0] == "open"]
-    assert len(opens) == 1
-
-
-def test_contiguous_ranges_travel_as_one_task():
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED]])
-    backend = _build()
-    ranges = [
-        RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=64),
-        RangeRequest(local_addr=0x1040, remote_addr=0x2040, length=64),
-        RangeRequest(local_addr=0x1080, remote_addr=0x2080, length=64),
-    ]
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, ranges)
-
-    assert [event.state for event in events] == [TransferState.COMPLETED] * 3
-    submitted = [call for call in backend._engine.calls if call[0] == "submit"][0]
-    assert len(submitted[2]) == 1
-    assert submitted[2][0].length == 192
+    assert len(_calls("open")) == 1
 
 
-def test_a_completed_batch_skips_the_per_task_status_list():
-    """A completed batch is settled from one status instead of one per range."""
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED]])
+def test_transfer_ignores_an_empty_range_list():
+    _install_fake_tent()
     backend = _build()
 
-    def _explode(_batch_id: int):
-        raise AssertionError("a completed batch must not read per-task statuses")
-
-    backend._engine.get_transfer_status_list = _explode
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(4))
-
-    assert [event.state for event in events] == [TransferState.COMPLETED] * 4
-
-
-def test_a_second_transfer_reuses_the_submitted_request_objects():
-    """Request objects are pooled, so a steady stream stops paying construction."""
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED, _StatusEnum.COMPLETED]])
-    backend = _build()
-    ranges = _ranges(2)
-
-    backend.transfer("10.0.0.2:9100", TransferOp.WRITE, ranges)
-    first = [call for call in backend._engine.calls if call[0] == "submit"][0]
-    first_ids = [id(request) for request in first[2]]
-
-    backend.transfer("10.0.0.2:9100", TransferOp.WRITE, ranges)
-    second = [call for call in backend._engine.calls if call[0] == "submit"][1]
-
-    assert [id(request) for request in second[2]] == first_ids
-
-
-def test_ranges_stay_split_when_a_side_is_not_contiguous():
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED, _StatusEnum.COMPLETED]])
-    backend = _build()
-    ranges = [
-        RangeRequest(local_addr=0x1000, remote_addr=0x2000, length=64),
-        RangeRequest(local_addr=0x1040, remote_addr=0x2400, length=64),
-    ]
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, ranges)
-
-    assert [event.state for event in events] == [TransferState.COMPLETED] * 2
-    submitted = [call for call in backend._engine.calls if call[0] == "submit"][0]
-    assert [request.length for request in submitted[2]] == [64, 64]
+    assert backend.transfer("10.0.0.2:16000", TransferOp.WRITE, []) == []
+    assert _CONTROL.calls == []
 
 
 def test_register_and_unregister_regions_use_batch_calls():
     _install_fake_tent()
     backend = _build()
-    regions = [MemoryRegion(base_addr=0x1000, length=4096)]
+    regions = [MemoryRegion(0x1000, 4096), MemoryRegion(0x3000, 8192)]
 
     backend.register_regions(regions)
     backend.unregister_regions(regions)
 
-    assert backend._engine.calls == [
-        ("register", [0x1000], [4096]),
-        ("unregister", [0x1000], [4096]),
-    ]
+    assert _calls("register") == [("register", [0x1000, 0x3000], [4096, 8192])]
+    assert _calls("unregister") == [("unregister", [0x1000, 0x3000], [4096, 8192])]
 
 
 def test_empty_regions_skip_the_engine():
@@ -432,72 +427,23 @@ def test_empty_regions_skip_the_engine():
     backend.register_regions([])
     backend.unregister_regions([])
 
-    assert backend._engine.calls == []
+    assert _CONTROL.calls == []
 
 
-def test_failed_submit_frees_the_batch_and_forgets_the_submission():
-    _install_fake_tent(submit_error=RuntimeError("submit refused"))
-    backend = _build()
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    assert events[0].state is TransferState.FAILED
-    assert "submit refused" in events[0].error
-    assert backend._batches == {}
-    assert ("free", 1) in backend._engine.calls
-    # The handle may have pointed at a peer that is gone, so it is dropped.
-    assert backend._peers == {}
-
-
-def test_unallocatable_batch_reports_the_task_count():
-    _install_fake_tent(allocate_fails=True)
-    backend = _build()
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(2))
-
-    assert [event.state for event in events] == [TransferState.FAILED] * 2
-    assert "could not allocate a batch of 2" in events[0].error
-    assert backend._batches == {}
-    assert ("free", 1) not in backend._engine.calls
-
-
-def test_shutdown_cancels_outstanding_ranges_and_closes_segments():
-    _install_fake_tent(polls=[[_StatusEnum.PENDING], [_StatusEnum.CANCELED]])
-    backend = _build()
-    backend._submit("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    backend.shutdown()
-
-    calls = backend._engine.calls
-    assert ("cancel", 1, 0) in calls
-    assert ("free", 1) in calls
-    assert any(call[0] == "close" for call in calls)
-
-
-def test_shutdown_reports_a_batch_that_never_settles(monkeypatch):
-    _install_fake_tent(polls=[[_StatusEnum.PENDING], [_StatusEnum.PENDING]])
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."
-        "SHUTDOWN_TIMEOUT_S",
-        0.05,
-    )
-    backend = _build()
-    backend._submit("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-    _CONTROL.cancel_error = sys.modules["tent"].NotImplementedError("no cancel")
-
-    with pytest.raises(RuntimeError, match="still holds 1 batches"):
-        backend.shutdown()
-
-
-def test_transfer_after_shutdown_reports_failed_ranges():
+def test_shutdown_closes_open_segments():
     _install_fake_tent()
+    _CONTROL.wait_statuses.append([_StatusEnum.COMPLETED])
     backend = _build()
+    backend.transfer("10.0.0.2:16000", TransferOp.WRITE, _ranges(1))
+
     backend.shutdown()
 
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(2))
+    assert _calls("close") == [("close", 1)]
 
-    assert [event.state for event in events] == [TransferState.FAILED] * 2
-    assert "shutting down" in events[0].error
+
+def test_peer_address_brackets_ipv6():
+    assert format_peer_address("2001:db8::1", 9100) == "[2001:db8::1]:9100"
+    assert format_peer_address("10.0.0.1", 9100) == "10.0.0.1:9100"
 
 
 @pytest.mark.parametrize(
@@ -613,297 +559,6 @@ def test_create_backend_uses_the_rank_specific_metrics_port():
     )
 
     assert backend._engine.config["metrics"]["http_port"] == TENT_METRICS_BASE_PORT + 3
-
-
-def test_transfer_reports_failed_ranges_when_the_submission_raises():
-    _install_fake_tent(submit_error=RuntimeError("transport down"))
-    backend = _build()
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(2))
-
-    assert [event.state for event in events] == [TransferState.FAILED] * 2
-    assert "transport down" in events[0].error
-    assert backend._batches == {}
-    assert ("free", 1) in backend._engine.calls
-
-
-def test_an_unreadable_status_leaves_the_ranges_in_flight():
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED]])
-    backend = _build()
-
-    def _explode(batch_id: int) -> None:
-        raise RuntimeError("status unavailable")
-
-    backend._engine.get_transfer_status_overall = _explode
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(2))
-
-    # Nothing confirms the transfer stopped, so the memory has to stay reserved.
-    assert [event.state for event in events] == [TransferState.IN_FLIGHT] * 2
-    assert "status unavailable" in events[0].error
-    # Without a verdict the batch cannot be freed, so shutdown has to settle it.
-    assert list(backend._batches) == [1]
-    with pytest.raises(RuntimeError, match="could not confirm that 1 batches settled"):
-        backend.shutdown()
-
-
-def test_a_canceled_range_keeps_the_canceled_state():
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED, _StatusEnum.CANCELED]])
-    backend = _build()
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.READ, _ranges(2))
-
-    assert events[0].state is TransferState.COMPLETED
-    assert events[1].state is TransferState.CANCELED
-
-
-def test_contiguous_ranges_merge_up_to_the_merge_limit():
-    """A merge stops at the limit, so the range that would overflow starts a task."""
-    half = MAX_MERGED_LENGTH // 2
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED, _StatusEnum.COMPLETED]])
-    backend = _build()
-
-    events = backend.transfer(
-        "10.0.0.2:9100",
-        TransferOp.WRITE,
-        [
-            RangeRequest(local_addr=0, remote_addr=0, length=half),
-            RangeRequest(local_addr=half, remote_addr=half, length=half),
-            RangeRequest(local_addr=2 * half, remote_addr=2 * half, length=half),
-        ],
-    )
-
-    submitted = [call for call in backend._engine.calls if call[0] == "submit"][0]
-    assert [request.length for request in submitted[2]] == [
-        MAX_MERGED_LENGTH,
-        half,
-    ]
-    assert len(events) == 3
-
-
-def test_backend_advertises_the_hostname_from_the_config(monkeypatch):
-    _install_fake_tent(segment_name="peer-alias:9100")
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."
-        "socket.getaddrinfo",
-        lambda host, port: [],
-    )
-
-    backend = _build(overrides={"rpc_server_hostname": "peer-alias"})
-
-    assert backend.rpc_port == 9100
-
-
-def test_peer_address_brackets_ipv6():
-    assert format_peer_address("2001:db8::1", 9100) == "[2001:db8::1]:9100"
-    assert format_peer_address("10.0.0.1", 9100) == "10.0.0.1:9100"
-
-
-def test_a_transfer_that_never_settles_times_out(monkeypatch):
-    _install_fake_tent(polls=[[_StatusEnum.PENDING]], cancel_settles=True)
-    backend = _build(transfer_timeout_s=0.01)
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    assert [event.state for event in events] == [TransferState.FAILED]
-    assert "did not settle" in events[0].error
-    assert ("cancel", 1, 0) in backend._engine.calls
-
-
-def test_a_transfer_the_engine_cannot_stop_is_reported_in_flight(monkeypatch):
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."
-        "SHUTDOWN_TIMEOUT_S",
-        0.05,
-    )
-    _install_fake_tent(
-        polls=[[_StatusEnum.PENDING]],
-        cancel_error=_TentNotImplemented("staging transfers cannot be canceled"),
-    )
-    backend = _build(transfer_timeout_s=0.01)
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    # The batch is still running, so the ranges are not failures the caller may
-    # retry over the same memory.
-    assert [event.state for event in events] == [TransferState.IN_FLIGHT]
-    assert "did not settle" in events[0].error
-    assert backend._batches != {}
-
-    with pytest.raises(RuntimeError, match="still holds"):
-        backend.shutdown()
-
-
-def test_a_new_submission_is_refused_while_the_peer_segment_is_stale():
-    _install_fake_tent()
-    backend = _build()
-    peer = "10.0.0.2:9100"
-    backend.transfer(peer, TransferOp.WRITE, _ranges(1))
-    opens_before = len([call for call in backend._engine.calls if call[0] == "open"])
-    # Another batch still runs over the handle, so the peer is stale with users.
-    backend._acquire_segment(peer)
-    backend._forget_segment(peer)
-
-    events = backend.transfer(peer, TransferOp.WRITE, _ranges(1))
-
-    assert events[0].state is TransferState.FAILED
-    assert "stale" in events[0].error
-    opens_after = len([call for call in backend._engine.calls if call[0] == "open"])
-    assert opens_after == opens_before
-
-
-def test_a_stale_segment_closes_only_after_its_last_batch():
-    """The handle stays open while a batch still writes through it."""
-    _install_fake_tent()
-    backend = _build()
-    peer = "10.0.0.2:9100"
-    handle = backend._acquire_segment(peer)
-    assert backend._acquire_segment(peer) == handle
-
-    backend._forget_segment(peer)
-    assert ("close", handle) not in backend._engine.calls
-
-    backend._release_segment_use(peer)
-    assert ("close", handle) not in backend._engine.calls
-
-    backend._release_segment_use(peer)
-    assert backend._engine.calls.count(("close", handle)) == 1
-
-    reopened = backend._acquire_segment(peer)
-    assert reopened != handle
-
-
-def test_a_submission_fails_instead_of_waiting_for_a_stale_segment():
-    """Waiting would hold the lifecycle lock and stall submissions to peers."""
-    _install_fake_tent()
-    backend = _build()
-    peer = "10.0.0.2:9100"
-    handle = backend._acquire_segment(peer)
-    backend._forget_segment(peer)
-
-    events = backend.transfer(peer, TransferOp.WRITE, _ranges(1))
-    assert events[0].state is TransferState.FAILED
-    assert "stale" in (events[0].error or "")
-
-    backend._release_segment_use(peer)
-    events = backend.transfer(peer, TransferOp.WRITE, _ranges(1))
-    assert events[0].state is TransferState.COMPLETED
-    assert ("close", handle) in backend._engine.calls
-
-
-def test_a_free_failure_is_retried_by_the_next_poll():
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED]], free_error=RuntimeError("busy"))
-    backend = _build()
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    assert events[0].state is TransferState.COMPLETED
-    assert backend._batches != {}
-
-    _CONTROL.free_error = None
-    assert backend._poll(1) == []
-
-    assert backend._batches == {}
-    assert ("free", 1) in backend._engine.calls
-
-
-def test_a_batch_the_engine_neither_submits_nor_frees_is_retried_by_shutdown():
-    _install_fake_tent(
-        submit_error=RuntimeError("submit refused"), free_error=RuntimeError("busy")
-    )
-    backend = _build()
-
-    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    # The submission never reached the registry, so the batch id is kept for
-    # `shutdown` instead of being dropped with the failed call.
-    assert events[0].state is TransferState.FAILED
-    assert "submit refused" in (events[0].error or "")
-    assert list(backend._pending_free) == [1]
-
-    _CONTROL.free_error = None
-    backend.shutdown()
-
-    assert backend._pending_free == {}
-    assert ("free", 1) in backend._engine.calls
-
-
-def test_a_failure_cannot_close_a_segment_a_submission_is_about_to_use():
-    _install_fake_tent(polls=[[_StatusEnum.COMPLETED]])
-    backend = _build()
-
-    handle = backend._acquire_segment("10.0.0.2:9100")
-    backend._forget_segment("10.0.0.2:9100")
-
-    # The submission holds a count, so the failed peer's handle stays open.
-    assert [call for call in backend._engine.calls if call[0] == "close"] == []
-
-    backend._release_segment_use("10.0.0.2:9100")
-
-    assert [call for call in backend._engine.calls if call[0] == "close"] == [
-        ("close", handle)
-    ]
-
-
-def test_a_failed_segment_close_is_retried_by_the_next_shutdown(monkeypatch):
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."
-        "SHUTDOWN_TIMEOUT_S",
-        0.05,
-    )
-    _install_fake_tent()
-    backend = _build()
-    backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    original_close = backend._engine.close_segment
-
-    def _refuse_once(segment: int) -> None:
-        backend._engine.close_segment = original_close
-        raise RuntimeError("engine is busy")
-
-    backend._engine.close_segment = _refuse_once
-
-    with pytest.raises(RuntimeError, match="could not close the segments"):
-        backend.shutdown()
-    assert backend._peers != {}
-
-    backend.shutdown()
-    assert backend._peers == {}
-
-
-def test_shutdown_keeps_the_segment_when_a_batch_never_settles(monkeypatch):
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."
-        "SHUTDOWN_TIMEOUT_S",
-        0.05,
-    )
-    _install_fake_tent(
-        polls=[[_StatusEnum.PENDING]],
-        cancel_error=_TentNotImplemented("staging transfers cannot be canceled"),
-    )
-    backend = _build()
-    backend._submit("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    with pytest.raises(RuntimeError, match="stay open"):
-        backend.shutdown()
-
-    # The unfinished transfer still owns the handle, so it is not closed.
-    assert backend._peers
-    assert not any(call[0] == "close" for call in backend._engine.calls)
-
-
-def test_a_failed_transfer_reopens_the_peer_segment():
-    _install_fake_tent(polls=[[_StatusEnum.FAILED]])
-    backend = _build()
-
-    first = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-    second = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
-
-    assert first[0].state is TransferState.FAILED
-    assert second[0].state is TransferState.FAILED
-    opens = [call for call in backend._engine.calls if call[0] == "open"]
-    assert len(opens) == 2
-    assert backend._engine.calls.count(("close", opens[0][2])) == 1
 
 
 def test_generated_config_disables_transports_the_connector_did_not_choose():
