@@ -429,21 +429,21 @@ class _CountingPattern:
     ],
     ids=["split_everywhere", "empty_first_name", "name_in_value", "broken_first"],
 )
-def test_search_args_matches_full_search(parts):
+def test_search_name_matches_full_search(parts):
     slot = ToolCallSlot()
     for part in parts:
         slot.append_args(part)
         m = ParserEngine._NAME_RE.search(slot.args)
         expected = m.group(1) if m else None
-        assert slot.search_args(ParserEngine._NAME_RE) == expected
+        assert slot.search_name(ParserEngine._NAME_RE) == expected
 
 
-def test_search_args_scans_each_char_once():
+def test_search_name_scans_each_char_once():
     slot = ToolCallSlot()
     pattern = _CountingPattern()
     chunk = '{"summary": "' + "lorem ipsum " * 10
     for _ in range(200):
         slot.append_args(chunk)
-        assert slot.search_args(pattern) is None
+        assert slot.search_name(pattern) is None
     # A full search per chunk would scan about 200 * 200 / 2 chunks.
     assert pattern.scanned <= 3 * len(slot.args)

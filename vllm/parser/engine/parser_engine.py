@@ -99,11 +99,13 @@ class ToolCallSlot:
         self._args_parts.append(value)
         self._args_joined = None
 
-    def search_args(self, pattern: re.Pattern[str]) -> str | None:
+    def search_name(self, pattern: re.Pattern[str]) -> str | None:
         """Group 1 of the leftmost `pattern` match in the args, or `None`.
 
         Each call scans only the args appended since the last call, plus the
-        tail where a partial match may still complete.
+        tail where a partial match may still complete. The first match is
+        kept as the slot's name for its lifetime, so every call must pass the
+        same name pattern.
         """
         if self._json_name is None:
             text = self._name_window + "".join(
@@ -1204,7 +1206,7 @@ class ParserEngine(Parser):
     _NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
 
     def _try_extract_name(self, idx: int) -> str | None:
-        return self._tool_slots[idx].search_args(self._NAME_RE) or None
+        return self._tool_slots[idx].search_name(self._NAME_RE) or None
 
     # ── Build ExtractedToolCallInformation ─────────────────────────────
 
