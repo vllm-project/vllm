@@ -47,7 +47,16 @@ def truncate_text_to_tokens(
     tokenizer,
     max_tokens: int,
 ) -> str:
-    """Truncate text to a maximum number of content tokens.
+    """Truncate text to a maximum number of content tokens."""
+    return _truncate_text_to_tokens(text, tokenizer, max_tokens)[0]
+
+
+def _truncate_text_to_tokens(
+    text: str,
+    tokenizer,
+    max_tokens: int,
+) -> tuple[str, int]:
+    """Return truncated text and its validated content-token count.
 
     Uses offset_mapping to slice the original text at the exact character
     boundary, avoiding lossy encode→decode round-trips that can shift
@@ -56,13 +65,14 @@ def truncate_text_to_tokens(
     the token count of the sliced text is re-checked either way.
     """
     if max_tokens <= 0:
-        return ""
+        return "", 0
 
     while text:
         if is_mistral_tokenizer(tokenizer):
             token_ids = tokenizer.encode(text, add_special_tokens=False)
-            if len(token_ids) <= max_tokens:
-                break
+            num_tokens = len(token_ids)
+            if num_tokens <= max_tokens:
+                return text, num_tokens
 
             # Unless special tokens are skipped, SentencePiece pieces such as
             # "▁" and "<0x0A>" are decoded verbatim.
@@ -75,8 +85,9 @@ def truncate_text_to_tokens(
                 return_offsets_mapping=True,
             )
             offsets = encoding["offset_mapping"]
-            if len(encoding["input_ids"]) <= max_tokens:
-                break
+            num_tokens = len(encoding["input_ids"])
+            if num_tokens <= max_tokens:
+                return text, num_tokens
 
             char_end = min(offsets[max_tokens - 1][1], offsets[max_tokens][0])
 
@@ -84,7 +95,7 @@ def truncate_text_to_tokens(
             char_end = len(text) - 1
         text = text[:char_end]
 
-    return text
+    return "", 0
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
@@ -272,10 +283,10 @@ def truncate_score_content(
             continue
 
         # Tokenize adjacent text together: token counts are not additive.
-        text = truncate_text_to_tokens(
+        text, num_tokens = _truncate_text_to_tokens(
             "".join(part["text"] for part in parts), tokenizer, max_tokens
         )
-        max_tokens -= len(tokenizer.encode(text, add_special_tokens=False))
+        max_tokens -= num_tokens
         for part in parts:
             length = len(part["text"])
             result.append({**part, "text": text[:length]})
