@@ -109,7 +109,7 @@ if target_enabled cuda-13-0; then
 fi
 
 # ---- AWS EFA variant (docker/Dockerfile.efa) ----
-# No cu134 entry: Rubin CUDA 13.4 is nightly-only and is not promoted to
+# No cu135 entry: Rubin CUDA 13.5 is nightly-only and is not promoted to
 # DockerHub for the base variant either.
 
 if target_enabled cuda-13-0-efa; then

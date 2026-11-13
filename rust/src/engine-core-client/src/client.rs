@@ -328,6 +328,7 @@ pub struct EngineCoreClient {
     runtime: BackgroundShutdownRuntime,
     // Background tasks
     output_task: AbortOnDropHandle<()>,
+    input_watch_task: AbortOnDropHandle<()>,
     dispatcher_task: AbortOnDropHandle<()>,
     abort_task: AbortOnDropHandle<()>,
     readiness_task: AbortOnDropHandle<()>,
@@ -434,6 +435,13 @@ impl EngineCoreClient {
             config.engine_stats_enabled,
             &engines,
         ));
+        let input_watch_task =
+            AbortOnDropHandle::new(runtime.spawn(transport::run_input_watch_loop(
+                connected.input_recv,
+                connected.input_events,
+                engines.iter().map(|engine| engine.engine_id.clone()).collect(),
+                output_tx.clone(),
+            )));
         let output_task = AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
             connected.output_socket,
             output_tx,
@@ -505,6 +513,7 @@ impl EngineCoreClient {
             profile_active: Mutex::new(false),
             runtime,
             output_task,
+            input_watch_task,
             dispatcher_task,
             abort_task,
             readiness_task,
@@ -1185,6 +1194,7 @@ impl EngineCoreClient {
             abort_tx,
             runtime,
             output_task,
+            input_watch_task,
             dispatcher_task,
             abort_task,
             readiness_task,
@@ -1199,7 +1209,13 @@ impl EngineCoreClient {
 
         // Abort all client tasks first, then await them.
         // Note the aborting orders here.
-        let mut tasks = vec![readiness_task, abort_task, dispatcher_task, output_task];
+        let mut tasks = vec![
+            readiness_task,
+            abort_task,
+            dispatcher_task,
+            output_task,
+            input_watch_task,
+        ];
         tasks.extend(coordinator_task);
         tasks.extend(coordinator_output_task);
 
