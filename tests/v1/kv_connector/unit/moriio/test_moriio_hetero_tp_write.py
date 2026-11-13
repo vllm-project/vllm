@@ -238,6 +238,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
         None,
     )
     worker.kv_layer_mr_offset = {}
+    worker.kv_region_mr_offsets = {}
     worker._mamba_offset_templates = {}
     worker._region_session_index = None
     worker.layer_name_to_local_kv_cache_metadata = {

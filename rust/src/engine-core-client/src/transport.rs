@@ -10,13 +10,16 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
+use futures::StreamExt as _;
 use thiserror_ext::AsReport;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
-use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage};
+use zeromq::{
+    PullSocket, RouterRecvHalf, RouterSendHalf, RouterSocket, SocketEvent, ZmqError, ZmqMessage,
+};
 
 use crate::coordinator::CoordinatorBootstrap;
 use crate::error::{Error, Result, bail_unexpected_handshake_message};
@@ -104,6 +107,9 @@ impl TryFrom<EngineId> for PeerIdentity {
     }
 }
 
+/// Receiver of a socket's monitor events, as returned by `Socket::monitor`.
+pub type SocketEventReceiver = futures::channel::mpsc::Receiver<SocketEvent>;
+
 /// Per-engine handshake result collected while bootstrapping one shared
 /// transport.
 #[derive(Clone, Debug)]
@@ -132,6 +138,11 @@ pub struct ConnectedTransport {
 
     /// The sending half of the shared input socket.
     pub input_send: RouterSendHalf,
+    /// The receiving half of the shared input socket, polled by
+    /// [`run_input_watch_loop`] to notice engines that disconnect.
+    pub input_recv: RouterRecvHalf,
+    /// Events of the shared input socket, which report disconnected engines.
+    pub input_events: SocketEventReceiver,
     /// The shared output socket for receiving responses from all engines.
     pub output_socket: PullSocket,
 }
@@ -186,6 +197,7 @@ pub async fn connect_handshake(
     );
     let (input_address, mut input_socket, output_address, output_socket) =
         bind_local_sockets(local_host, local_input_address, local_output_address).await?;
+    let input_events = input_socket.monitor();
     info!(%input_address, %output_address, "bound local transport sockets");
 
     let mut coordinator = if enable_inproc_coordinator {
@@ -376,12 +388,14 @@ pub async fn connect_handshake(
 
     info!(engine_count = engines.len(), "engines connected");
 
-    let (input_send, _) = input_socket.split();
+    let (input_send, input_recv) = input_socket.split();
 
     Ok(ConnectedTransport {
         input_address,
         output_address,
         input_send,
+        input_recv,
+        input_events,
         output_socket,
         engines,
         coordinator,
@@ -427,6 +441,7 @@ pub async fn connect_bootstrapped(
         .bind_listener(adopt_listener(input_listener_fd)?)
         .await?
         .to_string();
+    let input_events = input_socket.monitor();
 
     let mut output_socket = PullSocket::new();
     let output_address = output_socket
@@ -448,7 +463,7 @@ pub async fn connect_bootstrapped(
         "bootstrapped engines connected"
     );
 
-    let (input_send, _) = input_socket.split();
+    let (input_send, input_recv) = input_socket.split();
 
     Ok(ConnectedTransport {
         input_address,
@@ -456,6 +471,8 @@ pub async fn connect_bootstrapped(
         engines,
         coordinator: None,
         input_send,
+        input_recv,
+        input_events,
         output_socket,
     })
 }
@@ -747,6 +764,52 @@ pub async fn run_output_loop(
             // well.
             warn!("output loop rx dropped, shutting down output loop");
             return;
+        }
+    }
+}
+
+/// Watch the shared input socket and report the first connected engine whose
+/// connection closes as [`Error::EngineDisconnected`] on the output channel.
+///
+/// Every engine connects to the input socket under its own identity, and the
+/// connection closes when the engine process exits for any reason. A killed
+/// engine sends no [`ENGINE_CORE_DEAD_SENTINEL`], and the output socket neither
+/// reports closed connections nor knows which engine a connection belongs to,
+/// so this is how the client learns that such an engine is gone. The engine set
+/// is fixed after startup, so losing any engine is fatal to the client, as the
+/// sentinel is.
+pub async fn run_input_watch_loop(
+    mut input_recv: RouterRecvHalf,
+    mut input_events: SocketEventReceiver,
+    engine_ids: BTreeSet<EngineId>,
+    tx: mpsc::Sender<Result<EngineCoreOutputs>>,
+) {
+    loop {
+        tokio::select! {
+            // Engines send nothing on the input socket after registering, but the
+            // socket only notices closed connections while it is polled.
+            message = input_recv.recv() => match message {
+                Ok(message) => {
+                    warn!(frame_count = message.len(), "dropping unexpected message on input socket");
+                }
+                Err(error) => {
+                    error!(error = %error.as_report(), "failed to receive on input socket");
+                    let _ = tx.send(Err(Error::Transport(error))).await;
+                    return;
+                }
+            },
+            event = input_events.next() => match event {
+                Some(SocketEvent::Disconnected(peer_id)) => {
+                    let engine_id = EngineId(peer_id.into());
+                    if engine_ids.contains(&engine_id) {
+                        warn!(?engine_id, "engine disconnected from input socket");
+                        let _ = tx.send(Err(Error::EngineDisconnected { engine_id })).await;
+                        return;
+                    }
+                }
+                Some(_) => {}
+                None => return,
+            },
         }
     }
 }
