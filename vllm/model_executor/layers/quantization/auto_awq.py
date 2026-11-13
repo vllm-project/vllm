@@ -64,6 +64,7 @@ from vllm.model_executor.utils import is_weights_pre_processed, replace_paramete
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -76,6 +77,43 @@ logger = init_logger(__name__)
 # for indices [0,1,2,3,4,5,6,7], while AWQ stores them for indices
 # [0,4,1,5,2,6,3,7]. This permutation reverses that ordering.
 _REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+
+def _awq_linear(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    pack_factor: int,
+) -> torch.Tensor:
+    # Registered as a custom op so the token-count heuristic is evaluated per
+    # call; under torch.compile a plain Python branch on a symbolic size gets
+    # specialized once and reused for every batch size, including decode.
+    # num_tokens >= threshold
+    FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] >= 256
+    # Batch invariant mode requires torch.matmul path
+    # for Triton override
+    if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
+        out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+        return torch.matmul(x, out)
+    return ops.awq_gemm(x, qweight, scales, qzeros, pack_factor)
+
+
+def _awq_linear_fake(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    pack_factor: int,
+) -> torch.Tensor:
+    return torch.empty(
+        (x.shape[0], qweight.shape[-1] * pack_factor),
+        device=x.device,
+        dtype=x.dtype,
+    )
+
+
+direct_register_custom_op("awq_linear", _awq_linear, fake_impl=_awq_linear_fake)
 
 
 def _replace_or_register_parameter(
@@ -897,15 +935,9 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
         reshaped_x = x.reshape(-1, x.shape[-1])
 
-        # num_tokens >= threshold
-        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
-        # Batch invariant mode requires torch.matmul path
-        # for Triton override
-        if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
-            out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
-            out = torch.matmul(reshaped_x, out)
-        else:
-            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
+        out = torch.ops.vllm.awq_linear(
+            reshaped_x, qweight, scales, qzeros, pack_factor
+        )
         if bias is not None:
             out.add_(bias)
         return out.reshape(out_shape)
