@@ -10,18 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-
-from vllm import (
-    CompletionOutput,
-    PromptType,
-    RequestOutput,
-    SamplingParams,
-    TokensPrompt,
-)
-from vllm import logger as vllm_logger
 from vllm.config import VllmConfig, WatermarkConfig
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
-from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.generate.beam_search.utils import (
     BeamSearchInstance,
     BeamSearchSequence,
@@ -31,6 +21,16 @@ from vllm.inputs import EngineInput, TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
+
+from vllm import (
+    CompletionOutput,
+    PromptType,
+    RequestOutput,
+    SamplingParams,
+    TokensPrompt,
+)
+from vllm import logger as vllm_logger
+from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 
 
 @pytest.fixture
@@ -692,3 +692,69 @@ def test_beam_allowlist_rejects_unsupported_requests(case):
     with pytest.raises((ValueError, VLLMValidationError)):
         params.configure_logprobs(sampling, config)
         sampling._validate_logprobs(config.model_config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("beam_width", [1, 2, 3, 5])
+@pytest.mark.parametrize("max_tokens", [1, 3])
+@pytest.mark.parametrize("pattern", ["flat", "cutoff", "distinct"])
+async def test_online_beam_stable_ties(monkeypatch, beam_width, max_tokens, pattern):
+    prompt: TokensInput = {"type": "token", "prompt_token_ids": [1]}
+    params = BeamSearchParams(
+        beam_width=beam_width,
+        max_tokens=max_tokens,
+        ignore_eos=True,
+        watermarking=False,
+    )
+    scores = (
+        [-1.0] * 32
+        if pattern == "flat"
+        else [-0.5] + [-1.0] * 20 + [-2.0] * 11
+        if pattern == "cutoff"
+        else [-float(i + 1) for i in range(32)]
+    )
+
+    def result_for(engine_prompt):
+        return RequestOutput(
+            request_id="tie-test",
+            prompt=None,
+            prompt_token_ids=engine_prompt["prompt_token_ids"],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=None,
+                    logprobs=[
+                        {i + 11: Logprob(score) for i, score in enumerate(scores)}
+                    ],
+                    finish_reason="length",
+                )
+            ],
+            finished=True,
+        )
+
+    async def generate(engine_prompt, *args, **kwargs):
+        yield result_for(engine_prompt)
+
+    offline = _OfflineServing()
+    monkeypatch.setattr(
+        _OfflineServing, "_beam_search_step", BeamSearchOfflineMixin._beam_search_step
+    )
+    monkeypatch.setattr(
+        offline,
+        "_render_and_run_requests",
+        lambda *, prompts, **kwargs: [result_for(p) for p in prompts],
+        raising=False,
+    )
+    reference = offline.beam_search(cast(list, [prompt]), params)[0].sequences
+    online = _AsyncServing()
+    monkeypatch.setattr(online.engine_client, "generate", generate)
+    actual = (await anext(online.beam_search(prompt, "tie-test", params))).outputs
+    assert [list(output.token_ids) for output in actual] == [
+        beam.tokens[1:] for beam in reference
+    ]
+    assert [output.cumulative_logprob for output in actual] == pytest.approx(
+        [beam.cum_logprob for beam in reference]
+    )
