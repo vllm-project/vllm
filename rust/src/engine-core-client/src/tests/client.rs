@@ -37,7 +37,7 @@ use crate::protocol::multimodal::{
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
-    RequestBatchOutputs, UtilityCallOutput, decode_engine_core_outputs,
+    RequestBatchOutputs, UtilityCallOutput,
 };
 use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
@@ -4010,7 +4010,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(python_mm_features, rust_mm_features);
 
     let decoded_sampling_mask_outputs =
-        decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
+        EngineCoreOutputs::from_frames(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
@@ -4025,7 +4025,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         hex::decode(extended_outputs_hex).unwrap(),
     )];
     assert_eq!(
-        decode_engine_core_outputs(&extended_frames).unwrap(),
+        EngineCoreOutputs::from_frames(&extended_frames).unwrap(),
         decoded_outputs
     );
     expect_test::expect![[r#"
@@ -4106,7 +4106,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     };
 
     let inline_logprobs =
-        decode_engine_core_outputs(&decode_frames(inline_logprobs_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(inline_logprobs_frames)).unwrap();
     expect_sample_logprobs(
         inline_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
@@ -4115,7 +4115,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     );
 
     let multipart_logprobs =
-        decode_engine_core_outputs(&decode_frames(multipart_logprobs_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(multipart_logprobs_frames)).unwrap();
     expect_sample_logprobs(
         multipart_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
@@ -4123,7 +4123,8 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             .expect("multipart logprobs decoded"),
     );
 
-    let inline_prompt = decode_engine_core_outputs(&decode_frames(inline_prompt_frames)).unwrap();
+    let inline_prompt =
+        EngineCoreOutputs::from_frames(&decode_frames(inline_prompt_frames)).unwrap();
     expect_prompt_logprobs(
         inline_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
@@ -4132,7 +4133,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     );
 
     let multipart_prompt =
-        decode_engine_core_outputs(&decode_frames(multipart_prompt_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(multipart_prompt_frames)).unwrap();
     expect_prompt_logprobs(
         multipart_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
