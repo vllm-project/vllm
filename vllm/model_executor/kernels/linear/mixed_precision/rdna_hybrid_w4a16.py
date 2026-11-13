@@ -296,6 +296,107 @@ def _triton_w4a16_skinny_fmt_kernel(
     tl.store(c_ptrs, c, mask=mask_c)
 
 
+@triton.jit
+def _int4_pair_to_bf16x2(x):
+    """bf16 counterpart of `_int4_pair_to_fp16x2`: two lanes of 128 + nibble
+    (bf16 0x4300 is 128.0, whose ulp is 1, so 128 + nibble is exact)."""
+    mask = tl.full(x.shape, 0x000F000F, tl.int32)
+    return tl.inline_asm_elementwise(
+        asm="v_and_or_b32 $0, $1, $2, 0x43004300",
+        constraints="=v,v,v",
+        args=[x, mask],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    )
+
+
+@triton.jit
+def _triton_w4a16_bf16_deferred_kernel(
+    a_ptr,  # [M, K] bf16 activations
+    b_ptr,  # [N, K//8] int32 packed (ExLlama shuffle)
+    scales_ptr,  # [N, K//G] bf16
+    zp_ptr,  # [N//8, K//G] int32 zero-points (when HAS_ZP=True)
+    rowsum_ptr,  # [M, K//G] fp32 activation sums per group
+    c_ptr,  # [M, N] bf16 output
+    M,
+    N,
+    K,
+    K8,
+    stride_sn,
+    stride_bn,
+    stride_am,
+    stride_rm,
+    group_size,
+    ZP_BIAS: tl.constexpr,
+    HAS_ZP: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    UNROLL: tl.constexpr,
+):
+    """bf16 W4A16 GEMM that applies scale and zero point to the output tile.
+
+    The weights enter the dot as raw bf16 128 + q, one `v_and_or_b32` per
+    nibble pair, so the dequant costs no per-element FMA:
+
+        sum_k a[m,k] * (q[n,k] - z[n]) * s[n]
+            = s[n] * (sum_k a[m,k] * (128 + q[n,k]) - (128 + z[n]) * rowsum[m])
+
+    s and z are constant within a group, so the affine runs once per group on
+    the BLOCK_M x BLOCK_N tile instead of on every BLOCK_N x BLOCK_K weight.
+    BLOCK_K is the group size, so K block g is group g.
+    """
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    # Pair p of each ExLlama word: val[2p] at bits [4p, 4p+4), val[2p+1] 16 up.
+    shifts4 = (tl.arange(0, 4) * 4)[None, None, :]
+    for g in tl.range(0, tl.cdiv(K, BLOCK_K), loop_unroll_factor=UNROLL):
+        offs_k = g * BLOCK_K + tl.arange(0, BLOCK_K)
+        a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :]
+        a = tl.load(a_ptrs, mask=mask_m[:, None] & (offs_k[None, :] < K), other=0.0)
+        offs_k8 = g * (BLOCK_K // 8) + tl.arange(0, BLOCK_K // 8)
+        b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]
+        mask_b = mask_n[:, None] & (offs_k8[None, :] < K8)
+        b_packed = tl.load(b_ptrs, mask=mask_b, other=0)
+        bp_shift = tl.reshape(b_packed[:, :, None] >> shifts4, (BLOCK_N, BLOCK_K // 2))
+        packed_hl = _int4_pair_to_bf16x2(bp_shift)
+        lo = (packed_hl & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True)
+        hi = (packed_hl >> 16).to(tl.uint16).to(tl.bfloat16, bitcast=True)
+        partial = tl.dot(a, tl.trans(tl.interleave(lo, hi)), out_dtype=tl.float32)
+
+        # g itself (group_size == BLOCK_K) measured up to 1.4x slower at
+        # M <= 32: the compiler schedules these loads differently.
+        gs = (g * BLOCK_K) // group_size
+        scales = tl.load(
+            scales_ptr + offs_n * stride_sn + gs, mask=mask_n, other=0.0
+        ).to(tl.float32)
+        if HAS_ZP:
+            zp_word = tl.load(
+                zp_ptr + (offs_n // 8) * stride_sn + gs, mask=mask_n, other=0
+            )
+            zp_off = 128.0 + ((zp_word >> (4 * (offs_n % 8))) & 0xF).to(tl.float32)
+        else:
+            zp_off = 128.0 + ZP_BIAS
+        row_sum = tl.load(rowsum_ptr + offs_m * stride_rm + g, mask=mask_m, other=0.0)
+        accumulator += (
+            partial * scales[None, :] - row_sum[:, None] * (zp_off * scales)[None, :]
+        )
+
+    c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
+    tl.store(
+        c_ptrs,
+        accumulator.to(c_ptr.type.element_ty),
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+
+
 # Per-shape (group_size, K, N) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,
 # num_stages) tile-config overrides for prefill and selected decode-sized
 # batches (M <= 128). bf16 gfx1151 batches with 9 <= M <= 64 bypass these
@@ -441,6 +542,96 @@ def _select_skinny_gfx1151_config(
     return block_m, block_n, block_k, num_warps, num_stages, packed_dequant
 
 
+DeferredTile = tuple[int, int, int, int, int]
+"""(BLOCK_M, BLOCK_N, num_warps, unroll, num_stages); BLOCK_K is the group."""
+
+
+def _gfx1151_bf16_deferred_tile(
+    M: int, N: int, K: int, group_size: int
+) -> DeferredTile | None:
+    """DeferredTile for the bf16 deferred-scale kernel on gfx1151, or None to
+    keep the fused-dequant kernel.
+
+    Swept on gfx1151 against _select_skinny_gfx1151_config at M 8..128 over
+    Qwen3, Qwen3.8, Llama-3 and SmolLM2 shapes at group sizes 32, 64 and 128,
+    symmetric and with zero points, on ROCm 7.2 and 10.0 torch builds, with
+    the weights rotated past the 32 MB MALL. M <= 8 is served by
+    wvSplitK_int4_g. None where it does not win: narrow N at M 17..32 and
+    below g128, g32 above M 16, g64 at M 33..64, tall K above M 32, and
+    g128 with N < 2K at M <= 16.
+    """
+    if M <= 8 or M > 128 or group_size not in (32, 64, 128):
+        return None
+    if N < 1024:
+        if 16 < M <= 32 or group_size < 128:
+            return None
+        return (16, 64, 4, 4, 2)
+    tall = K >= 2 * N
+    if group_size < 128:
+        if M <= 16 or (M <= 32 and group_size == 64):
+            return (16 if M <= 16 else 32, 64, 4, 4, 2)
+        if M > 64 and group_size == 64 and not tall:
+            return (64, 64, 2, 1, 1)
+        return None
+    wide = N >= 2 * K
+    if M <= 16:
+        if tall:
+            return (16, 64, 4, 4, 1)
+        return (16, 32, 2, 2, 3) if wide else None
+    if M <= 32:
+        return (32, 64, 4, 1, 2) if wide else (32, 64, 4, 2, 1)
+    if tall:
+        return None
+    if not wide:
+        return (16, 64, 2, 1, 1) if M <= 48 else (32, 64, 2, 1, 1)
+    if M <= 48 or (M <= 64 and N < 4 * K):
+        return (16, 64, 2, 1, 2)
+    return (64, 64, 2, 1, 1)
+
+
+def _triton_w4a16_bf16_deferred_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+    zp_bias: int,
+    zp: torch.Tensor | None,
+    c: torch.Tensor,
+    tile: DeferredTile,
+) -> torch.Tensor:
+    M, K = a.shape
+    N = b_q.shape[0]
+    BLOCK_M, BLOCK_N, num_warps, unroll, num_stages = tile
+    rowsum = a.unflatten(1, (K // group_size, group_size)).sum(-1, dtype=torch.float32)
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    _triton_w4a16_bf16_deferred_kernel[grid](
+        a,
+        b_q,
+        scales,
+        zp if zp is not None else scales,  # dummy pointer when no zp (unused)
+        rowsum,
+        c,
+        M,
+        N,
+        K,
+        K // 8,
+        scales.stride(0),
+        b_q.stride(0),
+        a.stride(0),
+        rowsum.stride(0),
+        group_size,
+        ZP_BIAS=zp_bias,
+        HAS_ZP=zp is not None,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=group_size,
+        UNROLL=unroll,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return c
+
+
 def triton_w4a16_skinny_fmt_gemm(
     a: torch.Tensor,  # [M, K] fp16/bf16
     b_q: torch.Tensor,  # [N, K//8] int32 (ExLlama shuffle packed)
@@ -547,6 +738,15 @@ def triton_w4a16_skinny_fmt_gemm(
             else:
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 128, 32, 8
     elif _on_gfx1151():
+        deferred_tile = (
+            _gfx1151_bf16_deferred_tile(M, N, K, group_size)
+            if a.dtype == torch.bfloat16 and K % group_size == 0
+            else None
+        )
+        if deferred_tile is not None:
+            return _triton_w4a16_bf16_deferred_gemm(
+                a, b_q, scales, group_size, zp_bias, zp, c, deferred_tile
+            )
         BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, packed_dequant = (
             _select_skinny_gfx1151_config(
                 M, N, K, group_size, a.dtype, has_zp, scale_zp_carrier is not None
