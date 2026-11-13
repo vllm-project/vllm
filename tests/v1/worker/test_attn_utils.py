@@ -24,6 +24,7 @@ from tests.v1.attention.utils import (
     dense_kv_cache_views,
 )
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
+from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
@@ -35,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -57,17 +59,18 @@ from vllm.v1.worker.utils import (
 
 
 @pytest.mark.parametrize(
-    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected"),
+    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
     [
-        (True, 256, [64], [64], 64),
-        (True, 64, [32, 64], [16, 32], 32),
-        (True, 64, [MultipleOf(16)], [32], 32),
-        (True, 64, [64], [32], None),
-        (False, 256, [64], [64], 256),
+        (True, 256, [64], [64], 64, 64),
+        (True, 64, [32, 64], [16, 32], 32, 32),
+        (True, 64, [MultipleOf(16)], [32], 32, 32),
+        (True, 64, [64], [32], None, None),
+        (False, 256, [64], [64], 256, 256),
+        (True, 384, [MultipleOf(32)], [128, 256], 128, 256),
     ],
 )
 def test_get_kv_cache_spec_resolves_hisparse_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected
+    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected, indexer
 ):
     """Resolve shared MLA geometry before planning; leave other specs alone."""
     specs = {
@@ -102,6 +105,15 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     monkeypatch.setattr(
         attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
     )
+    mamba_fit_inputs: list[dict[str, KVCacheSpec]] = []
+
+    def fit_mamba_blocks(_, kv_cache_spec, __):
+        mamba_fit_inputs.append(kv_cache_spec)
+        return kv_cache_spec
+
+    monkeypatch.setattr(
+        attn_utils_module, "fit_mamba_blocks_to_attention", fit_mamba_blocks
+    )
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
     )
@@ -111,7 +123,11 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         return
 
     resolved = attn_utils.get_kv_cache_spec(config)
-    assert resolved["main"].block_size == resolved["indexer"].block_size == expected
+    assert resolved["main"].block_size == expected
+    assert resolved["indexer"].block_size == indexer
+    assert [specs["indexer"].block_size for specs in mamba_fit_inputs] == (
+        [indexer] if enabled else []
+    )
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
@@ -883,9 +899,9 @@ _VLLM_CONFIG = SimpleNamespace(
 
 
 def _packed_group(
-    tokens_per_state, row_bytes, supported_sizes, writes_from_block_table=False
+    tokens_per_state, row_bytes, supported_sizes, spec_cls=MLAAttentionSpec
 ):
-    spec = MLAAttentionSpec(
+    spec = spec_cls(
         block_size=1024,
         num_kv_heads=1,
         head_size=128,
@@ -898,7 +914,6 @@ def _packed_group(
         get_supported_kernel_block_sizes=lambda _=None: supported_sizes,
         get_name=lambda: "FAKE",
         customize_spec=lambda spec: spec,
-        writes_kv_cache_from_block_table=lambda: writes_from_block_table,
     )
     return AttentionGroup(backend, ["layer.0"], spec, 0)
 
@@ -948,11 +963,11 @@ def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
     assert spec.get_block_stride_alignment() == max(page_states * 132, 1)
 
 
-def test_packed_token_cache_written_from_block_table_is_split():
-    """A packed token cache whose layers write it from the block table is split
-    like a compressed one: its kernel blocks address the manager blocks' rows."""
+def test_packed_token_cache_without_slot_mapping_is_split():
+    """A packed token cache that takes no slot mapping is split like a compressed
+    one: its kernel blocks address the manager blocks' rows."""
     row, stride_rows = 132, 20 * 64
-    group = _packed_group(1, row, [64], writes_from_block_table=True)
+    group = _packed_group(1, row, [64], spec_cls=SelfAddressedMLASpec)
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
     # Each row holds its own row index.
     backing = torch.arange(3 * stride_rows).repeat_interleave(row)
@@ -974,43 +989,6 @@ def test_packed_token_cache_cannot_be_split():
     packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
     with pytest.raises(ValueError, match="cannot be split"):
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
-
-
-def test_packed_token_cache_splits_with_mapped_slots():
-    """A runner that maps slots too can split a packed token cache: slot
-    b * block_size + t is written to the row block b's offset t is read from."""
-    row, stride_rows = 8, 1280  # other layers' pages sit between blocks
-    group = _packed_group(1, row, [64])
-    group.maps_slot_mapping = True
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
-    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
-    manager = backing.view(3, 1, stride_rows, row)[:, :, :1024]
-    pages = map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])["layer.0"]
-
-    slots = torch.tensor([5, 2 * 1024 + 700, -1])
-    mapped = group.map_to_kernel_slot_mapping(slots)
-    assert mapped[2] == -1
-    for (block, offset), slot in zip([(0, 5), (2, 700)], mapped[:2].tolist()):
-        assert torch.equal(pages[slot // 64, 0, slot % 64], manager[block, 0, offset])
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_kernel_slot_mapping_cuda_matches_torch():
-    """The fused CUDA slot remap matches the elementwise torch path, padded
-    (negative) slots included."""
-    row, stride_rows = 8, 1280
-    group = _packed_group(1, row, [64])
-    group.maps_slot_mapping = True
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
-    manager = torch.zeros(3 * stride_rows, 1, row).view(3, 1, stride_rows, row)
-    map_kv_caches_to_kernel_blocks({"layer.0": manager[:, :, :1024]}, [group])
-
-    slots = torch.randint(-1, 3 * 1024, (3000,))
-    slots[:3] = torch.tensor([-1, 0, 3 * 1024 - 1])
-    expected = group.map_to_kernel_slot_mapping(slots).clone()
-    out = torch.empty(slots.shape, dtype=slots.dtype, device="cuda")
-    mapped = group.map_to_kernel_slot_mapping(slots.cuda(), out=out)
-    assert torch.equal(mapped.cpu(), expected)
 
 
 def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():
