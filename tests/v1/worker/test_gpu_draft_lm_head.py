@@ -20,6 +20,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.gpu_worker import Worker
 
 # Not a multiple of the vocab padding, so the head has padded rows.
@@ -67,6 +68,53 @@ def test_tracks_bf16_head_through_logits_processor(
     # The source head keeps its bf16 weight, and no bf16 copy is kept around.
     assert torch.equal(head.weight, target_weight)
     assert draft_head.weight.dtype != torch.bfloat16
+
+    logits_processor = LogitsProcessor(VOCAB)
+    hidden = torch.randn(2048, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    ref = logits_processor(head, hidden).float()
+    out = logits_processor(draft_head, hidden).float()
+    assert out.shape == ref.shape == (2048, VOCAB)
+    rel_err = ((out - ref).norm() / ref.norm()).item()
+    top1 = (out.argmax(-1) == ref.argmax(-1)).float().mean().item()
+    assert rel_err < max_rel_err
+    assert top1 > min_top1
+
+
+def _q8_0_target_head(default_vllm_config, monkeypatch) -> ParallelLMHead:
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+    )
+
+    try:
+        method = ModelOptBlockQuantLinearMethod("q8_0")
+    except ValueError as e:
+        pytest.skip(str(e))
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 2048
+    weight = _target_head(monkeypatch).weight.detach().float().cpu()
+    with set_default_torch_dtype(torch.bfloat16):
+        head = ParallelLMHead(VOCAB, HIDDEN, disable_tp=True, quant_method=method)
+    blocks = weight.view(weight.shape[0], -1, 32)
+    scales = (blocks.abs().amax(-1, keepdim=True) / 127).half()
+    values = (blocks / scales.float()).round().clamp(-127, 127).to(torch.int8)
+    head.weight.data.copy_(
+        torch.cat([scales.view(torch.uint8), values.view(torch.uint8)], -1)
+    )
+    head = head.to("cuda")
+    method.process_weights_after_loading(head)
+    return head
+
+
+@requires_cuda
+@pytest.mark.parametrize(
+    ("quantization", "max_rel_err", "min_top1"),
+    [("fp8", 0.05, 0.9), pytest.param("nvfp4", 0.15, 0.75, marks=requires_nvfp4)],
+)
+@torch.inference_mode()
+def test_tracks_q8_0_head_through_logits_processor(
+    default_vllm_config, dist_init, monkeypatch, quantization, max_rel_err, min_top1
+):
+    head = _q8_0_target_head(default_vllm_config, monkeypatch)
+    draft_head = quantized_lm_head_copy(head, quantization)
 
     logits_processor = LogitsProcessor(VOCAB)
     hidden = torch.randn(2048, HIDDEN, device="cuda", dtype=torch.bfloat16)

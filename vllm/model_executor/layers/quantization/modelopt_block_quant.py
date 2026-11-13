@@ -416,6 +416,30 @@ class ModelOptBlockQuantLinearMethod(LinearMethodBase):
             compile=compile,
         )
 
+    @torch.no_grad()
+    def dequantize_weight(
+        self, layer: torch.nn.Module, chunk_rows: int = 8192
+    ) -> torch.Tensor:
+        """The BF16 weight of a Q8_0 dense layer, read back from its b12x
+        storage: INT8 payloads in [N/T,K/32,T,32] tiles (T is 128 if it divides
+        N, else 8) and FP16 scales in [K/32,N]."""
+        if self.codec != "q8_0" or self.is_embedding:
+            raise ValueError("Only Q8_0 dense weights can be dequantized")
+        packed = layer.b12x_block_weight
+        n, kb = packed.out_features, packed.in_features // self.block_size
+        tile = 128 if n % 128 == 0 else 8
+        tiles = packed.values.view(torch.int8).view(n // tile, kb, tile, -1)
+        scales = packed.metadata.view(torch.float16).view(kb, n).t()
+        weight = torch.empty(
+            n, packed.in_features, dtype=torch.bfloat16, device=tiles.device
+        )
+        step = max(chunk_rows // tile, 1)
+        for start in range(0, n // tile, step):
+            values = tiles[start : start + step].transpose(1, 2).flatten(0, 1)
+            rows = slice(start * tile, start * tile + values.shape[0])
+            weight[rows] = (values.float() * scales[rows, :, None]).flatten(1)
+        return weight
+
     def apply(self, layer, x, bias=None):
         if x.dtype != torch.bfloat16:
             raise ValueError(

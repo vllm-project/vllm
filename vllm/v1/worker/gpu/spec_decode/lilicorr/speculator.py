@@ -5,6 +5,9 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    quantized_lm_head_copy,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
@@ -62,6 +65,16 @@ class LiLiCorrSpeculator(DFlash2Speculator):
             or lm_head.shard_indices.num_added_elements
         ):
             raise ValueError("LiLiCorr does not support added vocabulary entries.")
+        spec_config = self.vllm_config.speculative_config
+        assert spec_config is not None
+        quantization = spec_config.draft_lm_head_quantization
+        if quantization is not None:
+            if model.has_own_lm_head:
+                raise ValueError(
+                    "draft_lm_head_quantization needs a drafter that shares the "
+                    "target lm_head."
+                )
+            lm_head = quantized_lm_head_copy(lm_head, quantization)
         # Candidate embeddings always come from the target; the checkpoint may
         # supply its own candidate LM head.
         self.target_embeddings = embedding
