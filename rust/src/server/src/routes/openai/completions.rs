@@ -71,7 +71,7 @@ pub async fn completions(
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Result<Response, ApiError> {
     let stream = body.stream;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 

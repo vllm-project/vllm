@@ -248,7 +248,7 @@ mod tests {
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id)
+        resolve_request_context(headers, request_id).expect("valid headers")
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {

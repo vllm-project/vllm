@@ -58,7 +58,7 @@ pub async fn generate(
     headers: HeaderMap,
     ValidatedJson(mut body): ValidatedJson<GenerateRequest>,
 ) -> Result<Response, ApiError> {
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
     if body.content_parts.is_some() && body.features.is_some() {

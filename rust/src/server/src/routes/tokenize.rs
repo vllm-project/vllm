@@ -21,15 +21,13 @@ use crate::routes::tokenize::types::{
     TokenizeRequest, TokenizeResponse,
 };
 use crate::state::AppState;
-use crate::utils::resolve_base_request_id;
+use crate::utils::{header_value, resolve_base_request_id};
 
 /// Match Python `tokenize-{base}` where base is `X-Request-Id` or a new UUID.
-fn tokenize_request_id(headers: &HeaderMap) -> String {
-    let base = resolve_base_request_id(
-        headers.get("X-Request-Id").and_then(|value| value.to_str().ok()),
-        None,
-    );
-    format!("tokenize-{base}")
+fn tokenize_request_id(headers: &HeaderMap) -> Result<String, ApiError> {
+    let header: Option<String> = header_value(headers, "X-Request-Id")?;
+    let base = resolve_base_request_id(header.as_deref(), None);
+    Ok(format!("tokenize-{base}"))
 }
 
 /// Build the `token_strs` vector when requested, via the tokenizer vocab.
@@ -43,7 +41,7 @@ pub async fn tokenize(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<TokenizeRequest>,
 ) -> Result<Json<TokenizeResponse>, ApiError> {
-    let request_id = tokenize_request_id(&headers);
+    let request_id = tokenize_request_id(&headers)?;
     let tokenizer = state.chat.text().tokenizer();
     let max_model_len = state.llm().info().max_model_len;
 
@@ -127,13 +125,16 @@ mod tests {
     fn tokenize_request_id_prefers_x_request_id_header() {
         let mut headers = HeaderMap::new();
         headers.insert("X-Request-Id", HeaderValue::from_static("client-req-1"));
-        assert_eq!(tokenize_request_id(&headers), "tokenize-client-req-1");
+        assert_eq!(
+            tokenize_request_id(&headers).unwrap(),
+            "tokenize-client-req-1"
+        );
     }
 
     #[test]
     fn tokenize_request_id_generates_uuid_when_header_missing() {
         let headers = HeaderMap::new();
-        let id = tokenize_request_id(&headers);
+        let id = tokenize_request_id(&headers).unwrap();
         assert!(id.starts_with("tokenize-"));
         assert_ne!(id, "tokenize-");
     }

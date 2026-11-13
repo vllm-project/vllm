@@ -190,7 +190,7 @@ async fn render_chat(
         Some(false) => MmPayload::None,
         _ => MmPayload::Tensors,
     });
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     // Lowering has checked that `n` is at least 1.
     validate_n_limit(n.unwrap_or(1), state.max_n_sequences)?;
@@ -229,7 +229,7 @@ async fn render_completion(
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let text_request = lower_completion_request(
         body,
         &model_resolution(&state),

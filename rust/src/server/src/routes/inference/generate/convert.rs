@@ -278,7 +278,7 @@ mod tests {
         let prepared = prepare_generate_request(
             request,
             &served(&["test-model"]),
-            resolve_request_context(&headers, None),
+            resolve_request_context(&headers, None).expect("valid headers"),
             None,
         )
         .expect("prepare");

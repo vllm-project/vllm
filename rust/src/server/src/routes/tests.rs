@@ -1104,6 +1104,47 @@ async fn scale_out_generate_route_can_be_enabled() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn generate_rejects_unparsable_data_parallel_rank_header() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-dp-rank-header",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .header("X-data-parallel-rank", "rank-1")
+                .body(Body::from(
+                    json!({"token_ids": [1, 2], "sampling_params": {}}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    assert_eq!(
+        json["error"]["message"],
+        "Invalid X-data-parallel-rank header \"rank-1\": invalid digit found in string."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn generate_rejects_content_parts_with_features() {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-generate-mm-exclusive",
