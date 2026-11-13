@@ -781,11 +781,10 @@ class DFlashQwen3Model(nn.Module):
         """Precompute K/V for context states write them into each layer's KV cache.
 
         Input context states are projected to K/V, normed, and have RoPE applied.
-        Since the context shape is different than the query shape, we can't rely on the
-        regular forward pass to apply torch.compile and CUDA graphs to this section.
-        As such, this function is optimized to minimize the number of torch ops present:
-        we use fused vLLM kernels for RMSNorm and RoPE, fuse the GEMM into one
-        large projection, and avoid cloning buffers (with .contiguous()) where possible.
+        Context rows can also run outside the draft query graph, so this path uses
+        batched projections and fused RMSNorm/RoPE to reduce eager kernel launches.
+        Supported native caches are written across layers in one launch, including
+        during full draft CUDA graph capture.
 
         When context_slot_mapping is None (e.g. during dummy_run) only
         the computation runs, and no K/V is written to cache.
@@ -807,21 +806,36 @@ class DFlashQwen3Model(nn.Module):
         if v_scale is not None:
             all_v.mul_(v_scale)
 
-        # --- Per-layer cache insert ---
         all_k_final = all_k_normed.view(L, num_ctx, nkv, hd)
+        self._store_context_kv(all_k_final, all_v, context_slot_mapping)
+
+    def _store_context_kv(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None],
+    ) -> None:
+        if current_platform.is_cuda():
+            from vllm.v1.attention.ops.batched_kv_cache import (
+                try_batched_kv_cache_update,
+            )
+
+            if try_batched_kv_cache_update(
+                self._attn_layers, key, value, context_slot_mapping
+            ):
+                return
         per_layer = isinstance(context_slot_mapping, (list, tuple))
-        for i in range(L):
+        for i, attn in enumerate(self._attn_layers):
             slot_mapping = (
                 context_slot_mapping[i] if per_layer else context_slot_mapping
             )
             if slot_mapping is None:
                 continue  # dummy run: skip cache ops
-            attn = self._attn_layers[i]
             kv_cache = attn.kv_cache
             attn.impl.do_kv_cache_update(
                 attn,
-                all_k_final[i],
-                all_v[i],
+                key[i],
+                value[i],
                 kv_cache,
                 slot_mapping,
             )
