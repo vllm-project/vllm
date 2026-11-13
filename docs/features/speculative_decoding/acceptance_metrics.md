@@ -83,6 +83,19 @@ With `detailed`, ordered arrays are added, one entry per verification step:
 is `summary`/`detailed`, speculative decoding is enabled, and `n == 1` (with an
 all-zero histogram if the request drafted nothing). It is `null` otherwise.
 
+## Recomputable without the engine
+
+Every request that enables these metrics carries a compact settlement of how
+many draft tokens were proposed, accepted and verified. The design keeps it
+independently recomputable: a client, a test or a dashboard can reproduce
+`mean_acceptance_length` and `draft_acceptance_rate` from
+`acceptance_histogram` without running the engine.
+
+We keep that property enforced in code: the arithmetic lives in
+`vllm.v1.metrics.acceptance.acceptance_totals`, a dependency-free function used
+by both `RequestSpecDecodeMetrics.to_dict()` and the documented formula. The accompanying tests pin boundary cases with literal
+expected values, so the settlement stays verifiable as the engine evolves.
+
 ## Streaming
 
 In streaming responses, `metrics` (including `speculative_decoding`) rides the
