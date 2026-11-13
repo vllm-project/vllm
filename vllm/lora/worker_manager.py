@@ -42,6 +42,8 @@ class WorkerLoRAManager:
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
         self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
+        # Newest source of each adapter id that was reloaded in place.
+        self._inplace_sources: dict[int, LoRARequest] = {}
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
@@ -233,9 +235,11 @@ class WorkerLoRAManager:
         return loaded
 
     def remove_adapter(self, adapter_id: int) -> bool:
+        self._inplace_sources.pop(adapter_id, None)
         return self._adapter_manager.remove_adapter(adapter_id)
 
     def remove_all_adapters(self):
+        self._inplace_sources.clear()
         self._adapter_manager.remove_all_adapters()
 
     def list_adapters(self) -> set[int]:
@@ -301,7 +305,15 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 # evicting any existing adapters.
                 # This may cause the # of loaded lora adapters to very temporarily
                 # exceed `--max-cpu-loras`.
-                lora = self._load_adapter(lora_request)
+                # Requests admitted before an in-place reload carry the old path.
+                source = lora_request
+                if not lora_request.load_inplace:
+                    source = self._inplace_sources.get(
+                        lora_request.lora_int_id, lora_request
+                    )
+                lora = self._load_adapter(source)
+                if lora_request.load_inplace:
+                    self._inplace_sources[lora_request.lora_int_id] = lora_request
 
                 # Remove the existing adapter if it exists
                 # Use case for LoRA inplace

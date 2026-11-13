@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Script to test add_lora, remove_lora, pin_lora, list_loras functions."""
 
+import asyncio
+
+import httpx
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -12,6 +16,8 @@ from vllm.entrypoints.launchers.api_server.entry import (
 from vllm.lora.request import LoRARequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
+
+from ..utils import RemoteOpenAIServer
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_MODULE_PATH = "vllm-project/self_cognition_Alice"
@@ -185,3 +191,82 @@ def test_dummy_batch_keeps_loras(enforce_eager):
     while llm.has_unfinished_requests():
         llm.step()
     assert set(llm.list_loras()) == {1, 3}
+
+
+async def _wait_for_waiting_requests(http: httpx.AsyncClient, count: int) -> None:
+    while True:
+        resp = await http.get("/metrics")
+        resp.raise_for_status()
+        waiting = sum(
+            sample.value
+            for family in text_string_to_metric_families(resp.text)
+            for sample in family.samples
+            if sample.name == "vllm:num_requests_waiting"
+        )
+        if waiting >= count:
+            return
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_inplace_reload_survives_eviction_in_server(
+    qwen3_meowing_lora_files, qwen3_woofing_lora_files
+):
+    """A request queued across an in-place reload holds the old LoRARequest.
+    When the adapter is evicted and loaded again for it, later requests must
+    still be served by the reloaded weights."""
+    args = ["--enable-lora", "--enforce-eager", "--max-model-len", "2048"]
+    args += ["--max-loras", "1", "--max-cpu-loras", "1"]
+    args += ["--max-lora-rank", str(LORA_RANK), "--lora-modules"]
+    args += [f"pet={qwen3_meowing_lora_files}", f"dog={qwen3_woofing_lora_files}"]
+    env = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+    messages = [
+        {"role": "system", "content": "Follow the instructions to make animal noises"},
+        {"role": "user", "content": "Make your favorite animal noise."},
+    ]
+    no_thinking = {"chat_template_kwargs": {"enable_thinking": False}}
+
+    with RemoteOpenAIServer(MODEL_PATH, args, env_dict=env) as server:
+        client = server.get_async_client()
+
+        async def chat(model: str) -> str:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0,
+                max_tokens=10,
+                extra_body=no_thinking,
+            )
+            return resp.choices[0].message.content
+
+        async with httpx.AsyncClient(base_url=server.url_root) as http:
+            # "dog" occupies the only LoRA slot, so the "pet" request waits.
+            busy = await client.chat.completions.create(
+                model="dog",
+                messages=messages,
+                temperature=0,
+                max_tokens=1500,
+                stream=True,
+                extra_body={"ignore_eos": True, **no_thinking},
+            )
+            busy_chunks = aiter(busy)
+            await anext(busy_chunks)
+            queued = asyncio.create_task(chat("pet"))
+            await asyncio.wait_for(_wait_for_waiting_requests(http, 1), 60)
+
+            resp = await http.post(
+                "/v1/load_lora_adapter",
+                json={
+                    "lora_name": "pet",
+                    "lora_path": qwen3_woofing_lora_files,
+                    "load_inplace": True,
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            assert not queued.done(), "the pet request must still be queued"
+
+            async for _ in busy_chunks:
+                pass
+            await queued
+
+        assert "Woof Woof Woof" in await chat("pet")
