@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import functools
 import logging
 import math
 import queue
@@ -3588,15 +3589,40 @@ class MoRIIOConnectorWorker:
         if spec.num_kv_heads > 1 or self.world_size == 1:
             return spec.num_kv_heads * self.world_size
         # With one head per rank, up to world_size ranks share each head, so the
-        # spec cannot tell the count. Draft layers may be numbered past the
-        # target's layers, which its per-layer config does not list.
-        arch = self.model_config.model_arch_config
-        total = self.model_config.get_total_num_kv_heads()
+        # spec cannot tell the count: take it from the config of the model the
+        # layer belongs to.
+        model_config = self.model_config
+        is_draft = self._is_draft_layer(layer_name)
+        if is_draft:
+            spec_config = self.vllm_config.speculative_config
+            assert spec_config is not None and spec_config.draft_model_config
+            model_config = spec_config.draft_model_config
+        arch = model_config.model_arch_config
+        total = model_config.get_total_num_kv_heads()
         if arch.per_layer_overrides is not None:
             layer_idx = extract_layer_index(layer_name)
-            if layer_idx < len(arch.per_layer_overrides):
-                total = arch[layer_idx].total_num_kv_heads
+            if is_draft:
+                # Drafters may number their layers after the target's (EAGLE).
+                assert self._draft_layer_start is not None
+                layer_idx -= self._draft_layer_start
+            total = arch[layer_idx].total_num_kv_heads
         return min(total, self.world_size)
+
+    def _is_draft_layer(self, layer_name: str) -> bool:
+        layer = self.vllm_config.compilation_config.static_forward_context.get(
+            layer_name
+        )
+        return bool(getattr(layer, "is_draft_layer", False))
+
+    @functools.cached_property
+    def _draft_layer_start(self) -> int | None:
+        """Index of the first draft model layer with its own KV cache."""
+        indices = [
+            extract_layer_index(name)
+            for name in self.layer_to_spec
+            if self._is_draft_layer(name)
+        ]
+        return min(indices, default=None)
 
     def _write_tp_mapping(
         self, remote_tp_size: int | None, layer_name: str | None = None

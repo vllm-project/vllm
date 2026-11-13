@@ -127,7 +127,7 @@ class _ArchConfig:
     """Per-layer KV-head counts, as ModelArchitectureConfig exposes them."""
 
     def __init__(self, layers: list[Layer], heads: int):
-        counts = [_layer_heads(layer, heads) for layer in layers if not layer.draft]
+        counts = [_layer_heads(layer, heads) for layer in layers]
         self.per_layer_overrides: list[dict[str, Any]] | None = (
             None if len(set(counts)) == 1 else [{} for _ in counts]
         )
@@ -135,6 +135,15 @@ class _ArchConfig:
 
     def __getitem__(self, layer_idx: int) -> SimpleNamespace:
         return SimpleNamespace(total_num_kv_heads=self._counts[layer_idx])
+
+
+def _model_config(layers: list[Layer], heads: int) -> SimpleNamespace:
+    """The KV-head counts a model config gives for `layers`."""
+    total = max(_layer_heads(layer, heads) for layer in layers)
+    return SimpleNamespace(
+        get_total_num_kv_heads=lambda: total,
+        model_arch_config=_ArchConfig(layers, heads),
+    )
 
 
 def _groups(model: str, hma: bool) -> list[str]:
@@ -262,9 +271,22 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker.world_size = tp_size
     worker.use_mla = layers[0].kind == "mla"
     worker._has_mamba = any(layer.kind == "mamba" for layer in layers)
-    worker.model_config = SimpleNamespace(
-        get_total_num_kv_heads=lambda: heads,
-        model_arch_config=_ArchConfig(layers, heads),
+    worker.model_config = _model_config(
+        [layer for layer in layers if not layer.draft], heads
+    )
+    drafter = [layer for layer in layers if layer.draft]
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                layer.name: SimpleNamespace(is_draft_layer=layer.draft)
+                for layer in layers
+            }
+        ),
+        speculative_config=(
+            SimpleNamespace(draft_model_config=_model_config(drafter, heads))
+            if drafter
+            else None
+        ),
     )
     worker.kv_caches = caches
     worker.num_blocks = NUM_BLOCKS
@@ -403,8 +425,9 @@ SCENARIOS = [
     # Recurrent state needs the hybrid KV cache manager.
     if hma or "hybrid" not in model
 ] + [
-    # More ranks than the sliding layers have heads: those layers replicate.
-    ("mixed_heads", producer_tp, consumer_tp, hma)
+    # More ranks than some layers have heads: those layers replicate.
+    (model, producer_tp, consumer_tp, hma)
+    for model in ("mixed_heads", "mixed_heads_draft", "draft_from_zero")
     for producer_tp, consumer_tp in [(4, 8), (8, 4)]
     for hma in (True, False)
 ]
