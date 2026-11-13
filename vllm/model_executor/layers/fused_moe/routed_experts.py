@@ -377,22 +377,22 @@ class RoutedExperts(PluggableLayer):
         if (
             not self.use_ep
             or self.moe_config.moe_parallel_config.enable_eplb
-            or (
-                self.quant_config is not None
-                and self.quant_config.get_name() == "gpt_oss_mxfp4"
-            )
+            or self._loads_all_experts_at_once()
         ):
             return None
         quant_method = self._weight_loading_quant_method()
-        nonlocal_experts = {
-            expert_id
+        local_expert_ids = [
+            self._map_global_expert_id_to_local_expert_id(expert_id)
             for expert_id in range(self.moe_config.num_logical_experts)
-            if self._map_global_expert_id_to_local_expert_id(expert_id) == -1
-        }
-        return lambda weight_name, expert_id: (
-            expert_id not in nonlocal_experts
-            or self._is_global_sf_weight(quant_method, weight_name)
-        )
+        ]
+
+        def keeps(weight_name: str, expert_id: int) -> bool:
+            # IDs past the routed experts are left to `weight_loader`.
+            return expert_id >= len(local_expert_ids) or not self._skips_expert(
+                local_expert_ids[expert_id], quant_method, weight_name
+            )
+
+        return keeps
 
     #
     # Weight Loading Methods
@@ -735,6 +735,26 @@ class RoutedExperts(PluggableLayer):
             and "input_scale" in weight_name
         )
 
+    @classmethod
+    def _skips_expert(
+        cls,
+        local_expert_id: int,
+        quant_method: FusedMoEMethodBase,
+        weight_name: str,
+    ) -> bool:
+        """Return True if `weight_loader` skips this weight because another
+        expert parallel rank holds its expert."""
+        return local_expert_id == -1 and not cls._is_global_sf_weight(
+            quant_method, weight_name
+        )
+
+    def _loads_all_experts_at_once(self) -> bool:
+        # (FIXME) for gpt-oss all experts are combined
+        return (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "gpt_oss_mxfp4"
+        )
+
     @overload
     def weight_loader(
         self,
@@ -766,9 +786,7 @@ class RoutedExperts(PluggableLayer):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        quant_config_name = self.quant_config and self.quant_config.get_name()
-        if quant_config_name == "gpt_oss_mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
+        if self._loads_all_experts_at_once():
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
                 copy_weight_(param.data[:, :dim1], loaded_weight)
@@ -802,12 +820,11 @@ class RoutedExperts(PluggableLayer):
         )
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
-        use_global_sf = self._is_global_sf_weight(base_quant_method, weight_name)
-
-        if expert_id == -1 and not use_global_sf:
+        if self._skips_expert(expert_id, base_quant_method, weight_name):
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
+        use_global_sf = self._is_global_sf_weight(base_quant_method, weight_name)
 
         if self.shared_expert_online_loader is not None:
             param, expert_id, loaded = self.shared_expert_online_loader.load(
