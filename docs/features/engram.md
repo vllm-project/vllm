@@ -183,12 +183,12 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
-## Splitting GPU tables across engines (DeepSeek V4.1)
+## Splitting tables across engines (DeepSeek V4.1)
 
-Engines in one NVLink domain, such as the prefill engines of a disaggregated
-deployment, can split each GPU table's rows over all of their GPUs instead of
-keeping a host copy per engine. Each GPU holds 1/`peer_group_size` of every
-table and reads the other rows from their owner's HBM:
+Engines that can reach each other's GPUs, such as the prefill and decode
+engines of a disaggregated deployment, can split each table's rows over all of
+their GPUs instead of keeping a copy per engine. Each GPU holds
+1/`peer_group_size` of every table and reads the other rows from their owner:
 
 ```bash
 # Every engine of the group, e.g. 9 DEP2 prefill engines (18 GPUs):
@@ -200,8 +200,18 @@ table and reads the other rows from their owner's HBM:
 `peer_group_size` is the sum of the engines' GPU counts. `peer_group_store` is
 a file the engines meet through once at startup: give every engine the same
 path, reachable by all of them (a shared filesystem across nodes) and fresh per
-launch. Requires CUDA FABRIC handles (an IMEX channel, as on NVL72), TP=1, PP=1
-and `cpu_offload` disabled. Weights cannot be reloaded, and restarting one
+launch. `peer_group_transport` picks how rows move:
+
+- `nvlink` (default): GPUs load rows straight from their owner's HBM. Requires
+  CUDA FABRIC handles (an IMEX channel, as on NVL72) and `cpu_offload`
+  disabled.
+- `rdma`: one-sided RDMA READs (RoCE v2 or InfiniBand, through libibverbs) from
+  the owner's HBM, or from its host memory with `cpu_offload` enabled. Each GPU
+  uses an active RDMA device on its NUMA node and starts one proxy process that
+  posts the READs. Peers exchange memory keys at startup, so the network must
+  be trusted.
+
+Both require TP=1 and PP=1. Weights cannot be reloaded, and restarting one
 engine means restarting the group.
 
 ## Limitations

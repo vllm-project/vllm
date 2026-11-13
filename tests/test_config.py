@@ -1627,7 +1627,8 @@ _PEER_GROUP = {
     [
         ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
         ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, {}, "requires cpu_offload=False"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_transport='rdma'"),
+        (_PEER_GROUP | {"cpu_offload": True, "peer_group_transport": "rdma"}, {}, None),
         (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
         (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
         (_PEER_GROUP, {"data_parallel_size": 8}, "cannot hold an engine of 8"),

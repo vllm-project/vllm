@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import model_validator
 
@@ -62,11 +62,16 @@ class EngramConfig:
     Always on for private tables on ROCm."""
 
     peer_group_size: int = 0
-    """Split each GPU table's rows over this many GPUs of several engines in one
-    NVLink domain (the sum of their GPU counts); lookups read rows from the
-    owning GPU's HBM. Every engine passes the same value and `peer_group_store`.
-    Requires DeepSeek V4.1, CUDA FABRIC handles (an IMEX channel), tables in HBM,
-    TP=1 and PP=1."""
+    """Split each table's rows over this many GPUs of several engines (the sum
+    of their GPU counts); lookups read rows from the owning GPU. Every engine
+    passes the same value, `peer_group_store` and `peer_group_transport`.
+    Requires DeepSeek V4.1, CUDA, TP=1 and PP=1."""
+
+    peer_group_transport: Literal["nvlink", "rdma"] = "nvlink"
+    """How a peer group reads rows: `nvlink` loads them from peers' HBM (CUDA
+    FABRIC handles, an IMEX channel, cpu_offload=False); `rdma` reads them with
+    one-sided RDMA READs from peers' HBM, or from their host memory with
+    cpu_offload."""
 
     peer_group_store: str | None = None
     """File through which a peer group's engines meet once at startup. Required
@@ -86,7 +91,15 @@ class EngramConfig:
                 "peer_group_size and peer_group_store must be set together"
             )
         if self.peer_group_size and self.cpu_offload:
-            raise ValueError("peer_group_size requires cpu_offload=False")
+            if self.peer_group_transport != "rdma":
+                raise ValueError(
+                    "peer_group_size with cpu_offload requires "
+                    "peer_group_transport='rdma'"
+                )
+            if self.dp_shared_memory or self.use_thp:
+                raise ValueError(
+                    "peer_group_size does not support dp_shared_memory or use_thp"
+                )
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
@@ -121,6 +134,7 @@ class EngramConfig:
             self.dp_shared_memory = (
                 self.cpu_offload
                 and not self.use_thp
+                and not self.peer_group_size
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
             )

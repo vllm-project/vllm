@@ -34,6 +34,8 @@ from vllm.config.load import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.distributed import cleanup_dist_env_and_memory, parallel_state
+from vllm.distributed.engram_pool import EngramPool, verbs
+from vllm.distributed.engram_pool.group import PeerGroup
 from vllm.distributed.parallel_state import (
     get_engram_dp_group,
     get_engram_dp_size,
@@ -52,7 +54,6 @@ from vllm.models.deepseek_v41.common.engram import (
     Engram,
     EngramBatch,
     EngramLayout,
-    EngramPeerGroup,
     ParallelEngramEmbedding,
     engram_head_shard_rank,
     gather_engram_hashes,
@@ -247,7 +248,7 @@ def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
         for shm_fits in (True, False):
             _check_ple_shared_table(shm_fits)
         if tp_size == 1:
-            _check_peer_group_table(str(Path(store_dir) / "peers"))
+            _check_pool_tables(store_dir)
 
         # GPU peer reads need NVLink P2P, which CI's L4s lack.
         p2p = current_platform.is_fully_connected(
@@ -293,30 +294,30 @@ def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
         cleanup_dist_env_and_memory()
 
 
-def _check_peer_group_table(store_path: str):
-    """GPUs of independent engines split one GPU table, publish their slices
-    through a file store and read each other's rows without collectives."""
-    if not imex_channel_available():
-        return
+def _check_pool_tables(store_dir: str):
+    """GPUs of independent engines split one table in an Engram pool and read
+    each other's rows, over every transport this machine has."""
+    modes = [("nvlink", False)] if imex_channel_available() else []
+    if verbs.active_devices():
+        modes += [("rdma", False), ("rdma", True)]
     weight, scale = _full_table(sum(HEAD_SIZES))
-    group = EngramPeerGroup(WORLD_SIZE, store_path)
-    with torch.device("cuda"):
-        table = ParallelEngramEmbedding(
-            sum(HEAD_SIZES), DIM, HEAD_SIZES, peer_group=group
-        )
-    assert table.dp_size == 1
-    assert table.peer_rows == -(-sum(HEAD_SIZES) // WORLD_SIZE)
-    table.weight.weight_loader(table.weight, weight)
-    table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
-    table.process_weights_after_loading()
-    ids = _make_ids(HEAD_SIZES, 9, seed=500 + group.rank_in_group)
-    expected = _reference(weight.cuda(), scale.cuda(), ids)
-    torch.testing.assert_close(table(ids), expected, atol=0, rtol=0)
-    # A dropped table unmaps its slices; once every GPU has, its HBM is freed.
-    free, _ = torch.accelerator.get_memory_info()
-    del table
-    group.barrier()
-    assert torch.accelerator.get_memory_info()[0] > free
+    for transport, host in modes:
+        group = PeerGroup(WORLD_SIZE, f"{store_dir}/{transport}{host}/store")
+        pool = EngramPool(group, transport, host, 9 * len(HEAD_SIZES), 72)
+        with torch.device("cuda"):
+            table = ParallelEngramEmbedding(
+                sum(HEAD_SIZES), DIM, HEAD_SIZES, cpu_offload=host, pool=pool
+            )
+        assert table.dp_size == 1
+        table.weight.weight_loader(table.weight, weight)
+        table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
+        table.process_weights_after_loading()
+        ids = _make_ids(HEAD_SIZES, 9, seed=500 + group.rank_in_group)
+        ids[0, 0] = -1
+        expected = _reference(weight.cuda(), scale.cuda(), ids)
+        torch.testing.assert_close(table(ids), expected, atol=0, rtol=0)
+        group.barrier()
+        pool.close()
 
 
 def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
@@ -325,7 +326,7 @@ def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
     rather than joined."""
     path = str(tmp_path / "job" / "peers")
     with ThreadPoolExecutor(4) as pool:
-        groups = list(pool.map(lambda _: EngramPeerGroup(4, path), range(4)))
+        groups = list(pool.map(lambda _: PeerGroup(4, path), range(4)))
         gathered = list(
             pool.map(
                 lambda group: group.all_gather(b"%d" % group.rank_in_group),
@@ -335,13 +336,13 @@ def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
     assert sorted(group.rank_in_group for group in groups) == [0, 1, 2, 3]
     assert gathered == [[b"0", b"1", b"2", b"3"]] * 4
     with pytest.raises(RuntimeError, match="fresh store path"):
-        EngramPeerGroup(4, path)
+        PeerGroup(4, path)
 
 
 def test_engram_peer_group_names_missing_gpus(tmp_path, monkeypatch):
     """A peer that never arrives fails startup with its rank, not a bare timeout."""
-    monkeypatch.setattr(EngramPeerGroup, "TIMEOUT", timedelta(milliseconds=200))
-    group = EngramPeerGroup(2, str(tmp_path / "peers"))
+    monkeypatch.setattr(PeerGroup, "TIMEOUT", timedelta(milliseconds=200))
+    group = PeerGroup(2, str(tmp_path / "peers"))
     with pytest.raises(TimeoutError, match=r"GPUs \[1\] did not reach startup step 1"):
         group.barrier()
 
@@ -351,8 +352,12 @@ def test_engram_peer_group_table_rejects_reload(tmp_path, monkeypatch):
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
     table = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
     torch.nn.Module.__init__(table)
-    table.peer_rows = 1
-    table._peer_group = EngramPeerGroup(1, str(tmp_path / "peers"))
+    shard = torch.zeros(4, 16, dtype=torch.uint8)
+    table._table = SimpleNamespace(shard=shard)
+    table._pool = SimpleNamespace(ready=lambda: None)
+    table.row_bytes = 8
+    table.weight = torch.nn.Parameter(shard[:, :8], requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(shard[:, 8:], requires_grad=False)
     table.process_weights_after_loading()
     with pytest.raises(RuntimeError, match="cannot reload weights"):
         table.process_weights_after_loading()
