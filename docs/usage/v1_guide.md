@@ -130,7 +130,18 @@ Hybrid models that combine Mamba-2 and Mamba-1 layers with standard attention la
 
 Hybrid models with mechanisms different to Mamba are also supported (e.g, `Lfm2ForCausalLM`).
 
-Please note that prefix caching is not yet supported for any of the above models.
+Prefix caching for the recurrent (Mamba/SSM/GDN) layers of these models is supported, but is
+**experimental and disabled by default**. Enable it with `--enable-prefix-caching`; the Mamba cache
+mode is then selected automatically (`all` for models that support it, otherwise `align`), or you
+can set it explicitly with `--mamba-cache-mode`. The `align` mode requires chunked prefill, which is
+enabled by default for generative models. For example, to serve Qwen3-Next with prefix caching:
+
+```bash
+vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct \
+    --enable-prefix-caching \
+    --mamba-cache-mode align \
+    --enable-chunked-prefill
+```
 
 #### Encoder-Decoder Models
 
