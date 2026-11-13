@@ -2,17 +2,21 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::fmt::Debug;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use axum::BoxError;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use futures::Stream;
+use futures::{Stream, StreamExt as _, pin_mut};
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use thiserror_ext::AsReport;
+use tracing::trace;
 use uuid::Uuid;
 
 use crate::error::{ApiError, bail_invalid_request};
@@ -55,6 +59,49 @@ where
             .into_response(),
         None => sse.into_response(),
     }
+}
+
+#[easy_ext::ext(EventExt)]
+impl Event {
+    /// Set the event's data field to `payload` serialized as compact JSON.
+    ///
+    /// Writes the same bytes as [`Event::json_data`], which is about 2.5x slower
+    /// because it runs axum's newline scan on each of serde_json's small writes.
+    pub fn json(self, payload: &impl Serialize) -> Event {
+        self.data(serde_json::to_string(payload).expect("SSE payload must serialize to JSON"))
+    }
+}
+
+/// Convert one chunk stream into OpenAI-style SSE events.
+///
+/// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
+/// events followed by `data: [DONE]`, so the transport stream itself stays
+/// infallible even when generation fails after the HTTP response has started.
+#[try_stream]
+pub async fn openai_sse_stream<T: Serialize + Debug>(
+    stream: impl Stream<Item = Result<T, ApiError>>,
+    mut y: TryYielder<Event, Infallible>,
+) -> Result<(), Infallible> {
+    pin_mut!(stream);
+
+    while let Some(next) = stream.next().await {
+        match next {
+            Ok(chunk) => {
+                trace!(?chunk, "emitting chunk");
+                y.yield_ok(Event::default().json(&chunk)).await;
+            }
+            Err(error) => {
+                let response = error.to_error_response();
+                trace!(?response, "emitting error");
+                y.yield_ok(Event::default().json(&response)).await;
+                break;
+            }
+        }
+    }
+
+    trace!("emitting done");
+    y.yield_ok(Event::default().data("[DONE]")).await;
+    Ok(())
 }
 
 /// Construct an API error for a failed utility call to the engine core.

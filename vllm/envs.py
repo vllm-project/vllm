@@ -90,7 +90,7 @@ if TYPE_CHECKING:
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_TARGET_DEVICE: str = "cuda"
-    VLLM_MAIN_CUDA_VERSION: str = "13.0"
+    VLLM_MAIN_CUDA_VERSION: str = "13.2"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = True
+    VLLM_PP_TRANSPORT: Literal["auto", "nccl", "copy_engine"] = "auto"
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
@@ -153,6 +154,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
+    VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
+    VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
@@ -664,7 +667,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
     # Main CUDA version of vLLM. This follows PyTorch but can be overridden.
     "VLLM_MAIN_CUDA_VERSION": lambda: (
-        os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "13.0"
+        os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "13.2"
     ),
     # Controls PyTorch float32 matmul precision mode within vLLM workers.
     # Valid options mirror torch.set_float32_matmul_precision
@@ -1272,6 +1275,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # so that vLLM can verify if p2p is actually working.
     # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
+    # How a PP stage sends its intermediate tensors to the next stage.
+    # "copy_engine" uses CUDA copy engines instead of NCCL kernels; it needs
+    # TP=1 and NVLink-connected PP GPUs on one node, and fails startup without.
+    # "auto" uses copy engines when every PP rank can, and NCCL otherwise.
+    "VLLM_PP_TRANSPORT": env_with_choices(
+        "VLLM_PP_TRANSPORT", "auto", ["auto", "nccl", "copy_engine"]
+    ),
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
     # selection
@@ -1417,6 +1427,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "False").lower()
         in ("true", "1")
+    ),
+    # Run the sparse MLA calls the FlyDSL kernel accepts (bf16 q, fp8_ds_mla
+    # cache, no sinks: Kimi-K3.1 DSA) on it instead of Triton; others stay on
+    # Triton. gfx950 only. Disabled by default.
+    "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA", "False").lower()
+        in ("true", "1")
+    ),
+    # Smallest query batch VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA sends to the
+    # FlyDSL kernel; smaller ones (decode) stay on Triton, which is faster
+    # there. 160 is the measured gfx950 crossover for 2048-key rows, H 8..16.
+    "VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS", "160")
     ),
     # Whether to use aiter rope.
     # By default is disabled.
@@ -2480,6 +2503,7 @@ def compile_factors() -> dict[str, object]:
     hash everything else. This keeps the cache key aligned across workers."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
+        "VLLM_PP_TRANSPORT",
         "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",

@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLAMetadataBuilder,
     _compute_num_kv_splits,
 )
-from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 NUM_HEADS = 16
 KV_LORA_RANK = 512
@@ -230,13 +230,10 @@ def test_workspace_reservation_is_sized_by_the_sliding_window():
         model_config=SimpleNamespace(max_model_len=max_model_len),
         scheduler_config=SimpleNamespace(max_num_seqs=8),
     )
-    spec = SlidingWindowMLASpec(
-        block_size=PAGE_SIZE,
-        num_kv_heads=1,
-        head_size=HEAD_SIZE,
-        dtype=torch.bfloat16,
-        sliding_window=window,
+    spec = MLAAttentionSpec(
+        block_size=PAGE_SIZE, num_kv_heads=1, head_size=HEAD_SIZE, dtype=torch.bfloat16
     )
+    layers = {"layer0": SimpleNamespace(sliding_window=window)}
 
     def builder_init(self, kv_cache_spec, _layer_names, vllm_config, _device):
         self.kv_cache_spec = kv_cache_spec
@@ -264,9 +261,10 @@ def test_workspace_reservation_is_sized_by_the_sliding_window():
         patch(
             f"{triton_mla}.current_platform.num_compute_units", return_value=sm_count
         ),
+        patch(f"{triton_mla}.get_layers_from_vllm_config", return_value=layers),
         patch.object(MLACommonMetadataBuilder, "__init__", builder_init),
     ):
-        TritonMLAMetadataBuilder(spec, ["layer0"], vllm_config, "cpu")
+        TritonMLAMetadataBuilder(spec, list(layers), vllm_config, "cpu")
         impl.reserve_workspace()
 
     expected = _compute_num_kv_splits(window, sm_count)
@@ -290,12 +288,8 @@ def test_dots3_note_swa_workspace_reservation():
         model_config=SimpleNamespace(max_model_len=1 << 20, dtype=torch.bfloat16),
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
     )
-    spec = SlidingWindowMLASpec(
-        block_size=PAGE_SIZE,
-        num_kv_heads=1,
-        head_size=HEAD_SIZE,
-        dtype=torch.bfloat16,
-        sliding_window=window,
+    spec = MLAAttentionSpec(
+        block_size=PAGE_SIZE, num_kv_heads=1, head_size=HEAD_SIZE, dtype=torch.bfloat16
     )
 
     def builder_init(self, kv_cache_spec, _layer_names, vllm_config, _device):
@@ -314,6 +308,8 @@ def test_dots3_note_swa_workspace_reservation():
     impl.head_size = HEAD_SIZE
     impl.sliding_window = window
     impl._vllm_config = vllm_config
+    layers = {"layer0": SimpleNamespace(impl=impl)}
+    mla_layers = {"layer0": SimpleNamespace(sliding_window=window)}
 
     workspace = MagicMock()
     dots3_attn = "vllm.models.dots3_note.nvidia.attention"
@@ -322,8 +318,10 @@ def test_dots3_note_swa_workspace_reservation():
         patch(f"{dots3_attn}.is_workspace_manager_initialized", return_value=True),
         patch(f"{dots3_attn}.current_workspace_manager", return_value=workspace),
         patch(f"{dots3_attn}.max_decode_query_len", return_value=query_len),
+        patch(f"{dots3_attn}.get_layers_from_vllm_config", return_value=layers),
         patch(f"{triton_mla}.is_workspace_manager_initialized", return_value=True),
         patch(f"{triton_mla}.current_workspace_manager", return_value=workspace),
+        patch(f"{triton_mla}.get_layers_from_vllm_config", return_value=mla_layers),
         patch.object(MLACommonMetadataBuilder, "__init__", builder_init),
     ):
         Dots3NoteMLAMetadataBuilder(spec, ["layer0"], vllm_config, "cpu")

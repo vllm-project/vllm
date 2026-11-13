@@ -1398,7 +1398,12 @@ steps:
   # gated on gfx950, so this has to be MI355. The two kernels/ files the NVIDIA
   # step runs are CUDA-only (they import cuda.bindings.driver), so they are
   # deliberately left out here.
-  - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
+  # amd_specialized_decode/ is left to the dedicated mi355_8 step, which runs a
+  # strict superset of what one GPU can.
+  - >-
+    pytest -v -s models/kimi_k3
+    --ignore=models/kimi_k3/test_prefix_cache.py
+    --ignore=models/kimi_k3/amd_specialized_decode
 
 - label: ":amd: (MI355) Kimi K3 Multi-GPU" # TBD
   timeout_in_minutes: 30
@@ -1419,7 +1424,12 @@ steps:
   # multi-GPU test anywhere in the directory without editing this list.
   # Four GPUs run the two tp4 cases in test_amd_latent_moe_runner.py; the tp8
   # case and the 8/16-GPU cases in test_latent_moe_tail.py still skip.
-  - pytest -v -s -m "distributed" models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
+  # amd_specialized_decode/ is left to the mi355_8 step: every @multi_gpu_test
+  # in it asks for 8 GPUs, so four could never run them.
+  - >-
+    pytest -v -s -m "distributed" models/kimi_k3
+    --ignore=models/kimi_k3/test_prefix_cache.py
+    --ignore=models/kimi_k3/amd_specialized_decode
 
 - label: ":amd: (MI355) MiniMax M3 Specialized Decode"
   timeout_in_minutes: 45
@@ -1438,11 +1448,17 @@ steps:
   - vllm/model_executor/models/config.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s models/minimax_m3/amd_specialized_decode
+  # Named one by one: a directory selection in any pipeline yaml, this one
+  # included, keeps check_test_tethering.py quiet about a new file.
+  - >-
+    pytest -v -s
+    models/minimax_m3/amd_specialized_decode/test_ops.py
+    models/minimax_m3/amd_specialized_decode/test_model.py
+    models/minimax_m3/amd_specialized_decode/test_runtime.py
   - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
   - pytest -v -s models/minimax_m3/test_dspark_drafter.py
-  # the long TP4 hand-off stress
-  - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
+  # the long TP4 hand-off stress, the one pytest.mark.optional in the directory
+  - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode/test_ops.py
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
   timeout_in_minutes: 55
@@ -1521,6 +1537,7 @@ steps:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
   - vllm/model_executor
+  - vllm/models/deepseek_v32
   - tests/model_executor
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - vllm/_aiter_ops.py
@@ -2196,6 +2213,7 @@ steps:
   - vllm/config/attention.py
   - vllm/model_executor/layers/attention
   - vllm/v1/attention
+  - vllm/models/glm5next/amd/ops/kpool_compress.py
   - tests/v1/attention
   - vllm/_aiter_ops.py
   - vllm/envs.py
@@ -2358,7 +2376,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI300) Distributed DP Extended" # TBD
   timeout_in_minutes: 75
@@ -2397,7 +2416,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy" # TBD
   timeout_in_minutes: 55
@@ -2413,7 +2433,8 @@ steps:
   - tests/v1/kv_connector/nixl_push_integration/
   - vllm/platforms/rocm.py
   commands:
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_push_integration/test_push_accuracy_sweep.py
 
 - label: ":amd: (MI300) DP EP Distributed NixlConnector PD accuracy" # TBD
   timeout_in_minutes: 30
@@ -2428,7 +2449,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy" # TBD
   timeout_in_minutes: 80
@@ -2443,7 +2465,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI300) Hybrid SSM NixlConnector PD prefix cache" # TBD
   timeout_in_minutes: 25
@@ -2949,7 +2972,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
   timeout_in_minutes: 60
@@ -3003,7 +3027,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
   timeout_in_minutes: 105
@@ -5671,13 +5696,13 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
   - vllm/distributed/kv_transfer/kv_connector/v1/ssm_conv_transfer_utils.py
   - examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py
-  - tests/v1/kv_connector/unit/test_moriio_
+  - tests/v1/kv_connector/unit/moriio/
   - tests/v1/kv_connector/unit/utils.py
   - requirements/test/rocm.txt
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/unit/test_moriio_*.py
+  - pytest -v -s -rs v1/kv_connector/unit/moriio
 
 - label: ":amd: (MI355 DPX) UMBP Connector Unit Tests"
   timeout_in_minutes: 30
@@ -5947,6 +5972,7 @@ steps:
   - vllm/config/attention.py
   - vllm/model_executor/layers/attention
   - vllm/v1/attention
+  - vllm/models/glm5next/amd/ops/kpool_compress.py
   - tests/v1/attention
   - vllm/_aiter_ops.py
   - vllm/envs.py

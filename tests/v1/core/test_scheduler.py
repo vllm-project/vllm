@@ -57,17 +57,19 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.engine import CheckpointState, FinishReason
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
@@ -87,7 +89,8 @@ from .utils import (
     create_requests,
     create_scheduler,
     mock_kv,
-    new_sliding_window_spec,
+    new_kv_cache_group,
+    new_sliding_window_layer,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -113,10 +116,8 @@ def test_mamba_decode_checkpoint_publication(
         num_speculative_tokens=num_speculative_tokens or None,
         speculative_method="ngram_gpu",
         block_size=block_size,
-        kv_cache_spec=MambaSpec(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
+        kv_cache_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=block_size, shapes=((1, 1),), dtypes=(torch.float32,)),
             mamba_cache_mode="align",
             num_speculative_blocks=int(num_speculative_tokens > 0),
         ),
@@ -189,8 +190,11 @@ def test_mamba_decode_checkpoint_publication(
     assert cached_tokens == (block_size if outcome in ("accepted", "finished") else 0)
 
 
-def test_make_scheduled_encoder_input_stats_output_embeddings():
+def test_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
+    scheduler.observability_config.enable_logging_iteration_details = True
+    scheduler.max_num_encoder_input_tokens = 441
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=441)
     mm_features = [
         MultiModalFeatureSpec(
             data=MultiModalKwargsItem.dummy(),
@@ -211,13 +215,15 @@ def test_make_scheduled_encoder_input_stats_output_embeddings():
             mm_position=PlaceholderRange(offset=400, length=49),
         ),
     ]
-    scheduler.requests["req"] = Mock(mm_features=mm_features)
+    (request,) = create_requests(num_requests=1, num_tokens=449)
+    request.mm_features = mm_features
+    scheduler.add_request(request)
 
-    stats = scheduler._make_scheduled_encoder_input_stats({"req": [0, 1, 2]})
+    stats = scheduler.schedule().iteration_details
 
     assert stats is not None
-    assert stats.num_inputs == 3
-    assert stats.output_tokens == 441
+    assert stats.num_encoder_inputs == 3
+    assert stats.num_encoder_output_tokens == 441
 
 
 def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
@@ -225,12 +231,12 @@ def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(
 ):
     scheduler = create_scheduler()
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
 
 
 def test_scheduled_encoder_input_stats_disabled_without_log_stats(
@@ -240,12 +246,64 @@ def test_scheduled_encoder_input_stats_disabled_without_log_stats(
     scheduler.log_stats = False
     scheduler.observability_config.enable_logging_iteration_details = True
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
-    monkeypatch.setattr(scheduler, "_make_scheduled_encoder_input_stats", make_stats)
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
 
     scheduler_output = scheduler.schedule()
 
     make_stats.assert_not_called()
-    assert scheduler_output.scheduled_encoder_input_stats is None
+    assert scheduler_output.iteration_details is None
+
+
+def test_iteration_details_count_recomputation_as_prefill():
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=8,
+        max_model_len=128,
+    )
+    scheduler.observability_config.enable_logging_iteration_details = True
+    # Keep this test's prefill-to-decode setup self-contained.
+    (request,) = create_requests(num_requests=1, num_tokens=8, max_tokens=100)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_output_tokens == 1
+    assert scheduler.running == [request]
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+
+    for num_tokens in (8, 1):
+        output = scheduler.schedule()
+        details = output.iteration_details
+        assert details is not None
+        assert details.num_prefill_requests == 1
+        assert details.num_prefill_tokens == num_tokens
+        assert details.num_decode_requests == details.num_decode_tokens == 0
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                sampled_token_ids=[[] if num_tokens == 8 else [0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    details = scheduler.schedule().iteration_details
+    assert details is not None
+    assert details.num_decode_requests == details.num_decode_tokens == 1
+    assert details.num_prefill_requests == details.num_prefill_tokens == 0
 
 
 def test_add_requests():
@@ -367,12 +425,11 @@ def test_prefix_hit_is_capped_at_retained_auxiliary_outputs(
 ):
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        kv_cache_spec=(
-            SlidingWindowSpec(
-                block_size=16,
-                num_kv_heads=1,
-                head_size=1,
-                dtype=torch.float32,
+        kv_cache_layer_config=(
+            SlidingWindowManager.layer_config(
+                AttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
                 sliding_window=sliding_window,
             )
             if sliding_window
@@ -1323,10 +1380,8 @@ def test_cache_aware_admission_is_safe_on_a_mamba_spec():
         enable_prefix_caching=True,
         cache_aware_admission_window=4,
         cache_aware_admission_threshold=0.0,
-        kv_cache_spec=MambaSpec(
-            block_size=16,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
+        kv_cache_layer_config=MambaManager.layer_config(
+            MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,)),
             mamba_cache_mode="align",
         ),
     )
@@ -4384,9 +4439,9 @@ def create_scheduler_with_priority(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6796,12 +6851,11 @@ def _create_encoder_decoder_scheduler(
     """Create a scheduler configured for encoder-decoder cross-attention
     block allocation testing.
 
-    Constructs a scheduler with both FullAttentionSpec (self-attention) and
-    CrossAttentionSpec (cross-attention) KV cache groups, then patches it
+    Constructs a scheduler with both FullAttentionManager (self-attention) and
+    CrossAttentionManager (cross-attention) KV cache groups, then patches it
     to behave as an encoder-decoder model.
     """
     from vllm.v1.core.encoder_cache_manager import EncoderDecoderCacheManager
-    from vllm.v1.kv_cache_interface import CrossAttentionSpec
 
     model_config = ModelConfig(
         model="facebook/opt-125m",
@@ -6836,23 +6890,24 @@ def _create_encoder_decoder_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["self_attn_layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["cross_attn_layer"],
-                CrossAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
+                CrossAttentionManager.config(),
             ),
         ],
     )
@@ -8070,7 +8125,7 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     s = create_scheduler(
         num_blocks=64,
         use_kv_connector=mock_kv(matched_tokens=0, is_async=True),
-        kv_cache_spec=spec,
+        kv_cache_layer_config=spec,
         num_speculative_tokens=num_spec_tokens,
     )
     s.recompute_kv_load_failures = True
@@ -8147,7 +8202,7 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     [
         (None, None),
         (None, 2),
-        (new_sliding_window_spec(sliding_window=64), None),
+        (new_sliding_window_layer(sliding_window=64), None),
     ],
     ids=["full", "full_spec_decode", "sliding_window"],
 )
@@ -8212,27 +8267,26 @@ def _create_hybrid_mamba_connector_scheduler(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["fa"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
                 MambaSpec(
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
+                MambaManager.config(mamba_cache_mode="align"),
             ),
         ],
     )
-    register_all_kvcache_specs(vllm_config)
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
