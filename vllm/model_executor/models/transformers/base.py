@@ -857,7 +857,6 @@ class Base(
             assert intermediate_tensors is not None
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
-        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         # Add batch dimension before entering Transformers model
         if input_ids is not None and input_ids.ndim == 1:
@@ -900,7 +899,7 @@ class Base(
                 }
             )
 
-        if aux_hidden_states := remote_aux + aux_hidden_states:
+        if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
 
