@@ -320,7 +320,8 @@ class KimiMoE(nn.Module):
         min_moe_intermediate_per_partition = getattr(
             config, "min_moe_intermediate_per_partition", 256
         )
-        if self.tp_size > 1:
+        enable_ep = get_current_vllm_config().parallel_config.enable_expert_parallel
+        if self.tp_size > 1 and not enable_ep:
             moe_intermediate_per_partition = moe_intermediate_size // self.tp_size
             if moe_intermediate_per_partition < min_moe_intermediate_per_partition:
                 self.padded_moe_intermediate_size = (
