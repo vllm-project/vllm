@@ -20,6 +20,7 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     mhc_fused_post_pre_split_config,
     require_fused_post_pre_config,
 )
+from vllm.model_executor.kernels.mhc.warmup import MHCPreNormKernel
 from vllm.model_executor.warmup import jit_warmup_tilelang_helper
 
 
@@ -339,3 +340,56 @@ def test_tilelang_warmup_inputs_reproduce_compile_key(
     kernel.compile(compile_key)
 
     assert compiled == [expected_kernel]
+
+
+@pytest.mark.parametrize("num_tokens", [0, 1, 8, 9, 16, 17])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"input_is_disjoint": False},
+        {"hidden_size": 4096},
+        {"hc_mult": 2},
+        {"rms_numel": 5120},
+        {"save_pre_mix": False, "split_mode": "fused"},
+        {"split_mode": "stats"},
+        {"split_mode": "fused"},
+        {"write_aux": True},
+    ],
+)
+def test_delayed_norm_warmup_covers_store_partition_and_fallbacks(
+    num_tokens: int, overrides: dict[str, Any]
+) -> None:
+    """Every runtime store partition, including aliases, must be warmed."""
+    kernel = MHCPreNormKernel()
+    fields: dict[str, Any] = dict(
+        hidden_size=5120,
+        hc_mult=4,
+        rms_numel=20480,
+        use_pre_mix_in=True,
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=2.0,
+        sinkhorn_repeat=20,
+        norm_eps=1e-6,
+        split_mode="input",
+        input_is_disjoint=True,
+    )
+    fields.update(overrides)
+    key = kernel.dispatch(num_tokens=num_tokens, n_splits=8, **fields)
+    eligible = (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and 0 < num_tokens <= 8
+        and not overrides
+    )
+    assert key.h_tiles == (5 if eligible else 1)
+    fields.pop("input_is_disjoint")
+    for max_tokens in (1, 8, 9, 16, 17):
+        keys = kernel.get_warmup_keys(
+            max_tokens=max_tokens, extra_splits=(8,), **fields
+        )
+        if num_tokens <= max_tokens:
+            assert key in keys
+        assert kernel.dispatch(n_splits=8, **fields) in keys
