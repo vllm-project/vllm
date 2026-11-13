@@ -192,6 +192,13 @@ class TurboQuantAttentionBackend(AttentionBackend):
         # not the model's actual head_dim. Accept any positive value.
         return head_size > 0
 
+    @classmethod
+    def indexes_kv_by_block_stride(cls) -> bool:
+        # Returning True allows unify_kv_cache_spec_page_size to use
+        # page_size_padded when layers have different slot sizes
+        # (e.g. Gemma4's head_dim=256 vs 512).
+        return True
+
 
 @dataclass
 class TurboQuantMetadata(AttentionMetadata):
@@ -350,6 +357,25 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Detect flash-attn version (FA2/3/4) for prefill paths.
         self.fa_version = get_flash_attn_version(head_size=head_size)
 
+        # ROCm's CK-based flash_attn only supports head_dim <= 256.
+        # Disable the flash_attn prefill path for larger heads (e.g. Gemma4's
+        # global_head_dim=512 full-attention layers) so _prefill_attention falls
+        # back to F.scaled_dot_product_attention with mem_efficient backend.
+        from vllm.platforms import current_platform
+        _rocm_fa_head_dim_limit = 256
+        self._use_flash_attn = _HAS_FLASH_ATTN and not (
+            current_platform.is_rocm() and head_size > _rocm_fa_head_dim_limit
+        )
+        # When flash_attn is disabled (large head_dim on ROCm), force PyTorch's
+        # memory-efficient SDPA backend. The default math backend materialises
+        # the full N×N attention matrix, causing OOM at long context.
+        # mem_efficient uses a tiled O(N) memory algorithm instead.
+        # Chunk size for the memory-bounded causal attention fallback used when
+        # flash_attn is disabled (ROCm + head_dim > 256). Processing Q in chunks
+        # of this size bounds peak memory to chunk_size * seq_len * elem_size
+        # instead of seq_len^2 * elem_size, avoiding OOM at long context.
+        self._causal_chunk_size = 256 if not self._use_flash_attn else 0
+
         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
         # and benchmarks show no regression vs dynamic in eager mode).
         vllm_config = get_current_vllm_config()
@@ -367,6 +393,60 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # tracks FlyDSL availability (single switch for the whole pipeline).
         self._use_flydsl = is_flydsl_available()
         self._soa_store = self._use_flydsl
+
+    def _chunked_causal_attn(
+        self,
+        q: torch.Tensor,  # (1, Hq, S, D)  or  (1, Hq, q_len, D)
+        k: torch.Tensor,  # (1, Hk, S, D)  or  (1, Hk, kv_len, D)
+        v: torch.Tensor,  # (1, Hk, S, D)
+        is_causal: bool = False,
+        enable_gqa: bool = False,
+        q_offset: int = 0,
+    ) -> torch.Tensor:
+        """Memory-bounded attention via query chunking.
+
+        Processes queries in chunks of self._causal_chunk_size, building a
+        causal mask per-chunk. Peak memory is O(chunk_size x kv_len) instead
+        of O(q_len x kv_len), avoiding OOM for long prefills on ROCm.
+
+        q_offset: absolute KV position of the first query token. Use 0 for
+            first-chunk prefill (is_causal=True) and cached_len for
+            continuation prefill so the causal mask is correctly positioned.
+
+        Shapes: (1, H, L, D) -- batch-1 convention used by the TQ fallback.
+        """
+        _, Hq, q_len, D = q.shape
+        kv_len = k.shape[2]
+        chunk = self._causal_chunk_size
+        out = torch.zeros_like(q)  # (1, Hq, q_len, D)
+
+        for q_start in range(0, q_len, chunk):
+            q_end = min(q_start + chunk, q_len)
+            q_chunk = q[:, :, q_start:q_end, :]  # (1, Hq, c, D)
+            c = q_end - q_start
+
+            # Build additive causal mask per-chunk: query at absolute position
+            # (q_start + q_offset)..(q_end + q_offset - 1) can attend to keys
+            # 0..its_position. Peak memory: chunk_size * kv_len * elem_size.
+            q_pos = torch.arange(
+                q_start + q_offset, q_end + q_offset, device=q.device
+            ).unsqueeze(1)  # (c, 1)
+            k_pos = torch.arange(kv_len, device=q.device).unsqueeze(0)  # (1, kv_len)
+            chunk_mask = torch.where(
+                k_pos <= q_pos,
+                torch.zeros(c, kv_len, device=q.device, dtype=q.dtype),
+                torch.full(
+                    (c, kv_len), float("-inf"), device=q.device, dtype=q.dtype
+                ),
+            ).unsqueeze(0).unsqueeze(0)  # (1, 1, c, kv_len)
+            out[:, :, q_start:q_end, :] = F.scaled_dot_product_attention(
+                q_chunk, k, v,
+                attn_mask=chunk_mask,
+                scale=self.scale,
+                enable_gqa=enable_gqa,
+            )
+
+        return out
 
     def _flash_attn_varlen(
         self,
@@ -736,7 +816,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
         # max_query_len == max_seq_len means no request has prior cached KV.
         # Both are Python ints — no GPU sync.
-        if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
+        if self._use_flash_attn and attn_metadata.max_query_len == attn_metadata.max_seq_len:
             return self._flash_attn_varlen(
                 q=query,
                 k=key,
@@ -797,7 +877,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
-                if _HAS_FLASH_ATTN:
+                if self._use_flash_attn:
                     # Assign to slice to avoid gpu/cpu sync.
                     self._cu_2[1:2] = q_len
                     cu = self._cu_2
@@ -811,17 +891,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         max_seqlen_k=q_len,
                     )
                 else:
-                    q_t = q_seq.transpose(0, 1).contiguous()
-                    k_t = k_seq.transpose(0, 1).contiguous()
-                    v_t = v_seq.transpose(0, 1).contiguous()
-                    out = F.scaled_dot_product_attention(
-                        q_t,
-                        k_t,
-                        v_t,
-                        is_causal=True,
-                        scale=self.scale,
-                        enable_gqa=use_gqa,
-                    ).transpose(0, 1)
+                    q_t = q_seq.transpose(0, 1).contiguous().unsqueeze(0)
+                    k_t = k_seq.transpose(0, 1).contiguous().unsqueeze(0)
+                    v_t = v_seq.transpose(0, 1).contiguous().unsqueeze(0)
+                    out = self._chunked_causal_attn(
+                        q_t, k_t, v_t, enable_gqa=use_gqa
+                    )[0].transpose(0, 1)
                 output[q_start:q_end] = out.to(query.dtype)
             else:
                 # Continuation chunk: tokens already stored to TQ cache
@@ -1055,7 +1130,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         v_full[cached_len:] = val_chunk
 
         # Attention: q_len queries attending to seq_len K/V with causal mask
-        if _HAS_FLASH_ATTN:
+        if self._use_flash_attn:
             # Reuse pre-allocated cu_seqlens (avoid host→device transfer)
             if not hasattr(self, "_cu_2_q"):
                 self._cu_2_q = torch.zeros(2, device=device, dtype=torch.int32)
@@ -1075,22 +1150,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 max_seqlen_k=seq_len,
             )
         else:
-            # SDPA fallback: expand KV for GQA, build causal mask
+            # Chunked SDPA fallback: avoid O(seq_len^2) memory for large heads.
             q_t = query.transpose(0, 1).unsqueeze(0)  # (1, Hq, q_len, D)
             k_t = k_full.transpose(0, 1).unsqueeze(0)  # (1, Hk, seq_len, D)
             v_t = v_full.transpose(0, 1).unsqueeze(0)  # (1, Hk, seq_len, D)
-            # Build causal mask: query position p can attend to K position j
-            # where j <= cached_len + p (p is 0-indexed within chunk)
-            q_pos = torch.arange(q_len, device=device).unsqueeze(1) + cached_len
-            k_pos = torch.arange(seq_len, device=device).unsqueeze(0)
-            mask = k_pos <= q_pos  # (q_len, seq_len)
-            out = F.scaled_dot_product_attention(
-                q_t,
-                k_t,
-                v_t,
-                attn_mask=mask,
-                scale=self.scale,
-                enable_gqa=(Hk < Hq),
+            # Pass cached_len as q_offset so _chunked_causal_attn builds the
+            # causal mask per-chunk, bounding peak memory to
+            # chunk_size * seq_len * elem_size instead of q_len * seq_len.
+            out = self._chunked_causal_attn(
+                q_t, k_t, v_t, enable_gqa=(Hk < Hq), q_offset=cached_len,
             )  # (1, Hq, q_len, D)
             return out[0].transpose(0, 1)  # (q_len, Hq, D)
 
