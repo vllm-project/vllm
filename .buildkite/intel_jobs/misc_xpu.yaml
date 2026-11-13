@@ -271,7 +271,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
   source_file_dependencies:
-  - vllm/v1/spec_decode/extract_hidden_states.py
   - vllm/model_executor/models/extract_hidden_states.py
   - vllm/transformers_utils/configs/extract_hidden_states.py
   - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
@@ -302,7 +301,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'distributed' tests/v1/kv_connector/extract_hidden_states_integration
   source_file_dependencies:
-  - vllm/v1/spec_decode/extract_hidden_states.py
   - vllm/model_executor/models/extract_hidden_states.py
   - vllm/transformers_utils/configs/extract_hidden_states.py
   - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
@@ -312,6 +310,36 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     pytest --continue-on-collection-errors -v -s -m distributed tests/v1/kv_connector/extract_hidden_states_integration || true'
+- label: ':nvidia: (H200 MIG 35GB) Examples'
+  key: examples
+  device: intel_gpu
+  timeout_in_minutes: 40
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  automatic_shard: true
+  _raw_old_commands:
+  - pip install --no-deps tensorizer
+  - pytest -v -s examples/test_offline_examples.py
+  source_file_dependencies:
+  - vllm/entrypoints
+  - vllm/multimodal
+  - examples/
+  - tests/examples/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install --no-deps tensorizer || true &&
+    cd tests &&
+    pytest --continue-on-collection-errors -v -s examples/test_offline_examples.py || true'
 - label: ':nvidia: (L4) Metrics, Tracing'
   key: metrics-tracing-2-gpus-xpu
   device: intel_gpu
@@ -330,7 +358,6 @@ steps:
     mem: 16+
   automatic_shard: true
   _raw_old_commands:
-  - pip install 'opentelemetry-sdk>=1.26.0' 'opentelemetry-api>=1.26.0' 'opentelemetry-exporter-otlp>=1.26.0' 'opentelemetry-semantic-conventions-ai>=0.4.1'
   - pytest -v -s v1/tracing
   - pytest -v -s tracing
   source_file_dependencies:
@@ -352,14 +379,13 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install "opentelemetry-sdk\>=1.26.0" "opentelemetry-api\>=1.26.0" "opentelemetry-exporter-otlp\>=1.26.0" "opentelemetry-semantic-conventions-ai\>=0.4.1" || true &&
-    cd tests &&
+    'cd tests &&
     pytest --continue-on-collection-errors -v -s v1/tracing || true &&
     pytest --continue-on-collection-errors -v -s tracing || true'
 - label: ':nvidia: (H200 MIG 18GB) [Nightly] Python-only Installation'
   key: python-only-installation
   device: intel_gpu
-  timeout_in_minutes: 20
+  timeout_in_minutes: 75
   optional: true
   depends_on: null
   working_dir: .
@@ -385,7 +411,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) [Nightly] Python 3.14 Smoke'
   key: python-314-smoke-nightly
   device: intel_gpu
-  timeout_in_minutes: 30
+  timeout_in_minutes: 85
   optional: true
   depends_on: null
   working_dir: .

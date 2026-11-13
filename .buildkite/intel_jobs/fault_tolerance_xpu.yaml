@@ -18,6 +18,7 @@ steps:
     label: production
     gpu: 4+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
   - export NCCL_CUMEM_HOST_ENABLE=0
