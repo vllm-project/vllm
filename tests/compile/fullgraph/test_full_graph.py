@@ -1,0 +1,210 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import pytest
+import torch
+
+from tests.quantization.utils import is_quant_method_supported
+from vllm import LLM, SamplingParams
+from vllm.config import (
+    CacheConfig,
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    PassConfig,
+)
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+from ...utils import create_new_process_for_each_test, wait_for_memory_to_settle
+
+
+def models_list(*, all: bool = True, keywords: list[str] | None = None):
+    TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
+        ("facebook/opt-125m", {}),
+        (
+            "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic",
+            {"dtype": torch.float16},
+        ),
+    ]
+
+    if all:
+        if is_quant_method_supported("gptq_marlin"):
+            TEST_MODELS.append(
+                (
+                    "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+                    {"quantization": "gptq_marlin"},
+                )
+            )
+
+        if not current_platform.is_rocm() and is_quant_method_supported("awq"):
+            TEST_MODELS.append(
+                ("vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ", {"quantization": "AWQ"})
+            )
+
+    if keywords is None:
+        return TEST_MODELS
+
+    # filter by keywords
+    pred = lambda model: any(keyword in model[0] for keyword in keywords)
+    return list(filter(pred, TEST_MODELS))
+
+
+@pytest.mark.parametrize(
+    "compilation_mode",
+    [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.VLLM_COMPILE],
+)
+@pytest.mark.parametrize("model, model_kwargs", models_list(all=True))
+@create_new_process_for_each_test("spawn")
+def test_full_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    model_kwargs: dict[str, Any],
+    compilation_mode: CompilationMode,
+):
+    with monkeypatch.context():
+        print(f"MODEL={model}")
+
+        run_model(compilation_mode, model, **model_kwargs)
+
+
+# TODO(luka) add other supported compilation config scenarios here
+@pytest.mark.parametrize(
+    "compilation_config, model, model_kwargs",
+    [
+        # additional compile sizes, only some of the models
+        (
+            CompilationConfig(mode=CompilationMode.VLLM_COMPILE, compile_sizes=[1, 2]),
+            *model_info,
+        )
+        for model_info in models_list(all=False)
+    ]
+    + [
+        # RMSNorm + quant fusion, only 8-bit quant models
+        (
+            CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                custom_ops=["+rms_norm"],
+                pass_config=PassConfig(
+                    fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
+                ),
+            ),
+            *model_info,
+        )
+        for model_info in models_list(keywords=["FP8-dynamic"])
+    ]
+    + [
+        # graph inductor partition
+        (
+            CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                # inductor graph partition uses
+                # torch._C.Tag.cudagraph_unsafe to specify splitting ops
+                use_inductor_graph_partition=True,
+                cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                compile_sizes=[1, 2],
+            ),
+            *model_info,
+        )
+        for model_info in models_list(all=False)
+        if is_torch_equal_or_newer("2.9.0.dev")
+    ]
+    + [
+        # Test get_raw_stream patch with compile_sizes
+        # This tests that TorchInductor autotune works correctly with get_raw_stream
+        # patch in torch 2.9 and without patch in torch 2.10+
+        (
+            CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                compile_sizes=[1, 2],  # Triggers autotune which uses get_raw_stream
+                cudagraph_mode=CUDAGraphMode.NONE,
+            ),
+            "facebook/opt-125m",
+            {},
+        ),
+    ],
+)
+# only test some of the models
+@create_new_process_for_each_test("spawn")
+def test_custom_compile_config(
+    compilation_config: CompilationConfig,
+    model: str,
+    model_kwargs: dict[str, Any],
+):
+    if compilation_config.use_inductor_graph_partition and not is_torch_equal_or_newer(
+        "2.9.0.dev"
+    ):
+        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
+    print(f"MODEL={model}")
+    run_model(compilation_config, model, **model_kwargs)
+
+
+@create_new_process_for_each_test("spawn")
+def test_depyf_integration(disable_vllm_compile_cache):
+    """Compile with depyf's debugging hooks installed.
+
+    `disable_vllm_compile_cache` is what makes this a test rather than a
+    formality: depyf only ever sees a compilation that actually runs, so served
+    from a warm cache this exercises none of its hooks.
+    """
+    run_model(
+        CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            debug_dump_path=Path(tempfile.gettempdir()),
+        ),
+        "facebook/opt-125m",
+    )
+
+
+def run_model(
+    compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
+):
+    compilation_config = (
+        compile_config
+        if isinstance(compile_config, CompilationConfig)
+        else CompilationConfig(mode=compile_config)
+    )
+
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    sampling_params = SamplingParams(temperature=0)
+    # Allow override from model_kwargs
+    model_kwargs = {"tensor_parallel_size": 1, **model_kwargs}
+    model_kwargs = {"disable_custom_all_reduce": True, **model_kwargs}
+
+    # No cudagraphs by default
+    if compilation_config.cudagraph_mode is None:
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+    # V1 startup requires free_memory >= total * gpu_memory_utilization, so a
+    # device that is not free yet fails engine init rather than waiting for it.
+    # VllmRunner guards this; building LLM directly does not. No-op off ROCm.
+    wait_for_memory_to_settle(
+        threshold_ratio=1.0
+        - (
+            model_kwargs.get("gpu_memory_utilization")
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+        )
+    )
+
+    llm = LLM(
+        model=model,
+        compilation_config=compilation_config,
+        **model_kwargs,
+    )
+    outputs = llm.generate(prompts, sampling_params)
+
+    # Print the outputs.
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")

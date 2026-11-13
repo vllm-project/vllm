@@ -1,0 +1,3509 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+import json
+from collections.abc import AsyncIterator, Coroutine
+from contextlib import suppress
+from dataclasses import dataclass, field
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import pytest_asyncio
+from openai import OpenAI
+from starlette.requests import Request
+
+from tests.entrypoints.openai.utils import (
+    accumulate_streaming_response,
+    verify_chat_response,
+    verify_harmony_messages,
+)
+from tests.utils import RemoteOpenAIServer
+from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.config import MultiModalConfig
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    RequestResponseMetadata,
+)
+from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionStreamResponse,
+)
+from vllm.entrypoints.openai.chat_completion.serving import (
+    OpenAIServingChat,
+    _get_mm_token_counts,
+    _make_completion_tokens_details,
+    _make_prompt_tokens_details,
+)
+from vllm.entrypoints.openai.models.serving import (
+    BaseModelPath,
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.tool_calls_utils import resolve_finish_reason
+from vllm.exceptions import GenerationError, QueueOverflowError, VLLMValidationError
+from vllm.inputs import TokensPrompt
+from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import PlaceholderRange
+from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser import HarmonyParser
+from vllm.renderers.hf import HfRenderer
+from vllm.renderers.mistral import MistralRenderer
+from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.stats import RequestStateStats
+
+GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
+GPT_OSS_SPECULATOR_NAME = "RedHatAI/gpt-oss-20b-speculator.eagle3"
+_PER_REQUEST_STATS = RequestStateStats(
+    queued_ts=1.0,
+    scheduled_ts=1.5,
+    first_token_ts=2.0,
+    last_token_ts=3.0,
+    num_generation_tokens=2,
+)
+
+
+@pytest.fixture(scope="module")
+def monkeypatch_module():
+    from _pytest.monkeypatch import MonkeyPatch
+
+    mpatch = MonkeyPatch()
+    yield mpatch
+    mpatch.undo()
+
+
+@pytest.fixture(
+    scope="module",
+    params=[True, False],
+    ids=["with_tool_parser", "without_tool_parser"],
+)
+def with_tool_parser(request) -> bool:
+    return request.param
+
+
+@pytest.fixture(
+    scope="module",
+    params=[True],
+    ids=["exclude_tools_when_tool_choice_none"],
+)
+def exclude_tools_when_tool_choice_none(request) -> bool:
+    return request.param
+
+
+@pytest.fixture(scope="module")
+def default_server_args(
+    with_tool_parser: bool,
+    exclude_tools_when_tool_choice_none: bool,
+):
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--enforce-eager",
+        "--max-model-len",
+        "4096",
+        "--reasoning-parser",
+        "openai_gptoss",
+        "--gpu-memory-utilization",
+        "0.85",
+    ]
+    if with_tool_parser:
+        args.extend(
+            [
+                "--tool-call-parser",
+                "openai",
+                "--enable-auto-tool-choice",
+            ]
+        )
+    if exclude_tools_when_tool_choice_none:
+        args.append("--exclude-tools-when-tool-choice-none")
+    return args
+
+
+@pytest.fixture(scope="class")
+def gptoss_server(default_server_args: list[str]):
+    server_args = default_server_args + ["--attention-backend=TRITON_ATTN"]
+    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="class")
+def gptoss_speculative_server(default_server_args: list[str]):
+    attention_backend = (
+        "TRITON_ATTN"
+        if not is_aiter_found_and_supported()
+        else "ROCM_AITER_UNIFIED_ATTN"
+    )
+    server_args = default_server_args + [
+        "--speculative-config",
+        (
+            f'{{"model": "{GPT_OSS_SPECULATOR_NAME}", '
+            f'"method": "eagle3", "num_speculative_tokens": 3}}'
+        ),
+        f"--attention-backend={attention_backend}",
+    ]
+    # gpt-oss requires AITER unified attention on ROCm
+    # TODO: Remove after fixing TRITON_ATTN issue on ROCm
+    # https://github.com/vllm-project/vllm/issues/32434
+    env_dict = None
+    if is_aiter_found_and_supported():
+        env_dict = {"VLLM_ROCM_USE_AITER": "1"}
+    with RemoteOpenAIServer(
+        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict, max_wait_seconds=480
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def gptoss_client(gptoss_server):
+    async with gptoss_server.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest_asyncio.fixture
+async def gptoss_speculative_client(gptoss_speculative_server):
+    async with gptoss_speculative_server.get_async_client() as async_client:
+        yield async_client
+
+
+class TestGPTOSSChat:
+    @pytest.mark.asyncio
+    async def test_gpt_oss_chat_tool_call_streaming(
+        self, gptoss_client: OpenAI, with_tool_parser: bool
+    ):
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "state": {"type": "string"},
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
+                        },
+                        "required": ["city", "state", "unit"],
+                    },
+                },
+            }
+        ]
+
+        messages = [
+            {"role": "user", "content": "What is the weather in Dallas, TX?"},
+        ]
+
+        stream = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools if with_tool_parser else None,
+            stream=True,
+        )
+
+        name = None
+        args_buf = ""
+        content_buf = ""
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.tool_calls:
+                tc = delta.tool_calls[0]
+                if tc.function and tc.function.name:
+                    name = tc.function.name
+                if tc.function and tc.function.arguments:
+                    args_buf += tc.function.arguments
+            if getattr(delta, "content", None):
+                content_buf += delta.content
+        if with_tool_parser:
+            assert name is not None
+            assert len(args_buf) > 0
+        else:
+            assert name is None
+            assert len(args_buf) == 0
+            assert len(content_buf) > 0
+
+    @pytest.mark.asyncio
+    async def test_gpt_oss_multi_turn_chat(
+        self, gptoss_client: OpenAI, with_tool_parser: bool
+    ):
+        if not with_tool_parser:
+            pytest.skip("skip non-tool for multi-turn tests")
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "state": {"type": "string"},
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
+                        },
+                        "required": ["city", "state", "unit"],
+                    },
+                },
+            }
+        ]
+
+        messages = [
+            {"role": "system", "content": "you are a helpful assistant"},
+            {
+                "role": "user",
+                "content": "What is the weather in Dallas, TX with celsius?",
+            },
+        ]
+
+        first = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            temperature=0.0,
+        )
+        first_msg = first.choices[0].message
+        assert first_msg.tool_calls is not None and len(first_msg.tool_calls) > 0
+        tc = first_msg.tool_calls[0]
+        assert tc.function is not None and tc.function.name == "get_current_weather"
+        args1 = tc.function.arguments
+        assert args1 is not None and len(args1) > 0
+        assert not first_msg.content
+
+        messages.append({"role": "assistant", "content": args1})
+        messages.append(
+            {"role": "user", "content": "Now convert to celsius and return JSON only"}
+        )
+
+        second = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            temperature=0.0,
+        )
+        second_msg = second.choices[0].message
+        assert (second_msg.content is not None and len(second_msg.content) > 0) or (
+            second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0
+        )
+
+    @pytest.mark.asyncio
+    async def test_gpt_oss_tool_message_array_content(
+        self, gptoss_client: OpenAI, with_tool_parser: bool
+    ):
+        """Test that tool messages support both string and array content formats."""
+        if not with_tool_parser:
+            pytest.skip("skip non-tool for array content tests")
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "state": {"type": "string"},
+                        },
+                        "required": ["city", "state"],
+                    },
+                },
+            }
+        ]
+
+        # Test 1: Tool message with string content
+        messages_string = [
+            {"role": "user", "content": "What's the weather in Paris?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Paris", "state": "TX"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "content": "The weather in Paris, TX is sunny, 22°C"},
+        ]
+
+        response_string = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages_string,
+            tools=tools,
+            temperature=0.0,
+        )
+
+        assert response_string is not None
+        assert response_string.choices[0].message is not None
+
+        # Test 2: Tool message with array content
+        messages_array = [
+            {"role": "user", "content": "What's the weather in Dallas?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_456",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Dallas", "state": "TX"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": [
+                    {"type": "text", "text": "f2e897a7-2705-4337-8193-2a8f57b81618"}
+                ],
+            },
+        ]
+
+        response_array = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages_array,
+            tools=tools,
+            temperature=0.0,
+        )
+
+        assert response_array is not None
+        assert response_array.choices[0].message is not None
+
+        # Test 3: Tool message with multiple array content items
+        messages_multi_array = [
+            {"role": "user", "content": "Search for information"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_789",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Austin", "state": "TX"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": [
+                    {"type": "text", "text": "Weather data: "},
+                    {"type": "text", "text": "Austin, TX - Partly cloudy, 25°C"},
+                    {"type": "text", "text": " with 60% humidity"},
+                ],
+            },
+        ]
+
+        response_multi_array = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages_multi_array,
+            tools=tools,
+            temperature=0.0,
+        )
+
+        assert response_multi_array is not None
+        assert response_multi_array.choices[0].message is not None
+
+    @pytest.mark.asyncio
+    async def test_gpt_oss_tool_choice_none(
+        self,
+        gptoss_client: OpenAI,
+        with_tool_parser: bool,
+        exclude_tools_when_tool_choice_none: bool,
+    ):
+        if not (with_tool_parser and exclude_tools_when_tool_choice_none):
+            pytest.skip(
+                "skip tool_choice tests when non-tool or "
+                "--exclude-tools-when-tool-choice-none not set"
+            )
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "description": "Get the current weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"},
+                            "state": {"type": "string"},
+                            "unit": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                            },
+                        },
+                        "required": ["city", "state", "unit"],
+                    },
+                },
+            }
+        ]
+
+        messages = [
+            {
+                "role": "user",
+                "content": "What's the temperature(in degrees Celsius) in Dallas?",
+            },
+        ]
+
+        tool_choice_auto = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=0.0,
+        )
+        msg = tool_choice_auto.choices[0].message
+        assert len(msg.tool_calls) == 1
+
+        tool_choice_none = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            tools=tools,
+            tool_choice="none",
+            temperature=0.0,
+        )
+
+        msg = tool_choice_none.choices[0].message
+        assert msg.tool_calls is None
+
+
+class TestGPTOSSSpeculativeChat:
+    @pytest.mark.asyncio
+    async def test_gpt_oss_speculative_reasoning_leakage(
+        self,
+        gptoss_speculative_client: OpenAI,
+        with_tool_parser: bool,
+    ):
+        if not with_tool_parser:
+            pytest.skip("skip non-tool for array content tests")
+
+        messages = [
+            {"role": "user", "content": "Calculate 2+2. Return the answer 4 only."},
+        ]
+
+        stream = await gptoss_speculative_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            stream=True,
+            temperature=0.0,
+        )
+
+        content = ""
+        reasoning = ""
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content += delta.content
+
+            chunk_reasoning = getattr(delta, "reasoning", None)
+            if chunk_reasoning:
+                reasoning += delta.reasoning
+
+        assert len(reasoning) > 0, "No reasoning was generated."
+        assert content.strip() == "4"
+
+
+MODEL_NAME = "openai-community/gpt2"
+MODEL_NAME_SHORT = "gpt2"
+CHAT_TEMPLATE = "Dummy chat template for testing {}"
+BASE_MODEL_PATHS = [
+    BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
+    BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
+]
+
+
+@dataclass
+class MockHFConfig:
+    model_type: str = "any"
+
+
+@dataclass
+class MockModelConfig:
+    task = "generate"
+    runner_type = "generate"
+    model = MODEL_NAME
+    served_model_name = MODEL_NAME
+    tokenizer = MODEL_NAME
+    trust_remote_code = False
+    tokenizer_mode = "auto"
+    max_model_len = 100
+    revision = None
+    code_revision = None
+    tokenizer_revision = None
+    multimodal_config = MultiModalConfig()
+    hf_config = MockHFConfig()
+    hf_text_config = MockHFConfig()
+    logits_processors: list[str] | None = None
+    diff_sampling_param: dict | None = None
+    allowed_local_media_path: str = ""
+    allowed_media_domains: list[str] | None = None
+    encoder_config = None
+    generation_config: str = "auto"
+    override_generation_config: dict[str, Any] = field(default_factory=dict)
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
+    renderer_num_workers: int = 1
+    enable_prompt_embeds: bool = False
+
+    def get_diff_sampling_param(self):
+        return self.diff_sampling_param or {}
+
+    def get_vocab_size(self) -> int:
+        return 50257
+
+
+@dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+    parallel_config: MockParallelConfig
+
+
+def _build_renderer(model_config: MockModelConfig):
+    return HfRenderer(
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        cached_tokenizer_from_config(model_config),
+    )
+
+
+def _build_online_renderer(
+    engine, model_registry: OpenAIModelRegistry
+) -> OnlineRenderer:
+    return OnlineRenderer(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        request_logger=None,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+    )
+
+
+def _build_mock_engine() -> MagicMock:
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    return mock_engine
+
+
+def _build_serving_chat(
+    engine: AsyncLLM,
+    *,
+    reasoning_parser: str = "",
+    tool_parser: str | None = None,
+    enable_auto_tools: bool = False,
+) -> OpenAIServingChat:
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = _build_online_renderer(engine, models.registry)
+
+    serving_chat = OpenAIServingChat(
+        engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+        reasoning_parser=reasoning_parser,
+        tool_parser=tool_parser,
+        enable_auto_tools=enable_auto_tools,
+    )
+
+    return serving_chat
+
+
+def _build_minimal_metrics_serving_chat(
+    enable_per_request_metrics: bool,
+    enable_force_include_usage: bool = False,
+) -> OpenAIServingChat:
+    serving = OpenAIServingChat.__new__(OpenAIServingChat)
+    serving.response_role = "assistant"
+    serving.parser_cls = None
+    serving.enable_auto_tools = False
+    serving._include_reasoning_tokens_details = False
+    serving.enable_prompt_tokens_details = False
+    serving.enable_log_outputs = False
+    serving.enable_log_deltas = False
+    serving.enable_force_include_usage = enable_force_include_usage
+    serving.request_logger = None
+    serving.system_fingerprint = None
+    serving.enable_per_request_metrics = enable_per_request_metrics
+    return serving
+
+
+def _make_metrics_request_output(
+    metrics: RequestStateStats | None = _PER_REQUEST_STATS,
+    token_ids: tuple[int, ...] = (100, 101),
+) -> RequestOutput:
+    return RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="Hello",
+                token_ids=list(token_ids),
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="stop",
+            )
+        ],
+        finished=True,
+        metrics=metrics,
+    )
+
+
+async def _single_request_output(
+    request_output: RequestOutput,
+) -> AsyncIterator[RequestOutput]:
+    yield request_output
+
+
+async def _stream_request_outputs(
+    *request_outputs: RequestOutput,
+) -> AsyncIterator[RequestOutput]:
+    for request_output in request_outputs:
+        yield request_output
+
+
+async def _collect_metrics_stream_chunks(
+    serving: OpenAIServingChat,
+    request: ChatCompletionRequest,
+) -> list[dict[str, Any]]:
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _single_request_output(_make_metrics_request_output()),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        line = line.strip()
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :]
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+    return chunks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [False, True])
+async def test_streaming_chunks_keep_usage_and_metadata(raw):
+    serving = _build_minimal_metrics_serving_chat(False)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    metadata = RequestResponseMetadata(request_id="chatcmpl-test")
+    method = (
+        serving.chat_completion_stream_generator_raw
+        if raw
+        else serving.chat_completion_stream_generator
+    )
+    chunks = [
+        chunk
+        async for chunk in method(
+            request,
+            _single_request_output(_make_metrics_request_output()),
+            "chatcmpl-test",
+            "test-model",
+            conversation=[],
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+        )
+    ]
+    if raw:
+        responses = [
+            chunk for chunk in chunks if isinstance(chunk, ChatCompletionStreamResponse)
+        ]
+        assert len(responses) == len(chunks)
+    else:
+        frames = [chunk for chunk in chunks if isinstance(chunk, str)]
+        assert len(frames) == len(chunks)
+        assert frames[-1] == "data: [DONE]\n\n"
+        first = json.loads(frames[0].removeprefix("data: "))
+        assert first["choices"][0]["logprobs"] is None
+        usage = json.loads(frames[-2].removeprefix("data: "))
+        assert "system_fingerprint" not in usage
+        assert "prompt_tokens_details" not in usage["usage"]
+        responses = [
+            ChatCompletionStreamResponse.model_validate_json(
+                frame.removeprefix("data: ")
+            )
+            for frame in frames[:-1]
+        ]
+    assert len(responses) == 3
+    assert responses[0].choices[0].delta.role == "assistant"
+    assert responses[1].choices[0].delta.content == "Hello"
+    assert responses[1].choices[0].finish_reason == "stop"
+    assert responses[2].choices == []
+    assert responses[2].usage is not None
+    assert responses[2].usage.prompt_tokens == 3
+    assert responses[2].usage.completion_tokens == 2
+    assert metadata.final_usage_info is not None
+    assert metadata.final_usage_info.total_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_streaming_serialization_failure_emits_error_and_done(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = _build_minimal_metrics_serving_chat(False)
+    serving.parser_cls = HarmonyParser
+    parser = MagicMock()
+    parser.parse_delta.return_value = DeltaMessage(
+        content="Hello", extra_object=object()
+    )
+    monkeypatch.setattr(serving, "_make_parser", MagicMock(return_value=parser))
+    request = ChatCompletionRequest(
+        model="test-model", messages=[{"role": "user", "content": "Test"}], stream=True
+    )
+    frames = [
+        frame
+        async for frame in serving.chat_completion_stream_generator(
+            request,
+            _single_request_output(_make_metrics_request_output()),
+            "chatcmpl-test",
+            "test-model",
+            conversation=[],
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="chatcmpl-test"),
+        )
+    ]
+    assert frames[-1] == "data: [DONE]\n\n"
+    error = ErrorResponse.model_validate_json(frames[-2].removeprefix("data: "))
+    assert "serialize" in error.error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize(
+    "failure", ["parser", "before_first", "after_content", "generation"]
+)
+async def test_streaming_errors_preserve_envelope(
+    raw, failure, monkeypatch: pytest.MonkeyPatch
+):
+    serving = _build_minimal_metrics_serving_chat(False)
+    error = (
+        GenerationError("backend failed")
+        if failure == "generation"
+        else ValueError("backend failed")
+    )
+    if failure == "parser":
+        serving.parser_cls = HarmonyParser
+        monkeypatch.setattr(serving, "_make_parser", MagicMock(side_effect=error))
+
+    async def results():
+        if failure == "after_content":
+            output = _make_metrics_request_output()
+            output.outputs[0].finish_reason = None
+            output.finished = False
+            yield output
+        raise error
+
+    request = ChatCompletionRequest(
+        model="test-model", messages=[{"role": "user", "content": "Test"}], stream=True
+    )
+    method = (
+        serving.chat_completion_stream_generator_raw
+        if raw
+        else serving.chat_completion_stream_generator
+    )
+    chunks = [
+        chunk
+        async for chunk in method(
+            request,
+            results(),
+            "chatcmpl-test",
+            "test-model",
+            conversation=[],
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="chatcmpl-test"),
+        )
+    ]
+    if raw:
+        assert all(
+            isinstance(chunk, (ChatCompletionStreamResponse, ErrorResponse))
+            for chunk in chunks
+        )
+        assert isinstance(chunks[-1], ErrorResponse)
+        error_response = chunks[-1]
+    else:
+        assert chunks[-1] == "data: [DONE]\n\n"
+        assert chunks.count("data: [DONE]\n\n") == 1
+        error_frame = chunks[-2]
+        assert isinstance(error_frame, str)
+        error_response = ErrorResponse.model_validate_json(
+            error_frame.removeprefix("data: ")
+        )
+    assert error_response.error.message == "backend failed"
+    assert error_response.error.code == (500 if failure == "generation" else 400)
+
+
+def test_build_per_request_timing_metrics_valid_timestamps():
+    metrics = build_per_request_timing_metrics(
+        _PER_REQUEST_STATS, num_generation_tokens=10
+    )
+
+    assert metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert metrics.generation_time_ms == pytest.approx(1000.0)
+    assert metrics.queue_time_ms == pytest.approx(500.0)
+    assert metrics.mean_itl_ms == pytest.approx(1000.0 / 9, rel=1e-4)
+    assert metrics.tokens_per_second == pytest.approx(10.0 / 1.5, rel=1e-4)
+
+
+@pytest.mark.asyncio
+async def test_chat_per_request_metrics_follow_server_flag():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=False,
+    )
+    request_output = _make_metrics_request_output()
+
+    disabled_serving = _build_minimal_metrics_serving_chat(
+        enable_per_request_metrics=False
+    )
+    disabled_response = await disabled_serving.chat_completion_full_generator(
+        request,
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+    assert not isinstance(disabled_response, ErrorResponse)
+    assert disabled_response.metrics is None
+    details = disabled_response.usage.completion_tokens_details
+    assert details is None or details.reasoning_tokens == 0
+
+    enabled_serving = _build_minimal_metrics_serving_chat(
+        enable_per_request_metrics=True
+    )
+    enabled_response = await enabled_serving.chat_completion_full_generator(
+        request,
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+    assert not isinstance(enabled_response, ErrorResponse)
+    assert enabled_response.metrics is not None
+    assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
+    response = await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=False,
+            n=2,
+        ),
+        _single_request_output(_make_metrics_request_output()),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+    assert not isinstance(response, ErrorResponse)
+    assert response.metrics is None
+
+
+@pytest.mark.asyncio
+async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
+    prompts: list[list[int] | None] = []
+
+    class RecordingParser:
+        tool_parser_cls = None
+
+        def __init__(self, *args, **kwargs):
+            self.prompt_token_ids = None
+
+        def set_prompt_token_ids(self, prompt_token_ids):
+            self.prompt_token_ids = list(prompt_token_ids)
+
+        def parse(self, model_output, request, **kwargs):
+            prompts.append(self.prompt_token_ids)
+            return None, model_output, None
+
+        def count_reasoning_tokens(self, token_ids):
+            return 0
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = RecordingParser
+    serving.model_config = None
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
+    serving.default_chat_template_kwargs = {}
+    serving.online_renderer = MagicMock(reasoning_effort_map={})
+    request_output = _make_metrics_request_output()
+    request_output.prompt_token_ids = [7, 8]
+    request_output.outputs.append(
+        CompletionOutput(
+            index=1,
+            text="Hi",
+            token_ids=[102],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        )
+    )
+
+    await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            n=2,
+        ),
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=RecordingParser(),
+    )
+
+    assert prompts == [[7, 8], [7, 8]]
+
+
+@pytest.mark.asyncio
+async def test_chat_streaming_metrics_ride_on_usage_chunk():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=True,
+            stream_options={"include_usage": True},
+        ),
+    )
+
+    usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
+    assert usage_chunks
+    assert usage_chunks[-1]["metrics"]["time_to_first_token_ms"] == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2])
+@pytest.mark.parametrize("include_reasoning", [True, False])
+@pytest.mark.parametrize("include_details", [True, False])
+@pytest.mark.parametrize("separate_finish", [True, False])
+@pytest.mark.parametrize(
+    "stream_options, force_usage, include_usage, continuous_usage",
+    [
+        (None, False, False, False),
+        ({"include_usage": True}, False, True, False),
+        ({"include_usage": True, "continuous_usage_stats": True}, False, True, True),
+        ({"include_usage": False, "continuous_usage_stats": True}, False, False, False),
+        (None, True, True, True),
+    ],
+)
+async def test_streaming_reasoning_usage_counts_across_deltas(
+    n,
+    include_reasoning,
+    include_details,
+    separate_finish,
+    stream_options,
+    force_usage,
+    include_usage,
+    continuous_usage,
+):
+    """Final usage needs one recount per choice, not per streamed delta."""
+    serving = _build_minimal_metrics_serving_chat(
+        enable_per_request_metrics=False, enable_force_include_usage=force_usage
+    )
+    serving._include_reasoning_tokens_details = include_details
+    serving.model_config = None
+
+    parsers = [MagicMock() for _ in range(n)]
+    request_outputs = []
+    num_steps = 3 if separate_finish else 2
+    for parser in parsers:
+        parser.parse_delta.side_effect = [
+            DeltaMessage(reasoning="reasoning") if include_reasoning else None,
+            DeltaMessage(content="answer"),
+            DeltaMessage(),
+        ]
+        parser.count_reasoning_tokens.side_effect = lambda token_ids: sum(
+            token_id == 20 for token_id in token_ids
+        )
+    serving.parser_cls = MagicMock(side_effect=parsers)
+    for step in range(num_steps):
+        for i in reversed(range(n)):
+            tokens = ((10,) + (20,) * (i + 1), (11, 20, 30), ())[step]
+            result = _make_metrics_request_output(metrics=None, token_ids=tokens)
+            result.outputs[0].index = i
+            result.outputs[0].text = ("<think>reasoning", "</think>answer", "")[step]
+            finished = step == num_steps - 1
+            result.outputs[0].finish_reason = "stop" if finished else None
+            result.finished = finished and i == 0
+            request_outputs.append(result)
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+        n=n,
+        include_reasoning=include_reasoning,
+        return_token_ids=True,
+        stream_options=stream_options,
+    )
+    metadata = RequestResponseMetadata(request_id="chatcmpl-test-id")
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(*request_outputs),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=metadata,
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    assert all("error" not in chunk for chunk in chunks)
+    expected_count = sum(i + 2 for i in range(n))
+    expected_details = {"reasoning_tokens": expected_count} if include_details else None
+    assert metadata.final_usage_info is not None
+    assert metadata.final_usage_info.model_dump()["completion_tokens_details"] == (
+        expected_details
+    )
+    final_chunks = [chunk for chunk in chunks if not chunk["choices"]]
+    assert len(final_chunks) == int(include_usage)
+    if include_usage:
+        assert final_chunks[0]["usage"].get("completion_tokens_details") == (
+            expected_details
+        )
+    for i, parser in enumerate(parsers):
+        expected_calls = (
+            (num_steps if continuous_usage else 1) if include_details else 0
+        )
+        assert parser.count_reasoning_tokens.call_count == expected_calls
+        if include_details:
+            assert parser.count_reasoning_tokens.call_args.args == (
+                (10,) + (20,) * (i + 1) + (11, 20, 30),
+            )
+        choices = [
+            chunk
+            for chunk in chunks
+            if chunk["choices"] and chunk["choices"][0]["index"] == i
+        ]
+        assert (
+            "".join(c["choices"][0]["delta"].get("content") or "" for c in choices)
+            == "answer"
+        )
+        if not include_reasoning:
+            assert all(c["choices"][0].get("token_ids") is None for c in choices)
+        if continuous_usage and include_details:
+            counts = [
+                c["usage"]["completion_tokens_details"]["reasoning_tokens"]
+                for c in choices
+            ]
+            expected_counts = [0, i + 1] if include_reasoning else [0]
+            assert counts == expected_counts + [i + 2] * (num_steps - 1)
+
+
+def _reasoning_lifecycle_output(
+    index: int = 0,
+    tokens: tuple[int, ...] = (20, 30),
+    text: str = "answer",
+    finish: str | None = None,
+) -> RequestOutput:
+    result = _make_metrics_request_output(None, tokens)
+    result.outputs[0].index = index
+    result.outputs[0].text = text
+    result.outputs[0].finish_reason = finish
+    result.finished = finish is not None
+    return result
+
+
+_EMPTY_OUTPUTS = _reasoning_lifecycle_output(tokens=(), text="")
+_EMPTY_OUTPUTS.outputs = []
+
+_REASONING_LIFECYCLE_CASES = [
+    ("empty-generator", 1, [], 0, 0),
+    ("empty-outputs", 1, [_EMPTY_OUTPUTS], 0, 0),
+    (
+        "empty-finish",
+        1,
+        [_reasoning_lifecycle_output(tokens=(), text="", finish="stop")],
+        0,
+        0,
+    ),
+    (
+        "empty-prefill",
+        1,
+        [
+            _reasoning_lifecycle_output(tokens=(), text=""),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        2,
+        1,
+    ),
+    (
+        "one-empty-choice",
+        2,
+        [_reasoning_lifecycle_output(index=1, finish="stop")],
+        2,
+        1,
+    ),
+    (
+        "uneven-finish",
+        2,
+        [
+            _reasoning_lifecycle_output(index=1, finish="stop"),
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(tokens=(20,), finish="stop"),
+        ],
+        5,
+        3,
+    ),
+    (
+        "empty-final-delta",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(tokens=(), text="", finish="stop"),
+        ],
+        2,
+        1,
+    ),
+    (
+        "ignore-finished-choice",
+        2,
+        [
+            _reasoning_lifecycle_output(index=1, finish="stop"),
+            _reasoning_lifecycle_output(index=1, tokens=(20, 20, 20)),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        4,
+        2,
+    ),
+    ("exception-before", 1, [RuntimeError("fixture engine error")], None, None),
+    (
+        "exception-after",
+        1,
+        [_reasoning_lifecycle_output(), RuntimeError("fixture engine error")],
+        None,
+        None,
+    ),
+    (
+        "generation-error",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(finish="error"),
+        ],
+        None,
+        None,
+    ),
+    (
+        "cancel-after",
+        1,
+        [_reasoning_lifecycle_output(), asyncio.CancelledError()],
+        None,
+        None,
+    ),
+    (
+        "close-after",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        None,
+        None,
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage_mode", ["none", "final", "continuous"])
+@pytest.mark.parametrize(
+    "name, n, outputs, expected_tokens, expected_reasoning",
+    _REASONING_LIFECYCLE_CASES,
+    ids=[case[0] for case in _REASONING_LIFECYCLE_CASES],
+)
+async def test_streaming_reasoning_usage_lifecycle_edges(
+    usage_mode,
+    name,
+    n,
+    outputs,
+    expected_tokens,
+    expected_reasoning,
+):
+    """Cancel, errors, and empty choices still match baseline stream usage."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving._include_reasoning_tokens_details = True
+    parsers = [MagicMock() for _ in range(n)]
+    for parser in parsers:
+        parser.parse_delta.side_effect = lambda **kwargs: DeltaMessage(
+            content=kwargs["delta_text"]
+        )
+        parser.count_reasoning_tokens.side_effect = lambda ids: ids.count(20)
+    serving.parser_cls = MagicMock(side_effect=parsers)
+    stream_options = (
+        None
+        if usage_mode == "none"
+        else {
+            "include_usage": True,
+            "continuous_usage_stats": usage_mode == "continuous",
+        }
+    )
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        stream=True,
+        n=n,
+        return_token_ids=True,
+        stream_options=stream_options,
+    )
+    metadata = RequestResponseMetadata(request_id="chatcmpl-lifecycle")
+
+    async def source():
+        for result in outputs:
+            if isinstance(result, BaseException):
+                raise result
+            yield result
+
+    iterator = source()
+    stream = serving.chat_completion_stream_generator(
+        request,
+        iterator,
+        "chatcmpl-lifecycle",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=metadata,
+    )
+    chunks: list[object] = []
+    outcome = "exhausted"
+    try:
+        async for line in stream:
+            raw = line.removeprefix("data: ").strip()
+            if raw == "[DONE]":
+                chunks.append(raw)
+                continue
+            item = json.loads(raw)
+            chunks.append(item)
+            if name == "close-after" and any(
+                choice["delta"].get("content") for choice in item.get("choices", [])
+            ):
+                await stream.aclose()
+                outcome = "closed"
+                break
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+    finally:
+        await stream.aclose()
+        await iterator.aclose()
+
+    error_chunks = [c for c in chunks if isinstance(c, dict) and "error" in c]
+    if name == "empty-finish":
+        # A choice that finishes without output still gets its last chunk, unparsed.
+        assert any(
+            choice.get("finish_reason") == "stop"
+            for item in chunks
+            if isinstance(item, dict)
+            for choice in item.get("choices", [])
+        )
+        parsers[0].parse_delta.assert_not_called()
+    call_count = sum(parser.count_reasoning_tokens.call_count for parser in parsers)
+    if expected_tokens is not None:
+        assert outcome == "exhausted" and chunks[-1] == "[DONE]" and not error_chunks
+        assert metadata.final_usage_info is not None
+        assert metadata.final_usage_info.completion_tokens == expected_tokens
+        assert metadata.final_usage_info.completion_tokens_details is not None
+        assert (
+            metadata.final_usage_info.completion_tokens_details.reasoning_tokens
+            == expected_reasoning
+        )
+        nonempty_choices = sum(
+            bool(parser.count_reasoning_tokens.call_args) for parser in parsers
+        )
+        if usage_mode == "continuous":
+            assert call_count >= nonempty_choices
+        else:
+            assert call_count == nonempty_choices
+        return
+
+    assert metadata.final_usage_info is None
+    if name in {"cancel-after", "close-after"}:
+        assert outcome == ("cancelled" if name == "cancel-after" else "closed")
+        assert "[DONE]" not in chunks and not error_chunks
+    else:
+        assert outcome == "exhausted" and chunks[-1] == "[DONE]"
+        assert len(error_chunks) == 1
+    if usage_mode != "continuous" or name == "exception-before":
+        assert call_count == 0
+    else:
+        assert call_count >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_reasoning", "expected_tokens"),
+    [(True, ["<tool_call>", "answer"]), (False, [])],
+)
+async def test_streaming_logprobs_kept_when_parser_suppresses_delta(
+    include_reasoning: bool, expected_tokens: list[str]
+):
+    """Logprobs of tokens the parser swallows (e.g. <tool_call>) must still
+    be streamed, unless per-token metadata is hidden with the reasoning."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving.return_tokens_as_token_ids = False
+
+    parser = MagicMock()
+    parser.parse_delta.side_effect = [None, DeltaMessage(content="answer")]
+    parser.count_reasoning_tokens.return_value = 0
+    serving.parser_cls = MagicMock(return_value=parser)
+
+    def make_output(token_id: int, text: str, finish_reason: str | None):
+        request_output = _make_metrics_request_output(
+            metrics=None, token_ids=(token_id,)
+        )
+        completion = request_output.outputs[0]
+        completion.text = text
+        completion.finish_reason = finish_reason
+        completion.logprobs = [
+            {token_id: Logprob(logprob=-0.5, rank=1, decoded_token=text)}
+        ]
+        return request_output
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+        logprobs=True,
+        include_reasoning=include_reasoning,
+    )
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(
+            make_output(10, "<tool_call>", None), make_output(11, "answer", "stop")
+        ),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    streamed_tokens = [
+        entry["token"]
+        for chunk in chunks
+        for choice in chunk["choices"]
+        if choice.get("logprobs")
+        for entry in choice["logprobs"]["content"]
+    ]
+    assert streamed_tokens == expected_tokens
+
+
+@dataclass
+class MockEngine:
+    model_config: MockModelConfig = field(default_factory=MockModelConfig)
+    input_processor: MagicMock = field(default_factory=MagicMock)
+    renderer: MagicMock = field(default_factory=MagicMock)
+    errored: bool = False
+
+    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
+        pass
+
+
+async def _async_serving_chat_init():
+    engine = MockEngine()
+
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+
+    serving_completion = OpenAIServingChat(
+        engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
+    return serving_completion
+
+
+def test_async_serving_chat_init():
+    serving_completion = asyncio.run(_async_serving_chat_init())
+    assert serving_completion.chat_template == CHAT_TEMPLATE
+    assert serving_completion._include_reasoning_tokens_details is False
+
+
+def test_mm_prompt_tokens_details():
+    # Text-only input has no multimodal placeholders.
+    assert _get_mm_token_counts({"type": "tokens"}) == {}
+
+    # Per-modality counts sum each modality's placeholder ranges.
+    counts = _get_mm_token_counts(
+        {
+            "mm_placeholders": {
+                "image": [
+                    PlaceholderRange(offset=0, length=576),
+                    PlaceholderRange(offset=600, length=24),
+                ],
+                "video": [PlaceholderRange(offset=700, length=1200)],
+            }
+        }
+    )
+    assert counts == {"image": 600, "video": 1200}
+
+    # Gated off, or nothing to report -> no details.
+    assert _make_prompt_tokens_details(False, 5, 0, counts) is None
+    assert _make_prompt_tokens_details(True, None, None, None) is None
+
+    # Zero cached_tokens is still reported (not None), matching the cached-only
+    # behavior; multimodal counts ride alongside even when cached_tokens is None.
+    details = _make_prompt_tokens_details(True, 0, 0, None)
+    assert details is not None
+    assert details.cached_tokens == 0
+    assert details.created_cache_tokens == 0
+    assert details.multimodal_tokens is None
+    details = _make_prompt_tokens_details(True, None, None, counts)
+    assert details is not None
+    assert details.cached_tokens is None
+    assert details.created_cache_tokens is None
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
+    details = _make_prompt_tokens_details(True, 3, 0, counts)
+    assert details is not None
+    assert details.cached_tokens == 3
+    assert details.created_cache_tokens == 0
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_chunk_reports_prompt_tokens_details():
+    """The first chunk's prompt split matches the final usage chunk.
+
+    The Anthropic Messages stream builds `message_start` usage from the first
+    chunk, so a missing split there reads as the whole prompt being uncached.
+    """
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving.enable_prompt_tokens_details = True
+    output = _make_metrics_request_output(None)
+    output.num_cached_tokens = 2
+    output.num_cache_creation_tokens = 1
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        stream=True,
+        stream_options={"include_usage": True, "continuous_usage_stats": True},
+    )
+    usages = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _single_request_output(output),
+        "chatcmpl-details",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-details"),
+    ):
+        raw = line.removeprefix("data: ").strip()
+        if raw != "[DONE]" and json.loads(raw).get("usage"):
+            usages.append(json.loads(raw)["usage"])
+
+    first, last = (
+        usages[0]["prompt_tokens_details"],
+        usages[-1]["prompt_tokens_details"],
+    )
+    assert (first["cached_tokens"], first["created_cache_tokens"]) == (2, 1)
+    assert (last["cached_tokens"], last["created_cache_tokens"]) == (2, 1)
+
+
+def test_completion_tokens_details():
+    assert _make_completion_tokens_details(7).reasoning_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_returns_correct_model_name(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+    messages = [{"role": "user", "content": "what is 1+1?"}]
+
+    async def return_model_name(*args, **kwargs):
+        return args[3]
+
+    monkeypatch.setattr(
+        serving_chat, "chat_completion_full_generator", return_model_name
+    )
+
+    # Test that full name is returned when short name is requested
+    req = ChatCompletionRequest(model=MODEL_NAME_SHORT, messages=messages)
+    assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+    # Test that full name is returned when empty string is specified
+    req = ChatCompletionRequest(model="", messages=messages)
+    assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+    # Test that full name is returned when no model is specified
+    req = ChatCompletionRequest(messages=messages)
+    assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_admission_rejection_escapes_before_response_starts(stream):
+    """Overload rejections must propagate out of create_chat_completion.
+
+    For streaming this is the only chance to return a real HTTP status: once
+    StreamingResponse is constructed the 200 has already been sent and the
+    rejection would degrade into an in-band SSE error chunk.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.check_admission.side_effect = QueueOverflowError()
+
+    serving_chat = _build_serving_chat(mock_engine)
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        stream=stream,
+    )
+
+    with pytest.raises(QueueOverflowError):
+        await serving_chat.create_chat_completion(req)
+
+    mock_engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_should_set_correct_max_tokens():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    req.max_tokens = 10
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    # Model author's generation_config.json sets max_tokens (auto, no override)
+    # — should act as fallback only, not ceiling
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {"max_tokens": 10}
+
+    # Reinitialize the engine with new settings
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    # Initialize the serving chat
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # Test Case 1: No max_tokens specified in request
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    # Test Case 2: Request's max_tokens set higher than generation_config
+    # default so request-provided max_tokens takes precedence
+    req.max_tokens = 15
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 15
+
+    # Test Case 3: Request's max_tokens set lower than server accepts
+    req.max_tokens = 5
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 5
+
+    # User explicitly sets max_tokens via --override-generation-config
+    # — should act as a ceiling
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {"max_tokens": 10}
+    mock_model_config.override_generation_config = {"max_new_tokens": 10}
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # Test Case 3.1: No max_tokens — uses override as default
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    # Test Case 3.2: Request max_tokens higher — capped by user ceiling from override
+    req.max_tokens = 15
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    # Test Case 3.3: Request max_tokens lower — respected
+    req.max_tokens = 5
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 5
+
+    # Setting server's max_tokens in the generation_config.json
+    # higher than context_window - prompt_tokens
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {"max_tokens": 200}
+
+    # Reinitialize the engine with new settings
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    # Initialize the serving chat
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # Test case 1: No max_tokens specified, defaults to context_window
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    # Test Case 2: Request's max_tokens set higher than server accepts
+    req.max_tokens = 100
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    # Test Case 3: Request's max_tokens set lower than server accepts
+    req.max_tokens = 5
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
+    """When truncate_prompt_tokens is set, max_tokens must be calculated using
+    the truncated prompt length, not the original prompt length.
+
+    Regression: without the fix, get_max_tokens received the untruncated prompt
+    length, causing the output budget to be underestimated.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # "what is 1+1?" tokenizes to 7 tokens with the test chat template
+    # (max_model_len=100 -> max_tokens = 93 without truncation, confirmed by
+    # test_serving_chat_should_set_correct_max_tokens above).
+    messages = [{"role": "user", "content": "what is 1+1?"}]
+
+    # Baseline: no truncation -> max_tokens = 100 - 7 = 93.
+    req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    # With truncate_prompt_tokens=5 (less than 7): the effective prompt length
+    # is 5, so max_tokens should be 100 - 5 = 95, not 93.
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        truncate_prompt_tokens=5,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 95
+
+    # With truncate_prompt_tokens=-1 (meaning use full max_model_len as the
+    # truncation limit, i.e., no practical truncation vs the window): effective
+    # length = min(7, 100) = 7 -> max_tokens = 93 again.
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        truncate_prompt_tokens=-1,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_truncation_side_controls_prompt_truncation():
+    model_config = MockModelConfig()
+    model_config.model = MODEL_NAME_SHORT
+    model_config.tokenizer = MODEL_NAME_SHORT
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+
+    serving_chat = _build_serving_chat(mock_engine)
+    messages = [
+        {
+            "role": "user",
+            "content": "Summarize how prompt truncation works in one sentence.",
+        }
+    ]
+
+    full_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+    )
+    assert len(full_token_ids) > 4
+
+    right_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+        truncate_prompt_tokens=4,
+        truncation_side="right",
+    )
+    assert right_token_ids == full_token_ids[:4]
+
+    left_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+        truncate_prompt_tokens=4,
+        truncation_side="left",
+    )
+    assert left_token_ids == full_token_ids[-4:]
+
+
+def test_serving_chat_starts_without_tokenizer():
+    """Regression test: building the serving objects must not require a
+    tokenizer, which is absent under `skip_tokenizer_init`."""
+    mock_engine = _build_mock_engine()
+    mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_engine.renderer = HfRenderer(
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
+        None,
+    )
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    assert serving_chat.parser_cls is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt_length,max_tokens,truncate_prompt_tokens,expected_max_tokens",
+    [(95, 10, None, 5), (200, None, -1, 1)],
+)
+async def test_serving_chat_mistral_token_ids_prompt_is_validated(
+    prompt_length,
+    max_tokens,
+    truncate_prompt_tokens,
+    expected_max_tokens,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Token-ID prompts must leave a generation budget after truncation.
+
+    A large requested output limit is capped to the remaining context. An
+    omitted limit must still reserve one output token for automatic truncation.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_engine.input_processor = MagicMock()
+
+    mock_tokenizer = MagicMock(spec=MistralTokenizer)
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
+        tokenizer=mock_tokenizer,
+    )
+    # Exercise the renderer path that returns token IDs directly.
+    monkeypatch.setattr(
+        mock_renderer,
+        "render_messages_async",
+        AsyncMock(
+            return_value=(
+                [],
+                TokensPrompt(prompt_token_ids=list(range(prompt_length))),
+            )
+        ),
+    )
+    mock_engine.renderer = mock_renderer
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        max_tokens=max_tokens,
+        truncate_prompt_tokens=truncate_prompt_tokens,
+    )
+
+    # Both an already fitting prompt and an auto-truncated one must succeed.
+    await serving_chat.create_chat_completion(req)
+
+    # The generation budget fits the remaining context.
+    sampling_params = mock_engine.generate.call_args.args[1]
+    assert sampling_params.max_tokens == expected_max_tokens
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Regression test: MistralTokenizer token-id prompts must still enforce
+    the max context length for the input itself (token_num >= max_model_len).
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_engine.input_processor = MagicMock()
+
+    mock_tokenizer = MagicMock(spec=MistralTokenizer)
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
+        tokenizer=mock_tokenizer,
+    )
+    # prompt_token_ids length == max_model_len should be rejected for
+    # completion-like requests (ChatCompletionRequest).
+    monkeypatch.setattr(
+        mock_renderer,
+        "render_messages_async",
+        AsyncMock(
+            return_value=(
+                [],
+                TokensPrompt(
+                    prompt_token_ids=list(range(mock_engine.model_config.max_model_len))
+                ),
+            )
+        ),
+    )
+    mock_engine.renderer = mock_renderer
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        max_tokens=1,
+    )
+
+    with pytest.raises(VLLMValidationError):
+        await serving_chat.create_chat_completion(req)
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_could_load_correct_generation_config():
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {
+        "temperature": 0.5,
+        "repetition_penalty": 1.05,
+    }
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    # Initialize the serving chat
+    serving_chat = _build_serving_chat(mock_engine)
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].temperature == 0.5
+    assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
+
+    # Test the param when user set it
+    req.temperature = 0.1
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].temperature == 0.1
+    assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
+
+    # Test When temperature==0.0
+    req.temperature = 0.0
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].temperature == 0.0
+    assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
+
+
+@pytest.mark.parametrize("model_type", ["gpt_oss", "any"])
+@pytest.mark.asyncio
+async def test_serving_chat_did_set_correct_cache_salt(
+    model_type, monkeypatch: pytest.MonkeyPatch
+):
+    mock_model_config = MockModelConfig()
+    mock_model_config.hf_config.model_type = model_type
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    orig_render_chat_request = serving_chat.render_chat_request
+    captured_inputs = []
+
+    async def render_chat_request(request):
+        result = await orig_render_chat_request(request)
+
+        assert isinstance(result, tuple)
+        conversation, engine_inputs = result
+        captured_inputs.extend(engine_inputs)
+
+        return result
+
+    monkeypatch.setattr(serving_chat, "render_chat_request", render_chat_request)
+
+    # Test cache_salt
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    # By default, cache_salt in the engine prompt is not set
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert len(captured_inputs) == 1
+    assert "cache_salt" not in captured_inputs[0]
+
+    captured_inputs.clear()
+
+    # Test with certain cache_salt
+    req.cache_salt = "test_salt"
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0]["type"] == "token"
+    assert captured_inputs[0]["cache_salt"] == "test_salt"
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_data_parallel_rank_extraction():
+    """Test that data_parallel_rank is properly extracted from header and
+    passed to engine."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    # Mock the generate method to return an async generator
+    async def mock_generate(*args, **kwargs):
+        # Yield a fake RequestOutput
+        from vllm.outputs import CompletionOutput, RequestOutput
+
+        yield RequestOutput(
+            request_id="test-request",
+            prompt="test prompt",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="test response",
+                    token_ids=[4, 5, 6],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+            finished=True,
+        )
+
+    mock_engine.generate = AsyncMock(side_effect=mock_generate)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # Test when data_parallel_rank is present in header
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    # Mock request with X-data-parallel-rank header
+    mock_raw_request = MagicMock()
+    mock_raw_request.headers = {"X-data-parallel-rank": "2"}
+    mock_raw_request.state = MagicMock()
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req, mock_raw_request)
+
+    # Verify that data_parallel_rank was passed to engine.generate
+    assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
+    assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] == 2
+
+    # Test when data_parallel_rank is not present (defaults to None)
+    req_no_dp = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 2+2?"}],
+    )
+
+    # Mock request with no header
+    mock_raw_request_no_dp = MagicMock()
+    mock_raw_request_no_dp.headers = {}
+    mock_raw_request_no_dp.state = MagicMock()
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req_no_dp, mock_raw_request_no_dp)
+
+    # Verify that data_parallel_rank defaults to None
+    assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
+    assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", [None, "-5", "0"])
+async def test_beam_search_preserves_request_priority(header):
+    """Body and header priority survive every beam expansion."""
+    engine = _build_mock_engine()
+    priorities = []
+
+    async def generate(*args, priority=0, **kwargs):
+        priorities.append(priority)
+        output = _make_metrics_request_output()
+        output.outputs[0].logprobs = [{100: Logprob(-0.1), 101: Logprob(-0.2)}]
+        yield output
+
+    engine.generate = generate
+    serving = _build_serving_chat(engine)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test"}],
+        use_beam_search=True,
+        n=2,
+        max_tokens=2,
+        ignore_eos=True,
+        watermarking=False,
+        priority=-9,
+    )
+    headers = [] if header is None else [(b"x-vllm-priority", header.encode())]
+    response = await serving.create_chat_completion(
+        request, Request({"type": "http", "headers": headers})
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert len(response.choices) == 2
+    assert priorities == [-9 if header is None else int(header)] * 3
+
+
+async def _render_chat_prompt_token_ids(
+    serving_chat: OpenAIServingChat,
+    messages: list[dict[str, str]],
+    *,
+    model_name: str = MODEL_NAME,
+    truncate_prompt_tokens: int | None = None,
+    truncation_side: str | None = None,
+) -> list[int]:
+    request = ChatCompletionRequest(
+        model=model_name,
+        messages=messages,
+        max_tokens=1,
+        temperature=0.0,
+        return_token_ids=True,
+        truncate_prompt_tokens=truncate_prompt_tokens,
+        truncation_side=truncation_side,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    _, engine_inputs = result
+    assert len(engine_inputs) == 1
+
+    prompt_token_ids = serving_chat._extract_prompt_components(
+        engine_inputs[0]
+    ).token_ids
+    assert prompt_token_ids is not None
+    return prompt_token_ids
+
+
+class TestServingChatWithHarmony:
+    """These tests ensure Chat Completion requests are being properly converted into
+    Harmony messages and Harmony response messages back into Chat Completion responses.
+    These tests are not exhaustive, but each one was created to cover a specific case
+    that we got wrong but is now fixed.
+
+    Any changes to the tests and their expectations may result in changes to the
+    accuracy of model prompting and responses generated. It is suggested to run
+    an evaluation or benchmarking suite (such as bfcl multi_turn) to understand
+    any impact of changes in how we prompt Harmony models.
+    """
+
+    @pytest.fixture(params=[False, True], ids=["non_streaming", "streaming"])
+    def stream(self, request) -> bool:
+        """Parameterize tests to run in both non-streaming and streaming modes."""
+        return request.param
+
+    @pytest.fixture()
+    def mock_engine(self) -> AsyncLLM:
+        mock_engine = MagicMock(spec=AsyncLLM)
+        mock_engine.errored = False
+        mock_engine.model_config = MockModelConfig()
+        mock_engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+        mock_engine.model_config.hf_text_config = MockHFConfig(model_type="gpt_oss")
+        mock_engine.input_processor = MagicMock()
+        mock_engine.renderer = _build_renderer(mock_engine.model_config)
+        return mock_engine
+
+    @pytest.fixture()
+    def serving_chat(self, mock_engine) -> OpenAIServingChat:
+        chat = _build_serving_chat(
+            mock_engine,
+            reasoning_parser="openai_gptoss",
+            tool_parser="openai",
+            enable_auto_tools=True,
+        )
+        assert chat.parser_cls is HarmonyParser
+        return chat
+
+    def mock_request_output_from_req_and_token_ids(
+        self, req: ChatCompletionRequest, token_ids: list[int], finished: bool = False
+    ) -> RequestOutput:
+        # Our tests don't use most fields, so just get the token ids correct
+        completion_output = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=token_ids,
+            cumulative_logprob=0.0,
+            logprobs=None,
+        )
+        return RequestOutput(
+            request_id=req.request_id,
+            prompt=[],
+            prompt_token_ids=[],
+            prompt_logprobs=None,
+            outputs=[completion_output],
+            finished=finished,
+        )
+
+    @pytest.fixture
+    def weather_tools(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"},
+                        },
+                        "required": ["location"],
+                    },
+                },
+            },
+        ]
+
+    @pytest.fixture
+    def weather_messages_start(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "role": "user",
+                "content": "What's the weather like in Paris today?",
+            },
+        ]
+
+    async def generate_response_from_harmony_str(
+        self,
+        serving_chat: OpenAIServingChat,
+        req: ChatCompletionRequest,
+        harmony_str: str,
+        stream: bool = False,
+    ) -> ChatCompletionResponse:
+        harmony_token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        tokenizer = get_tokenizer(GPT_OSS_MODEL_NAME)
+
+        async def result_generator():
+            if stream:
+                for token_id in harmony_token_ids:
+                    yield self.mock_request_output_from_req_and_token_ids(
+                        req, [token_id]
+                    )
+                yield self.mock_request_output_from_req_and_token_ids(
+                    req, [], finished=True
+                )
+            else:
+                yield self.mock_request_output_from_req_and_token_ids(
+                    req, harmony_token_ids, finished=True
+                )
+
+        generator_func = (
+            serving_chat.chat_completion_stream_generator
+            if stream
+            else serving_chat.chat_completion_full_generator
+        )
+
+        chat_template_kwargs = serving_chat._effective_chat_template_kwargs(req)
+        if stream:
+            extra_kwargs: dict[str, Any] = {
+                "chat_template_kwargs": chat_template_kwargs,
+            }
+        else:
+            parser = None
+            if serving_chat.parser_cls is not None:
+                parser = serving_chat.parser_cls(
+                    tokenizer,
+                    req.tools,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+            extra_kwargs = {"parser": parser}
+
+        result = generator_func(
+            request=req,
+            result_generator=result_generator(),
+            request_id=req.request_id,
+            model_name=req.model,
+            conversation=[],
+            tokenizer=tokenizer,
+            request_metadata=RequestResponseMetadata(
+                request_id=req.request_id,
+                model_name=req.model,
+            ),
+            **extra_kwargs,
+        )
+
+        if stream:
+            return await accumulate_streaming_response(result)
+        assert isinstance(result, Coroutine)
+        response = await result
+        assert not isinstance(response, ErrorResponse)
+        return response
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "include_reasoning", [True, False], ids=["with_reasoning", "no_reasoning"]
+    )
+    async def test_simple_chat(self, serving_chat, stream, include_reasoning):
+        messages = [{"role": "user", "content": "what is 1+1?"}]
+
+        # Test the Harmony messages for the first turn's input
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            include_reasoning=include_reasoning,
+        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "user", "content": messages[0]["content"]},
+            ],
+        )
+
+        # Test the Chat Completion response for the first turn's output
+        reasoning_str = "We need to think really hard about this."
+        final_str = "The answer is 2."
+        response_str = (
+            f"<|channel|>analysis<|message|>{reasoning_str}<|end|>"
+            f"<|start|>assistant<|channel|>final<|message|>{final_str}<|end|>"
+        )
+        response = await self.generate_response_from_harmony_str(
+            serving_chat, req, response_str, stream=stream
+        )
+        verify_chat_response(
+            response,
+            content=final_str,
+            reasoning=reasoning_str if include_reasoning else None,
+        )
+
+        # Add the output messages from the first turn as input to the second turn
+        for choice in response.choices:
+            messages.append(choice.message.model_dump(exclude_none=True))
+
+        # Test the Harmony messages for the second turn's input
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
+        )
+        expected_input_messages_2 = [
+            {"role": "system"},
+            {"role": "user"},
+        ]
+        if include_reasoning:
+            expected_input_messages_2.append(
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                }
+            )
+        expected_input_messages_2.append(
+            {"role": "assistant", "channel": "final", "content": final_str}
+        )
+        verify_harmony_messages(
+            input_messages_2,
+            expected_input_messages_2,
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_message_without_tools(self, serving_chat, stream):
+        """Leading system message produces a developer message with
+        DeveloperContent (# Instructions header)."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {
+                    "role": "developer",
+                    "instructions": "You are a helpful assistant.",
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_message_with_tools(self, serving_chat, stream, weather_tools):
+        """Leading system message is folded into the developer message
+        alongside tool definitions."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "What's the weather?"},
+        ]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME, messages=messages, tools=weather_tools
+        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {
+                    "role": "developer",
+                    "instructions": "You are a helpful assistant.",
+                    "tool_definitions": ["get_weather"],
+                },
+                {"role": "user", "content": "What's the weather?"},
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_tool_call_response_with_content(
+        self, serving_chat, stream, weather_tools, weather_messages_start
+    ):
+        tools = weather_tools
+        messages = list(weather_messages_start)
+
+        # Test the Harmony messages for the first turn's input
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "developer", "tool_definitions": ["get_weather"]},
+                {"role": "user", "content": messages[0]["content"]},
+            ],
+        )
+
+        # Test the Chat Completion response for the first turn's output
+        commentary_str = "We'll call get_weather."
+        tool_args_str = '{"location": "Paris"}'
+        response_str = (
+            f"<|channel|>commentary<|message|>{commentary_str}<|end|>"
+            "<|start|>assistant to=functions.get_weather<|channel|>commentary"
+            f"<|constrain|>json<|message|>{tool_args_str}<|call|>"
+        )
+        response = await self.generate_response_from_harmony_str(
+            serving_chat, req, response_str, stream=stream
+        )
+        verify_chat_response(
+            response,
+            content=commentary_str,
+            tool_calls=[("get_weather", tool_args_str)],
+        )
+
+        tool_call = response.choices[0].message.tool_calls[0]
+
+        # Add the output messages from the first turn as input to the second turn
+        for choice in response.choices:
+            messages.append(choice.message.model_dump(exclude_none=True))
+
+        # Add our tool output message
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": "20 degrees Celsius",
+            },
+        )
+
+        # Test the Harmony messages for the second turn's input
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
+        )
+        verify_harmony_messages(
+            input_messages_2,
+            [
+                {"role": "system"},
+                {"role": "developer"},
+                {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "content": commentary_str,
+                },
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "recipient": "functions.get_weather",
+                    "content": tool_args_str,
+                },
+                {
+                    "role": "tool",
+                    "author_name": "functions.get_weather",
+                    "channel": "commentary",
+                    "recipient": "assistant",
+                    "content": "20 degrees Celsius",
+                },
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_tools_and_reasoning(
+        self, serving_chat, stream, weather_tools, weather_messages_start
+    ):
+        tools = weather_tools
+        messages = list(weather_messages_start)
+
+        # Test the Harmony messages for the first turn's input
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "developer", "tool_definitions": ["get_weather"]},
+                {"role": "user", "content": messages[0]["content"]},
+            ],
+        )
+
+        # Test the Chat Completion response for the first turn's output
+        reasoning_str = "I'll call get_weather."
+        paris_tool_args_str = '{"location": "Paris"}'
+        response_str = (
+            f"<|channel|>analysis<|message|>{reasoning_str}<|end|>"
+            "<|start|>assistant to=functions.get_weather<|channel|>commentary"
+            f"<|constrain|>json<|message|>{paris_tool_args_str}<|call|>"
+        )
+        response = await self.generate_response_from_harmony_str(
+            serving_chat, req, response_str, stream=stream
+        )
+        verify_chat_response(
+            response,
+            reasoning=reasoning_str,
+            tool_calls=[("get_weather", paris_tool_args_str)],
+        )
+
+        tool_call = response.choices[0].message.tool_calls[0]
+
+        # Add the output messages from the first turn as input to the second turn
+        for choice in response.choices:
+            messages.append(choice.message.model_dump(exclude_none=True))
+
+        # Add our tool output message
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": "20 degrees Celsius",
+            },
+        )
+
+        # Test the Harmony messages for the second turn's input
+        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
+        )
+        verify_harmony_messages(
+            input_messages_2,
+            [
+                {"role": "system"},
+                {"role": "developer"},
+                {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "recipient": "functions.get_weather",
+                    "content": paris_tool_args_str,
+                },
+                {
+                    "role": "tool",
+                    "author_name": "functions.get_weather",
+                    "channel": "commentary",
+                    "recipient": "assistant",
+                    "content": "20 degrees Celsius",
+                },
+            ],
+        )
+
+        # Test the Chat Completion response for the second turn's output
+        paris_weather_str = "The weather in Paris today is 20 degrees Celsius."
+        response_str = f"<|channel|>final<|message|>{paris_weather_str}<|end|>"
+        response_2 = await self.generate_response_from_harmony_str(
+            serving_chat, req_2, response_str, stream=stream
+        )
+        verify_chat_response(response_2, content=paris_weather_str)
+
+        # Add the output messages from the second turn as input to the third turn
+        for choice in response_2.choices:
+            messages.append(choice.message.model_dump(exclude_none=True))
+
+        # Add a new user message for the third turn
+        messages.append(
+            {
+                "role": "user",
+                "content": "What's the weather like in Boston today?",
+            },
+        )
+
+        # Test the Harmony messages for the third turn's input
+        req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        input_messages_3, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_3
+        )
+        verify_harmony_messages(
+            input_messages_3,
+            [
+                {"role": "system"},
+                {"role": "developer"},
+                {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": reasoning_str,
+                },
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "recipient": "functions.get_weather",
+                    "content": paris_tool_args_str,
+                },
+                {
+                    "role": "tool",
+                    "author_name": "functions.get_weather",
+                    "channel": "commentary",
+                    "recipient": "assistant",
+                    "content": "20 degrees Celsius",
+                },
+                {
+                    "role": "assistant",
+                    "channel": "final",
+                    "content": paris_weather_str,
+                },
+                {"role": "user", "content": messages[-1]["content"]},
+            ],
+        )
+
+        # Test the Chat Completion response for the third turn's output
+        reasoning_str = "I'll call get_weather."
+        boston_tool_args_str = '{"location": "Boston"}'
+        response_str = (
+            f"<|channel|>analysis<|message|>{reasoning_str}<|end|>"
+            "<|start|>assistant to=functions.get_weather<|channel|>commentary"
+            f"<|constrain|>json<|message|>{boston_tool_args_str}<|call|>"
+        )
+        response_3 = await self.generate_response_from_harmony_str(
+            serving_chat, req, response_str, stream=stream
+        )
+        verify_chat_response(
+            response_3,
+            reasoning=reasoning_str,
+            tool_calls=[("get_weather", boston_tool_args_str)],
+        )
+
+        tool_call = response_3.choices[0].message.tool_calls[0]
+
+        # Add the output messages from the third turn as input to the fourth turn
+        for choice in response_3.choices:
+            messages.append(choice.message.model_dump(exclude_none=True))
+
+        # Add our tool output message
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": "10 degrees Celsius",
+            },
+        )
+
+        # Test the Harmony messages for the fourth turn's input
+        req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        input_messages_4, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_4
+        )
+        verify_harmony_messages(
+            input_messages_4,
+            [
+                {"role": "system"},
+                {"role": "developer"},
+                {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
+                {"role": "assistant"},
+                {"role": "tool"},
+                {
+                    "role": "assistant",
+                    "channel": "final",
+                },
+                {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": reasoning_str,
+                },
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "recipient": "functions.get_weather",
+                    "content": boston_tool_args_str,
+                },
+                {
+                    "role": "tool",
+                    "author_name": "functions.get_weather",
+                    "channel": "commentary",
+                    "recipient": "assistant",
+                    "content": "10 degrees Celsius",
+                },
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_tool_reasoning(self, serving_chat):
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's 2+2?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "Adding 2 and 2 is easy. The result is 4.",
+                "content": "4",
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "user", "content": messages[0]["content"]},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
+                {
+                    "role": "assistant",
+                    "channel": "final",
+                    "content": messages[1]["content"],
+                },
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_tool_reasoning_empty_content(self, serving_chat):
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's 2+2?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "Adding 2 and 2 is easy. The result is 4.",
+                "content": "",
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "user", "content": messages[0]["content"]},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": messages[1]["reasoning"],
+                },
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_tool_reasoning_empty_content_list(self, serving_chat):
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's 2+2?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "Adding 2 and 2 is easy. The result is 4.",
+                "content": [],
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "user", "content": messages[0]["content"]},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": messages[1]["reasoning"],
+                },
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_validation_without_parser():
+    """Test that tool_choice='required' or named tool without tool_parser
+    returns an appropriate error message."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
+
+    # Create serving_chat without tool_parser (enable_auto_tools=False)
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+        enable_auto_tools=False,  # No tool parser
+    )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+
+    # Test tool_choice="required" without tool_parser
+    req_required = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What's the weather?"}],
+        tools=tools,
+        tool_choice="required",
+    )
+    response_required = await serving_chat.create_chat_completion(req_required)
+    assert isinstance(response_required, ErrorResponse)
+    assert "tool_choice" in response_required.error.message
+    assert "--tool-call-parser" in response_required.error.message
+
+    # Test named tool_choice without tool_parser
+    req_named = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What's the weather?"}],
+        tools=tools,
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+    )
+    response_named = await serving_chat.create_chat_completion(req_named)
+    assert isinstance(response_named, ErrorResponse)
+    assert "tool_choice" in response_named.error.message
+    assert "--tool-call-parser" in response_named.error.message
+    # The function name should appear in a clean, readable form -
+    # guards against leaking Pydantic's internal repr of the
+    # ChatCompletionNamedToolChoiceParam/ChatCompletionNamedFunction
+    # objects directly into the client-facing error message.
+    assert "get_weather" in response_named.error.message
+    assert "ChatCompletionNamedFunction" not in response_named.error.message
+    assert "ChatCompletionNamedToolChoiceParam" not in response_named.error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("engine_finish_reason", "expected_finish_reason"),
+    [("stop", "tool_calls"), ("length", "length")],
+)
+async def test_streaming_n_gt1_independent_tool_parsers(
+    engine_finish_reason: str, expected_finish_reason: str
+):
+    """n>1 streaming must use independent parser instances
+    and token-id histories per choice.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
+
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+        enable_auto_tools=True,
+        tool_parser="hermes",
+    )
+
+    tokenizer = get_tokenizer(MODEL_NAME)
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+    ]
+
+    num_choices = 2
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        n=num_choices,
+        stream=True,
+        tools=tools,
+        tool_choice="auto",
+    )
+
+    tool_call_text = (
+        "<tool_call>\n"
+        '{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n'
+        "</tool_call>"
+    )
+    all_token_ids = tokenizer.encode(tool_call_text, add_special_tokens=False)
+
+    # Compute proper delta text for each token so that concatenated deltas
+    # reproduce the original string exactly.
+    steps: list[tuple[str, int]] = []
+    prev_decoded = ""
+    for i, tid in enumerate(all_token_ids):
+        decoded_so_far = tokenizer.decode(all_token_ids[: i + 1])
+        delta = decoded_so_far[len(prev_decoded) :]
+        steps.append((delta, tid))
+        prev_decoded = decoded_so_far
+
+    async def result_generator():
+        for delta_text, token_id in steps:
+            yield RequestOutput(
+                request_id="test-req",
+                prompt="test",
+                prompt_token_ids=[1, 2, 3],
+                prompt_logprobs=None,
+                outputs=[
+                    CompletionOutput(
+                        index=choice_idx,
+                        text=delta_text,
+                        token_ids=[token_id],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                    )
+                    for choice_idx in range(num_choices)
+                ],
+                finished=False,
+            )
+        # Final output with finish_reason
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=choice_idx,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason=engine_finish_reason,
+                )
+                for choice_idx in range(num_choices)
+            ],
+            finished=True,
+        )
+
+    # Collect tool-call deltas and finish_reasons per choice from the SSE
+    # stream.
+    tc_deltas_by_choice: dict[int, list[dict]] = {i: [] for i in range(num_choices)}
+    finish_reasons_by_choice: dict[int, list[str]] = {i: [] for i in range(num_choices)}
+    async for chunk_str in serving_chat.chat_completion_stream_generator(
+        request=request,
+        result_generator=result_generator(),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req",
+            model_name=MODEL_NAME,
+        ),
+    ):
+        if not chunk_str.strip() or "data: [DONE]" in chunk_str:
+            continue
+        if chunk_str.startswith("data: "):
+            data = json.loads(chunk_str[6:].strip())
+            for choice in data.get("choices", []):
+                idx = choice["index"]
+                delta = choice.get("delta", {})
+                if delta.get("tool_calls"):
+                    for tc in delta["tool_calls"]:
+                        tc_deltas_by_choice[idx].append(tc)
+                if choice.get("finish_reason") is not None:
+                    finish_reasons_by_choice[idx].append(choice["finish_reason"])
+
+    # Both choices must independently produce the correct tool call.
+    for choice_idx in range(num_choices):
+        deltas = tc_deltas_by_choice[choice_idx]
+        assert len(deltas) > 0, (
+            f"Choice {choice_idx}: expected tool-call deltas but got none"
+        )
+
+        name = None
+        args_buf = ""
+        for tc in deltas:
+            fn = tc.get("function", {})
+            if fn.get("name"):
+                name = fn["name"]
+            if fn.get("arguments"):
+                args_buf += fn["arguments"]
+
+        assert name == "get_weather", (
+            f"Choice {choice_idx}: expected 'get_weather', got {name!r}"
+        )
+        parsed_args = json.loads(args_buf)
+        assert parsed_args == {"city": "Tokyo"}, (
+            f"Choice {choice_idx}: expected {{'city': 'Tokyo'}}, got {parsed_args}"
+        )
+
+        reasons = finish_reasons_by_choice[choice_idx]
+        assert len(reasons) == 1, (
+            f"Choice {choice_idx}: expected exactly 1 finish_reason, got {reasons}"
+        )
+        assert reasons[0] == expected_finish_reason, (
+            f"Choice {choice_idx}: expected finish_reason={expected_finish_reason!r}, "
+            f"got '{reasons[0]}'"
+        )
+
+
+def test_make_request_with_harmony_reuses_kv_transfer_prompt_token_ids():
+    """The Harmony reuse branch honors ids forwarded in kv_transfer_params.
+
+    A GPT-OSS server is impractical to stand up here, so this exercises the
+    branch directly on a harmony-configured renderer.
+    """
+    engine = MockEngine()
+    engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+    assert online_renderer.use_harmony
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    conversation, engine_inputs = online_renderer._make_request_with_harmony(request)
+
+    assert conversation == []
+    assert len(engine_inputs) == 1
+    engine_input = engine_inputs[0]
+    assert engine_input["type"] == "token"
+    assert engine_input["prompt_token_ids"] == [10, 20, 30]
+    # The reuse key is consumed and other kv_transfer_params are preserved.
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.parametrize("ids", [[-1], [1.5]])
+def test_make_request_with_harmony_rejects_invalid_kv_transfer_prompt_token_ids(ids):
+    engine = MockEngine()
+    engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids},
+    )
+    with pytest.raises(VLLMValidationError, match="non-negative integers"):
+        online_renderer._make_request_with_harmony(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[], [-1], [1.5], [1.0], ["1"], [True], "abc", 5])
+async def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(ids):
+    """`kv_transfer_params` is untyped, so the ids are checked on reuse."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids},
+    )
+    with pytest.raises(VLLMValidationError, match="non-negative integers"):
+        await serving_chat.render_chat_request(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ids", "stream", "match"),
+    [
+        ([1.5], False, "non-negative integers"),
+        ([999999], True, r"out of vocabulary.*kv_transfer_params\.prompt_token_ids"),
+    ],
+)
+async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector(
+    ids, stream, match
+):
+    """A render-time 400 on a decode request notifies the KV connector."""
+    mock_engine = _build_mock_engine()
+    mock_engine.notify_kv_transfer_request_rejected = AsyncMock()
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.has_kv_connector = True
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        stream=stream,
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
+    )
+    with pytest.raises(VLLMValidationError, match=match):
+        await serving_chat.create_chat_completion(request)
+
+    mock_engine.notify_kv_transfer_request_rejected.assert_awaited_once_with(
+        request.request_id, {"do_remote_prefill": True}, data_parallel_rank=None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
+async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
+    """`echo` needs the rendered conversation, so the ids are not used."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
+        echo=True,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert [msg["role"] for msg in conversation] == ["user"]
+    assert engine_inputs[0]["type"] == "token"
+    assert engine_inputs[0]["prompt_token_ids"] != ids
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
+async def test_chat_kv_transfer_prompt_token_ids_ignored_with_return_prompt_text(ids):
+    """`return_prompt_text` needs the rendered conversation, so the ids are
+    not used."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
+        return_prompt_text=True,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert [msg["role"] for msg in conversation] == ["user"]
+    assert engine_inputs[0]["type"] == "token"
+    assert engine_inputs[0]["prompt_token_ids"] != ids
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [
+            {"type": "text", "text": "what is in this image?"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+        ],
+        # A part written without a "type" is identified by its media key.
+        [{"image_url": "https://example.com/a.png"}],
+        # A media key counts even when the part claims to be text, which is
+        # how chat_utils reads a part carrying a "uuid".
+        [
+            {
+                "type": "text",
+                "text": "look",
+                "uuid": "u1",
+                "image_url": "https://example.com/a.png",
+            }
+        ],
+        [{"type": "hologram", "hologram": "https://a/b.holo"}],
+        [{"type": ["image_url"]}],
+    ],
+)
+def test_chat_kv_transfer_prompt_token_ids_ignored_with_non_text_content(content):
+    """The ids are dropped so that `messages` is rendered with its media."""
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": content}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+def test_chat_kv_transfer_prompt_token_ids_ignored_with_reasoning_embeds():
+    request = ChatCompletionRequest(
+        messages=[
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "some text"}],
+                "reasoning": {"type": "prompt_embeds", "data": "tensor"},
+            }
+        ],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+def test_chat_kv_transfer_prompt_token_ids_allows_text_only_parts():
+    """Text-bearing part types are not multimodal, so the ids are kept."""
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "let me think"},
+                    {"type": "refusal", "refusal": "no"},
+                ],
+            },
+            {"role": "user", "content": "plain string"},
+        ],
+        kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+    )
+    assert request.kv_transfer_params == {"prompt_token_ids": [10, 20, 30]}
+
+
+_TOOL_FINISH_REASON_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+_HERMES_TOOL_CALL_TEXT = (
+    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n</tool_call>'
+)
+
+
+_NAMED_WEATHER_TOOL_CHOICE = {"type": "function", "function": {"name": "get_weather"}}
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "engine_finish_reason", "tool_calls_made", "expected"),
+    [
+        ("auto", "stop", True, "tool_calls"),
+        ("auto", "length", True, "length"),
+        ("auto", "stop", False, "stop"),
+        ("required", "stop", True, "tool_calls"),
+        ("required", "stop", False, "stop"),
+        ("required", "length", True, "length"),
+        (_NAMED_WEATHER_TOOL_CHOICE, "stop", True, "stop"),
+        (_NAMED_WEATHER_TOOL_CHOICE, "length", True, "length"),
+        ("none", "stop", False, "stop"),
+        (None, None, False, "stop"),
+    ],
+)
+def test_resolve_finish_reason(
+    tool_choice, engine_finish_reason, tool_calls_made, expected
+):
+    """`tool_calls` needs a real call, a natural stop and no forced tool;
+    `length` is never hidden behind a parsed call."""
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        tools=_TOOL_FINISH_REASON_TOOLS if tool_choice else None,
+        tool_choice=tool_choice,
+    )
+    assert (
+        resolve_finish_reason(engine_finish_reason, request, tool_calls_made)
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_choice", "text", "engine_finish_reason", "expected_finish_reason"),
+    [
+        ("auto", _HERMES_TOOL_CALL_TEXT, "stop", "tool_calls"),
+        ("auto", _HERMES_TOOL_CALL_TEXT, "length", "length"),
+        ("required", "Hello, how are you?", "stop", "stop"),
+        (_NAMED_WEATHER_TOOL_CHOICE, _HERMES_TOOL_CALL_TEXT, "stop", "stop"),
+    ],
+)
+async def test_non_streaming_finish_reason_matches_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_choice,
+    text: str,
+    engine_finish_reason: str,
+    expected_finish_reason: str,
+):
+    """Non-streaming `finish_reason` must agree with `message.tool_calls`
+    and never hide a `length` truncation (#53255, #58228)."""
+    serving_chat = _build_serving_chat(
+        _build_mock_engine(), tool_parser="hermes", enable_auto_tools=True
+    )
+    assert serving_chat.parser_cls is not None
+    # Parse required/named calls from the native <tool_call> format regardless
+    # of VLLM_ENFORCE_STRICT_TOOL_CALLING, so one text serves every case.
+    monkeypatch.setattr(
+        serving_chat.parser_cls.tool_parser_cls, "supports_required_and_named", False
+    )
+
+    tokenizer = get_tokenizer(MODEL_NAME)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        tools=_TOOL_FINISH_REASON_TOOLS,
+        tool_choice=tool_choice,
+    )
+    parser = serving_chat.parser_cls(
+        tokenizer,
+        request.tools,
+        chat_template_kwargs=serving_chat._effective_chat_template_kwargs(request),
+        model_config=serving_chat.model_config,
+    )
+    request_output = RequestOutput(
+        request_id="test-req",
+        prompt="test",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                cumulative_logprob=0.0,
+                logprobs=None,
+                finish_reason=engine_finish_reason,
+            )
+        ],
+        finished=True,
+    )
+
+    response = await serving_chat.chat_completion_full_generator(
+        request=request,
+        result_generator=_single_request_output(request_output),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req", model_name=MODEL_NAME
+        ),
+        parser=parser,
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    choice = response.choices[0]
+    assert choice.finish_reason == expected_finish_reason
+    assert bool(choice.message.tool_calls) == (text != "Hello, how are you?"), (
+        "finish_reason must reflect whether tool calls were emitted"
+    )

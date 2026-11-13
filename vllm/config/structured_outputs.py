@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from typing import Literal, Self
+
+from pydantic import model_validator
+
+from vllm.config.utils import CompileFactors, config
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+StructuredOutputsBackend = Literal[
+    "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
+]
+
+
+@config
+class StructuredOutputsConfig:
+    """Dataclass which contains structured outputs config for the engine."""
+
+    backend: StructuredOutputsBackend = "auto"
+    """Which engine will be used for structured outputs (e.g. JSON schema,
+    regex, etc) by default. With "auto", we will make opinionated choices
+    based on request contents and what the backend libraries currently support,
+    so the behavior is subject to change in each release.
+    The "lm-format-enforcer" backend is deprecated and will be removed in
+    v0.35.0. Use "auto", "xgrammar", or "guidance" instead."""
+    disable_any_whitespace: bool = False
+    """If `True`, json output will always be compact without any whitespace.
+    If `False`, the model may generate whitespace between JSON fields,
+    which is still valid JSON. This is only supported for xgrammar
+    and guidance backends."""
+    disable_additional_properties: bool = False
+    """If `True`, the `guidance` backend will not use `additionalProperties`
+    in the JSON schema. This is only supported for the `guidance` backend and
+    is used to better align its behaviour with `outlines` and `xgrammar`."""
+    reasoning_parser: str = ""
+    """Select the reasoning parser depending on the model that you're using.
+    This is used to parse the reasoning content into OpenAI API format."""
+    reasoning_parser_plugin: str = ""
+    """Path to a dynamically reasoning parser plugin that can be dynamically
+    loaded and registered."""
+    enable_in_reasoning: bool = False
+    """Whether to use structured input for reasoning."""
+
+    def compile_factors(self) -> CompileFactors:
+        """This config does not affect the compiled graph.
+
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
+        """
+        return {}
+
+    @model_validator(mode="after")
+    def _validate_structured_output_config(self) -> Self:
+        if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
+            raise ValueError(
+                "disable_any_whitespace is only supported for "
+                "xgrammar and guidance backends."
+            )
+        if self.disable_additional_properties and self.backend != "guidance":
+            raise ValueError(
+                "disable_additional_properties is only supported "
+                "for the guidance backend."
+            )
+        if self.backend == "lm-format-enforcer":
+            logger.warning_once(
+                "The lm-format-enforcer structured outputs backend is deprecated "
+                "and will be removed in v0.35.0. Use auto, xgrammar, or guidance "
+                "instead. See https://docs.vllm.ai/en/latest/features/"
+                "structured_outputs/#migrating-from-lm-format-enforcer "
+                "for migration guidance."
+            )
+        return self

@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import openai
+import pytest
+import pytest_asyncio
+
+from tests.utils import RemoteOpenAIServer
+
+
+@pytest.fixture(scope="module")
+def chat_server_with_force_include_usage(request):
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "128",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "4",
+        "--enable-force-include-usage",
+        "--port",
+        "55857",
+        "--gpu-memory-utilization",
+        "0.2",
+    ]
+
+    with RemoteOpenAIServer("Qwen/Qwen3-0.6B", args, auto_port=False) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def chat_client_with_force_include_usage(chat_server_with_force_include_usage):
+    async with chat_server_with_force_include_usage.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest.mark.asyncio
+async def test_chat_with_enable_force_include_usage(
+    chat_client_with_force_include_usage: openai.AsyncOpenAI,
+):
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?"},
+    ]
+
+    stream = await chat_client_with_force_include_usage.chat.completions.create(
+        model="Qwen/Qwen3-0.6B",
+        messages=messages,
+        max_completion_tokens=10,
+        extra_body=dict(min_tokens=10),
+        temperature=0.0,
+        stream=True,
+    )
+    last_completion_tokens = 0
+    async for chunk in stream:
+        assert chunk.usage.prompt_tokens >= 0
+        assert (
+            last_completion_tokens == 0
+            or chunk.usage.completion_tokens > last_completion_tokens
+            or (
+                # A usage-only chunk, or a chunk that carries only
+                # finish_reason (the Rust frontend sends one, as OpenAI does).
+                (
+                    not chunk.choices
+                    or (
+                        chunk.choices[0].finish_reason is not None
+                        and not chunk.choices[0].delta.content
+                    )
+                )
+                and chunk.usage.completion_tokens == last_completion_tokens
+            )
+        )
+        assert chunk.usage.total_tokens == (
+            chunk.usage.prompt_tokens + chunk.usage.completion_tokens
+        )
+        last_completion_tokens = chunk.usage.completion_tokens

@@ -1,0 +1,1406 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import itertools
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
+
+import regex as re
+import torch
+import torch.nn as nn
+from torch.nn.modules.module import register_module_module_registration_hook
+
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.logger import init_logger
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.reload import (
+    support_quantized_model_reload_from_hp_weights,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import supports_any_eagle
+from vllm.multimodal import NestedTensors
+from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+)
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedConfig
+    from transformers.conversion_mapping import WeightRenaming
+
+    from vllm.model_executor.layers.quantization import QuantizationConfig
+
+logger = init_logger(__name__)
+
+ShardId: TypeAlias = str | int | tuple[int, ...]
+"""One shard of a stacked parameter. A tuple is a single contiguous span."""
+ShardIds: TypeAlias = ShardId | list[ShardId]
+"""One shard, or a list of shards the same weight is loaded into in turn."""
+
+WeightsTransformFn: TypeAlias = Callable[
+    [Iterable[tuple[str, torch.Tensor]]], Iterable[tuple[str, torch.Tensor]]
+]
+"""A lazy transform over a raw checkpoint `(name, tensor)` stream, passing
+unrecognized tensors through unchanged."""
+
+
+@dataclass
+class WeightsMapper:
+    """Maps the name of each weight if they match the following patterns.
+
+    If a key maps to a value of `None`, the corresponding weight is ignored.
+
+    `weights_transforms` rewrite the raw weight stream in list order before
+    any name mapping."""
+
+    orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
+    orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
+    orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
+        default_factory=dict
+    )
+    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
+    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
+
+    def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
+        """Combine two `WeightsMapper`s by merging their mappings."""
+        return WeightsMapper(
+            orig_to_new_renaming=[
+                *self.orig_to_new_renaming,
+                *other.orig_to_new_renaming,
+            ],
+            orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
+            orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_stacked={
+                **self.orig_to_new_stacked,
+                **other.orig_to_new_stacked,
+            },
+            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
+            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
+            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
+        )
+
+    def map_name(self, key: str) -> str | None:
+        """Map a weight name; returns `None` if the weight should be ignored."""
+        result = self._map_name_with_shard(key)
+        return result[0] if result is not None else None
+
+    def _map_name(self, key: str) -> str | None:
+        """Backward-compatible alias for `map_name`."""
+        return self.map_name(key)
+
+    def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
+        """Map a weight name and extract any shard_id metadata.
+
+        Returns:
+            (mapped_name, shard_id) if the name should be kept. A list of shard
+            ids means the weight is loaded into each of those shards in turn.
+            None if the name should be dropped.
+
+        """
+        # Deprecation warnings
+        if key.endswith(".kv_scale"):
+            logger.warning_once(
+                "DEPRECATED. Found kv_scale in the checkpoint. "
+                "This format is deprecated in favor of separate k_scale and "
+                "v_scale tensors and will be removed in a future release. "
+                "Functionally, we will remap kv_scale to k_scale and duplicate "
+                "k_scale to v_scale"
+            )
+
+        for renaming in self.orig_to_new_renaming:
+            key, _ = renaming.rename_source_key(key)
+
+        for pattern, new_key in self.orig_to_new_regex.items():
+            if pattern.search(key):
+                if new_key is None:
+                    return None
+
+                key = pattern.sub(new_key, key)
+
+        for substr, new_key in self.orig_to_new_substr.items():
+            if substr in key:
+                if new_key is None:
+                    return None
+
+                key = key.replace(substr, new_key, 1)
+
+        shard_id: ShardIds | None = None
+        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
+            if substr in key:
+                key = key.replace(substr, new_key, 1)
+                shard_id = new_shard_id
+
+        for prefix, new_key in self.orig_to_new_prefix.items():
+            if key.startswith(prefix):
+                if new_key is None:
+                    return None
+
+                key = key.replace(prefix, new_key, 1)
+
+        for suffix, new_key in self.orig_to_new_suffix.items():
+            if key.endswith(suffix):
+                if new_key is None:
+                    return None
+
+                key = new_key.join(key.rsplit(suffix, 1))
+
+        return key, shard_id
+
+    def apply(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for transform in self.weights_transforms:
+            weights = transform(weights)
+        for name, data in weights:
+            result = self._map_name_with_shard(name)
+            if result is None:
+                continue
+            out_name, shard_id = result
+            if shard_id is None:
+                yield out_name, data
+                continue
+            shard_ids = shard_id if isinstance(shard_id, list) else [shard_id]
+            for i, one_shard_id in enumerate(shard_ids):
+                # Each shard carries its own id, so extra shards need their own
+                # tensor object; `detach` aliases the storage instead of copying.
+                shard_data = data if i == 0 else data.detach()
+                shard_data.shard_id = one_shard_id
+                yield out_name, shard_data
+
+    def apply_list(self, values: list[str]) -> list[str]:
+        return [
+            out_name
+            for name in values
+            if (out_name := self._map_name(name)) is not None
+        ]
+
+    def apply_dict(self, values: dict[str, Any]) -> dict[str, Any]:
+        return {
+            out_name: value
+            for name, value in values.items()
+            if (out_name := self._map_name(name)) is not None
+        }
+
+    def get_rename_mapper(self) -> "WeightsMapper":
+        """Mapper variant keeping only the renames.
+
+        This is what consumers that *name* modules rather than load them need:
+        LoRA name parsing and the quantization config's layer lists.
+
+        Stacked maps are dropped so that constituent names (e.g. `q_proj`) survive
+        rather than being rewritten to the stacked vLLM name (`qkv_proj`). Mappings to
+        `None` are dropped because "do not load this weight" is meaningless to such a
+        consumer, and applying it would silently shrink a quantization config's ignore
+        list or make LoRA name parsing fail."""
+        remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
+        return replace(
+            self,
+            orig_to_new_regex=remove_none(self.orig_to_new_regex),
+            orig_to_new_substr=remove_none(self.orig_to_new_substr),
+            orig_to_new_stacked={},
+            orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
+            orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
+            weights_transforms=[],
+        )
+
+
+def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
+    """Map each tied word embedding qualname to the first name it aliases."""
+    canonical = dict[int, str]()
+    aliased = dict[str, str]()
+    for prefix, submodule in module.named_modules(remove_duplicate=False):
+        if not isinstance(submodule, VocabParallelEmbedding):
+            continue
+        for name, param in submodule.named_parameters(remove_duplicate=False):
+            qualname = f"{prefix}.{name}" if prefix else name
+            if (first_name := canonical.setdefault(id(param), qualname)) != qualname:
+                aliased[qualname] = first_name
+    return aliased
+
+
+class AutoWeightsLoader:
+    """Helper class to load weights into a [`torch.nn.Module`][]. It is able
+    to automatically detect child modules and parameters while iterating over
+    the weights only once.
+
+    The weight loading logic for individual modules can be overridden
+    by defining a `load_weights` method.
+
+    Similarly, the weight loading logic for individual parameters can be
+    overridden by defining a `weight_loader` method.
+
+    Detailed weight loading information can be viewed by setting the
+    environment variable `VLLM_LOGGING_LEVEL=DEBUG`.
+    """
+
+    # Models trained using early version ColossalAI or quantized by
+    # GPTQModel may include these tensors in checkpoint. Drop them.
+    REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER = WeightsMapper(
+        orig_to_new_substr={
+            "rotary_pos_emb.inv_freq": None,
+            "rotary_emb.inv_freq": None,
+            "rotary_emb.cos_cached": None,
+            "rotary_emb.sin_cached": None,
+        }
+    )
+
+    def __init__(
+        self,
+        module: nn.Module,
+        *,
+        ignore_unexpected_prefixes: list[str] | None = None,
+        ignore_unexpected_suffixes: list[str] | None = None,
+    ) -> None:
+        super().__init__()
+
+        self.module = module
+        self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
+        self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
+
+        # Weight tying makes two qualnames point at the same `nn.Parameter`
+        # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
+        # would write the same storage twice, so only the first name reached by
+        # module traversal is loaded and the rest are skipped.
+        self.aliased_params = _get_tied_embedding_params(module)
+
+    def _groupby_prefix(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> Iterable[tuple[str, Iterable[tuple[str, torch.Tensor]]]]:
+        weights_by_parts = (
+            (weight_name.split(".", 1), weight_data)
+            for weight_name, weight_data in weights
+        )
+
+        for prefix, group in itertools.groupby(weights_by_parts, key=lambda x: x[0][0]):
+            yield (
+                prefix,
+                # Because maxsplit=1 in weight_name.split(...),
+                # the length of `parts` must either be 1 or 2
+                (
+                    ("" if len(parts) == 1 else parts[1], weights_data)
+                    for parts, weights_data in group
+                ),
+            )
+
+    def _get_qualname(self, prefix: str, rest: str) -> str:
+        if prefix == "":
+            return rest
+        if rest == "":
+            return prefix
+
+        return ".".join((prefix, rest))
+
+    def _can_skip(self, qualname: str) -> bool:
+        return qualname in self.aliased_params
+
+    def _can_ignore_unexpected(self, qualname: str) -> bool:
+        iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
+        ius = (qualname.endswith(s) for s in self.ignore_unexpected_suffixes)
+        return any(iup) or any(ius)
+
+    def _load_param(
+        self,
+        base_prefix: str,
+        param: nn.Parameter,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> Iterable[str]:
+        for weight_name, weight_data in weights:
+            weight_qualname = self._get_qualname(base_prefix, weight_name)
+
+            if self._can_skip(weight_qualname):
+                logger.debug("Skipping weight %s", weight_qualname)
+
+                continue
+
+            if weight_name != "":
+                if self._can_ignore_unexpected(weight_qualname):
+                    logger.debug("Ignoring weight %s", weight_qualname)
+
+                    continue
+
+                raise ValueError(
+                    f"Attempted to load nested weight {weight_qualname!r} "
+                    f"into a single parameter {base_prefix!r}"
+                )
+
+            if param.dtype != weight_data.dtype:
+                # An exact widening -- an fp32 accumulator reading a bf16
+                # table, say -- keeps every stored value, so it is a debug
+                # line. Every other mismatch still warns.
+                exact_widening = weight_data.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                    torch.float32,
+                ) and param.dtype in (torch.float32, torch.float64)
+                (logger.debug if exact_widening else logger.warning)(
+                    "Attempted to load weight %s with dtype %s into "
+                    "parameter with dtype %s",
+                    weight_qualname,
+                    weight_data.dtype,
+                    param.dtype,
+                )
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, weight_data)
+
+            logger.debug("Loaded weight %s with shape %s", weight_qualname, param.shape)
+
+            yield weight_qualname
+
+    def _add_loadable_non_param_tensors(
+        self, module: nn.Module, child_params: dict[str, torch.Tensor]
+    ):
+        """Add tensor names that are not in the model params that may be in the
+        safetensors, e.g., batch normalization stats and registered buffers.
+        """
+        # Add persistent registered buffers.
+        # Non-persistent buffers are excluded, matching PyTorch state_dict().
+        non_persistent: set[str] = getattr(module, "_non_persistent_buffers_set", set())
+        for buf_name, buf in module.named_buffers(recurse=False):
+            if buf_name not in child_params and buf_name not in non_persistent:
+                child_params[buf_name] = buf
+
+        if isinstance(
+            module,
+            (
+                nn.BatchNorm1d,
+                nn.BatchNorm2d,
+                nn.BatchNorm3d,
+                nn.LazyBatchNorm1d,
+                nn.LazyBatchNorm2d,
+                nn.LazyBatchNorm3d,
+                nn.SyncBatchNorm,
+            ),
+        ):
+            module_state_dict = module.state_dict()
+            for stat_name in ("running_mean", "running_var", "num_batches_tracked"):
+                child_params[stat_name] = module_state_dict[stat_name]
+
+    def _load_module(
+        self,
+        base_prefix: str,
+        module: nn.Module,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> Iterable[str]:
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
+            return
+
+        # Avoid infinite recursion since this function is typically
+        # called inside load_weights of the module itself
+        if module != self.module:
+            module_load_weights = getattr(module, "load_weights", None)
+            if callable(module_load_weights):
+                loaded_params = module_load_weights(weights)
+                if loaded_params is None:
+                    logger.warning(
+                        "Unable to collect loaded parameters for module %s", module
+                    )
+                else:
+                    yield from map(
+                        lambda x: self._get_qualname(base_prefix, x),
+                        loaded_params,
+                    )
+
+        child_modules = dict(module.named_children())
+        child_params = dict(module.named_parameters(recurse=False))
+
+        # Add missing tensors the weight loader needs to be able to load
+        # that aren't registered as params, e.g., batchnorm statistics.
+        self._add_loadable_non_param_tensors(module, child_params)
+
+        for child_prefix, child_weights in self._groupby_prefix(weights):
+            prefix = self._get_qualname(base_prefix, child_prefix)
+
+            if child_prefix in child_modules:
+                yield from self._load_module(
+                    prefix, child_modules[child_prefix], child_weights
+                )
+            elif child_prefix in child_params:
+                if self._can_skip(prefix):
+                    logger.debug("Skipping param %s", prefix)
+
+                    continue
+
+                yield from self._load_param(
+                    prefix, child_params[child_prefix], child_weights
+                )
+            else:
+                if self._can_skip(prefix):
+                    logger.debug("Skipping missing %s", prefix)
+
+                    continue
+
+                can_ignore_module = self._can_ignore_unexpected(prefix + ".")
+                can_ignore_param = self._can_ignore_unexpected(prefix)
+                if can_ignore_module or can_ignore_param:
+                    logger.debug("Ignoring missing %s", prefix)
+
+                    continue
+
+                named_parameters = module.named_parameters(recurse=True)
+                desc_param_keys = {
+                    maybe_prefix(base_prefix, k) for k, _ in named_parameters
+                }
+                msg = (
+                    f"There is no module or parameter named {prefix!r} "
+                    f"in {self.module._get_name()}. "
+                    f"The available parameters belonging to {base_prefix} "
+                    f"({module._get_name()}) are: {desc_param_keys}"
+                )
+                raise ValueError(msg)
+
+    @support_quantized_model_reload_from_hp_weights
+    def load_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+        *,
+        mapper: WeightsMapper | None = None,
+    ) -> set[str]:
+        # Ignore unexpected biases (typically from GPTQ models)
+        self.ignore_unexpected_suffixes.append(".bias")
+
+        mapper = mapper or WeightsMapper()
+        # Many models store quant_config in the base model instead of the causal model.
+        # We look at the causal model's direct children for this reason.
+        modules = (self.module, *self.module.children())
+        iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
+        if quant_config := next(iterator, None):
+            # Apply mappings for quantization-specific checkpoint tensors.
+            mapper |= quant_config.get_cache_scale_mapper()
+            mapper |= quant_config.get_checkpoint_weight_mapper()
+            ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
+            self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
+        mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
+
+        weights = mapper.apply(weights)
+        weights = self._filter_skipped(weights)
+
+        return set(self._load_module("", self.module, weights))
+
+    def _filter_skipped(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, weight in weights:
+            if self._can_skip(name):
+                continue
+
+            yield name, weight
+
+
+def get_fused_shared_expert_layers(
+    module: nn.Module,
+    moe_cls: type[nn.Module],
+    enable_eplb: bool = False,
+) -> frozenset[int]:
+    """Resolve fused-shared-expert layer indices from the live module tree.
+
+    The index is taken from each MoE module's qualified name, so it follows the
+    same index space as the caller's weight names: 0-based for modules stored in
+    an `nn.ModuleList`, and absolute for `nn.ModuleDict` MTP layers keyed by
+    layer index. No loader needs to hard-code an offset.
+
+    Also rejects mixed fusion when EPLB is enabled or the `nixl_ep` all2all
+    backend is selected, and logs the resolved policy.
+    """
+    fused_layers: set[int] = set()
+    moe_layers: set[int] = set()
+    for name, mod in module.named_modules():
+        if not isinstance(mod, moe_cls):
+            continue
+        idx = extract_layer_index(name)
+        moe_layers.add(idx)
+        if getattr(mod, "is_fused_shared_expert_enabled", False):
+            fused_layers.add(idx)
+
+    # EPLB bookkeeping is per rank/model: `EplbState` builds each model's
+    # `expert_weights`/`num_moe_layers` from the local `MixtureOfExperts` (one
+    # pipeline stage here), while main and draft models have separate
+    # `EplbModelState`s keyed by model config. The uniformity requirement is
+    # therefore stage/model-local by design: mixed within a stage is rejected,
+    # mixed across PP stages (or main vs draft) is allowed.
+    if 0 < len(fused_layers) < len(moe_layers):
+        if enable_eplb:
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion within a pipeline "
+                "stage/model is not supported with EPLB"
+            )
+        vllm_config = get_current_vllm_config_or_none()
+        parallel_config = (
+            vllm_config.parallel_config if vllm_config is not None else None
+        )
+        if parallel_config is not None and parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion with expert parallelism is "
+                "not tested. Please open an issue if you need this combination."
+            )
+        # These backends size one shared buffer from the first MoE layer's
+        # geometry (all2all.py NixlEPAll2AllManager._init_buffer/get_handle).
+        all2all_backend = (
+            parallel_config.all2all_backend if parallel_config is not None else None
+        )
+        if all2all_backend == "nixl_ep":
+            raise NotImplementedError(
+                "Mixed per-layer shared-expert fusion is not supported with "
+                f"all2all_backend={all2all_backend!r}"
+            )
+
+    if fused_layers:
+        logger.info(
+            "AITER fused shared experts: enabled on MoE layer(s) %s; "
+            "disabled on MoE layer(s) %s.",
+            sorted(fused_layers),
+            sorted(moe_layers - fused_layers) or "none",
+        )
+    elif moe_layers:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+            logger.info(
+                "AITER fused shared experts: disabled on all %d MoE layer(s).",
+                len(moe_layers),
+            )
+    return frozenset(fused_layers)
+
+
+def maybe_fuse_shared_experts(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    *,
+    n_routed_experts: int,
+    n_shared_experts: int,
+    fused_shared_expert_layers: frozenset[int],
+    ckpt_prefix: str = "mlp.shared_experts",
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Route AITER fused-shared-expert checkpoint weights into fused slots.
+
+    When AITER fused-shared-experts is active, shared experts are packed into
+    the routed expert tensor. The checkpoint stores them under `ckpt_prefix`
+    as a single (possibly widened) tensor; this splits it into
+    `n_shared_experts` chunks named `mlp.experts.{n_routed_experts + j}` so
+    the `RoutedExperts` loader treats them as extra experts. Yields the input
+    unchanged when the fusion is inactive, so callers can wrap unconditionally.
+
+    Args:
+        weights: Iterable of `(name, tensor)` checkpoint pairs.
+        n_routed_experts: Number of routed experts; offsets the fused slots.
+        n_shared_experts: Number of shared experts packed into the tensor.
+        ckpt_prefix: Checkpoint module name of the shared experts.
+        fused_shared_expert_layers: Layer indices whose shared expert was fused
+            at construction time, as returned by
+            `get_fused_shared_expert_layers`. Only weights belonging to these
+            layers are routed to fused slots.
+
+    Yields:
+        `(name, tensor)` pairs with shared experts routed to fused slots.
+
+    """
+    if not fused_shared_expert_layers:
+        yield from weights
+        return
+
+    # Match on the dotted boundary so e.g. "mlp.shared_expert." does not also
+    # catch a sibling "mlp.shared_expert_gate".
+    prefix = f"{ckpt_prefix}."
+    for name, loaded_weight in weights:
+        if prefix not in name:
+            yield name, loaded_weight
+            continue
+        if extract_layer_index(name) not in fused_shared_expert_layers:
+            yield name, loaded_weight
+            continue
+        # gate/up split on the output dim; down_proj on the input dim.
+        split_dim = 1 if ("down_proj.weight" in name and loaded_weight.ndim > 1) else 0
+        total = loaded_weight.shape[split_dim]
+        if total % n_shared_experts != 0:
+            raise ValueError(
+                f"FSE shared-expert weight {name!r} has size {total} along axis "
+                f"{split_dim}, not divisible by n_shared_experts={n_shared_experts}."
+            )
+        chunk = total // n_shared_experts
+        for j in range(n_shared_experts):
+            sl = slice(j * chunk, (j + 1) * chunk)
+            if loaded_weight.ndim == 1:
+                chunk_weight = loaded_weight[sl]
+            elif split_dim == 0:
+                chunk_weight = loaded_weight[sl, :]
+            else:
+                chunk_weight = loaded_weight[:, sl]
+            yield (
+                name.replace(prefix, f"mlp.experts.{n_routed_experts + j}."),
+                chunk_weight,
+            )
+
+
+def get_spec_layer_idx_from_weight_name(
+    config: "PreTrainedConfig", weight_name: str
+) -> int | None:
+    """Return the MTP layer index a weight belongs to, or None.
+
+    Args:
+        config: The model config; must expose `num_hidden_layers` and,  for MTP
+            checkpoints, `num_nextn_predict_layers`.
+        weight_name: Checkpoint weight name to classify.
+
+    Returns:
+        The absolute layer index for an MTP-layer weight, else None.
+
+    """
+    if not (n := getattr(config, "num_nextn_predict_layers", 0)):
+        return None
+    base = config.num_hidden_layers
+    for i in range(n):
+        if weight_name.startswith(
+            (
+                f"model.layers.{base + i}.",
+                f"layers.{base + i}.",
+                f"model.language_model.layers.{base + i}.",
+            )
+        ):
+            return base + i
+    return None
+
+
+def skip_spec_layers(
+    weights: Iterable[tuple[str, torch.Tensor]], config: "PreTrainedConfig"
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Drop MTP spec-layer weights (loaded by the MTP head, not the base model).
+
+    Args:
+        weights: Iterable of `(name, tensor)` checkpoint pairs.
+        config: The model config, passed to `get_spec_layer_idx_from_weight_name`.
+
+    Yields:
+        `(name, tensor)` pairs whose weight is not an MTP-layer weight.
+
+    """
+    return (
+        (name, w)
+        for name, w in weights
+        if get_spec_layer_idx_from_weight_name(config, name) is None
+    )
+
+
+def init_vllm_registered_model(
+    vllm_config: VllmConfig,
+    *,
+    prefix: str = "",
+    hf_config: "PreTrainedConfig | None" = None,
+    architectures: list[str] | None = None,
+) -> nn.Module:
+    """Helper function to initialize an inner model registered to vLLM,
+    based on the arguments passed to the outer vLLM model.
+    """
+    from vllm.model_executor.model_loader.utils import initialize_model
+
+    if hf_config is None and architectures is not None:
+        # So that the architectures field is overridden
+        hf_config = vllm_config.model_config.hf_config
+
+    if hf_config is not None:
+        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+
+    return initialize_model(vllm_config=vllm_config, prefix=prefix)
+
+
+@overload
+def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
+
+
+@overload
+def flatten_bn(x: torch.Tensor) -> torch.Tensor: ...
+
+
+@overload
+def flatten_bn(
+    x: list[torch.Tensor] | torch.Tensor,
+    *,
+    concat: Literal[True],
+) -> torch.Tensor: ...
+
+
+@overload
+def flatten_bn(
+    x: list[torch.Tensor] | torch.Tensor,
+    *,
+    concat: bool = False,
+) -> list[torch.Tensor] | torch.Tensor: ...
+
+
+def flatten_bn(
+    x: list[torch.Tensor] | torch.Tensor,
+    *,
+    concat: bool = False,
+) -> list[torch.Tensor] | torch.Tensor:
+    """Flatten the `B` and `N` dimensions of batched multimodal inputs.
+
+    The input tensor should have shape `(B, N, ...)`.
+    """
+    if isinstance(x, torch.Tensor):
+        return x.flatten(0, 1)
+
+    if concat:
+        return torch.cat(x)
+
+    return [x_n for x_b in x for x_n in x_b]
+
+
+def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
+    """Recursively flattens and concatenates NestedTensors on all but the last
+    dimension.
+    """
+    if isinstance(embeddings, torch.Tensor):
+        # Flatten all but the last dimension.
+        return embeddings.flatten(0, -2)
+
+    return torch.cat(tuple(_flatten_embeddings(t) for t in embeddings))
+
+
+def _embedding_count_expression(embeddings: NestedTensors) -> str:
+    """Constructs a debugging representation of the number of embeddings in the
+    NestedTensors.
+    """
+    if isinstance(embeddings, torch.Tensor):
+        return " x ".join([str(dim) for dim in embeddings.shape[:-1]])
+
+    return " + ".join(_embedding_count_expression(inner) for inner in embeddings)
+
+
+def split_list_into_ranges(lst: torch.Tensor, interval: int) -> list[list[int]]:
+    ranges: list[list[int]] = [[] for _ in range((max(lst) // interval) + 1)]
+    for num in lst:
+        index = num // interval
+        ranges[index].append(num)
+    return ranges
+
+
+def _merge_multimodal_embeddings(
+    inputs_embeds: torch.Tensor,
+    multimodal_embeddings: NestedTensors,
+    is_multimodal: torch.Tensor,
+) -> torch.Tensor:
+    """Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
+    positions in `inputs_embeds` corresponding to placeholder tokens in
+    `input_ids`.
+
+    Note:
+        This updates `inputs_embeds` in place.
+
+    """
+    if len(multimodal_embeddings) == 0:
+        return inputs_embeds
+
+    mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+    input_dtype = inputs_embeds.dtype
+
+    try:
+        # If is_multimodal is on CPU this avoids a D2H sync
+        inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
+    except RuntimeError as e:
+        num_actual_tokens = len(mm_embeds_flat)
+        num_expected_tokens = is_multimodal.sum().item()
+
+        if num_actual_tokens != num_expected_tokens:
+            expr = _embedding_count_expression(multimodal_embeddings)
+
+            raise ValueError(
+                f"Attempted to assign {expr} = {num_actual_tokens} "
+                f"multimodal tokens to {num_expected_tokens} placeholders"
+            ) from e
+
+        raise ValueError("Error during index put operation") from e
+
+    return inputs_embeds
+
+
+class StageMissingLayer(nn.Module):
+    def __init__(self, stage_name: str, module: nn.Module | None = None) -> None:
+        super().__init__()
+
+        self.stage_name = stage_name
+
+        # Don't register this as a child module in order to
+        # avoid missing keys when loading weights
+        self.__dict__["module"] = module
+
+    def __getattr__(self, name: str):
+        return getattr(self.__dict__["module"], name)
+
+    def tie_weights(self, embed_tokens: nn.Module) -> "StageMissingLayer":
+        """Omitted layers do not need to share embedding weights."""
+        return self
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(f"{self} should not be called")
+
+    def extra_repr(self) -> str:
+        return f"stage_name={self.stage_name!r}"
+
+
+@contextmanager
+def collect_children(
+    module: nn.Module,
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """Within this context, collect all direct child assignments to `module`,
+    returning a list of children names that is internally updated until the
+    context is exited.
+
+    If `targets` is set, instead collect descendents of `module`
+    that are an instance of `targets`, even if they aren't direct children.
+    """
+    children_names = list[str]()
+
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                children_names.append(name)
+
+        with register_module_module_registration_hook(hook):
+            yield children_names
+    else:
+        yield children_names
+
+        for name, module_ in module.named_modules():
+            if isinstance(module_, targets):
+                children_names.append(name)
+
+
+@contextmanager
+def no_init_weights(
+    module: nn.Module,
+    placeholder: Callable[[nn.Module], nn.Module],
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """Within this context, prevent weight initialization from using device memory and
+    replace direct child assignments to `module` with the result of `placeholder()`.
+
+    If `targets` is set, instead prevent weight initialization and
+    replace assignments where the child is an instance of `targets`,
+    even if they aren't direct children of `module`.
+    """
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                return placeholder(submodule)
+
+            return submodule
+
+        with register_module_module_registration_hook(hook), torch.device("meta"):
+            yield
+    else:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if isinstance(module_, targets):
+                submodule.to("meta")  # Free memory
+            if isinstance(submodule, targets):
+                submodule.to("meta")  # Free memory
+                return placeholder(submodule)
+
+            return submodule
+
+        # Not all descendents are targeted, so we can't use a blanket
+        # `torch.device("meta")` context
+        with register_module_module_registration_hook(hook):
+            yield
+
+
+class LayerFn(Protocol):
+    def __call__(self, prefix: str) -> torch.nn.Module: ...
+
+
+class PPMissingLayer(torch.nn.Identity):
+    """A placeholder layer for missing layers in a pipeline parallel model."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, *args, **kwargs):
+        """Return the first arg from args or the first value from kwargs."""
+        return args[0] if args else next(iter(kwargs.values()))
+
+
+def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
+    """Whether the last PP rank needs the target input embedding, for a
+    hidden-state drafter that may reuse it (see `maybe_share_target_embed`)."""
+    from vllm.distributed.parallel_state import get_pp_group
+
+    speculative_config = vllm_config.speculative_config
+    if (
+        speculative_config is None
+        or not speculative_config.uses_target_hidden_states
+        or not speculative_config.draft_model_config.may_use_target_embed
+    ):
+        return False
+    pp = get_pp_group()
+    return pp.world_size > 1 and pp.is_last_rank
+
+
+def make_layers(
+    num_hidden_layers: int,
+    layer_fn: LayerFn,
+    prefix: str,
+) -> tuple[int, int, torch.nn.ModuleList]:
+    """Make a list of layers with the given layer function, taking
+    pipeline parallelism into account.
+
+    Args:
+        num_hidden_layers: Total number of hidden layers in the model.
+        layer_fn: Function to create a layer given its index.
+        prefix: Prefix for layer names.
+
+    Returns:
+        Tuple of (start_layer, end_layer, modules).
+
+    """
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed.utils import get_pp_indices
+    from vllm.model_executor.offloader import get_offloader
+
+    start_layer, end_layer = get_pp_indices(
+        num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
+    )
+
+    modules = torch.nn.ModuleList(
+        [PPMissingLayer() for _ in range(start_layer)]
+        + get_offloader().wrap_modules(
+            layer_fn(prefix=f"{prefix}.{idx}") for idx in range(start_layer, end_layer)
+        )
+        + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
+    )
+
+    return start_layer, end_layer, modules
+
+
+# NOTE: don't use lru_cache here because it can prevent garbage collection
+_model_to_pp_missing_layer_names: dict[int, list[str]] = {}
+
+
+def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
+    """Get the names of the missing layers in a pipeline parallel model."""
+    model_id = id(model)
+    if model_id in _model_to_pp_missing_layer_names:
+        return _model_to_pp_missing_layer_names[model_id]
+
+    missing_layer_names = []
+    for name, module in model.named_modules():
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
+            # NOTE: the trailing dot is used to match the prefix of the layer.
+            # without the dot, we could match a layer that is not missing,
+            # e.g., 'encoder.layer.1' would match 'encoder.layer.11'
+            missing_layer_names.append(name + ".")
+    _model_to_pp_missing_layer_names[model_id] = missing_layer_names
+
+    return missing_layer_names
+
+
+def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
+    """Check if a parameter is missing in a pipeline parallel model."""
+    if isinstance(model, (StageMissingLayer, PPMissingLayer)):
+        return True
+
+    return any(
+        name.startswith(missing_layer_name)
+        for missing_layer_name in get_pp_missing_layer_names(model)
+    )
+
+
+def compute_skip_topk_layers(config: "PreTrainedConfig") -> set[int]:
+    """Backbone layers that reuse the top-k of the closest preceding indexer
+    layer instead of building their own indexer."""
+    if not hasattr(config, "index_topk"):
+        return set()
+
+    num_hidden_layers = config.num_hidden_layers
+    indexer_types = getattr(config, "indexer_types", None)
+    if indexer_types is not None:
+        if len(indexer_types) != num_hidden_layers:
+            raise ValueError(
+                "indexer_types must contain one entry per hidden layer: "
+                f"expected {num_hidden_layers}, got {len(indexer_types)}."
+            )
+        invalid_types = sorted(set(indexer_types) - {"full", "shared"})
+        if invalid_types:
+            raise ValueError(
+                f"indexer_types only supports 'full' and 'shared', got {invalid_types}."
+            )
+        return {
+            layer_idx
+            for layer_idx, indexer_type in enumerate(indexer_types)
+            if indexer_type == "shared"
+        }
+
+    freq = getattr(config, "index_topk_freq", 1)
+    if not isinstance(freq, int) or freq <= 0:
+        raise ValueError(f"index_topk_freq must be a positive integer, got {freq!r}.")
+    pattern = getattr(config, "index_topk_pattern", None)
+    offset = getattr(config, "index_skip_topk_offset", 2)
+    skip_layers: set[int] = set()
+    for layer_idx in range(num_hidden_layers):
+        if pattern is None:
+            if max(layer_idx - offset + 1, 0) % freq != 0:
+                skip_layers.add(layer_idx)
+        elif 0 <= layer_idx < len(pattern) and pattern[layer_idx] == "S":
+            skip_layers.add(layer_idx)
+    return skip_layers
+
+
+def pp_splits_layer_sharing(
+    num_hidden_layers: int, users: Iterable[int], consumers: set[int]
+) -> bool:
+    """Whether a later PP stage's first `users` layer is one of `consumers`,
+    which read state an earlier layer wrote in the same forward pass."""
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed.utils import get_pp_indices
+
+    users = sorted(users)
+    pp_size = get_pp_group().world_size
+    for rank in range(1, pp_size):
+        start, _ = get_pp_indices(num_hidden_layers, rank, pp_size)
+        if next((layer for layer in users if layer >= start), None) in consumers:
+            return True
+    return False
+
+
+def pp_topk_buffers(
+    config: "PreTrainedConfig",
+    topk_indices_buffer: torch.Tensor,
+    topk_layers: Iterable[int],
+) -> dict[str, torch.Tensor]:
+    """The shared top-k, if a later PP stage starts on a layer that reuses it."""
+    topk_layers = set(topk_layers)
+    skip_layers = compute_skip_topk_layers(config) & topk_layers
+    if pp_splits_layer_sharing(config.num_hidden_layers, topk_layers, skip_layers):
+        return {"topk_indices": topk_indices_buffer}
+    return {}
+
+
+def copy_pp_buffers(
+    intermediate_tensors: IntermediateTensors, buffers: Mapping[str, torch.Tensor]
+) -> None:
+    """Copy cross-layer state received from the previous PP stage into place."""
+    for key, buffer in buffers.items():
+        tensor = intermediate_tensors[key]
+        buffer[: tensor.shape[0]].copy_(tensor)
+
+
+def make_empty_intermediate_tensors_factory(
+    keys: list[str],
+    hidden_size: int,
+    buffers: Mapping[str, torch.Tensor] | None = None,
+):
+    """`buffers` are token-major cross-layer state sent along with `keys`."""
+    buffers = buffers or {}
+
+    def make_empty_intermediate_tensors(
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            {
+                key: torch.zeros((batch_size, hidden_size), dtype=dtype, device=device)
+                for key in keys
+            }
+            | {
+                key: torch.zeros(
+                    (batch_size, *buffer.shape[1:]), dtype=buffer.dtype, device=device
+                )
+                for key, buffer in buffers.items()
+            }
+        )
+
+    return make_empty_intermediate_tensors
+
+
+def maybe_prefix(prefix: str, name: str) -> str:
+    """Add a prefix to a name if the prefix is non-empty.
+
+    Args:
+        prefix: The prefix to add. If empty, no prefix will be added.
+        name: The name to potentially prefix.
+
+    Returns:
+        The string "prefix.name" if prefix was non-empty, otherwise just "name".
+
+    """
+    return name if not prefix else f"{prefix}.{name}"
+
+
+def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | None":
+    """Get quantization config for Draft models.
+
+    Draft models should use their own quantization config instead of the verifier/target
+    model's config. This helper retrieves the draft model's quantization config.
+
+    Args:
+        vllm_config: The vLLM configuration object.
+
+    Returns:
+        The draft model's config if available, None otherwise.
+
+    """
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    draft_model_config = speculative_config.draft_model_config
+    draft_load_config = vllm_config.load_config
+
+    return (
+        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
+        if draft_model_config
+        else None
+    )
+
+
+def map_draft_quant_config(
+    quant_config: "QuantizationConfig | None",
+    weight_mapper: WeightsMapper,
+    prefix: str,
+    start_layer_id: int,
+    num_hidden_layers: int,
+) -> None:
+    """Map draft quantization settings to runtime module names."""
+    if quant_config is None:
+        return
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptQuantConfigBase
+
+    if isinstance(quant_config, ModelOptQuantConfigBase):
+        quant_config.apply_vllm_mapper(weight_mapper.get_rename_mapper())
+        root = rf"(?:{re.escape(prefix)}\.)?" if prefix else ""
+        # Match root-level layers.N, optionally prefixed or wildcarded. Offset
+        # higher IDs first so an offset of 1 cannot cascade from 0 -> 1 -> 2.
+        runtime_names = {
+            re.compile(rf"^({root}\*?)layers\.{index}(?=\.|\*|$)"): (
+                rf"\g<1>layers.{start_layer_id + index}"
+            )
+            for index in reversed(range(num_hidden_layers))
+            if start_layer_id
+        }
+        if prefix:
+            # Preserve leading wildcards and names already rooted at prefix.
+            runtime_names[re.compile(rf"^(?!\*|{re.escape(prefix)}(?:\.|\*|$))")] = (
+                f"{prefix}."
+            )
+        quant_config.apply_vllm_mapper(WeightsMapper(orig_to_new_regex=runtime_names))
+        return
+
+    # Other backends may use semantic keys or suffix rules rather than module
+    # names. Preserve their settings and only add the existing layer aliases.
+    if start_layer_id == 0:
+        return
+    exclusions = getattr(quant_config, "exclude_modules", None)
+    if not isinstance(exclusions, list):
+        return
+
+    def offset_local_layer(match: re.Match[str]) -> str:
+        layer_idx = int(match.group(1))
+        if layer_idx >= num_hidden_layers:
+            return match.group(0)
+        return f"layers.{layer_idx + start_layer_id}"
+
+    for exclusion in tuple(exclusions):
+        # Accept layers.N or *layers.N, excluding nested names such as
+        # lilicorr.layers.N, which are not decoder-layer indices.
+        global_exclusion = re.sub(
+            r"(?<![A-Za-z0-9_.])layers\.(\d+)", offset_local_layer, exclusion
+        )
+        if global_exclusion != exclusion and global_exclusion not in exclusions:
+            exclusions.append(global_exclusion)
+
+
+def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
+    """Extract the layer index from the module name.
+
+    Examples:
+    - "encoder.layers.0" -> 0
+    - "encoder.layers.1.self_attn" -> 1
+    - "2.self_attn" -> 2
+    - "model.encoder.layers.0.sub.1" -> ValueError if num_attn_module == 1
+
+    """
+    subnames = layer_name.split(".")
+    int_vals: list[int] = []
+    for subname in subnames:
+        try:
+            int_vals.append(int(subname))
+        except ValueError:
+            continue
+    if num_attn_module == 1 or "attn" not in layer_name:
+        assert len(int_vals) == 1, (
+            f"layer name {layer_name} should only contain one integer"
+        )
+
+        return int_vals[0]
+    else:
+        assert len(int_vals) <= 2, (
+            f"layer name {layer_name} should contain most two integers"
+        )
+        layer_index = (
+            int_vals[0] * num_attn_module + int_vals[1]
+            if len(int_vals) == 2
+            else int_vals[0]
+        )
+        return layer_index
+
+
+def cast_overflow_tensors(tensors: torch.Tensor, offset: float = 1000) -> torch.Tensor:
+    clamp_value = torch.finfo(tensors.dtype).max - offset
+    return torch.clamp(tensors, min=-clamp_value, max=clamp_value)
+
+
+def fast_topk(
+    values: torch.Tensor, topk: int, dim: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Optimized topk implementation that uses torch.max for k=1 case.
+
+    This function provides better performance for the common case of k=1
+    by using torch.max instead of the more general torch.topk.
+
+    Args:
+        values: Input tensor to find top-k values from
+        topk: Number of top values to return (k). Must be > 0.
+        dim: Dimension along which to compute topk
+
+    Returns:
+        Tuple of (values, indices) where values are the top-k values
+        and indices are their corresponding indices in the input tensor
+
+    """
+    if topk == 1:
+        # Use max along the specified dimension to get both value and index
+        return torch.max(values, dim=dim, keepdim=True)
+    else:
+        # Use topk for efficiency with larger k values
+        return torch.topk(values, topk, dim=dim)
+
+
+# Chunk x along the num_tokens axis for sequence parallelism
+# NOTE: This is wrapped in a torch custom op to work around the following issue:
+# The output tensor can have a sequence length 0 at small input sequence lengths
+# even though we explicitly pad to avoid this.
+def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
+    return torch.ops.vllm.sequence_parallel_chunk_impl(x)
+
+
+def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    # all_gather needs the sequence length to be divisible by tp_size
+    seq_len = x.size(0)
+    remainder = seq_len % tp_size
+    if remainder != 0:
+        pad_len = tp_size - remainder
+        y = nn.functional.pad(x, (0, 0, 0, pad_len))
+    else:
+        y = x
+
+    chunk = y.shape[0] // tp_size
+    start = tp_rank * chunk
+    out = torch.narrow(y, 0, start, chunk)
+    # narrow() returns a view; clone when it aliases the input (no-pad case),
+    # since a functional custom op must not return a view of an input.
+    return out.clone() if y is x else out
+
+
+def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:
+    tp_size = get_tensor_model_parallel_world_size()
+    seq_len = cdiv(x.size(0), tp_size)
+    shape = list(x.shape)
+    shape[0] = seq_len
+    out = torch.empty(shape, dtype=x.dtype, device=x.device)
+    return out
+
+
+direct_register_custom_op(
+    op_name="sequence_parallel_chunk_impl",
+    op_func=sequence_parallel_chunk_impl,
+    fake_impl=sequence_parallel_chunk_impl_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
+def process_eagle_weight(
+    model: nn.Module,
+    name: str,
+) -> None:
+    """Update EAGLE model flags based on loaded weight name.
+    This should be called during weight loading to detect if a model
+    has its own lm_head or embed_tokens weight.
+
+    Args:
+        model: The model instance (must support EAGLE)
+        name: The name of the weight to process
+
+    """
+    if not supports_any_eagle(model):
+        return
+
+    # To prevent overriding with target model's layers
+    if "lm_head" in name:
+        model.has_own_lm_head = True
+    if "embed_tokens" in name:
+        model.has_own_embed_tokens = True
+
+
+def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
+    """Given a signed vision feature layer, get the number of hidden layers
+       needed to leverage it.
+
+    Args:
+        feature_layer_index: Index of a required layer in the visual encoder.
+        num_hidden_layers: The total number of hidden layers in the visual encoder.
+
+    """
+    if feature_layer_index < 0:
+        return num_hidden_layers + feature_layer_index + 1
+    return feature_layer_index
+
+
+def scatter_output_slices(
+    output: torch.Tensor,
+    indices: list[int],
+    per_item_out_tokens: list[int],
+    dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+    clone: bool = False,
+) -> None:
+    """Slice a concatenated output tensor and scatter into dest by index."""
+    offset = 0
+    for idx in indices:
+        n_tok = per_item_out_tokens[idx]
+        sliced = output[offset : offset + n_tok]
+        dest[idx] = sliced.clone() if clone else sliced
+        offset += n_tok
+
+
+def parse_diarized_timestamp(marker: str) -> float | None:
+    if (
+        not marker
+        or not marker.isascii()
+        or marker.count(".") > 1
+        or not marker.replace(".", "").isdigit()
+    ):
+        return None
+    return float(marker)
+
+
+def parse_diarized_speaker(speaker: str) -> str | None:
+    if (
+        len(speaker) < 2
+        or speaker[0] != "S"
+        or not speaker[1:].isascii()
+        or not speaker[1:].isdigit()
+    ):
+        return None
+    return speaker

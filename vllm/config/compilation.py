@@ -1,0 +1,1692 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import bisect
+import enum
+import math
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import field, fields
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
+
+from pydantic import Field, TypeAdapter, field_validator
+
+import vllm.envs as envs
+from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
+from vllm.config.utils import (
+    CompileFactors,
+    Range,
+    config,
+    get_compile_factors,
+)
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import AttentionCGSupport
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+else:
+    VllmConfig = object
+
+logger = init_logger(__name__)
+
+
+class CompilationMode(enum.IntEnum):
+    """The compilation approach used for torch.compile-based compilation of the
+    model."""
+
+    NONE = 0
+    """No torch.compile compilation is applied, model runs in fully eager pytorch mode.
+    The model runs as-is."""
+    STOCK_TORCH_COMPILE = 1
+    """The standard `torch.compile` compilation pipeline."""
+    DYNAMO_TRACE_ONCE = 2
+    """Single Dynamo trace through the model, avoiding recompilation."""
+    VLLM_COMPILE = 3
+    """Custom vLLM Inductor-based backend with caching, piecewise compilation,
+    shape specialization, and custom passes."""
+
+
+def decode_cudagraph_capture_shapes(
+    sizes: Iterable[int], query_lens: Mapping[int, int], max_tokens: int
+) -> list[tuple[int, int]]:
+    """The `(num_reqs, query_len)` uniform decode graphs for the request counts
+    `sizes`, for each query length up to the most requests it maps to and
+    `max_tokens` tokens. A batch pads to the smallest graph that holds it, so
+    the first size above a limit is captured at the limit and larger ones are
+    unreachable."""
+    sizes = sorted(set(sizes))
+    shapes: set[tuple[int, int]] = set()
+    for q, max_reqs in query_lens.items():
+        limit = min(max_reqs, max_tokens // q)
+        reachable = sizes[: bisect.bisect_left(sizes, limit) + 1]
+        shapes.update((min(n, limit), q) for n in reachable if limit >= 1)
+    return sorted(shapes, key=lambda shape: (shape[1], shape[0]))
+
+
+def decode_cudagraph_capture_max_tokens(config: "CompilationConfig") -> int:
+    """The most tokens a uniform decode graph holds: the recorded max, which
+    attention backends size their buffers by, within the decode token budget."""
+    max_tokens = config.max_cudagraph_capture_size or 0
+    return min(max_tokens, config.max_decode_cudagraph_capture_tokens or max_tokens)
+
+
+def _walk_grid(limit: int, step: Callable[[int], float]) -> list[int]:
+    """Sizes 1, ..., `limit`, each the next multiple of the largest power of two
+    not above `step(size)`."""
+    grid, size = [], 1
+    while size < limit:
+        grid.append(size)
+        stride = 1 << max(0, math.floor(math.log2(max(1.0, step(size)))))
+        size = (size // stride + 1) * stride
+    return [*grid, limit] if limit else []
+
+
+def prefill_cudagraph_capture_grid(
+    max_tokens: int, dense_head: bool = False
+) -> list[int]:
+    """The token-count grid up to `max_tokens`: 1, 2, 4, every 8 up to 64, four
+    sizes per doubling up to 1024 (every count up to 32 with `dense_head`), then
+    every 256 tokens, and every 512 once 7% of the size exceeds 512: 54 sizes at
+    8192."""
+    grid = _walk_grid(max_tokens, lambda t: min(t, max(8, t / 4), 0.07 * max(t, 4096)))
+    if dense_head:
+        grid = sorted({*grid, *(t for t in range(1, 33) if t < max_tokens)})
+    return grid
+
+
+def varlen_decode_cudagraph_capture_grid(
+    max_tokens: int, dense_head: bool = False
+) -> list[int]:
+    """The token-count grid of adaptive verification's decode graphs: 1, 2, 4
+    (every count up to 32 with `dense_head`), then 4 sizes per doubling from 8
+    to 1024, every 128 up to 4096 and every 256 beyond. Adaptive verification
+    picks its verify budget from the captured sizes, so it needs a finer grid
+    than prefill."""
+    grid = set(range(1, 33)) if dense_head else {1, 2, 4}
+    low = 8
+    grid.add(low)
+    while low < 1024:
+        grid.update(range(low + low // 4, 2 * low + 1, low // 4))
+        low *= 2
+    grid.update(range(1024, 4096, 128), range(4096, max_tokens, 256))
+    return (
+        sorted({s for s in grid if s < max_tokens} | {max_tokens}) if max_tokens else []
+    )
+
+
+def decode_cudagraph_capture_grid(max_requests: int) -> list[int]:
+    """The request-count grid up to `max_requests`: every count up to 6, then a
+    step of the largest power of two not above 0.65 * n^(2/3) (2 from 8, 4 from
+    16, 8 from 48, 16 from 128, 32 from 352): 64 sizes at 1024."""
+    return _walk_grid(max_requests, lambda n: 0.65 * n ** (2 / 3))
+
+
+class CUDAGraphMode(enum.Enum):
+    """Constants for the cudagraph mode in CompilationConfig.
+    Meanwhile, the subset enum `NONE`, `PIECEWISE` and `FULL` are also
+    treated as concrete runtime mode for cudagraph runtime dispatching.
+    """
+
+    NONE = 0
+    PIECEWISE = 1
+    FULL = 2
+    FULL_DECODE_ONLY = (FULL, NONE)
+    FULL_AND_PIECEWISE = (FULL, PIECEWISE)
+
+    def decode_mode(self) -> "CUDAGraphMode":
+        return CUDAGraphMode(self.value[0]) if self.separate_routine() else self
+
+    def mixed_mode(self) -> "CUDAGraphMode":
+        return CUDAGraphMode(self.value[1]) if self.separate_routine() else self
+
+    def has_mode(self, mode: "CUDAGraphMode") -> bool:
+        assert not mode.separate_routine()
+        if self.separate_routine():
+            return mode.value in self.value
+        return self == mode
+
+    def requires_piecewise_compilation(self) -> bool:
+        return self.has_mode(CUDAGraphMode.PIECEWISE)
+
+    def without_piecewise(self) -> "CUDAGraphMode":
+        if self == CUDAGraphMode.PIECEWISE:
+            return CUDAGraphMode.NONE
+        if self == CUDAGraphMode.FULL_AND_PIECEWISE:
+            return CUDAGraphMode.FULL_DECODE_ONLY
+        return self
+
+    def max_cudagraph_mode(self) -> "CUDAGraphMode":
+        return CUDAGraphMode(max(self.value)) if self.separate_routine() else self
+
+    def has_full_cudagraphs(self) -> bool:
+        return self.max_cudagraph_mode() == CUDAGraphMode.FULL
+
+    def has_piecewise_cudagraphs(self) -> bool:
+        return self.requires_piecewise_compilation()
+
+    def separate_routine(self) -> bool:
+        return isinstance(self.value, tuple)
+
+    @classmethod
+    def valid_runtime_modes(cls) -> frozenset["CUDAGraphMode"]:
+        return frozenset({cls.NONE, cls.PIECEWISE, cls.FULL})
+
+    def is_valid_runtime_mode(self) -> bool:
+        return self in CUDAGraphMode.valid_runtime_modes()
+
+    def __str__(self) -> str:
+        return self.name
+
+    def __bool__(self) -> bool:
+        return self != CUDAGraphMode.NONE
+
+
+@config
+class PassConfig:
+    """Configuration for custom Inductor passes.
+
+    This is separate from general `CompilationConfig` so that inductor passes
+    don't all have access to full configuration - that would create a cycle as
+    the `PassManager` is set as a property of config.
+
+    You must pass PassConfig to VLLMConfig constructor via the CompilationConfig
+    constructor. VLLMConfig's post_init does further initialization.
+    If used outside of the VLLMConfig, some fields may be left in an
+    improper state.
+    """
+
+    # New flags
+    fuse_norm_quant: bool = None  # type: ignore[assignment]
+    """Fuse the custom RMSNorm + quant ops."""
+    fuse_act_quant: bool = None  # type: ignore[assignment]
+    """Fuse the custom SiluMul + quant ops."""
+    fuse_attn_quant: bool = None  # type: ignore[assignment]
+    """Fuse the custom Attention and MLAAttention + quant ops."""
+    eliminate_noops: bool = Field(default=True)
+    """Eliminate no-op ops."""
+    fuse_allreduce_rms: bool = None  # type: ignore[assignment]
+    """Enable flashinfer allreduce fusion."""
+    enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
+    """Enable fused Q/K RMSNorm + RoPE pass."""
+    fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
+    """Enable fused MLA KV cache update with RoPE."""
+
+    # ROCm/AITER specific fusions
+    fuse_act_padding: bool = None  # type: ignore[assignment]
+    """Fuse the custom RMSNorm + padding ops."""
+    fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment]
+    """Fuse paired q/kv RMS norms in MLA attention."""
+    fuse_rope_kvcache: bool = None  # type: ignore[assignment]
+    """Fuse the QK rope + KV cache ops."""
+    fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
+    """Fuse QK RMSNorm + RoPE/MRoPE + KV cache update into an AITER HIP
+    kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
+    for layers that support it. Auto-enabled at O2+ on ROCm for models
+    with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
+
+    rope_kvcache_fusion_max_token_num: int = 256
+    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+    Larger batch sizes e.g. during prefill will use the unfused kernels.
+    Also applies to the fused QK-Norm+RoPE/MRoPE+KVCache pass.
+    """
+
+    fi_allreduce_fusion_max_size_mb: float | None = None
+    """The threshold of the communicated tensor sizes under which
+    vllm should use flashinfer fused allreduce. Specified as a
+    float in MB.
+    Unspecified will fallback to default values
+    which are compute capability and world size dependent.
+        FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
+            90: {
+                2: 64,  # 64MB
+                4: 2,  # 2MB
+                8: 1,  # 1MB
+            },
+            100: {
+                2: 64,  # 64MB
+                4: 32,  # 32MB
+                8: 1,  # 1MB
+            },
+        }, where key is the device capability"""
+    # TODO(luka) better pass enabling system.
+
+    def flashinfer_max_size(self, world_size: int) -> int | None:
+        """Returns the max communication size in bytes for flashinfer
+        allreduce fusion for the given world size. Returns None if world size
+        is not supported by configs as it's not supported by flashinfer.
+        """
+        MiB = 1024 * 1024
+        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8, 16]
+        if world_size not in FI_SUPPORTED_WORLD_SIZES:
+            return None
+        max_size_mb = self.fi_allreduce_fusion_max_size_mb
+        if max_size_mb is None:
+            max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
+
+        return int(max_size_mb * MiB) if max_size_mb is not None else None
+
+    @staticmethod
+    def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
+        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+            FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
+        )
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            return {}
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            return {}
+        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
+
+    def compile_factors(self) -> CompileFactors:
+        """Produces a hash unique to the pass configuration.
+        Any new fields that affect compilation should be added to the hash.
+        Any future fields that don't affect compilation should be excluded.
+        """
+        return get_compile_factors(self, set())
+
+    @field_validator(
+        "fuse_norm_quant",
+        "fuse_act_quant",
+        "fuse_attn_quant",
+        "fuse_allreduce_rms",
+        "fuse_act_padding",
+        "fuse_mla_dual_rms_norm",
+        "fuse_rope_kvcache",
+        "fuse_qk_norm_rope_kvcache",
+        "enable_qk_norm_rope_fusion",
+        "fuse_rope_kvcache_cat_mla",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
+    def __post_init__(self) -> None:
+        # Handle deprecation and defaults
+
+        if not self.eliminate_noops:
+            if self.fuse_norm_quant or self.fuse_act_quant:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "RMSNorm/SiluMul + quant (fp8) fusion might not work"
+                )
+            if self.fuse_attn_quant:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Attention + quant (fp8) fusion might not work"
+                )
+            if self.fuse_allreduce_rms:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Allreduce + rms norm + quant (fp8) fusion might not work"
+                )
+            if self.fuse_act_padding:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "RMSNorm + padding fusion might not work"
+                )
+        if self.enable_qk_norm_rope_fusion and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
+            logger.warning_once(
+                "QK Norm + RoPE fusion enabled but the current platform is not "
+                "CUDA, ROCm or XPU. The fusion will be disabled."
+            )
+            self.enable_qk_norm_rope_fusion = False
+        if self.fuse_act_padding and not current_platform.is_rocm():
+            logger.warning_once(
+                "Padding fusion enabled but the current platform is not ROCm. "
+                "The fusion will be disabled."
+            )
+            self.fuse_act_padding = False
+        if self.fuse_mla_dual_rms_norm and not current_platform.is_rocm():
+            logger.warning_once(
+                "MLA dual RMS norm fusion requires ROCm/AITER. "
+                "The fusion will be disabled."
+            )
+            self.fuse_mla_dual_rms_norm = False
+        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+            logger.warning_once(
+                "KV cache fusion currently only enabled on ROCm. "
+                "The fusion will be disabled."
+            )
+            self.fuse_rope_kvcache = False
+        if self.fuse_qk_norm_rope_kvcache and not current_platform.is_rocm():
+            logger.warning_once(
+                "QK-Norm+RoPE+KVCache fusion requires ROCm with AITER. "
+                "The fusion will be disabled."
+            )
+            self.fuse_qk_norm_rope_kvcache = False
+        if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
+            logger.warning_once(
+                "MLA KV cache update with RoPE fusion enabled but the "
+                "current platform is not CUDA or ROCm. The fusion will be disabled."
+            )
+            self.fuse_rope_kvcache_cat_mla = False
+
+    def log_enabled_passes(self) -> None:
+        """Log the enabled custom fusion passes.
+        This is called at the end of VLLMConfig post_init,
+        after all defaults are finalized.
+        TODO also log the compile ranges for which this is enabled.
+        """
+        fusion_prefixes = ("fuse_", "enable_")
+        enabled_fusions = [
+            f.name[len(prefix) :]
+            for f in fields(self)  # type: ignore[arg-type]
+            if getattr(self, f.name)
+            for prefix in fusion_prefixes
+            if f.name.startswith(prefix)
+        ]
+
+        if enabled_fusions:
+            logger.info_once(
+                "Enabled custom fusions: %s", ", ".join(enabled_fusions), scope="global"
+            )
+
+
+class DynamicShapesType(enum.StrEnum):
+    """Types of dynamic shapes handling in torch.compile().
+    see  Dynamic shapes and vllm guard dropping in torch_compile.md
+    for more details."""
+
+    BACKED = "backed"
+    """Use backed dynamic shapes. torch.compile() guards on backed dynamic
+    shapes and may add guards. Symbols are specialized to 0, 1, or >=2 even
+    without encountering branching on those ranges."""
+
+    UNBACKED = "unbacked"
+    """Use unbacked dynamic shapes. Guaranteed not to be guarded on and not
+    0/1 specialized, but may throw data dependent errors when branches require
+    their value without explicit unbacked handling."""
+
+    BACKED_SIZE_OBLIVIOUS = "backed_size_oblivious"
+    """Experimental flag that treats backed symbols as unbacked when explicit
+    unbacked handling is defined."""
+
+
+@config
+class DynamicShapesConfig:
+    """Configuration to control/debug torch compile dynamic shapes."""
+
+    type: DynamicShapesType = DynamicShapesType.BACKED
+    """Controls the type of dynamic shapes handling to use with torch.compile().
+
+    - BACKED: Default PyTorch behavior with potential guards ignored.
+    - UNBACKED: No guards guaranteed (most sound) but may throw
+      data dependent errors.
+    - BACKED_SIZE_OBLIVIOUS: Experimental safer alternative to
+      backed/unbacked.
+    """
+
+    evaluate_guards: bool = False
+    """
+    A debug mode to detect and fail if Dynamo ever specializes a dynamic shape by
+    guarding on it. When True, dynamic shape guards are not dropped from dynamo.
+    And a failure will be triggered if a recompilation ever happens due to that.
+    This mode requires VLLM_USE_BYTECODE_HOOK to be 0.
+    Enabling this allow observing the dynamic shapes guards in the tlparse
+    artifacts also.
+    When type is backed, aot_compile must be disabled for this mode to work.
+    until this change picked up https://github.com/pytorch/pytorch/pull/169239.
+    """
+
+    assume_32_bit_indexing: bool = False
+    """
+    whether all tensor sizes can use 32 bit indexing.
+    `True` requires PyTorch 2.10+
+    """
+
+    def compile_factors(self) -> CompileFactors:
+        """Provide the factors used for hashing DynamicShapesConfig."""
+        return get_compile_factors(self, set())
+
+
+@config
+class CompilationConfig:
+    """Configuration for compilation.
+
+    You must pass CompilationConfig to VLLMConfig constructor.
+    VLLMConfig's post_init does further initialization. If used outside of the
+    VLLMConfig, some fields will be left in an improper state.
+
+    It contains PassConfig, which controls the custom fusion/transformation passes.
+    The rest has three parts:
+
+    - Top-level Compilation control:
+        - [`mode`][vllm.config.CompilationConfig.mode]
+        - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
+        - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
+        - [`backend`][vllm.config.CompilationConfig.backend]
+        - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
+        - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
+        - [`compile_mm_encoder`][vllm.config.CompilationConfig.compile_mm_encoder]
+    - CudaGraph capture:
+        - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
+        - [`cudagraph_capture_sizes`]
+        [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`max_cudagraph_capture_size`]
+        [vllm.config.CompilationConfig.max_cudagraph_capture_size]
+        - [`prefill_cudagraph_capture_token_sizes`]
+        [vllm.config.CompilationConfig.prefill_cudagraph_capture_token_sizes]
+        - [`max_prefill_cudagraph_capture_tokens`]
+        [vllm.config.CompilationConfig.max_prefill_cudagraph_capture_tokens]
+        - [`decode_cudagraph_capture_request_sizes`]
+        [vllm.config.CompilationConfig.decode_cudagraph_capture_request_sizes]
+        - [`max_decode_cudagraph_capture_requests`]
+        [vllm.config.CompilationConfig.max_decode_cudagraph_capture_requests]
+        - [`cudagraph_num_of_warmups`]
+        [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
+        - [`cudagraph_copy_inputs`]
+        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+    - Inductor compilation:
+        - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`compile_ranges_endpoints`]
+            [vllm.config.CompilationConfig.compile_ranges_endpoints]
+        - [`inductor_compile_config`]
+        [vllm.config.CompilationConfig.inductor_compile_config]
+        - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
+        - custom inductor passes
+
+    Why we have different sizes for cudagraph and inductor:
+    - cudagraph: a cudagraph captured for a specific size can only be used
+        for the same size. We need to capture all the sizes we want to use.
+    - inductor: a graph compiled by inductor for a general shape can be used
+        for different sizes. Inductor can also compile for specific sizes,
+        where it can have more information to optimize the graph with fully
+        static shapes. However, we find the general shape compilation is
+        sufficient for most cases. It might be beneficial to compile for
+        certain small batchsizes, where inductor is good at optimizing.
+    """
+
+    # Top-level Compilation control
+    mode: CompilationMode = None  # type: ignore[assignment]
+    """The compilation approach used for torch.compile-based compilation of the
+    model.
+
+    - None: If None, we will select the default compilation mode.
+      For V1 engine this is 3.
+    - 0: NONE: No torch.compile compilation is applied, model runs in fully
+         eager pytorch mode. The model runs as-is.
+    - 1: STOCK_TORCH_COMPILE: The standard `torch.compile` compilation pipeline.
+    - 2: DYNAMO_TRACE_ONCE: Single Dynamo trace through the model, avoiding
+         recompilation by removing guards.
+         Requires no dynamic-shape-dependent control-flow.
+    - 3: VLLM_COMPILE: Custom vLLM Inductor-based backend with caching,
+         piecewise compilation, shape specialization, and custom passes."""
+    debug_dump_path: Path | None = None
+    """The path to dump the debug information."""
+    cache_dir: str = ""
+    """The directory to store the compiled graph, to accelerate Inductor
+    compilation. By default, it will use model-related information to generate
+    a cache directory."""
+    compile_cache_save_format: Literal["binary", "unpacked"] = field(
+        default_factory=lambda: envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
+    )
+    """Format for saving torch compile cache:\n
+    - "binary": saves as binary file (multiprocess safe)\n
+    - "unpacked": saves as directory structure for inspection/debugging
+    (NOT multiprocess safe)\n
+    Defaults to `VLLM_COMPILE_CACHE_SAVE_FORMAT` if not specified.
+    """
+    backend: str = ""
+    """The backend for compilation. It needs to be a string:
+
+    - "" (empty string): use the default backend ("inductor" on CUDA-alike
+    platforms).
+    - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
+    - "full.module.name": a qualified name which can be used to import the
+
+    backend function.
+    We use string to avoid serialization issues when using compilation in a
+    distributed setting. When the compilation mode is 1 or 2, the backend is
+    used for the compilation directly (it sees the whole graph). When the
+    compilation mode is 3, the backend supports both whole graph and piecewise
+    compilation, available backends include eager, inductor, and custom backends,
+    the latter of which can be defined via `get_compile_backend`. Furthermore,
+    compilation is only piecewise if splitting ops is set accordingly and
+    use_inductor_graph_partition is off. Note that the default options for
+    splitting ops are sufficient for piecewise compilation.
+    """
+    custom_ops: list[str] = field(default_factory=list)
+    """Fine-grained control over which custom ops to enable/disable. Use 'all'
+    to enable all, 'none' to disable all. Also specify a list of custom op
+    names to enable (prefixed with a '+'), or disable (prefixed with a '-').
+    Examples:
+
+    - 'all,-op1' to enable all except op1
+    - 'none,+op1,+op2' to enable only op1 and op2
+
+    By default, all custom ops are enabled when running without Inductor and
+    disabled when running with Inductor: mode>CompilationMode.NONE and
+    backend="inductor".
+    Inductor generates (fused) Triton kernels for disabled custom ops."""
+
+    ir_enable_torch_wrap: bool = None  # type: ignore[assignment]
+    """If True, enable vllm_ir torch custom op wrapping during the forward pass.
+    When False, torch custom op wrapping is disabled, allowing Dynamo to trace the
+    selected implementation directly or avoiding torch custom op overhead in eager mode.
+    Defaults to True when using Inductor with vllm-compile
+    (backend=="inductor" and mode == VLLM_COMPILE), False otherwise.
+    """
+
+    splitting_ops: list[str] | None = None
+    """A list of ops to exclude from cudagraphs, used in piecewise compilation.
+
+    The behavior depends on use_inductor_graph_partition:
+
+    - When use_inductor_graph_partition=False (default):
+        These ops are used for Dynamo FX-level graph splitting. The graph is
+        split at these ops before Inductor compilation, creating separate
+        subgraphs for cudagraph capture.
+
+    - When use_inductor_graph_partition=True:
+        These ops are used to register Inductor partition rules. The graph
+        partitioning happens at Inductor codegen time after all passes and
+        fusions are finished, allowing compilation and custom passes to operate
+        on the full graph while still excluding these ops from cudagraphs.
+
+    If None, defaults to attention ops for piecewise cudagraphs.
+    If empty list [], no ops are excluded (suitable for full cudagraphs)."""
+    compile_mm_encoder: bool = False
+    """Whether or not to compile the multimodal encoder.
+    Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models on selected
+    platforms. It may also work for models loaded with the Transformers modeling backend
+    if the encoder is compilable. Disabled by default until more models are
+    supported/tested to work."""
+
+    # Vision encoder CUDA graph
+    cudagraph_mm_encoder: bool = False
+    """Enable CUDA graph capture for multimodal encoder (ViT).
+    When enabled, captures full encoder forward as CUDA graph
+    for each token budget level."""
+
+    encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
+    """Token budget levels for encoder CUDA graph capture.
+    Each budget defines a fixed token capacity. At runtime, a batch replays the
+    smallest budget that holds it, or runs eagerly if none does.
+    If empty (default), generated over the model's budget range: quarter-octave
+    steps up to 1024 tokens, steps of 128 up to 2560, then 1/8-octave steps,
+    up to `encoder_cudagraph_max_token_budget`.
+    User-provided values override auto-inference.
+    Example: [2048, 4096, 8192, 13824]"""
+
+    encoder_cudagraph_max_token_budget: int | None = 5120
+    """Largest auto-generated encoder CUDA graph token budget; must be positive
+    or None. A batch with more tokens runs eagerly. The default balances graph
+    memory against replay coverage; performance depends on the model, batch
+    shape, and hardware. None captures up to the model's largest budget.
+    Ignored when encoder_cudagraph_token_budgets is set."""
+
+    encoder_cudagraph_max_vision_items_per_batch: int = 0
+    """Maximum number of images/videos per batch for encoder CUDA graph capture.
+    Determines the fixed batch size used during graph capture.
+    If 0 (default), auto-inferred as max_budget // min_budget from the
+    model's budget range. User-provided positive value overrides
+    auto-inference. A batch with more items runs eagerly in one forward."""
+
+    encoder_cudagraph_max_frames_per_batch: int | None = None
+    """Maximum total video frames per batch for encoder CUDA graph capture.
+    Controls the cu_seqlens buffer size (one entry per attention sequence,
+    i.e. one per video frame).
+    If None (default), auto-inferred as encoder_cudagraph_max_vision_items_per_batch
+    * max_frames_per_video (model-specific value according to processing_info).
+    Positive value overrides auto-inference and applies to all budget levels.
+    If we limit the video count per prompt to `0`, it will also be set to `0`
+    (i.e., fall back to image-only mode)."""
+
+    cudagraph_decoder_replay: bool = True
+    """Run the decoder replay layers of YOCO models (e.g. DeepSeek-V4.1) in CUDA
+    graphs of their own, and trim them in PIECEWISE graph steps. Requires
+    breakable PIECEWISE graphs; off under LoRA, prompt embeddings and non-first
+    PP ranks."""
+
+    decoder_replay_cudagraph_capture_sizes: list[int] = field(default_factory=list)
+    """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1), at
+    most max_num_batched_tokens. If empty: the powers of two below
+    sliding_window, then multiples of sliding_window up to
+    min(max_cudagraph_capture_size, max_num_seqs * sliding_window), coarser past
+    16 * sliding_window. Larger replay batches run eagerly."""
+
+    decoder_replay_trim_threshold: int = Field(default=768, ge=0)
+    """For YOCO models (e.g. DeepSeek-V4.1), PIECEWISE graphs with at least this
+    many padded tokens trim the decoder replay batch; must exceed the replay
+    window (128), below which nothing trims. Independent of the replay graph
+    capture sizes; eager steps still trim."""
+
+    # Inductor capture
+    compile_sizes: list[int | str] | None = None
+    """Sizes to compile for inductor. In addition
+    to integers, it also supports "cudagraph_capture_sizes" to
+    specify the sizes for cudagraph capture."""
+
+    compile_ranges_endpoints: list[int] | None = None
+    """Endpoints for Inductor compile ranges.
+    The compile ranges are
+    [1, endpoints[0]],
+    [endpoints[0] + 1, endpoints[1]], ...,
+    [endpoints[-1] + 1, max_num_batched_tokens].
+    Compile sizes are also used single element ranges,
+    the range is represented as [compile_sizes[i], compile_sizes[i]].
+
+    If a range overlaps with the compile size, graph for compile size
+    will be prioritized, i.e. if we have a range [1, 8] and a compile size 4,
+    graph for compile size 4 will be compiled and used instead of the graph
+    for range [1, 8].
+    """
+
+    inductor_compile_config: dict = field(default_factory=dict)
+    """Additional configurations for inductor.
+    - None: use default configurations."""
+
+    inductor_passes: dict[str, str] = field(default_factory=dict)
+    """Additional passes for inductor. It is a dictionary
+    from pass name to pass function qualified name. We use function
+    name because the config uses JSON format. If we pass the config
+    from Python, functions can also be passed directly via Python object
+    constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
+
+    # CudaGraph compilation
+    cudagraph_mode: CUDAGraphMode = None  # type: ignore[assignment]
+    """
+    The mode of the cudagraph:
+
+    - NONE, no cudagraph capture.
+    - PIECEWISE.
+    - FULL.
+    - FULL_DECODE_ONLY.
+    - FULL_AND_PIECEWISE. (v1 default)
+
+    PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
+    incompatible ops (i.e. some attention ops) outside the cudagraph
+    for general flexibility.
+
+    FULL mode: Capture full cudagraph for all batches. Can be good for small
+    models or workloads with small prompts; not supported by many backends.
+    Generally for performance FULL_AND_PIECEWISE is better.
+
+    FULL_DECODE_ONLY mode: Capture full cudagraph for decode batches only.
+    Mixed prefill-decode batches are run without cudagraphs. Can be good for
+    decode instances in a P/D setup where prefill is not as important so we
+    can save some memory.
+
+    FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
+    piecewise cudagraph for prefill and mixed prefill-decode batches.
+    This is the most performant mode for most models and is the default.
+
+    Currently, the cudagraph mode is only used for the v1 engine.
+    Note that the cudagraph logic is generally orthogonal to the
+    compilation logic. While piecewise cudagraphs require piecewise
+    compilation (mode=VLLM_COMPILE and non-empty splitting_ops), full
+    cudagraphs are supported with and without compilation.
+
+    Warning: This flag is new and subject to change in addition
+    more modes may be added.
+    """
+    use_breakable_cudagraph: bool | None = None
+    """Whether to use breakable CUDA graphs (runtime stream-capture breaks
+    instead of torch.compile FX graph splitting).
+
+    Resolved by VllmConfig.__post_init__: an explicit
+    VLLM_USE_BREAKABLE_CUDAGRAPH env var takes precedence, otherwise it is
+    auto-enabled for breakable-by-default architectures (and for tuned
+    batch-invariant setups). None means unresolved; readers fall back to
+    envs.VLLM_USE_BREAKABLE_CUDAGRAPH so standalone CompilationConfig users
+    keep working. Stored per-config (and pickled to workers) rather than
+    written back to os.environ."""
+    cudagraph_num_of_warmups: int = 0
+    """Number of warmup runs for cudagraph.
+    It means the first several runs will be treated as warmup runs.
+    Only after that, the execution will be recorded, and the recorded
+    cudagraph will be used for subsequent runs."""
+    cudagraph_capture_sizes: list[int] = None  # type: ignore[assignment]
+    """Sizes to capture cudagraph.
+    - None (default): capture sizes are inferred from vllm config.
+    - list[int]: capture sizes are specified as given.
+
+    Deprecated with model runner V2, which takes
+    `prefill_cudagraph_capture_token_sizes` and
+    `decode_cudagraph_capture_request_sizes` instead. Set there, these token
+    counts are the prefill sizes and, rounded up to whole requests of the target
+    model's query length, the decode sizes. After config resolution it holds the
+    token count of every captured graph."""
+    prefill_cudagraph_capture_token_sizes: list[int] | None = None
+    """Token counts of the CUDA graphs for prefill batches: every batch that is
+    not a uniform decode batch, i.e. one with a prefill or with requests of
+    different query lengths, and every batch when `cudagraph_mode` is FULL or
+    PIECEWISE. Decode batches under adaptive verification are the exception;
+    see `decode_cudagraph_capture_request_sizes`. `[]` captures none, and sizes
+    above `max_num_batched_tokens` are dropped. None (default): the token-count
+    grid up to `max_prefill_cudagraph_capture_tokens`."""
+    max_prefill_cudagraph_capture_tokens: int | None = Field(default=None, ge=0)
+    """Largest token count of a prefill CUDA graph. None (default): 8192 on SM100
+    GPUs, otherwise the platform's default `max_cudagraph_capture_size`; at most
+    `max_num_batched_tokens`. More and wider graphs take memory from the KV
+    cache and lengthen startup."""
+    decode_cudagraph_capture_request_sizes: list[int] | None = None
+    """Request counts of the FULL CUDA graphs for uniform decode batches, whose
+    requests all have the same query length `q`: `1 + num_speculative_tokens`
+    for the target model, K or K + 1 for DSpark, DFlash and multi-module MTP
+    drafters. A runner captures `n` requests as `n * q` tokens, for each `n` up
+    to the most requests its batches have and the recorded
+    `max_cudagraph_capture_size // q`. One-token draft decodes (EAGLE, EAGLE3, MTP)
+    take the request-count grid up to `max_num_seqs` instead. `[]` captures none.
+    None (default): the request-count grid up to
+    `max_decode_cudagraph_capture_requests`.
+
+    With adaptive verification, the target model's decode batches mix query
+    lengths, so they take token-keyed FULL graphs instead: the token-count grid
+    up to `max_decode_cudagraph_capture_requests * (1 + num_speculative_tokens)`
+    tokens, within `max_decode_cudagraph_capture_tokens`. These request counts
+    then set the draft decode graphs alone."""
+    max_decode_cudagraph_capture_requests: int | None = Field(default=None, ge=0)
+    """Largest request count of a decode CUDA graph; with adaptive verification
+    it also bounds the verify graphs' tokens (see
+    `decode_cudagraph_capture_request_sizes`). None (default): `max_num_seqs` on
+    SM100 GPUs, otherwise the most requests that the platform's default
+    `max_cudagraph_capture_size` holds at the target model's query lengths.
+    Graphs no wider than the widest prefill graph mostly reuse its memory in the
+    shared graph pool. Wider graphs, and FULL graphs of
+    models with large per-token buffers (e.g. DeepSeek's indexer at a long
+    `max_model_len`), take memory from the KV cache."""
+    max_decode_cudagraph_capture_tokens: int | None = Field(default=None, ge=1)
+    """Token budget of a uniform decode CUDA graph: each runner captures `n`
+    requests at query length `q` only while `n * q` fits, and wider decode
+    batches take the prefill graphs. It also bounds adaptive verification's
+    token-keyed graphs. None (default): 8192 on SM100 GPUs, otherwise no budget.
+    Wider decode graphs take memory from the KV cache."""
+    cudagraph_copy_inputs: bool = False
+    """Whether to copy input tensors for
+    cudagraph. If the caller can guarantee that the same input buffers
+    are always used, it can set this to False. Otherwise, it should
+    set this to True, and the compiler will copy the input to an
+    internally managed buffer. Default is False.
+    Note that this flag is only effective when cudagraph_mode is PIECEWISE.
+    """
+    cudagraph_specialize_lora: bool = True
+    """Whether to create separate cuda graphs for cases with and without active
+    LoRA adapters. When set to False, the LoRA-enabled cuda graph will be used
+    for all cases, incurring the overhead of running LoRA ops even when no
+    adapters are active. Setting this to True will remove this overhead at the
+    cost of increased startup time and slightly higher memory usage.
+    When `enable_lora` is False, this option has no effect.
+    """
+
+    use_inductor_graph_partition: bool = None  # type: ignore[assignment]
+    """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
+    This partition happens at inductor codegen time after all passes and fusions
+    are finished. It generates a single `call` function which wraps
+    cudagraph-safe ops into partition functions and leave cudagraph-unsafe ops
+    outside the partition functions. For a graph with N cudagraph-unsafe ops
+    (e.g., Attention), there would be N+1 partitions. To mark an op as
+    cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
+    register the custom op.
+
+    This config supports both full cudagraph and piecewise cudagraph without
+    compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
+    to each partition. For N+1 partitions, there would be N+1
+    CUDAGraph wrapper instances.
+
+    For full CUDAGraph, we always apply a single CUDAGraph wrapper outside the
+    inductor `call` function in the model runner. The top-level full cudagraph
+    capture ignores all partitioning.
+    """
+
+    pass_config: PassConfig = field(default_factory=PassConfig)
+    """Custom inductor passes, see PassConfig for more details"""
+
+    max_cudagraph_capture_size: int = None  # type: ignore[assignment]
+    """The maximum cudagraph capture size.
+
+    If cudagraph_capture_sizes is specified, this will be set to the largest
+    size in that list (or checked for consistency if specified). If
+    cudagraph_capture_sizes is not specified, the list of sizes is generated
+    automatically following the pattern:
+
+        [1, 2, 4] + list(range(8, 256, 8)) + list(
+        range(256, max_cudagraph_capture_size + 1, 16))
+
+    If not specified, max_cudagraph_capture_size is capped at 512 by default,
+    or 1024 on data center Blackwell GPUs. This avoids OOM in tight memory
+    scenarios with small max_num_seqs, and limits capture of large graphs that
+    increase startup time and memory usage. Uniform decode sizes are appended
+    only within this default ceiling.
+
+    Deprecated with model runner V2, which takes
+    `max_prefill_cudagraph_capture_tokens` (tokens) and
+    `max_decode_cudagraph_capture_requests` (requests) instead. After config
+    resolution it holds the token count of the widest captured graph.
+    """
+
+    dynamic_shapes_config: DynamicShapesConfig = field(
+        default_factory=DynamicShapesConfig
+    )
+    """Configuration for dynamic shapes options"""
+
+    local_cache_dir: str = field(default=None, init=False)  # type: ignore
+    """local cache dir for each rank"""
+
+    fast_moe_cold_start: bool | None = None
+    """Optimization for fast MOE cold start.
+
+    This is a bit of a hack that assumes that:
+    1. the only decoder forward pass being run is the current model
+    2. the decoder forward pass runs all of the MOEs in the order in which they
+       are initialized
+
+    When the above two conditions hold, this option greatly decreases cold start
+    time for MOE models.
+
+    The options are:
+    - True: optimization is always on
+    - False: optimization is always off
+    - None: optimization is on usually but off for speculative decoding
+
+    If conditions 1&2 don't hold then this option will lead to silent
+    incorrectness.
+    The only condition in which this doesn't hold is speculative
+    decoding, where there is a draft model that may have MOEs in them.
+
+    NB: We're working on a longer-term solution that doesn't need these assumptions.
+    """
+
+    # keep track of enabled and disabled custom ops
+    enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
+    """custom ops that are enabled"""
+    disabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
+    """custom ops that are disabled"""
+    traced_files: set[Path] = field(default_factory=set, init=False)
+    """files that are traced for compilation"""
+    compilation_time: float = field(default=0.0, init=False)
+    """time taken for compilation"""
+    encoder_compilation_time: float = field(default=0.0, init=False)
+    """time taken for multimodal encoder compilation"""
+
+    static_forward_context: dict[str, Any] = field(default_factory=dict, init=False)
+    """Per-model forward context
+    Map from layer name to layer objects that need to be accessed outside
+    model code, e.g., Attention, FusedMOE when dp_size>1."""
+
+    static_all_moe_layers: list[str] = field(default_factory=list, init=False)
+    """The names of all the MOE layers in the model
+    """
+
+    # Attention ops; used for piecewise cudagraphs
+    # Use PyTorch operator format: "namespace::name"
+    _attention_ops: ClassVar[list[str]] = [
+        "vllm::unified_attention_with_output",
+        "vllm::unified_mla_attention_with_output",
+        "vllm::mamba_mixer2",
+        "vllm::mamba_mixer",
+        "vllm::short_conv",
+        "vllm::zaya_cca",
+        # Qwen4Exp's AMD backend still uses these splitting ops.
+        "vllm::qwen4_exp_ple_short_conv",
+        "vllm::qwen4_exp_qsa_with_output",
+        # The fused prepare calls this op instead of the one above.
+        "vllm::qwen4_exp_qsa_prepare_with_output",
+        "vllm::linear_attention",
+        "vllm::qwen_gdn_attention_core",
+        "vllm::qwen_gdn_attention_core_fused_norm_packed",
+        "vllm::gdn_attention_core_xpu",
+        "vllm::olmo_hybrid_gdn_full_forward",
+        "vllm::sparse_attn_indexer",
+        "vllm::rocm_aiter_sparse_attn_indexer",
+        "vllm::deepseek_v4_attention",
+        "vllm::hpc_rope_norm_forward",
+        "vllm::step5_csa_attention",
+    ]
+
+    def compile_factors(self) -> CompileFactors:
+        """Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+
+        WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
+        """
+        ignored_factors = {
+            # Paths/dirs and runtime/metrics that don’t affect compiled graph
+            "debug_dump_path",
+            "cache_dir",
+            "local_cache_dir",
+            "traced_files",
+            "compilation_time",
+            "encoder_compilation_time",
+            "enabled_custom_ops",
+            "disabled_custom_ops",
+            "static_forward_context",
+        }
+
+        return get_compile_factors(self, ignored_factors)
+
+    def __repr__(self) -> str:
+        exclude: dict[str, bool | dict[str, bool]] = {
+            "static_forward_context": True,
+            "enabled_custom_ops": True,
+            "disabled_custom_ops": True,
+            "compilation_time": True,
+            "encoder_compilation_time": True,
+            "traced_files": True,
+            "inductor_compile_config": {
+                "post_grad_custom_post_pass": True,
+            },
+        }
+
+        # exclude default attr in pass_config
+        pass_config_exclude = {}
+        for attr, default_val in vars(PassConfig()).items():
+            if getattr(self.pass_config, attr) == default_val:
+                pass_config_exclude[attr] = True
+        if pass_config_exclude:
+            exclude["pass_config"] = pass_config_exclude
+
+        config = TypeAdapter(CompilationConfig).dump_python(
+            self, exclude=exclude, exclude_unset=True
+        )
+
+        return str(config)
+
+    __str__ = __repr__
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def validate_mode_before(cls, value: Any) -> Any:
+        """Enable parsing the `mode` field from string mode names.
+        Accepts both integers (0-3) and string names, like NONE, STOCK_TORCH_COMPILE,
+        DYNAMO_TRACE_ONCE, VLLM_COMPILE.
+        """
+        if isinstance(value, str):
+            # Convert string mode name to integer value
+            mode_name = value.upper()
+
+            if mode_name not in CompilationMode.__members__:
+                raise ValueError(
+                    f"Invalid compilation mode: {value}. "
+                    f"Valid modes are: {', '.join(CompilationMode.__members__.keys())}"
+                )
+
+            return CompilationMode[mode_name]
+        return value
+
+    @field_validator("cudagraph_mode", mode="before")
+    @classmethod
+    def validate_cudagraph_mode_before(cls, value: Any) -> Any:
+        """Enable parsing of the `cudagraph_mode` enum type from string."""
+        if isinstance(value, str):
+            return CUDAGraphMode[value.upper()]
+        return value
+
+    @field_validator("pass_config", mode="before")
+    @classmethod
+    def validate_pass_config_before(cls, value: Any) -> Any:
+        """Enable parsing of the `pass_config` field from a dictionary."""
+        if isinstance(value, dict):
+            return PassConfig(**value)
+        return value
+
+    @field_validator("compile_cache_save_format")
+    @classmethod
+    def validate_compile_cache_save_format(cls, value: str) -> str:
+        if value not in ("binary", "unpacked"):
+            raise ValueError(
+                f"compile_cache_save_format must be 'binary' or 'unpacked', "
+                f"got: {value}"
+            )
+        return value
+
+    @field_validator(
+        "level",
+        "mode",
+        "cudagraph_mode",
+        "max_cudagraph_capture_size",
+        "use_inductor_graph_partition",
+        "ir_enable_torch_wrap",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
+    def __post_init__(self) -> None:
+        # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
+        # 1. A bug in PyTorch, fixed in 2.7:
+        #    https://github.com/pytorch/pytorch/issues/147924
+        # 2. Custom passes (fusion) rely on auto-functionalization V1 and don't
+        #    work with V2. Addressing this will take extra engineering effort
+        #    and it is not yet a priority. RFC here:
+        #    https://github.com/vllm-project/vllm/issues/14703
+
+        KEY = "enable_auto_functionalized_v2"
+        if KEY not in self.inductor_compile_config:
+            self.inductor_compile_config[KEY] = False
+
+        # Tie inductor runtime assertions to debug logging mode.
+        # These assertions add ~2ms overhead per forward pass on large
+        # models (e.g., DeepSeek-R1 671B: ~340 assert_size_stride + ~60
+        # assert_alignment calls per forward). PyTorch >= 2.12 has a
+        # native fix (assert-once), so we only apply this workaround on
+        # older versions. On torch < 2.12, enable asserts only when
+        # VLLM_LOGGING_LEVEL=DEBUG. Users can still override explicitly
+        # via --compilation-config '{"inductor_compile_config":
+        # {"size_asserts": true, ...}}'.
+        # See: https://github.com/pytorch/pytorch/issues/177719
+        if not is_torch_equal_or_newer("2.12.0.dev"):
+            enable_asserts = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+            for key in (
+                "size_asserts",
+                "alignment_asserts",
+                "scalar_asserts",
+            ):
+                self.inductor_compile_config.setdefault(key, enable_asserts)
+
+        for k, v in self.inductor_passes.items():
+            if not isinstance(v, str):
+                assert callable(v), f"pass {k} should be callable or a qualified name"
+                self.inductor_compile_config[k] = (
+                    v if isinstance(v, InductorPass) else CallableInductorPass(v)
+                )
+                continue
+
+            # resolve function from qualified name
+            names = v.split(".")
+            module = ".".join(names[:-1])
+            func_name = names[-1]
+            func = __import__(module).__dict__[func_name]
+            self.inductor_compile_config[k] = (
+                func if isinstance(func, InductorPass) else CallableInductorPass(func)
+            )
+
+        if (
+            self.pass_config.enable_qk_norm_rope_fusion
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            # TODO(zhuhaoran): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+
+        if (
+            self.pass_config.fuse_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            # TODO(Rohan138): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+
+        if (
+            self.pass_config.fuse_qk_norm_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            self.custom_ops.append("+rotary_embedding")
+
+        if (
+            is_torch_equal_or_newer("2.9.0.dev")
+            and "combo_kernels" not in self.inductor_compile_config
+            and "benchmark_combo_kernel" not in self.inductor_compile_config
+            # (fixme @boyuan) combo kernel does not support cpu yet.
+            and not current_platform.is_cpu()
+        ):
+            from torch._inductor import config as inductor_config
+
+            # use horizontal fusion, which is useful for fusing qk-norm and
+            # qk-rope when query and key have different shapes.
+            self.inductor_compile_config["combo_kernels"] = True
+
+            deterministic = self.inductor_compile_config.get(
+                "deterministic", getattr(inductor_config, "deterministic", False)
+            )
+            self.inductor_compile_config["benchmark_combo_kernel"] = not deterministic
+
+        if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
+            "2.9.0.dev"
+        ):
+            raise ValueError(
+                "use_inductor_graph_partition is only "
+                "supported with torch>=2.9.0.dev. Set "
+                "use_inductor_graph_partition=False instead."
+            )
+
+        for op in self.custom_ops:
+            if op not in {"all", "none"} and (len(op) < 2 or op[0] not in {"+", "-"}):
+                raise ValueError(
+                    f"Invalid syntax '{op}' for custom op, "
+                    "must be 'all', 'none', '+op' or '-op' "
+                    "(where 'op' is the registered op name)"
+                )
+
+        base_modes = [op for op in self.custom_ops if op in {"all", "none"}]
+        if len(base_modes) > 1:
+            raise ValueError(
+                "custom_ops can contain only one base mode: 'all' or 'none'"
+            )
+
+        enabled_ops = {op[1:] for op in self.custom_ops if op.startswith("+")}
+        disabled_ops = {op[1:] for op in self.custom_ops if op.startswith("-")}
+        conflicting_ops = sorted(enabled_ops & disabled_ops)
+        if conflicting_ops:
+            raise ValueError(
+                "custom_ops cannot both enable and disable the same operation(s): "
+                f"{', '.join(conflicting_ops)}. Remove either the '+' or '-' directive"
+            )
+
+        # Currently only eager and inductor backend are supported.
+        # for piecewise compilation. Custom backends are not supported for
+        # piecewise compilation. Update when more backends are supported.
+        if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
+            "",
+            "eager",
+            "inductor",
+        ]:
+            raise ValueError(
+                f"Invalid backend for piecewise compilation: {self.backend}"
+            )
+
+        if any(s <= 0 for s in self.decoder_replay_cudagraph_capture_sizes):
+            raise ValueError(
+                "All decoder_replay_cudagraph_capture_sizes must be positive"
+            )
+
+        # Validate encoder CUDA graph configuration
+        if (
+            self.cudagraph_mm_encoder
+            and self.encoder_cudagraph_max_vision_items_per_batch < 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_vision_items_per_batch must be "
+                "non-negative (0 = auto-infer)"
+            )
+        if (
+            self.cudagraph_mm_encoder
+            and self.encoder_cudagraph_max_frames_per_batch is not None
+            and self.encoder_cudagraph_max_frames_per_batch < 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_frames_per_batch must be "
+                "non-negative (None = auto-infer)"
+            )
+
+        if (
+            self.encoder_cudagraph_max_token_budget is not None
+            and self.encoder_cudagraph_max_token_budget <= 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_token_budget must be positive "
+                f"(None = no limit), got {self.encoder_cudagraph_max_token_budget}"
+            )
+
+        if self.encoder_cudagraph_token_budgets and any(
+            b <= 0 for b in self.encoder_cudagraph_token_budgets
+        ):
+            raise ValueError(
+                f"All encoder_cudagraph_token_budgets must be positive, "
+                f"got {self.encoder_cudagraph_token_budgets}"
+            )
+
+        if self.backend == "":
+            self.backend = current_platform.get_compile_backend()
+
+    def init_backend(
+        self,
+        vllm_config: "VllmConfig",
+        prefix: str = "",
+        is_encoder: bool = False,
+        use_aot_compile: bool = True,
+    ) -> str | Callable:
+        """Initialize the backend for the compilation config from a vllm config.
+
+        Arguments:
+            vllm_config: The vllm config to initialize the backend from.
+            prefix: Cache directory prefix for this compiled module.
+            is_encoder: Whether this module is used in an encoder (as
+                opposed to a text backbone).
+            use_aot_compile: Whether the module permits AOT and direct artifacts.
+
+        Returns:
+            The backend for the compilation config.
+
+        """
+        if self.mode is None:
+            raise ValueError(
+                "No compilation mode is set. This method should only be "
+                "called via vllm config where the level is set if none is "
+                "provided."
+            )
+        if self.mode == CompilationMode.NONE:
+            raise ValueError("No compilation mode is set.")
+
+        from torch._dynamo.backends.registry import list_backends
+
+        torch_backends = list_backends(exclude_tags=tuple())
+        if self.mode in [
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+        ]:
+            if self.backend in torch_backends:
+                return self.backend
+            return resolve_obj_by_qualname(self.backend)
+
+        assert self.mode == CompilationMode.VLLM_COMPILE
+        if self.backend not in ["eager", "inductor"]:
+            logger.info("Using OOT custom backend for compilation.")
+
+        from vllm.compilation.backends import VllmBackend
+
+        return VllmBackend(
+            vllm_config,
+            prefix=prefix,
+            is_encoder=is_encoder,
+            use_aot_compile=use_aot_compile,
+        )
+
+    def post_init_cudagraph_sizes(self) -> None:
+        """To complete the initialization after cudagraph related
+        configs are set. This includes:
+        - initialize compile_sizes
+        """
+        computed_compile_sizes: list[int] = []
+        if self.compile_sizes is not None:
+            # de-duplicate the sizes provided by the config
+            self.compile_sizes = list(set(self.compile_sizes))
+            for x in self.compile_sizes:
+                if isinstance(x, str):
+                    assert x == "cudagraph_capture_sizes", (
+                        "Unrecognized size type in compile_sizes, "
+                        f"expect 'cudagraph_capture_sizes', got {x}"
+                    )
+                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
+                else:
+                    assert isinstance(x, int)
+                    computed_compile_sizes.append(x)
+        self.compile_sizes = computed_compile_sizes  # type: ignore
+
+        # make sure the sizes are in ascending order
+        self.cudagraph_capture_sizes.sort()
+        if self.cudagraph_capture_sizes:
+            assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
+
+    def set_splitting_ops_for_v1(
+        self, all2all_backend: str, data_parallel_size: int = 1
+    ):
+        # To compatible with OOT hardware plugin platform (for example vllm-ascend)
+        # which currently only supports sequence parallelism in eager mode.
+        if self.mode != CompilationMode.VLLM_COMPILE:
+            if self.splitting_ops is None:
+                self.splitting_ops = []
+            return
+
+        if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
+            self.set_splitting_ops_for_attn_fusion()
+        else:
+            if self.splitting_ops is None:
+                # NOTE: When using full cudagraph, instead of setting an empty
+                # list and capture the full cudagraph inside the flattened fx
+                # graph, we keep the piecewise fx graph structure but capture
+                # the full cudagraph outside the fx graph. This reduces some
+                # cpu overhead when the runtime batch_size is not cudagraph
+                # captured. see https://github.com/vllm-project/vllm/pull/20059
+                # for details. Make a copy to avoid mutating the class-level
+                # list via reference.
+                self.splitting_ops = list(self._attention_ops)
+
+                # unified_kv_cache_update has a string param that prevents Inductor
+                # from reusing piecewise graphs. Remove it from the compiled graph.
+                # This has the side-effect of excluding cache from cudagraphs but
+                # that doesn't seem to affect performance.
+                # https://github.com/vllm-project/vllm/issues/33267
+                if not self.use_inductor_graph_partition:
+                    if self.pass_config.fuse_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_rope_kvcache is enabled, but splitting_ops is None "
+                            "and Inductor graph partition is not enabled."
+                            "Disabling fuse_rope_kvcache."
+                            "Please either set splitting_ops to an empty list []"
+                            "or set use_inductor_graph_partition to True "
+                            "to enable RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_rope_kvcache = False
+                    if self.pass_config.fuse_qk_norm_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_qk_norm_rope_kvcache is enabled, but "
+                            "splitting_ops is None and Inductor graph partition "
+                            "is not enabled. Disabling fuse_qk_norm_rope_kvcache. "
+                            "Please either set splitting_ops to an empty list [] "
+                            "or set use_inductor_graph_partition to True "
+                            "to enable QK-Norm+RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_qk_norm_rope_kvcache = False
+                    self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
+
+            elif len(self.splitting_ops) == 0:
+                if (
+                    self.cudagraph_mode == CUDAGraphMode.PIECEWISE
+                    or self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+                ):
+                    logger.warning_once(
+                        "Using piecewise cudagraph with empty splitting_ops"
+                    )
+                if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                    logger.warning_once(
+                        "Piecewise compilation with empty splitting_ops does not "
+                        "contain piecewise cudagraph. Setting cudagraph_"
+                        "mode to NONE. Hint: If you are using attention "
+                        "backends that support cudagraph, consider manually "
+                        "setting cudagraph_mode to FULL or FULL_DECODE_ONLY "
+                        "to enable full cudagraphs."
+                    )
+                    self.cudagraph_mode = CUDAGraphMode.NONE
+                elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                    logger.warning_once(
+                        "Piecewise compilation with empty splitting_ops does "
+                        "not contain piecewise cudagraph. Setting "
+                        "cudagraph_mode to FULL."
+                    )
+                    self.cudagraph_mode = CUDAGraphMode.FULL
+                self.splitting_ops = []
+
+        # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
+        if (
+            all2all_backend == "deepep_high_throughput"
+            and data_parallel_size > 1
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # TODO: Piecewise Cuda graph might be enabled
+            # if torch compile cache key issue fixed
+            # See https://github.com/vllm-project/vllm/pull/25093
+            logger.info(
+                "DeepEP: Disabling CUDA Graphs since DeepEP high-throughput kernels "
+                "are optimized for prefill and are incompatible with CUDA Graphs. "
+                "In order to use CUDA Graphs for decode-optimized workloads, "
+                "use --all2all-backend with another option, such as "
+                "deepep_low_latency, nixl_ep, or allgather_reducescatter."
+            )
+            self.cudagraph_mode = CUDAGraphMode.NONE
+
+    def set_splitting_ops_for_attn_fusion(self):
+        assert self.pass_config.fuse_attn_quant
+        if self.splitting_ops is None:
+            self.splitting_ops = []
+            if self.cudagraph_mode.has_piecewise_cudagraphs():
+                logger.warning_once(
+                    "fuse_attn_quant is incompatible with piecewise "
+                    "cudagraph when use_inductor_graph_partition is off. "
+                    "In this case, splitting_ops will be set to empty "
+                    "list, and cudagraph_mode will be set to FULL. "
+                    "Please ensure you are using attention backends that "
+                    "support cudagraph or set cudagraph_mode to NONE "
+                    "explicitly if encountering any problems."
+                )
+                self.cudagraph_mode = CUDAGraphMode.FULL
+
+        assert not self.splitting_ops_contain_attention(), (
+            "attention ops should not be in splitting_ops when fuse_attn_quant is True"
+        )
+
+    def splitting_ops_contain_attention(self) -> bool:
+        return self.splitting_ops is not None and all(
+            op in self.splitting_ops for op in self._attention_ops
+        )
+
+    def splitting_ops_contain_kv_cache_update(self) -> bool:
+        # when using Dynamo partition while splitting ops is None
+        # and attn+quant fusion disabled, the kv_cache_update_ops are
+        # appended to splitting_ops in set_splitting_ops_for_v1 due to
+        # https://github.com/vllm-project/vllm/issues/33267
+        # In this case, we return True if the kv_cache_update_ops
+        # are not in the splitting_ops yet, but will subsequently
+        # be added to splitting_ops.
+        if (
+            not self.use_inductor_graph_partition
+            and self.splitting_ops is None
+            and not self.pass_config.fuse_attn_quant
+        ):
+            return True
+
+        kv_cache_update_ops = [
+            "vllm::unified_kv_cache_update",
+            "vllm::unified_mla_kv_cache_update",
+        ]
+        return self.splitting_ops is not None and all(
+            op in self.splitting_ops for op in kv_cache_update_ops
+        )
+
+    def is_attention_compiled_piecewise(self) -> bool:
+        if not self.splitting_ops_contain_attention():
+            return False
+
+        if not self.use_inductor_graph_partition:
+            # Dynamo-level FX split case
+            return self.mode == CompilationMode.VLLM_COMPILE
+
+        # Inductor partition case
+        return self.backend == "inductor" and self.mode != CompilationMode.NONE
+
+    def custom_op_log_check(self):
+        """This method logs the enabled/disabled custom ops and checks that the
+        passed custom_ops field only contains relevant ops.
+        It is called at the end of set_current_vllm_config,
+        after the custom ops have been instantiated.
+        """
+        if len(self.enabled_custom_ops) + len(self.disabled_custom_ops) == 0:
+            logger.debug("No custom ops found in model.")
+            return
+
+        logger.debug("enabled custom ops: %s", self.enabled_custom_ops)
+        logger.debug("disabled custom ops: %s", self.disabled_custom_ops)
+
+        all_ops_in_model = self.enabled_custom_ops | self.disabled_custom_ops
+        for op in self.custom_ops:
+            if op in {"all", "none"}:
+                continue
+
+            assert op[0] in {"+", "-"}, (
+                "Invalid custom op syntax (should be checked during init)"
+            )
+
+            # check if op name exists in model
+            op_name = op[1:]
+            if op_name not in all_ops_in_model:
+                from vllm.model_executor.custom_op import op_registry
+
+                # Does op exist at all or is it just not present in this model?
+                # Note: Only imported op classes appear in the registry.
+                missing_str = (
+                    "doesn't exist (or wasn't imported/registered)"
+                    if op_name not in op_registry
+                    else "not present in model"
+                )
+
+                enable_str = "enabling" if op[0] == "+" else "disabling"
+                logger.warning_once(
+                    "Op '%s' %s, %s with '%s' has no effect",
+                    op_name,
+                    missing_str,
+                    enable_str,
+                    op,
+                )
+
+    def is_custom_op_enabled(self, op: str) -> bool:
+        count_all = self.custom_ops.count("all")
+        count_none = self.custom_ops.count("none")
+        if count_all + count_none != 1:
+            raise ValueError(
+                "custom_ops must contain exactly one base mode: 'all' or 'none'"
+            )
+
+        if count_all:
+            return f"-{op}" not in self.custom_ops
+
+        return f"+{op}" in self.custom_ops
+
+    def resolve_cudagraph_mode_and_sizes(
+        self,
+        min_cg_support: "AttentionCGSupport",
+        min_cg_attn_backend: str | None,
+        uniform_decode_query_len: int = 1,
+        kv_cache_config: "KVCacheConfig | None" = None,
+        max_num_reqs: int | None = None,
+        is_profiling: bool = False,
+        piecewise_capture_available: bool = True,
+    ) -> CUDAGraphMode:
+        """Resolve the CUDA Graphs mode the attention backends can support.
+
+        Downgrades the configured mode to the best supported one and stores it, or
+        raises a `ValueError` if the requested CUDA Graphs cannot be supported.
+        """
+        from vllm.v1.attention.backend import AttentionCGSupport
+
+        cudagraph_mode = self.cudagraph_mode
+        if cudagraph_mode is None or cudagraph_mode == CUDAGraphMode.NONE:
+            self.cudagraph_mode = CUDAGraphMode.NONE
+            return CUDAGraphMode.NONE
+
+        # Check cudagraph for mixed batch is supported
+        if (
+            cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL
+            and min_cg_support != AttentionCGSupport.ALWAYS
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
+                f"with {min_cg_attn_backend} backend (support: "
+                f"{min_cg_support})"
+            )
+            if min_cg_support == AttentionCGSupport.NEVER:
+                # if not supported any full cudagraphs, just raise it.
+                msg += (
+                    "; please try cudagraph_mode=PIECEWISE, and "
+                    "make sure compilation mode is VLLM_COMPILE"
+                )
+                raise ValueError(msg)
+
+            # attempt to resolve the full cudagraph related mode
+            if self.splitting_ops_contain_attention():
+                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
+                cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+            logger.warning(msg)
+
+        # check that if we are doing decode full-cudagraphs it is supported
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and min_cg_support == AttentionCGSupport.NEVER
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
+                f"with {min_cg_attn_backend} backend (support: "
+                f"{min_cg_support})"
+            )
+            if self.mode == CompilationMode.VLLM_COMPILE and (
+                self.splitting_ops_contain_attention()
+                or self.use_inductor_graph_partition
+            ):
+                msg += (
+                    "; setting cudagraph_mode=PIECEWISE because "
+                    "attention is compiled piecewise"
+                )
+                cudagraph_mode = CUDAGraphMode.PIECEWISE
+            else:
+                msg += (
+                    "; setting cudagraph_mode=NONE because "
+                    "attention is not compiled piecewise"
+                )
+                cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(msg)
+
+        # check that if we are doing spec-decode + decode full-cudagraphs it is
+        # supported
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and uniform_decode_query_len > 1
+            and min_cg_support.value < AttentionCGSupport.UNIFORM_BATCH.value
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
+                f" with spec-decode for attention backend "
+                f"{min_cg_attn_backend} (support: {min_cg_support})"
+            )
+            if self.splitting_ops_contain_attention():
+                msg += "; setting cudagraph_mode=PIECEWISE"
+                cudagraph_mode = CUDAGraphMode.PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=NONE"
+                cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(msg)
+
+        if (
+            not piecewise_capture_available
+            and cudagraph_mode.requires_piecewise_compilation()
+        ):
+            fallback_mode = cudagraph_mode.without_piecewise()
+            logger.warning_once(
+                "Cudagraph mode %s requires piecewise capture, but the loaded "
+                "model provides neither a compiled submodule nor breakable CUDA "
+                "graphs. Overriding to %s.",
+                cudagraph_mode,
+                fallback_mode,
+            )
+            cudagraph_mode = fallback_mode
+
+        # double check that we can support full cudagraph if they are requested
+        # even after automatic downgrades
+        if (
+            cudagraph_mode.has_full_cudagraphs()
+            and min_cg_support == AttentionCGSupport.NEVER
+        ):
+            raise ValueError(
+                f"CUDAGraphMode.{cudagraph_mode.name} is not "
+                f"supported with {min_cg_attn_backend} backend ("
+                f"support:{min_cg_support}) "
+                "; please try cudagraph_mode=PIECEWISE, "
+                "and make sure compilation mode is VLLM_COMPILE"
+            )
+
+        # For Mamba models with FULL decode cudagraphs, each decode
+        # sequence needs one Mamba cache block. The decode cudagraph
+        # dispatcher already caps batch sizes at max_num_seqs, so we just
+        # need to verify that enough blocks exist. Raising here instead
+        # of silently capping cudagraph_capture_sizes avoids unintended
+        # restrictions on PIECEWISE (prefill) cudagraphs.
+        # See: https://github.com/vllm-project/vllm/issues/34094
+        if (
+            kv_cache_config is not None
+            and max_num_reqs is not None
+            and cudagraph_mode.has_full_cudagraphs()
+            and not is_profiling
+            and kv_cache_config.has_mamba_layers
+            and max_num_reqs > kv_cache_config.num_blocks
+        ):
+            raise ValueError(
+                f"max_num_seqs ({max_num_reqs}) exceeds available Mamba cache "
+                f"blocks ({kv_cache_config.num_blocks}). Each decode sequence "
+                "requires one Mamba cache block, so CUDA graph capture cannot "
+                "proceed. Please lower max_num_seqs to at most "
+                f"{kv_cache_config.num_blocks} or increase "
+                "gpu_memory_utilization."
+            )
+
+        self.cudagraph_mode = cudagraph_mode
+        return cudagraph_mode
+
+    def get_compile_ranges(self) -> list[Range]:
+        """Get the compile ranges for the compilation config."""
+        if self.compile_ranges_endpoints is None:
+            return []
+        endpoints = sorted(set(self.compile_ranges_endpoints))
+        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]

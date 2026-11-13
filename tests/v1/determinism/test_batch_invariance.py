@@ -1,0 +1,1101 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import os
+import random
+
+import pytest
+import torch
+from transformers import AutoTokenizer
+from utils import (
+    BACKENDS,
+    TEST_MODEL,
+    _extract_step_logprobs,
+    _random_prompt,
+    skip_if_not_cuda_alike,
+    skip_unsupported,
+)
+
+import vllm.envs as envs
+from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
+from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
+
+
+@skip_unsupported
+@pytest.mark.flaky(reruns=3)
+@pytest.mark.timeout(1000)
+@pytest.mark.parametrize(
+    "backend",
+    BACKENDS,
+)
+@pytest.mark.parametrize("rms_norm_impl", ["default", "vllm_c"])
+def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
+    backend,
+    rms_norm_impl,
+):
+    """Ensures that the same request (the 'needle' prompt) yields identical output
+    whether run alone (bs=1) or mixed into a larger batch (e.g., bs=64),
+    using the high-level v1 LLM() API only (no manual batching).
+
+    Strategy:
+    - Create a single LLM engine configured for the larger batch limit (N).
+    - Compute a baseline output for the needle prompt when it is run alone.
+    - For many trials, generate a mixed batch (size N) where the needle appears
+      at a random position among random filler prompts using the same engine.
+    - Track how many trials match vs mismatch, and report totals at the end.
+      The test fails if any mismatches occur, but we still dump pass/fail
+      counts.
+
+    Notes:
+    - Use seeded stochastic sampling with a fixed seed to test determinism.
+    - Outputs are intentionally longer and sampled at higher temperature/top_p
+      to produce a more random-sounding phrase, yet remain deterministic by
+      seed.
+    - Keep max_tokens and max_model_len bounded for speed and memory use.
+
+    """
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+
+    attention_config = {"backend": backend}
+    # Force the C++ RMSNorm implementation so we actually exercise the
+    # num_tokens-dependent block-size branches.
+    kernel_config = None
+    if rms_norm_impl == "vllm_c":
+        kernel_config = {
+            "ir_op_priority": {
+                "rms_norm": ["vllm_c"],
+                "fused_add_rms_norm": ["vllm_c"],
+            }
+        }
+    # Allow overrides from environment (useful for CI tuning)
+    # "facebook/opt-125m" is too small, doesn't reliably test determinism
+    model = TEST_MODEL
+    num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
+    max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
+    min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
+    max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
+    assert max_batch_size >= 2, "Batch size should be >= 2 to mix needle."
+
+    # Keep GPU memory usage low to avoid startup allocation failures.
+    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.5"))
+    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "5120"))
+
+    # Sampling parameters: longer outputs with a more random-sounding
+    # continuation,but still deterministic due to fixed seed.
+    temperature = float(os.getenv("VLLM_NEEDLE_TEMPERATURE", "0.0"))
+    top_p = float(os.getenv("VLLM_NEEDLE_TOP_P", "0.95"))
+    max_tokens = int(os.getenv("VLLM_NEEDLE_MAX_TOKENS", "128"))
+
+    sampling = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        seed=20240919,
+    )
+
+    needle_prompt = "There once was a "
+
+    llm = None
+    try:
+        llm = LLM_with_max_seqs(
+            model=model,
+            max_num_seqs=max_batch_size,
+            gpu_memory_utilization=gpu_mem_util,
+            max_model_len=max_model_len,
+            attention_config=attention_config,
+            kernel_config=kernel_config,
+        )
+
+        # Baseline generation for the needle prompt alone.
+        baseline_out = llm.generate([needle_prompt], sampling)
+        assert len(baseline_out) == 1
+        assert len(baseline_out[0].outputs) >= 1
+        baseline_text = baseline_out[0].outputs[0].text
+
+        mismatches = 0
+
+        for _ in range(num_trials):
+            # Create a batch of size `max_batch_size` and insert the needle at
+            # a random index
+            prompts: list[str] = []
+            batch_size = random.randint(max_batch_size // 2, max_batch_size)
+            needle_pos = random.randint(0, batch_size - 1)
+            for i in range(batch_size):
+                if i == needle_pos:
+                    prompts.append(needle_prompt)
+                else:
+                    prompts.append(_random_prompt(min_random_prompt, max_random_prompt))
+
+            # Generate with the same engine but in a larger batch.
+            outputs = llm.generate(prompts, sampling)
+            # Find the needle output by position
+            needle_output = outputs[needle_pos]
+            assert needle_output.prompt == needle_prompt
+            assert len(needle_output.outputs) >= 1
+            text = needle_output.outputs[0].text
+
+            if text != baseline_text:
+                print(f"{text}\n\n== Not the same as ==\n\n{baseline_text}\n\n")
+                mismatches += 1
+
+        passes = num_trials - mismatches
+        # Dump how many passed vs failed
+        print(
+            f"[determinism] total={num_trials}, passed={passes}, "
+            f"failed={mismatches}, max_batch_size={max_batch_size}"
+        )
+
+        if mismatches > 0:
+            pytest.fail(
+                f"Nondeterministic outputs detected: {mismatches} failed out "
+                f"of {num_trials} trials (max_batch_size={max_batch_size})."
+            )
+
+    finally:
+        # Ensure engines are shutdown to free GPU/VRAM across test sessions
+        if llm is not None:
+            with contextlib.suppress(Exception):
+                llm.llm_engine.engine_core.shutdown()
+
+
+@skip_unsupported
+@pytest.mark.parametrize(
+    "backend",
+    BACKENDS,
+)
+@pytest.mark.parametrize(
+    "block_m,block_n",
+    [(16, 16), (8, 16)],
+)
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
+    backend,
+    block_m,
+    block_n,
+):
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+
+    llm = LLM(
+        model=TEST_MODEL,
+        tensor_parallel_size=tp_size,
+        disable_custom_all_reduce=os.getenv("VLLM_TEST_DISABLE_CUSTOM_AR") == "1",
+        max_num_seqs=128,
+        max_model_len=8192,
+        dtype="auto",  # not everything is supported
+        attention_config={
+            "backend": backend,
+            "flex_attn_block_m": block_m,
+            "flex_attn_block_n": block_n,
+        },
+    )
+
+    # Use more realistic prompts for better token generation
+    prompts = [_random_prompt(10, 50) for _ in range(32)]
+
+    # Chunked prefill is covered by
+    # test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill below.
+
+    sp = SamplingParams(
+        temperature=0.6,
+        top_p=1.0,
+        max_tokens=16,
+        seed=1234,
+        logprobs=5,
+    )
+
+    # BS=1: run prompts individually and collect logprobs per step.
+    print("\n" + "=" * 80)
+    print("STARTING BS=1 RUNS (each prompt individually)")
+    print("=" * 80 + "\n")
+
+    bs1_logprobs_per_prompt = []
+    bs1_tokens_per_prompt = []
+    for idx, p in enumerate(prompts):
+        print(f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
+        outs = llm.generate([p], sp, use_tqdm=False)
+        assert len(outs) == 1
+        step_logprobs, token_ids = _extract_step_logprobs(outs[0])
+        if step_logprobs is None:
+            pytest.skip(
+                "Logits are not available on RequestOutput; "
+                "enable logprobs return to run this test."
+            )
+        bs1_logprobs_per_prompt.append(step_logprobs)
+        bs1_tokens_per_prompt.append(token_ids)
+        print(f"[BS=1] Prompt {idx} generated tokens: {token_ids}")
+
+    # BS=N: run prompts in a batch and collect logprobs per step for each
+    # prompt.
+    print("\n" + "=" * 80)
+    print(f"STARTING BS={len(prompts)} RUN (all prompts batched)")
+    print("=" * 80 + "\n")
+
+    outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+    assert len(outs_batched) == len(prompts)
+    bsN_logprobs_per_prompt = []
+    bsN_tokens_per_prompt = []
+
+    print(f"\n[BS={len(prompts)}] Processing batched outputs...")
+    for idx, o in enumerate(outs_batched):
+        tokens = o.outputs[0].token_ids if o.outputs else "N/A"
+        print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
+        step_logprobs, token_ids = _extract_step_logprobs(o)
+        if step_logprobs is None:
+            pytest.skip(
+                "Logits are not available on RequestOutput; "
+                "enable logprobs return to run this test."
+            )
+        bsN_logprobs_per_prompt.append(step_logprobs)
+        bsN_tokens_per_prompt.append(token_ids)
+
+    # Compare step-by-step logprobs for each prompt between BS=1 and BS=N runs.
+    failed_prompts = []
+    for i, (logprobs_bs1, logprobs_bsN, tokens_bs1, tokens_bsN) in enumerate(
+        zip(
+            bs1_logprobs_per_prompt,
+            bsN_logprobs_per_prompt,
+            bs1_tokens_per_prompt,
+            bsN_tokens_per_prompt,
+        )
+    ):
+        if len(logprobs_bs1) != len(logprobs_bsN):
+            reason = (
+                f"Different number of steps: {len(logprobs_bs1)} (BS=1) "
+                f"vs {len(logprobs_bsN)} (BS=N)"
+            )
+            failed_prompts.append(
+                {
+                    "prompt_idx": i,
+                    "step": "all",
+                    "reason": reason,
+                    "prompt_preview": prompts[i][:100],
+                    "bs1_tokens": tokens_bs1,
+                    "bsN_tokens": tokens_bsN,
+                }
+            )
+            continue
+
+        # Check if tokens match first
+        if tokens_bs1 != tokens_bsN:
+            failed_prompts.append(
+                {
+                    "prompt_idx": i,
+                    "step": "sampling",
+                    "reason": "Different tokens sampled",
+                    "prompt_preview": prompts[i][:100],
+                    "bs1_tokens": tokens_bs1,
+                    "bsN_tokens": tokens_bsN,
+                    "bs1_all_logprobs": [
+                        logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))
+                    ],
+                    "bsN_all_logprobs": [
+                        logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))
+                    ],
+                }
+            )
+            continue
+
+        for t, (a, b) in enumerate(zip(logprobs_bs1, logprobs_bsN)):
+            if a.shape != b.shape:
+                failed_prompts.append(
+                    {
+                        "prompt_idx": i,
+                        "step": t,
+                        "reason": f"Shape mismatch: {a.shape} vs {b.shape}",
+                        "prompt_preview": prompts[i][:100],
+                        "bs1_tokens": tokens_bs1,
+                        "bsN_tokens": tokens_bsN,
+                    }
+                )
+                break
+
+            if not torch.equal(a, b):
+                max_diff = torch.abs(a - b).max().item()
+                # Print which token failed
+                print(f"\n[DIVERGENCE] Prompt {i}, Token {t}: max_diff={max_diff:.6e}")
+                bs1_tok = tokens_bs1[t] if t < len(tokens_bs1) else "N/A"
+                bsN_tok = tokens_bsN[t] if t < len(tokens_bsN) else "N/A"
+                print(f"  Token IDs: bs1={bs1_tok}, bsN={bsN_tok}")
+                print(f"  BS=1 logprob: {a.tolist()}")
+                print(f"  BS=N logprob: {b.tolist()}")
+                failed_prompts.append(
+                    {
+                        "prompt_idx": i,
+                        "step": t,
+                        "reason": f"Bitwise mismatch (max_diff={max_diff:.6e})",
+                        "prompt_preview": prompts[i][:100],
+                        "bs1_tokens": tokens_bs1,
+                        "bsN_tokens": tokens_bsN,
+                        "bs1_all_logprobs": [
+                            logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))
+                        ],
+                        "bsN_all_logprobs": [
+                            logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))
+                        ],
+                    }
+                )
+                break
+
+    # Print summary of all failures
+    if failed_prompts:
+        print(f"\n{'=' * 80}")
+        fail_msg = (
+            f"BATCH INVARIANCE FAILURES: {len(failed_prompts)}/"
+            f"{len(prompts)} prompts failed"
+        )
+        print(fail_msg)
+        print(f"{'=' * 80}")
+        for fail in failed_prompts:
+            print(f"\nPrompt {fail['prompt_idx']} (step {fail['step']}):")
+            print(f"  Reason: {fail['reason']}")
+            print(f"  Preview: {fail['prompt_preview']}...")
+
+            # Always show the tokens
+            if "bs1_tokens" in fail:
+                print(f"  BS=1 tokens: {fail['bs1_tokens']}")
+            if "bsN_tokens" in fail:
+                print(f"  BS=N tokens: {fail['bsN_tokens']}")
+
+            if "bs1_all_logprobs" in fail:
+                print(f"  BS=1 logprobs for all {len(fail['bs1_all_logprobs'])} steps:")
+                for step_idx, logprobs in enumerate(fail["bs1_all_logprobs"]):
+                    print(f"    Step {step_idx}: {logprobs}")
+                print(f"  BS=N logprobs for all {len(fail['bsN_all_logprobs'])} steps:")
+                for step_idx, logprobs in enumerate(fail["bsN_all_logprobs"]):
+                    print(f"    Step {step_idx}: {logprobs}")
+        print(f"{'=' * 80}\n")
+
+        # Fail the test with summary
+        msg = (
+            f"Batch invariance violated in {len(failed_prompts)}/"
+            f"{len(prompts)} prompts. See output above for details."
+        )
+        pytest.fail(msg)
+
+
+@skip_unsupported
+@pytest.mark.parametrize(
+    "backend",
+    BACKENDS,
+)
+def test_logprobs_bitwise_batch_invariance_ragged_chunked_prefill(backend):
+    """Batch invariance must hold when a prefill is split across chunks."""
+    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
+
+    prompts = (
+        [_random_prompt(10, 50) for _ in range(8)]
+        + [_random_prompt(300, 450) for _ in range(4)]
+        + [_random_prompt(800, 1200) for _ in range(2)]
+    )
+    random.shuffle(prompts)
+
+    # _random_prompt takes a word target, not a token count, and the ratio
+    # depends on the tokenizer, so derive the budget rather than hardcode it:
+    # half the longest prompt splits that prefill whatever TEST_MODEL is, while
+    # the shorter prompts are still co-scheduled whole. Floor is max_num_seqs.
+    tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL)
+    prompt_lens = [len(tokenizer(p).input_ids) for p in prompts]
+    max_num_batched_tokens = max(len(prompts), max(prompt_lens) // 2)
+    assert max_num_batched_tokens < max(prompt_lens), (
+        f"a {max_num_batched_tokens}-token budget does not split the longest "
+        f"prompt ({max(prompt_lens)} tokens), so nothing would be chunked"
+    )
+
+    sp = SamplingParams(
+        temperature=0.6, top_p=1.0, max_tokens=16, seed=1234, logprobs=5
+    )
+    llm = LLM_with_max_seqs(
+        model=TEST_MODEL,
+        max_num_seqs=len(prompts),
+        gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.5")),
+        max_model_len=4096,
+        attention_config={"backend": backend},
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+
+    try:
+        bs1 = []
+        for p in prompts:
+            out = llm.generate([p], sp, use_tqdm=False)[0]
+            bs1.append(_extract_step_logprobs(out))
+        if any(logprobs is None for logprobs, _ in bs1):
+            pytest.skip("Logprobs are not available on RequestOutput.")
+
+        outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+        assert len(outs_batched) == len(prompts)
+
+        mismatches = []
+        for i, out in enumerate(outs_batched):
+            logprobs, tokens = _extract_step_logprobs(out)
+            bs1_logprobs, bs1_tokens = bs1[i]
+            n = prompt_lens[i]
+            if tokens != bs1_tokens:
+                mismatches.append(f"prompt {i} ({n} tokens): tokens differ")
+            elif not torch.equal(bs1_logprobs, logprobs):
+                delta = torch.max(torch.abs(bs1_logprobs - logprobs)).item()
+                mismatches.append(
+                    f"prompt {i} ({n} tokens): logprobs differ, max|delta|={delta:.3e}"
+                )
+
+        assert not mismatches, (
+            "Batch invariance violated under chunked prefill "
+            f"(max_num_batched_tokens={max_num_batched_tokens}): "
+            + "; ".join(mismatches)
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+
+@skip_unsupported
+@pytest.mark.parametrize(
+    "backend",
+    BACKENDS,
+)
+def test_simple_generation(backend):
+    """Simple test that runs the model with a basic prompt and prints the output.
+    Useful for quick smoke testing and debugging.
+    """
+    model = TEST_MODEL
+
+    llm = LLM(
+        model=model,
+        max_num_seqs=1,
+        tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
+        max_model_len=2048,
+        dtype="auto",
+        enable_prefix_caching=False,
+        attention_config={"backend": backend},
+    )
+
+    prompt = "the capital of france is"
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=20,
+    )
+
+    print(f"\n{'=' * 80}")
+    print("Running simple generation test")
+    print(f"Prompt: '{prompt}'")
+    print(f"{'=' * 80}\n")
+
+    try:
+        outputs = llm.generate([prompt], sampling_params)
+
+        assert len(outputs) == 1
+        output_text = outputs[0].outputs[0].text
+
+        print(f"Output: '{output_text}'")
+        print(f"\n{'=' * 80}")
+        print(f"Full completion: '{prompt}{output_text}'")
+        print(f"{'=' * 80}\n")
+
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+
+@skip_unsupported
+@pytest.mark.parametrize(
+    "backend",
+    BACKENDS,
+)
+def test_logprobs_without_batch_invariance_should_fail(
+    backend, monkeypatch: pytest.MonkeyPatch
+):
+    """This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.
+    It DISABLES batch invariance mode and expects to see non-deterministic behavior
+    between BS=1 and BS=N runs. This demonstrates that batch invariance is actually
+    doing something useful.
+
+    The test will PASS if we detect differences (proving batch invariance matters).
+    The test will FAIL if everything matches (suggesting batch invariance isn't needed).
+    """
+    # CRITICAL: Disable batch invariance for this test
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+
+    print(f"\n{'=' * 80}")
+    print("BATCH INVARIANCE DISABLED: Expecting non-deterministic behavior")
+    print(f"{'=' * 80}\n")
+
+    llm = LLM(
+        model=TEST_MODEL,
+        tensor_parallel_size=tp_size,
+        max_num_seqs=32,
+        max_model_len=8192,
+        dtype="auto",
+        attention_config={"backend": backend},
+    )
+
+    # build ragged prompts to change shapes significantly across BS=1 vs BS=N
+    long_min = int(os.getenv("VLLM_MIN_PROMPT", "768"))
+    long_max = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
+    prompts: list[str] = []
+    options = [
+        (max(long_min, 1536), max(long_max, 3072)),  # very long
+        (max(1024, long_min), max(2048, long_max)),  # long
+        (256, 512),  # mid
+        (10, 20),  # short
+    ]
+
+    for _ in range(32):
+        lo, hi = random.choice(options)
+        prompts.append(_random_prompt(lo, hi))
+
+    sp = SamplingParams(
+        temperature=0.6,
+        top_p=1.0,
+        max_tokens=8,
+        seed=1234,
+        logprobs=5,
+    )
+
+    # BS=1: run prompts individually and collect logprobs per step.
+    print("\n" + "=" * 80)
+    print("STARTING BS=1 RUNS (each prompt individually)")
+    print("=" * 80 + "\n")
+
+    bs1_logprobs_per_prompt = []
+    bs1_tokens_per_prompt = []
+    for idx, p in enumerate(prompts):
+        print(f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
+        outs = llm.generate([p], sp, use_tqdm=False)
+        assert len(outs) == 1
+        step_logprobs, token_ids = _extract_step_logprobs(outs[0])
+        if step_logprobs is None:
+            pytest.skip(
+                "Logits are not available on RequestOutput; "
+                "enable logprobs return to run this test."
+            )
+        bs1_logprobs_per_prompt.append(step_logprobs)
+        bs1_tokens_per_prompt.append(token_ids)
+        print(f"[BS=1] Prompt {idx} generated tokens: {token_ids}")
+
+    # BS=N: run prompts in a batch and collect logprobs per step for each prompt.
+    print("\n" + "=" * 80)
+    print(f"STARTING BS={len(prompts)} RUN (all prompts batched)")
+    print("=" * 80 + "\n")
+
+    outs_batched = llm.generate(prompts, sp, use_tqdm=False)
+    assert len(outs_batched) == len(prompts)
+    bsN_logprobs_per_prompt = []
+    bsN_tokens_per_prompt = []
+
+    print(f"\n[BS={len(prompts)}] Processing batched outputs...")
+    for idx, o in enumerate(outs_batched):
+        tokens = o.outputs[0].token_ids if o.outputs else "N/A"
+        print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
+        step_logprobs, token_ids = _extract_step_logprobs(o)
+        if step_logprobs is None:
+            pytest.skip(
+                "Logits are not available on RequestOutput; "
+                "enable logprobs return to run this test."
+            )
+        bsN_logprobs_per_prompt.append(step_logprobs)
+        bsN_tokens_per_prompt.append(token_ids)
+
+    # Compare step-by-step logprobs for each prompt between BS=1 and BS=N runs.
+    differences_found = []
+    for i, (logprobs_bs1, logprobs_bsN, tokens_bs1, tokens_bsN) in enumerate(
+        zip(
+            bs1_logprobs_per_prompt,
+            bsN_logprobs_per_prompt,
+            bs1_tokens_per_prompt,
+            bsN_tokens_per_prompt,
+        )
+    ):
+        if len(logprobs_bs1) != len(logprobs_bsN):
+            reason = (
+                f"Different number of steps: {len(logprobs_bs1)} (BS=1) "
+                f"vs {len(logprobs_bsN)} (BS=N)"
+            )
+            differences_found.append(
+                {
+                    "prompt_idx": i,
+                    "step": "all",
+                    "reason": reason,
+                    "prompt_preview": prompts[i][:100],
+                    "bs1_tokens": tokens_bs1,
+                    "bsN_tokens": tokens_bsN,
+                }
+            )
+            continue
+
+        # Check if tokens match first
+        if tokens_bs1 != tokens_bsN:
+            differences_found.append(
+                {
+                    "prompt_idx": i,
+                    "step": "sampling",
+                    "reason": "Different tokens sampled",
+                    "prompt_preview": prompts[i][:100],
+                    "bs1_tokens": tokens_bs1,
+                    "bsN_tokens": tokens_bsN,
+                }
+            )
+            continue
+
+        for t, (a, b) in enumerate(zip(logprobs_bs1, logprobs_bsN)):
+            if a.shape != b.shape:
+                differences_found.append(
+                    {
+                        "prompt_idx": i,
+                        "step": t,
+                        "reason": f"Shape mismatch: {a.shape} vs {b.shape}",
+                        "prompt_preview": prompts[i][:100],
+                        "bs1_tokens": tokens_bs1,
+                        "bsN_tokens": tokens_bsN,
+                    }
+                )
+                break
+
+            if not torch.equal(a, b):
+                max_diff = torch.abs(a - b).max().item()
+                print(
+                    f"\n[EXPECTED DIVERGENCE FOUND] Prompt {i}, "
+                    f"Token {t}: max_diff={max_diff:.6e}"
+                )
+                bs1_tok = tokens_bs1[t] if t < len(tokens_bs1) else "N/A"
+                bsN_tok = tokens_bsN[t] if t < len(tokens_bsN) else "N/A"
+                print(f"  Token IDs: bs1={bs1_tok}, bsN={bsN_tok}")
+                print(f"  BS=1 logprob: {a.tolist()}")
+                print(f"  BS=N logprob: {b.tolist()}")
+                differences_found.append(
+                    {
+                        "prompt_idx": i,
+                        "step": t,
+                        "reason": f"Bitwise mismatch (max_diff={max_diff:.6e})",
+                        "prompt_preview": prompts[i][:100],
+                        "bs1_tokens": tokens_bs1,
+                        "bsN_tokens": tokens_bsN,
+                    }
+                )
+                break
+
+    # Print summary
+    print(f"\n{'=' * 80}")
+    if differences_found:
+        success_msg = (
+            f"✓ SUCCESS: Batch invariance is doing something! "
+            f"Found {len(differences_found)}/{len(prompts)} prompts "
+            f"with differences when batch invariance was DISABLED."
+        )
+        print(success_msg)
+        print(f"{'=' * 80}")
+        for diff in differences_found:
+            print(f"\nPrompt {diff['prompt_idx']} (step {diff['step']}):")
+            print(f"  Reason: {diff['reason']}")
+            print(f"  Preview: {diff['prompt_preview']}...")
+            if "bs1_tokens" in diff:
+                print(f"  BS=1 tokens: {diff['bs1_tokens']}")
+            if "bsN_tokens" in diff:
+                print(f"  BS=N tokens: {diff['bsN_tokens']}")
+        print(f"{'=' * 80}\n")
+        # Test PASSES because we found differences (batch invariance matters!)
+        return
+    else:
+        # Test FAILS because everything matched even without batch invariance
+        fail_msg = (
+            f"✗ UNEXPECTED: All {len(prompts)} prompts matched "
+            f"between BS=1 and BS=N even with batch invariance DISABLED. "
+            f"This suggests batch invariance might not be necessary, "
+            f"or the test needs more sensitive prompts."
+        )
+        print(fail_msg)
+        print(f"{'=' * 80}\n")
+        pytest.fail(fail_msg)
+
+
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize(
+    "backend", ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
+)
+def test_decode_logprobs_match_prefill_logprobs(
+    backend,
+):
+    """Test that verifies decode logprobs match prefill logprobs.
+
+    For each decoded token at position i:
+    1. Run decode to generate N tokens and collect their logprobs
+    2. For each position i in [0, N):
+       - Take prefix = prompt + tokens[0:i]
+       - Run prefill(prefix + tokens[i]) to get logprob of tokens[i]
+       - Verify prefill logprob matches decode logprob bitwise
+
+    This ensures that the logprobs from decode are consistent with what
+    we would get if we ran prefill on each prefix.
+    """
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+
+    llm = LLM(
+        model=TEST_MODEL,
+        tensor_parallel_size=tp_size,
+        max_num_seqs=32,
+        max_model_len=8192,
+        dtype="auto",
+        attention_config={"backend": backend},
+    )
+
+    # Use a few test prompts
+    num_test_prompts = int(os.getenv("VLLM_DECODE_PREFILL_NUM_PROMPTS", "4"))
+    prompts = [_random_prompt(10, 50) for _ in range(num_test_prompts)]
+
+    # Generate longer sequences to test multiple decode steps
+    max_tokens = int(os.getenv("VLLM_DECODE_PREFILL_MAX_TOKENS", "16"))
+
+    sp = SamplingParams(
+        temperature=0.0,  # Greedy for determinism
+        max_tokens=max_tokens,
+        logprobs=5,
+    )
+
+    print("\n" + "=" * 80)
+    print("STEP 1: Running decode to generate tokens and collect logprobs")
+    print("=" * 80 + "\n")
+
+    # Step 1: Run decode and collect logprobs
+    decode_outputs = llm.generate(prompts, sp, use_tqdm=False)
+
+    failed_comparisons = []
+
+    for prompt_idx, (prompt, decode_output) in enumerate(zip(prompts, decode_outputs)):
+        print(f"\n[Prompt {prompt_idx}] Testing: {prompt[:80]}...")
+
+        # Extract decode logprobs and tokens
+        decode_logprobs, token_ids = _extract_step_logprobs(decode_output)
+        if decode_logprobs is None:
+            pytest.skip(
+                "Logprobs are not available on RequestOutput; "
+                "enable logprobs return to run this test."
+            )
+
+        print(f"[Prompt {prompt_idx}] Generated {len(token_ids)} tokens: {token_ids}")
+        print(f"[Prompt {prompt_idx}] Decode logprobs: {decode_logprobs.tolist()}")
+
+        # Step 2: For each token position, run prefill and compare.
+        prompt_token_ids = list(decode_output.prompt_token_ids or [])
+
+        print(f"\n[Prompt {prompt_idx}] Verifying each token via prefill...")
+
+        for token_idx in range(len(token_ids)):
+            # Construct the prefix up to (but not including) this token using
+            # token ids directly.
+            current_token = token_ids[token_idx]
+            prefix_token_ids = prompt_token_ids + list(token_ids[:token_idx])
+
+            # Now run prefill with max_tokens=1 to get the logprob of the next token
+            prefill_sp = SamplingParams(
+                temperature=0.0,
+                max_tokens=1,
+                logprobs=5,
+            )
+
+            print(
+                f"  [Token {token_idx}] Running prefill for prefix "
+                f"(num_tokens={len(prefix_token_ids)})..."
+            )
+            prefill_output = llm.generate(
+                [TokensPrompt(prompt_token_ids=prefix_token_ids)],
+                prefill_sp,
+                use_tqdm=False,
+            )[0]
+            prefill_logprobs, prefill_token_ids_out = _extract_step_logprobs(
+                prefill_output
+            )
+
+            if prefill_logprobs is None:
+                print(f"  [Token {token_idx}] Warning: No prefill logprobs available")
+                continue
+
+            # The first token from prefill should match the current token
+            prefill_token = prefill_token_ids_out[0]
+            prefill_logprob = prefill_logprobs[0].item()
+            decode_logprob = decode_logprobs[token_idx].item()
+
+            print(
+                f"  [Token {token_idx}] Decode token: {current_token}, "
+                f"logprob: {decode_logprob:.8f}"
+            )
+            print(
+                f"  [Token {token_idx}] Prefill token: {prefill_token}, "
+                f"logprob: {prefill_logprob:.8f}"
+            )
+
+            # Check if tokens match
+            if current_token != prefill_token:
+                failed_comparisons.append(
+                    {
+                        "prompt_idx": prompt_idx,
+                        "token_idx": token_idx,
+                        "reason": "Token mismatch",
+                        "decode_token": current_token,
+                        "prefill_token": prefill_token,
+                        "decode_logprob": decode_logprob,
+                        "prefill_logprob": prefill_logprob,
+                        "prompt_text": prompt[:100],
+                        "prefix_token_ids": prefix_token_ids[:50],
+                    }
+                )
+                print(f"  [Token {token_idx}] ✗ TOKEN MISMATCH!")
+                continue
+
+            # Check if logprobs match bitwise
+            if decode_logprob != prefill_logprob:
+                diff = abs(decode_logprob - prefill_logprob)
+                failed_comparisons.append(
+                    {
+                        "prompt_idx": prompt_idx,
+                        "token_idx": token_idx,
+                        "reason": "Logprob mismatch",
+                        "decode_token": current_token,
+                        "prefill_token": prefill_token,
+                        "decode_logprob": decode_logprob,
+                        "prefill_logprob": prefill_logprob,
+                        "diff": diff,
+                        "prompt_text": prompt[:100],
+                        "prefix_token_ids": prefix_token_ids[:50],
+                        "decode_all_tokens": token_ids,
+                        "decode_all_logprobs": decode_logprobs.tolist(),
+                    }
+                )
+                print(f"  [Token {token_idx}] ✗ LOGPROB MISMATCH! diff={diff:.8e}")
+            else:
+                print(f"  [Token {token_idx}] ✓ Match (bitwise equal)")
+
+    # Print summary
+    print(f"\n{'=' * 80}")
+    if failed_comparisons:
+        print(f"DECODE-PREFILL MISMATCH: {len(failed_comparisons)} failures detected")
+        print(f"{'=' * 80}")
+
+        # Group failures by prompt for better readability
+        failures_by_prompt: dict[int, list[dict]] = {}
+        for fail in failed_comparisons:
+            pid = fail["prompt_idx"]
+            if pid not in failures_by_prompt:
+                failures_by_prompt[pid] = []
+            failures_by_prompt[pid].append(fail)
+
+        for prompt_idx, failures in failures_by_prompt.items():
+            print(f"\n{'=' * 80}")
+            print(f"PROMPT {prompt_idx}: {failures[0]['prompt_text']}...")
+            print(f"{'=' * 80}")
+            print(f"Total failures for this prompt: {len(failures)}")
+
+            # Show where mismatches occur (which token positions)
+            mismatch_positions = [f["token_idx"] for f in failures]
+            print(f"Mismatch at token positions: {mismatch_positions}")
+
+            # Show first few failures in detail
+            for i, fail in enumerate(failures[:5]):  # Show first 5 failures per prompt
+                print(f"\n  [Failure {i + 1}] Token position {fail['token_idx']}:")
+                print(f"    Reason: {fail['reason']}")
+                print(f"    Prefix token ids: {fail['prefix_token_ids']}...")
+                print(
+                    f"    Decode:  token={fail['decode_token']}, "
+                    f"logprob={fail['decode_logprob']:.10f}"
+                )
+                print(
+                    f"    Prefill: token={fail['prefill_token']}, "
+                    f"logprob={fail['prefill_logprob']:.10f}"
+                )
+                if "diff" in fail:
+                    print(f"    Difference: {fail['diff']:.10e}")
+                    # Show in hex to see bitwise difference
+                    import struct
+
+                    decode_hex = struct.pack("f", fail["decode_logprob"]).hex()
+                    prefill_hex = struct.pack("f", fail["prefill_logprob"]).hex()
+                    print(f"    Decode logprob (hex):  0x{decode_hex}")
+                    print(f"    Prefill logprob (hex): 0x{prefill_hex}")
+
+                # If we have all tokens/logprobs, show the context
+                if "decode_all_tokens" in fail and "decode_all_logprobs" in fail:
+                    token_idx = fail["token_idx"]
+                    all_tokens = fail["decode_all_tokens"]
+                    all_logprobs = fail["decode_all_logprobs"]
+
+                    # Show context: 2 tokens before and after
+                    start = max(0, token_idx - 2)
+                    end = min(len(all_tokens), token_idx + 3)
+
+                    print(f"    Context (tokens {start} to {end - 1}):")
+                    for j in range(start, end):
+                        marker = " <-- MISMATCH" if j == token_idx else ""
+                        print(
+                            f"      [{j}] token={all_tokens[j]}, "
+                            f"logprob={all_logprobs[j]:.8f}{marker}"
+                        )
+
+            if len(failures) > 5:
+                print(f"\n  ... and {len(failures) - 5} more failures for this prompt")
+
+        print(f"\n{'=' * 80}\n")
+
+        pytest.fail(
+            f"Decode logprobs do not match prefill logprobs: "
+            f"{len(failed_comparisons)} mismatches found."
+        )
+    else:
+        print("✓ SUCCESS: All decode logprobs match prefill logprobs bitwise!")
+        print(f"{'=' * 80}\n")
+
+
+def _supports_online_fp8() -> bool:
+    if current_platform.is_rocm():
+        # Imported lazily: this module resolves the GPU arch at import time.
+        from vllm.platforms.rocm import on_mi3xx
+
+        return on_mi3xx()
+    return current_platform.has_device_capability(89)
+
+
+@skip_if_not_cuda_alike
+@pytest.mark.skipif(
+    not _supports_online_fp8(),
+    reason="Online FP8 requires compute capability 8.9+ or MI300/MI355",
+)
+@pytest.mark.timeout(600)
+def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
+    """Online (per-tensor weight, dynamic activation) FP8 MoE experts must not
+    let a request's output depend on the other requests in its batch.
+
+    Guards against the expert inputs being quantized with a single dynamic
+    scale over the whole batch (issue #57016): the scale is then the max over
+    every token of every co-batched request, so greedy tokens and logprobs
+    change with batch composition even though each batch is deterministic.
+    """
+    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
+    prompts = [_random_prompt(10, 50) for _ in range(8)]
+    sp = SamplingParams(temperature=0.0, max_tokens=32, logprobs=1)
+
+    llm = LLM(
+        model="ibm-granite/granite-3.1-1b-a400m-instruct",
+        quantization="fp8_per_tensor",
+        enforce_eager=True,
+        max_num_seqs=8,
+        max_model_len=2048,
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        bs1 = [
+            _extract_step_logprobs(llm.generate([p], sp, use_tqdm=False)[0])
+            for p in prompts
+        ]
+        bsN = [
+            _extract_step_logprobs(o) for o in llm.generate(prompts, sp, use_tqdm=False)
+        ]
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, ((lp1, tok1), (lpN, tokN)) in enumerate(zip(bs1, bsN)):
+        assert lp1 is not None and lpN is not None
+        assert tok1 == tokN, (
+            f"Prompt {i}: tokens differ between BS=1 and BS={len(prompts)}: "
+            f"{tok1} vs {tokN}"
+        )
+        assert torch.equal(lp1, lpN), (
+            f"Prompt {i}: logprobs are not bitwise equal between BS=1 and "
+            f"BS={len(prompts)}; max abs diff {(lp1 - lpN).abs().max():.3e}"
+        )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(90)),
+    reason="FA3 drops covered sliding windows only on CUDA Hopper",
+)
+@pytest.mark.timeout(600)
+def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch():
+    """A sliding-window request must decode the same bits alone (FULL CUDA
+    graphs) and next to other requests' prefill chunks (eager), see #65587."""
+    model = "google/gemma-2-2b-it"
+    window = get_config(model, trust_remote_code=False).sliding_window
+    max_model_len = 2 * window
+    max_tokens = 16
+    rng = random.Random(int(os.getenv("VLLM_TEST_SEED", "12345")))
+
+    def prompt(num_tokens: int) -> TokensPrompt:
+        ids = [rng.randint(1000, 30000) for _ in range(num_tokens)]
+        return TokensPrompt(prompt_token_ids=ids)
+
+    # Every sequence spans several KV tiles but stays inside the window, so
+    # mixed steps see max_seqlen_k < window while FULL graphs see max_model_len.
+    targets = [prompt(rng.randint(256, 512)) for _ in range(4)]
+    fillers = [prompt(rng.randint(window // 2, window - max_tokens)) for _ in range(4)]
+
+    # Random token ids make Gemma emit <end_of_turn> within a few steps.
+    sp = SamplingParams(
+        temperature=0.0, max_tokens=max_tokens, logprobs=1, ignore_eos=True
+    )
+    llm = LLM(
+        model=model,
+        attention_config={"backend": "FLASH_ATTN"},
+        compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
+        max_model_len=max_model_len,
+        max_num_batched_tokens=256,
+        max_num_seqs=len(targets) + len(fillers),
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        alone = [
+            _extract_step_logprobs(llm.generate([p], sp, use_tqdm=False)[0])
+            for p in targets
+        ]
+        outputs = llm.generate(targets + fillers, sp, use_tqdm=False)
+        batched = [_extract_step_logprobs(o) for o in outputs[: len(targets)]]
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, ((lp1, tok1), (lpN, tokN)) in enumerate(zip(alone, batched)):
+        assert len(tok1) == max_tokens and len(tokN) == max_tokens
+        assert tok1 == tokN, f"Prompt {i}: tokens differ: {tok1} vs {tokN}"
+        assert torch.equal(lp1, lpN), (
+            f"Prompt {i}: logprobs differ alone vs batched; "
+            f"max abs diff {(lp1 - lpN).abs().max():.3e}"
+        )
+
+
+def LLM_with_max_seqs(
+    model: str,
+    max_num_seqs: int,
+    gpu_memory_utilization: float,
+    max_model_len: int,
+    attention_config: dict | None = None,
+    kernel_config: dict | None = None,
+    max_num_batched_tokens: int | None = None,
+) -> LLM:
+    """Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
+    using the high-level v1 LLM API, while constraining memory usage.
+    """
+    extra_kwargs: dict = {}
+    if kernel_config is not None:
+        extra_kwargs["kernel_config"] = kernel_config
+    if max_num_batched_tokens is not None:
+        extra_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+    return LLM(
+        model=model,
+        max_num_seqs=max_num_seqs,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
+        dtype="auto",
+        tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
+        enable_prefix_caching=False,
+        attention_config=attention_config,
+        # Enable for MOE models
+        # enable_expert_parallel=True,
+        **extra_kwargs,
+    )

@@ -1,0 +1,291 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import pytest
+import torch
+
+from vllm.platforms import current_platform
+
+from ....utils import large_gpu_mark
+from ...registry import HF_EXAMPLE_MODELS
+from ...utils import check_logprobs_close
+
+# Models that require embedding scaling for prompt_embeds test
+EMBED_SCALING_MODELS = {
+    "openbmb/MiniCPM4.1-8B",
+}
+
+# This list contains the model that are using AITER kernel.
+# Skip model that are not using AITER tests.
+# When more AITER kernels are added, this list will not be
+# needed as all the models will be calling AITER kernels
+# in parts of the operators
+AITER_MODEL_LIST = [
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "openbmb/MiniCPM3-4B",
+    "Qwen/Qwen2.5-0.5B-Instruct",
+    "axolotl-ai-co/tiny-mixtral-30m",
+    "Qwen/Qwen3-8B",
+]
+
+
+def _input_embeds(hf_model, model: str, prompts: list[str]) -> list[torch.Tensor]:
+    """Prompt embeddings for the vLLM inputs_embeds path, off the HF model."""
+    embeds = []
+    for prompt in prompts:
+        token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
+            hf_model.model.device
+        )
+        # Retained prompt values must not keep reference weights alive.
+        with torch.no_grad():
+            embed = hf_model.model.get_input_embeddings()(token_ids)
+
+        # MiniCPM models apply scale_emb to embeddings internally.
+        # vLLM expects pre-scaled embeddings when using inputs_embeds.
+        if model in EMBED_SCALING_MODELS:
+            embed = embed * hf_model.model.config.scale_emb
+
+        embeds.append(embed.squeeze(0))
+    return embeds
+
+
+@pytest.fixture
+def hf_reference_key(request):
+    """Cache key: every parametrized value except the one the reference ignores.
+
+    Read off the parametrization so a parameter added later joins the key on
+    its own; if the reference does not depend on it, the cost is a missed hit.
+    """
+    params = dict(request.node.callspec.params)
+    params.pop("use_prompt_embeds")
+    return tuple(sorted(params.items()))
+
+
+@pytest.fixture(scope="module")
+def hf_reference_cache():
+    """Greedy HF logprobs, so one reference serves both use_prompt_embeds arms.
+
+    Without this, every model loads the HF checkpoint and decodes it once per
+    value of a parameter the reference does not depend on. The prompts are a
+    fixture constant and the only per-model edit to them is keyed on the model,
+    so hf_reference_key covers everything the reference varies with. Entries
+    hold no tensors; one is ~130 KiB.
+    """
+    cache: dict[tuple[tuple[str, object], ...], list] = {}
+    yield cache
+    cache.clear()
+
+
+# @maybe_test_rocm_aiter
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(
+            "bigscience/bloom-560m",  # bloom - testing alibi slopes
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.slow_test,
+                pytest.mark.cpu_model,
+            ],
+        ),
+        pytest.param(
+            "openai-community/gpt2",  # gpt2
+            marks=[pytest.mark.core_model]
+            + ([pytest.mark.flaky(reruns=2)] if current_platform.is_xpu() else []),
+        ),
+        pytest.param("vllm-project/slovak-gpt-j-405M"),  # gptj
+        pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
+        pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
+        pytest.param(
+            "google/gemma-1.1-2b-it",  # gemma
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.slow_test,
+            ],
+        ),
+        pytest.param(
+            "google/gemma-2-2b-it",  # test hybrid attention
+            marks=[pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "zai-org/chatglm3-6b",  # chatglm (text-only)
+        ),
+        pytest.param(
+            "meta-llama/Llama-3.2-1B-Instruct",  # llama
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "openbmb/MiniCPM4.1-8B",  # minicpm
+            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=48)],
+        ),
+        pytest.param(
+            "facebook/opt-125m",  # opt
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "facebook/opt-350m",  # opt with projected token embeddings
+        ),
+        pytest.param(
+            "microsoft/phi-2",  # phi
+            marks=[pytest.mark.core_model, pytest.mark.slow_test],
+        ),
+        pytest.param(
+            "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.slow_test,
+            ],
+        ),
+        pytest.param(
+            "Qwen/Qwen3-8B",  # qwen (text-only)
+        ),
+        pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
+        pytest.param("bigcode/starcoder2-3b"),  # starcoder2
+        pytest.param(
+            "axolotl-ai-co/tiny-mixtral-30m",  # mixtral
+            marks=[pytest.mark.core_model],
+        ),
+        pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
+        pytest.param("domyn/Domyn-Edge-Base"),  # domyn_edge
+        pytest.param(
+            "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
+            marks=[large_gpu_mark(min_gb=32)],
+        ),
+    ],
+)
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+)
+@pytest.mark.parametrize("use_prompt_embeds", [True, False])
+def test_models(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    hf_reference_cache,
+    hf_reference_key,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+    use_rocm_aiter: bool,
+    use_prompt_embeds: bool,
+    monkeypatch,
+) -> None:
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
+    if use_rocm_aiter and (model in AITER_MODEL_LIST):
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    elif use_rocm_aiter and model not in AITER_MODEL_LIST:
+        # Skip model that are not using AITER tests.
+        # When more AITER kernels are added, this list will not be
+        # needed as all the models will be calling AITER kernels
+        # in parts of the operators
+        pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
+
+    if model == "bigcode/starcoder2-3b":
+        # Replace example.txt's Test1 (an NL prompt) with a code prompt:
+        # starcoder2-3b is a code model, so NL prompts give near-uniform
+        # digit logits where HF<->vLLM bf16 drift can reorder top-K.
+        example_prompts = list(example_prompts)
+        example_prompts[1] = (
+            "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
+        )
+
+    prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
+    hf_outputs = hf_reference_cache.get(hf_reference_key)
+
+    # Embeddings have to come off a live reference model, so the checkpoint is
+    # still loaded for the inputs_embeds runs even on a cache hit.
+    if hf_outputs is None or prompt_embeds is not None:
+        with hf_runner(
+            model,
+            revision=model_info.revision,
+            trust_remote_code=model_info.trust_remote_code,
+        ) as hf_model:
+            if hf_outputs is None:
+                hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                    example_prompts,
+                    max_tokens,
+                    num_logprobs,
+                    # Domyn's remote code decodes with torch varlen_attn, whose
+                    # ROCm causal mask is top-left aligned when max_q < max_k:
+                    # https://github.com/pytorch/pytorch/pull/201930
+                    use_cache=not (
+                        current_platform.is_rocm() and model == "domyn/Domyn-Edge-Base"
+                    ),
+                )
+                hf_reference_cache[hf_reference_key] = hf_outputs
+
+            if prompt_embeds is not None:
+                prompt_embeds.extend(_input_embeds(hf_model, model, example_prompts))
+
+    vllm_kwargs = {}
+    if (
+        model == "bigscience/bloom-560m"
+        and current_platform.is_device_capability_family(90)
+    ):
+        # On SM90, the metadata builder otherwise selects FA3 AOT scheduling
+        # before Bloom's ALiBi layers fall back to FA2. Pinning FA2 keeps the
+        # builder and layer consistent and preserves the L4 test path.
+        vllm_kwargs["attention_config"] = {"flash_attn_version": 2}
+
+    with vllm_runner(
+        model,
+        tokenizer_name=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+        # Remove the effects of batch variance on this comparison since
+        # batch invariance is not yet supported.
+        # See: https://github.com/vllm-project/vllm/issues/27433
+        max_num_seqs=1,
+        enable_prompt_embeds=use_prompt_embeds,
+        compilation_config={"cudagraph_capture_sizes": [1, 2]},
+        **vllm_kwargs,
+    ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+        if prompt_embeds is not None:
+            vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
+                prompt_embeds, max_tokens, num_logprobs
+            )
+
+    # Tolerate near-ties at the top-k boundary: HF and vLLM bf16 numerics
+    # can reorder nearly tied candidates (see #42392), which otherwise
+    # fails the comparison spuriously.
+    try:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+            near_tie_tol=0.1,
+        )
+    except AssertionError:
+        # A rerun has to redraw the reference: HF decoding is nondeterministic
+        # on XPU, which is why gpt2 carries flaky(reruns=2) there (#57862).
+        hf_reference_cache.pop(hf_reference_key, None)
+        raise
+
+    if prompt_embeds is not None:
+        check_logprobs_close(
+            outputs_0_lst=vllm_outputs,
+            outputs_1_lst=vllm_outputs_from_embeds,
+            name_0="vllm",
+            name_1="vllm_from_embeds",
+            near_tie_tol=0.1,
+        )
+
+    if use_rocm_aiter:
+        # this is to ensure that vllm engine
+        # has deallocated the memory before running the next
+        # unit tests. On ROCm, when using AITER
+        # the memory might not be deallocated completely
+        # before running the next test case
+        torch.accelerator.synchronize()

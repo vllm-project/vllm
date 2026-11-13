@@ -1,0 +1,88 @@
+#pragma once
+
+#include <torch/all.h>
+
+torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
+                    const int64_t rows_per_block);
+
+torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
+                       const std::optional<at::Tensor>& in_bias,
+                       const int64_t CuCount);
+
+torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
+                              const at::Tensor& in_scale,
+                              const std::optional<at::Tensor>& in_zero_points,
+                              const std::optional<at::Tensor>& in_bias,
+                              const int64_t CuCount, const int64_t group_size);
+
+torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
+                         const std::optional<at::Tensor>& in_bias,
+                         const int64_t CuCount);
+
+void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
+               const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
+               const at::Tensor& scale_a, const at::Tensor& scale_b,
+               const int64_t CuCount);
+
+torch::Tensor mxfp4_w4a8_gemv_rdna3(const at::Tensor& a, const at::Tensor& b_q,
+                                    const at::Tensor& b_scale);
+
+torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
+                              torch::Tensor b_qzeros, torch::Tensor b_scales,
+                              bool use_v2_format);
+
+torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
+                                   torch::Tensor b_qzeros,
+                                   torch::Tensor b_scales, bool use_v2_format);
+
+void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
+                         torch::Tensor b_q_weight, torch::Tensor b_scales,
+                         torch::Tensor b_qzeros, torch::Tensor topk_weights,
+                         torch::Tensor sorted_token_ids,
+                         torch::Tensor expert_ids,
+                         torch::Tensor num_tokens_post_padded, int64_t top_k,
+                         int64_t block_size_m, bool mul_topk_weight,
+                         int64_t output_topk);
+
+// RDNA3.5 decode and prefill attention: the fields of every build (none off
+// gfx1151), and a launch of one build by its index.
+std::vector<int64_t> rdna_decode_configs();
+std::vector<int64_t> rdna_decode_batch_configs();
+void rdna_decode_attn(int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,
+                      torch::Tensor& block_table, torch::Tensor& out,
+                      torch::Tensor& acc, torch::Tensor& m, torch::Tensor& l,
+                      torch::Tensor& cnt, torch::Tensor& seq_lens, double scale,
+                      const std::optional<torch::Tensor>& mm_ranges,
+                      bool batched);
+
+std::vector<int64_t> rdna_prefill_configs();
+std::vector<int64_t> rdna_prefill_batch_configs();
+void rdna_prefill_attn(int64_t config, torch::Tensor& q,
+                       torch::Tensor& kv_cache, torch::Tensor& block_table,
+                       torch::Tensor& out, torch::Tensor& partial_o,
+                       torch::Tensor& partial_ml, torch::Tensor& counters,
+                       torch::Tensor& seq_lens, int64_t max_seq_len,
+                       double scale,
+                       const std::optional<torch::Tensor>& mm_ranges,
+                       const std::optional<torch::Tensor>& plan,
+                       const std::optional<torch::Tensor>& query_start_loc,
+                       int64_t head_group);
+
+void paged_attention(
+    torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
+    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
+    torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens,
+    const std::optional<torch::Tensor>& query_start_loc, int64_t block_size,
+    int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
+    torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale,
+    const std::string& mfma_type, bool use_interleaved_v_cache);
+
+// RDNA3.5 only: Fused Gated Delta Net prefill kernel.
+// Mutates `out` and `final_state` in place.
+void rdna35_gdn_chunked(torch::Tensor& q, torch::Tensor& k, torch::Tensor& v,
+                        torch::Tensor& g, torch::Tensor& beta,
+                        std::optional<torch::Tensor> initial_state,
+                        torch::Tensor& cu_seqlens, torch::Tensor& out,
+                        torch::Tensor& final_state, double scale);

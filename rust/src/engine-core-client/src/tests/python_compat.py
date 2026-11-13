@@ -1,0 +1,707 @@
+#!/usr/bin/env -S uv run
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "msgspec>=0.19,<1",
+#   "msgpack>=1,<2",
+#   "numpy>=2,<3",
+# ]
+# ///
+
+from dataclasses import dataclass
+from enum import Enum, IntEnum
+
+import msgpack
+import msgspec
+import numpy as np
+
+
+class RequestOutputKind(Enum):
+    DELTA = 1
+    FINAL_ONLY = 2
+
+
+class FinishReason(IntEnum):
+    STOP = 0
+    LENGTH = 1
+    ABORT = 2
+    ERROR = 3
+    REPETITION = 4
+
+
+# Mirror of real SamplingParams; omit_defaults makes fixtures match real maps.
+class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
+    temperature: float = 1.0
+    watermarking: bool = True
+    top_p: float = 1.0
+    top_k: int = 0
+    seed: int | None = None
+    max_tokens: int = 16
+    min_tokens: int = 0
+    thinking_token_budget: int | None = None
+    min_p: float = 0.0
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
+    repetition_penalty: float = 1.0
+    stop_token_ids: list[int] = []
+    _eos_token_id: int | None = None
+    _all_stop_token_ids: set[int] = set()
+    routed_experts_prompt_start: int = 0
+    output_kind: RequestOutputKind = RequestOutputKind.DELTA
+
+
+class KvHintAction(msgspec.Struct, frozen=True):
+    action_id: str
+    action_type: str
+    action_version: str
+    payload: dict[str, object]
+
+
+class KvHintsEnvelope(msgspec.Struct, frozen=True):
+    protocol_version: str
+    message_id: str
+    actions: list[KvHintAction]
+
+
+class LoRARequest(
+    msgspec.Struct,
+    omit_defaults=True,
+    array_like=True,
+):
+    lora_name: str
+    lora_int_id: int
+    lora_path: str = ""
+    base_model_name: str | None = None
+    load_inplace: bool = False
+    is_3d_lora_weight: bool = False
+
+
+class EngineCoreRequest(
+    msgspec.Struct,
+    array_like=True,
+    omit_defaults=True,
+):
+    request_id: str
+    prompt_token_ids: object | None
+    mm_features: object | None
+    sampling_params: EngineCoreSamplingParams | None
+    pooling_params: object | None
+    arrival_time: float
+    lora_request: LoRARequest | None = None
+    cache_salt: str | None = None
+    data_parallel_rank: int | None = None
+    prompt_embeds: object | None = None
+    prompt_is_token_ids: list[bool] | None = None
+    client_index: int = 0
+    current_wave: int = 0
+    priority: int = 0
+    trace_headers: dict[str, str] | None = None
+    resumable: bool = False
+    external_req_id: str | None = None
+    reasoning_ended: bool | None = None
+    reasoning_parser_kwargs: dict[str, object] | None = None
+    abort_immediately: bool = False
+    session_id: str | None = None
+    kv_hints: KvHintsEnvelope | None = None
+    block_hashes: list[bytes] | None = None
+
+
+@dataclass(frozen=True)
+class RequestError:
+    code: str
+    message: str
+    retryable: bool = False
+
+
+class EngineCoreOutput(
+    msgspec.Struct,
+    array_like=True,
+    omit_defaults=True,
+):
+    request_id: str
+    new_token_ids: list[int]
+    new_logprobs: object | None = None
+    new_prompt_logprobs_tensors: object | None = None
+    pooling_output: object | None = None
+    finish_reason: FinishReason | None = None
+    stop_reason: int | str | None = None
+    events: object | None = None
+    kv_transfer_params: object | None = None
+    ec_transfer_params: object | None = None
+    trace_headers: object | None = None
+    prefill_stats: object | None = None
+    routed_experts: object | None = None
+    num_nans_in_logits: int = 0
+    mm_cache_miss_hashes: list[str] | None = None
+    new_sampling_mask: object | None = None
+    spec_decode_metrics: object | None = None
+    prompt_token_id_logprobs: object | None = None
+    error: RequestError | None = None
+    watermarking: bool | None = None
+
+
+class ExtendedEngineCoreOutput(EngineCoreOutput):
+    # Match Omni's append-only schema without requiring Omni or torch.
+    multimodal_output: dict[str, object] | None = None
+    is_segment_finished: bool = False
+    new_prompt_len_snapshot: int | None = None
+
+
+class EngineCoreOutputs(
+    msgspec.Struct,
+    array_like=True,
+    omit_defaults=True,
+):
+    engine_index: int = 0
+    outputs: list[EngineCoreOutput] = []
+    scheduler_stats: object | None = None
+    timestamp: float = 0.0
+    utility_output: object | None = None
+    finished_requests: set[str] | None = None
+    wave_complete: int | None = None
+    start_wave: int | None = None
+    weight_version: str | None = None
+
+
+def token_ids(ids: list[int]) -> list:
+    # Prompt token ids as the Python frontend sends them, an int32 ndarray.
+    array = np.array(ids, dtype=np.int32)
+    return [array.dtype.str, list(array.shape), msgspec.msgpack.Ext(3, array.tobytes())]
+
+
+request = EngineCoreRequest(
+    request_id="req-1",
+    prompt_token_ids=token_ids([11, 22]),
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(
+        temperature=0.8,
+        watermarking=False,
+        top_p=0.9,
+        top_k=8,
+        seed=None,
+        max_tokens=32,
+        min_tokens=1,
+        thinking_token_budget=256,
+        min_p=0.0,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        repetition_penalty=1.0,
+        stop_token_ids=[151643],
+        _eos_token_id=151645,
+        _all_stop_token_ids={151643, 151645},
+        routed_experts_prompt_start=1,
+        output_kind=RequestOutputKind.FINAL_ONLY,
+    ),
+    pooling_params=None,
+    arrival_time=42.5,
+    client_index=0,
+    session_id="session-1",
+    kv_hints=KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="msg-1",
+        actions=[
+            KvHintAction(
+                action_id="action-1",
+                action_type="example.action",
+                action_version="1.0",
+                payload={"key": "value"},
+            )
+        ],
+    ),
+    block_hashes=[b"\x01" * 32, b"\x02" * 32],
+)
+
+# All defaults -> empty map. Regression guard for the sparse-map decode.
+defaults_request = EngineCoreRequest(
+    request_id="req-defaults",
+    prompt_token_ids=token_ids([5, 6, 7]),
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(),
+    pooling_params=None,
+    arrival_time=1.0,
+)
+
+# Embedded in a full request so the fixture also pins the `lora_request` slot.
+lora_request = EngineCoreRequest(
+    request_id="req-lora",
+    prompt_token_ids=token_ids([5, 6, 7]),
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(),
+    pooling_params=None,
+    arrival_time=2.0,
+    lora_request=LoRARequest(
+        lora_name="adapter-a",
+        lora_int_id=3,
+        lora_path="/adapters/a",
+        base_model_name="base-model",
+        load_inplace=True,
+        is_3d_lora_weight=True,
+    ),
+)
+inplace_lora_request = LoRARequest(
+    lora_name="adapter-b",
+    lora_int_id=4,
+    lora_path="/adapters/b",
+    load_inplace=True,
+)
+
+multimodal_tensor = np.array([[1.0, 2.0], [3.5, 4.25]], dtype=np.float32)
+multimodal_features = [
+    {
+        "data": {
+            "pixel_values": {
+                "data": [
+                    "float32",
+                    [2, 2],
+                    msgpack.ExtType(3, multimodal_tensor.tobytes()),
+                ],
+                "field": [
+                    "flat",
+                    {
+                        "slices": [[0, 2, None]],
+                        "dim": 0,
+                        "keep_on_cpu": False,
+                    },
+                ],
+            }
+        },
+        "modality": "image",
+        "identifier": "mm-cache-key",
+        "mm_position": {
+            "offset": 1,
+            "length": 2,
+            "is_embed": None,
+        },
+        "mm_hash": "processor-hash",
+    }
+]
+multimodal_request_wire = [
+    "req-mm",
+    [
+        "<i4",
+        [4],
+        msgpack.ExtType(3, np.array([101, 102, 103, 104], dtype=np.int32).tobytes()),
+    ],
+    multimodal_features,
+    None,
+    None,
+    43.5,
+]
+
+outputs = EngineCoreOutputs(
+    outputs=[
+        EngineCoreOutput(
+            request_id="req-1",
+            new_token_ids=[7, 8],
+            finish_reason=FinishReason.ERROR,
+            error=RequestError("engine_paused", "Generation is paused.", True),
+            watermarking=True,
+            routed_experts=[
+                np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
+                [2, 1, 2],
+                msgspec.msgpack.Ext(3, np.arange(4, dtype=np.uint8).tobytes()),
+            ],
+        )
+    ],
+    finished_requests={"req-1"},
+    weight_version="v7",
+)
+
+extended_outputs = EngineCoreOutputs(
+    outputs=[
+        ExtendedEngineCoreOutput(
+            **msgspec.structs.asdict(outputs.outputs[0]),
+            multimodal_output={"audio": b"\x00\x01"},
+            is_segment_finished=True,
+            new_prompt_len_snapshot=12,
+        )
+    ],
+    finished_requests=outputs.finished_requests,
+    weight_version=outputs.weight_version,
+)
+extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
+# The ordinary frontend's schema ignores even non-default extension values.
+assert msgspec.msgpack.decode(extended_outputs_bytes, type=EngineCoreOutputs) == outputs
+
+sampling_mask_wire = [
+    [
+        "<i4",
+        [5],
+        msgspec.msgpack.Ext(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
+    ],
+    None,
+    None,
+]
+outputs_with_sampling_mask = EngineCoreOutputs(
+    outputs=[
+        EngineCoreOutput(
+            request_id="req-mask",
+            new_token_ids=[16],
+            new_sampling_mask=sampling_mask_wire,
+        )
+    ]
+)
+
+
+def encode_ndarray(
+    array: np.ndarray,
+    buffers: list[bytes],
+    *,
+    size_threshold: int = 256,
+):
+    arr_data = array.data if array.flags.c_contiguous else array.tobytes()
+    if not array.shape or array.nbytes < size_threshold:
+        data = msgpack.ExtType(3, bytes(arr_data))
+    else:
+        data = len(buffers)
+        buffers.append(bytes(arr_data))
+    return [array.dtype.str, list(array.shape), data]
+
+
+def encode_tensor_like(
+    dtype: str,
+    shape: list[int],
+    payload: bytes,
+    buffers: list[bytes],
+    *,
+    size_threshold: int = 256,
+):
+    if len(payload) < size_threshold:
+        data = msgpack.ExtType(3, payload)
+    else:
+        data = len(buffers)
+        buffers.append(payload)
+    return [dtype, shape, data]
+
+
+def encode_output_frames(obj, *, size_threshold: int = 256) -> list[bytes]:
+    buffers = [b""]
+
+    def transform(value):
+        if isinstance(value, np.ndarray):
+            return encode_ndarray(value, buffers, size_threshold=size_threshold)
+        if (
+            isinstance(value, tuple)
+            and len(value) == 3
+            and value[0] in ("int32", "int64", "float32")
+        ):
+            dtype, shape, payload = value
+            return encode_tensor_like(
+                dtype,
+                shape,
+                payload,
+                buffers,
+                size_threshold=size_threshold,
+            )
+        if type(value) is list:
+            return [transform(v) for v in value]
+        if type(value) is tuple:
+            return [transform(v) for v in value]
+        if type(value) is dict:
+            return {k: transform(v) for k, v in value.items()}
+        return value
+
+    buffers[0] = msgpack.packb(transform(obj), use_bin_type=True)
+    return buffers
+
+
+def engine_output_wire(
+    request_id: str,
+    *,
+    new_logprobs=None,
+    new_prompt_logprobs_tensors=None,
+):
+    return [
+        request_id,
+        [7, 8],
+        new_logprobs,
+        new_prompt_logprobs_tensors,
+        None,
+        int(FinishReason.LENGTH),
+    ]
+
+
+def engine_outputs_wire(output):
+    return [0, [output], None, 0.0, None, ["req-1"]]
+
+
+inline_logprobs = engine_outputs_wire(
+    engine_output_wire(
+        "req-1",
+        new_logprobs=(
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int64),
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
+            np.array([1, 2], dtype=np.int64),
+            None,
+        ),
+    )
+)
+
+multipart_logprobs = engine_outputs_wire(
+    engine_output_wire(
+        "req-1",
+        new_logprobs=(
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int64),
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
+            np.array([1, 2], dtype=np.int64),
+            None,
+        ),
+    )
+)
+
+inline_prompt_logprobs = engine_outputs_wire(
+    engine_output_wire(
+        "req-1",
+        new_prompt_logprobs_tensors=(
+            (
+                "int64",
+                [2, 3],
+                np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes(),
+            ),
+            (
+                "float32",
+                [2, 3],
+                np.array(
+                    [[10, 11, 12], [13, 14, 15]],
+                    dtype=np.float32,
+                ).tobytes(),
+            ),
+            ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
+        ),
+    )
+)
+
+multipart_prompt_logprobs = engine_outputs_wire(
+    engine_output_wire(
+        "req-1",
+        new_prompt_logprobs_tensors=(
+            (
+                "int64",
+                [2, 3],
+                np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes(),
+            ),
+            (
+                "float32",
+                [2, 3],
+                np.array(
+                    [[10, 11, 12], [13, 14, 15]],
+                    dtype=np.float32,
+                ).tobytes(),
+            ),
+            ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
+        ),
+    )
+)
+
+
+@dataclass
+class KVEventsConfig:
+    enable_kv_cache_events: bool
+    publisher: str
+    endpoint: str
+    replay_endpoint: str | None
+    buffer_steps: int
+    hwm: int
+    max_queue_size: int
+    topic: str
+
+
+@dataclass
+class PrefixHashConfig:
+    hash_algo: str
+    hash_block_size: int
+    none_hash: bytes
+    num_lookahead_tokens: int = 0
+
+
+@dataclass
+class EngineCoreReadyResponse:
+    max_model_len: int
+    num_gpu_blocks: int
+    block_size: int
+    dp_stats_address: str | None
+    dtype: str
+    vllm_version: str
+    world_size: int
+    data_parallel_size: int
+    tensor_parallel_size: int
+    pipeline_parallel_size: int
+    decode_context_parallel_size: int
+    data_parallel_rank: int
+    max_num_seqs: int
+    max_num_batched_tokens: int
+    instance_id: str
+    supports_lora: bool
+    max_loras: int
+    kv_cache_size_tokens: int | None = None
+    kv_cache_max_concurrency: float | None = None
+    kv_events_config: KVEventsConfig | None = None
+    weight_transfer_backend: str | None = None
+    enable_sleep_mode: bool = False
+    supports_draft_weight_updates: bool = False
+    effective_attention_block_size: int | None = None
+    vllm_config: dict | None = None
+    prefix_hash_config: PrefixHashConfig | None = None
+    cache_config_info: dict[str, str] | None = None
+    config_hash: str | None = None
+    enable_expert_parallel: bool = False
+
+
+ready_response = EngineCoreReadyResponse(
+    max_model_len=32768,
+    num_gpu_blocks=1000,
+    block_size=16,
+    dp_stats_address=None,
+    dtype="float32",
+    vllm_version="0.0.0",
+    data_parallel_size=1,
+    world_size=1,
+    tensor_parallel_size=1,
+    pipeline_parallel_size=1,
+    decode_context_parallel_size=1,
+    data_parallel_rank=0,
+    max_num_seqs=256,
+    max_num_batched_tokens=8192,
+    instance_id="test-instance",
+    supports_lora=True,
+    max_loras=8,
+    weight_transfer_backend="nccl",
+    enable_sleep_mode=True,
+    supports_draft_weight_updates=True,
+    effective_attention_block_size=64,
+    prefix_hash_config=PrefixHashConfig(
+        hash_algo="sha256",
+        hash_block_size=16,
+        none_hash=bytes(range(32)),
+        num_lookahead_tokens=1,
+    ),
+    kv_events_config=KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://127.0.0.1:5557",
+        replay_endpoint="tcp://127.0.0.1:5558",
+        buffer_steps=10_000,
+        hwm=100_000,
+        max_queue_size=100_000,
+        topic="kv",
+    ),
+    vllm_config={
+        "model_config": {"model": "test-model", "max_model_len": 32768},
+        "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+        "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+        "speculative_config": None,
+    },
+    cache_config_info={"block_size": "16", "mamba_block_size": "None"},
+    config_hash="0123456789",
+    enable_expert_parallel=True,
+)
+
+nixl_stats = {
+    "transfer_duration": [0.01, 0.02],
+    "post_duration": [0.001, 0.002],
+    "bytes_transferred": [4096, 8192],
+    "num_descriptors": [2, 4],
+    "num_failed_transfers": [],
+    "num_failed_notifications": [1],
+    "num_failed_handshakes": [1],
+    "num_kv_expired_reqs": [1],
+    "num_notifications_after_expiry": [2],
+}
+mooncake_stats = {
+    "load_get": [
+        {
+            "duration_seconds": 0.05,
+            "num_keys": 3,
+            "num_bytes": 1024,
+            "status": "ok",
+            "num_failed_keys": 0,
+        }
+    ]
+}
+mooncake_transfer_stats = {
+    "transfer_duration": [0.01, 0.02],
+    "bytes_transferred": [4096, 8192],
+    "num_descriptors": [2, 4],
+    "num_failed_transfers": [1],
+    "num_failed_recvs": [],
+    "num_kv_expired_reqs": [1],
+}
+# `UMBPStoreConnectorStats.data`: interval counters keyed by operation.
+umbp_stats = {
+    "load": {"submitted": 3, "completed": 2, "failed": 1, "num_bytes": 8192},
+    "store": {"submitted": 1, "completed": 1, "failed": 0, "num_bytes": 4096},
+}
+# `SimpleCPUOffloadStats.data` as `SimpleCPUOffloadScheduler.get_stats` fills
+# it: metric types, and samples keyed by metric name and label-value tuple. The
+# last metric stands for one Python adds later, which Rust must ignore.
+simple_cpu_offload_stats = {
+    "types": {
+        "vllm:simple_kv_offload_save_outcomes_total": "counter",
+        "vllm:simple_kv_offload_load_blocks_total": "counter",
+        "vllm:simple_kv_offload_used_blocks": "gauge",
+        "vllm:simple_kv_offload_pending_store_blocks": "gauge",
+        "vllm:simple_kv_offload_info": "gauge",
+        "vllm:simple_kv_offload_future_blocks": "gauge",
+    },
+    "data": {
+        "vllm:simple_kv_offload_save_outcomes_total": {
+            ("stored",): 3,
+            ("skipped_in_flight",): 1,
+        },
+        "vllm:simple_kv_offload_load_blocks_total": {(): 4},
+        "vllm:simple_kv_offload_used_blocks": {(): 9},
+        "vllm:simple_kv_offload_pending_store_blocks": {(): 2},
+        "vllm:simple_kv_offload_info": {("cpu", "false", "true", "64"): 1},
+        "vllm:simple_kv_offload_future_blocks": {(): 7},
+    },
+}
+# `OffloadingConnector` stats share the `types`/`data` envelope.
+kv_offload_stats = {
+    "types": {"vllm:kv_offload_load_bytes": "counter"},
+    "data": {"vllm:kv_offload_load_bytes": {(): 4096}},
+}
+multi_connector_stats = {
+    "NixlConnector": nixl_stats,
+    "MooncakeConnector": mooncake_transfer_stats,
+    "MooncakeStoreConnector": mooncake_stats,
+    "UMBPStoreConnector": umbp_stats,
+    "SimpleCPUOffloadConnector": simple_cpu_offload_stats,
+    "UnsupportedConnector": {"sample_count": 1},
+}
+
+print(msgspec.msgpack.encode(request).hex())
+print(msgspec.msgpack.encode(defaults_request).hex())
+print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
+print(msgspec.msgpack.encode(outputs).hex())
+print(msgspec.msgpack.encode(outputs_with_sampling_mask).hex())
+print(" ".join(frame.hex() for frame in encode_output_frames(inline_logprobs)))
+print(
+    " ".join(
+        frame.hex()
+        for frame in encode_output_frames(multipart_logprobs, size_threshold=1)
+    )
+)
+print(" ".join(frame.hex() for frame in encode_output_frames(inline_prompt_logprobs)))
+print(
+    " ".join(
+        frame.hex()
+        for frame in encode_output_frames(multipart_prompt_logprobs, size_threshold=1)
+    )
+)
+print(msgspec.msgpack.encode(nixl_stats).hex())
+print(msgspec.msgpack.encode(mooncake_stats).hex())
+print(msgspec.msgpack.encode(mooncake_transfer_stats).hex())
+print(msgspec.msgpack.encode(umbp_stats).hex())
+print(msgspec.msgpack.encode(multi_connector_stats).hex())
+print(msgspec.msgpack.encode(ready_response).hex())
+print(extended_outputs_bytes.hex())
+print(msgspec.msgpack.encode(lora_request).hex())
+print(msgspec.msgpack.encode(inplace_lora_request).hex())
+print(msgspec.msgpack.encode(simple_cpu_offload_stats).hex())
+print(msgspec.msgpack.encode(kv_offload_stats).hex())

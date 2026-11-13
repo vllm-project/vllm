@@ -1,0 +1,420 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from collections.abc import Callable
+from dataclasses import InitVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
+
+from pydantic import Field, field_validator
+
+from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.logger import init_logger
+from vllm.utils.import_utils import resolve_obj_by_qualname
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.interface import SchedulerInterface
+
+logger = init_logger(__name__)
+
+RunnerType = Literal["generate", "pooling", "draft"]
+SchedulerPolicy = Literal["fcfs", "priority"]
+
+
+@config
+class SchedulerConfig:
+    """Scheduler configuration."""
+
+    max_model_len: InitVar[int]
+    """Maximum length of a sequence (including prompt and generated text).
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    provide fallbacks and validate other attributes."""
+
+    is_encoder_decoder: InitVar[bool]
+    """True if the model is an encoder-decoder model.
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    disable chunked prefill and prefix caching for encoder-decoder models.
+    """
+
+    DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
+    DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP: ClassVar[int] = 256
+    DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
+
+    runner_type: RunnerType = "generate"
+    """The runner type to launch for the model."""
+
+    max_num_batched_tokens: int = Field(default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1)
+    """Maximum number of tokens that can be processed in a single iteration.
+
+    The default value here is mainly for convenience when testing.
+    In real usage, this should be set in `EngineArgs.create_engine_config`.
+    """
+
+    max_num_scheduled_tokens: int | None = Field(default=None, ge=1)
+    """Maximum number of tokens that the scheduler may issue in a single iteration.
+    
+    This is usually equal to max_num_batched_tokens, but can be smaller in cases
+    when the model might append tokens into the batch (such as speculative decoding).
+    Defaults to max_num_batched_tokens."""
+
+    max_num_seqs: int = Field(default=DEFAULT_MAX_NUM_SEQS, ge=1)
+    """Maximum number of sequences to be processed in a single iteration.
+
+    The default value here is mainly for convenience when testing.
+    In real usage, this should be set in `EngineArgs.create_engine_config`.
+    """
+
+    max_num_active_seqs: int | None = Field(default=None, ge=1)
+    """Maximum number of requests the scheduler admits into RUNNING.
+
+    `max_num_seqs` sizes the model runner (per-request buffers and CUDA
+    graph capture) and is also the default admission limit. Setting this
+    lowers only the number of requests that may occupy RUNNING, so decode
+    batches stay smaller without shrinking runner or graph capacity. Must
+    be `<= max_num_seqs`. `None` (default) keeps current behavior.
+    """
+
+    max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
+    """Maximum number of requests holding KV blocks for an async KV connector
+    load (e.g. a P/D NIXL pull) before they run: loads in progress, or finished
+    and waiting for a running slot.
+
+    Setting it also lets requests the connector may load asynchronously
+    (`KVConnectorBase_V1.may_load_async`, by default P/D remote-prefill
+    requests) start their loads while the running batch is full, so they are
+    ready when a slot frees. `None` (default) keeps current behavior: no cap,
+    and loads start only when a running slot is free.
+    """
+
+    max_async_kv_loads_per_step: int | None = Field(default=None, ge=1)
+    """Maximum number of async KV connector loads (e.g. a P/D NIXL pull) that
+    start in one scheduling step. Each start allocates KV blocks for the whole
+    prompt on the main thread, and with data parallelism every rank waits for the
+    slowest step. `max_num_inflight_kv_loads` bounds how many loads are held;
+    this bounds how fast they start. `None` (default) means no limit.
+
+    Requests identified by the connector as async loads wait separately, so
+    this limit does not block ordinary waiting requests. Starting loads while
+    the running batch is full still requires `max_num_inflight_kv_loads`.
+
+    **Experimental**: this option may be changed or removed in a future release.
+    """
+
+    long_prefill_token_threshold: int = Field(default=0, ge=0)
+    """For chunked prefill, a request is considered long if the prompt is
+    longer than this number of tokens. 0 disables the cap (default).
+    Ignored when chunked prefill is disabled.
+
+    The cap is not applied when the request is the only one in the batch,
+    since there is no other request for it to starve."""
+
+    long_prefill_token_threshold_adaptive: bool = Field(default=False)
+    """Floor the effective long prefill token threshold at a fair share of
+    the token budget: max_num_batched_tokens divided by the number of
+    queued and running requests. Only applies when
+    long_prefill_token_threshold is nonzero."""
+
+    max_num_queued_reqs: int | None = Field(default=None, ge=0)
+    """Maximum number of requests that can be in-flight (waiting or running)
+    at the same time, or None for no limit. When the limit is reached, new
+    requests are rejected with HTTP 503 so the client can retry on another
+    instance. This bounds vLLM's otherwise unbounded request queue and is
+    primarily a coarse capacity valve.
+
+    Unlike `max_num_seqs`, which applies per data-parallel rank, this
+    limit is enforced in the API server process and counts in-flight
+    requests across all DP ranks it routes to. Size it as roughly
+    `data_parallel_size * max_num_seqs` plus the desired queue depth if
+    it should not bind before per-rank admission does."""
+
+    max_num_queued_tokens: int | None = Field(default=None, ge=0)
+    """Maximum total prompt tokens of requests currently in the prefill
+    phase, or None for no limit. When the limit is reached, new requests
+    are rejected with HTTP 503.
+
+    This is a TTFT QoS mechanism: by setting it to
+    `target_TTFT * prefill_throughput` you reject requests when the
+    prefill backlog would exceed the latency target.  In a disaggregated
+    prefill-decode setup this maps directly to the prefill pool's
+    capacity.
+
+    Like `max_num_queued_reqs`, this limit is enforced in the API
+    server process and covers the prefill backlog across all DP ranks it
+    routes to, so `prefill_throughput` in the formula above is the
+    aggregate throughput of the deployment.
+
+    Note: the count is conservative.  A partially prefilled request
+    still contributes its full `prompt_len` until it transitions out
+    of the prefill phase, because the scheduler's per-iteration
+    `num_computed_tokens` progress is not propagated to the API
+    server process during prefill (`EngineCoreOutput` is only
+    emitted once the request starts producing tokens).  Similarly,
+    prefix-cache hits (`num_cached_tokens`) are only known to the
+    OutputProcessor after prefill completes.  This overestimates the
+    real backlog, causing earlier rejection than strictly necessary
+    — the safe direction for QoS.  The impact is limited to long
+    prompts under chunked prefill; short prompts that prefill in a
+    single iteration are unaffected."""
+
+    enable_chunked_prefill: bool = True
+    """If True, prefill requests can be chunked based
+    on the remaining `max_num_batched_tokens`.
+
+    The default value here is mainly for convenience when testing.
+    In real usage, this should be set in `EngineArgs.create_engine_config`.
+    """
+
+    is_multimodal_model: bool = False
+    """True if the model is multimodal."""
+
+    # TODO (ywang96): Make this configurable.
+    max_num_encoder_input_tokens: int = Field(init=False)
+    """Multimodal encoder compute budget, only used in V1.
+
+    NOTE: This is not currently configurable. It will be overridden by
+    max_num_batched_tokens in case max multimodal embedding size is larger."""
+
+    # TODO (ywang96): Make this configurable.
+    encoder_cache_size: int = Field(init=False)
+    """Multimodal encoder cache size, only used in V1.
+
+    NOTE: This is not currently configurable. It will be overridden by
+    max_num_batched_tokens in case max multimodal embedding size is larger."""
+
+    policy: SchedulerPolicy = "fcfs"
+    """The scheduling policy to use:
+
+    - "fcfs" means first come first served, i.e. requests are handled in order 
+      of arrival.
+    - "priority" means requests are handled based on given priority (lower
+      value means earlier handling) and time of arrival deciding any ties)."""
+
+    disable_chunked_mm_input: bool = False
+    """If set to true and chunked prefill is enabled, we do not want to
+    partially schedule a multimodal item. Only used in V1
+    This ensures that if a request has a mixed prompt
+    (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
+    some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
+    it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
+
+    # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
+    # (default) or "mod.custom_class".
+    scheduler_cls: str | type[object] | None = None
+    """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
+    the default scheduler. Can be a class directly or the path to a class of
+    form "mod.custom_class"."""
+
+    disable_hybrid_kv_cache_manager: bool | None = None
+    """If set to True, KV cache manager will allocate the same size of KV cache
+    for all attention layers even if there are multiple type of attention layers
+    like full attention and sliding window attention.
+    If set to None, the default value will be determined based on the environment
+    and starting configuration.
+    """
+
+    scheduler_reserve_full_isl: bool = True
+    """If True, the scheduler checks whether the full input sequence length
+    fits in the KV cache before admitting a new request, rather than only
+    checking the first chunk. Prevents over-admission and KV cache thrashing
+    with chunked prefill."""
+
+    watermark: float = Field(default=0.0, ge=0.0, lt=1.0)
+    """Fraction of total KV cache blocks to keep free (the watermark) when
+    admitting waiting or preempted requests into the running queue. This headroom
+    helps avoid frequent KV cache eviction and the resulting repeated preemption
+    of requests when GPU memory is scarce. Must be in the range [0.0, 1.0); 0.0
+    (the default) disables the watermark."""
+
+    prefill_schedule_interval: int = Field(default=1, ge=1)
+    """Only admit prefill once every N engine steps, leaving the steps in
+    between to decode alone. 1 (the default) admits prefill on every step.
+
+    A deferred step carries no prefill at all, including chunks of an
+    already-admitted prompt, so a long prompt can take up to N times as many
+    steps to finish prefilling."""
+
+    cache_aware_admission_window: int = Field(default=0, ge=0)
+    """Look-ahead window for cache-aware admission. Within the first N waiting
+    requests, those whose prefix is already in the KV cache are admitted ahead
+    of requests that would have to compute theirs, so a cold request does not
+    evict blocks a resident one still needs. 0 (the default) admits strictly in
+    arrival order.
+
+    Reordering is confined to the window and to requests that are merely
+    waiting, so a request that is blocked or already partially computed keeps
+    its position and nothing is moved past it. Requires prefix caching and the
+    "fcfs" policy; it is ignored otherwise. Costs one prefix-cache lookup per
+    request in the window per step, so prefer the smallest window that spans
+    the usual queue depth."""
+
+    cache_aware_admission_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    """KV cache usage below which `cache_aware_admission_window` is not applied.
+
+    Defaults to 0.5, so the window engages only once the cache is at least half
+    used. Below that there is room for both prompts and reordering would change
+    admission order without an eviction to avoid, which is a fairness cost for
+    no benefit. It also means the per-request cache probe is skipped entirely
+    while the cache is roomy. Set to 0.0 to reorder on every step."""
+
+    async_scheduling: bool | None = None
+    """If set to False, disable async scheduling. Async scheduling helps to
+    avoid gaps in GPU utilization, leading to better latency and throughput.
+    """
+
+    stream_interval: int = Field(default=1, ge=1)
+    """The interval (or buffer size) for streaming in terms of token length.
+    A smaller value (1) makes streaming smoother by sending each token immediately,
+    while a larger value (e.g., 10) reduces host overhead and may increase throughput
+    by batching multiple tokens before sending."""
+
+    @staticmethod
+    def default_factory(**kwargs):
+        """Create a `SchedulerConfig` with default values for its `InitVar`s."""
+        if "max_model_len" not in kwargs:
+            kwargs["max_model_len"] = 8192
+        if "is_encoder_decoder" not in kwargs:
+            kwargs["is_encoder_decoder"] = False
+        return SchedulerConfig(**kwargs)
+
+    def get_scheduler_cls(self) -> type["SchedulerInterface"]:
+        if self.scheduler_cls is None:
+            if self.async_scheduling:
+                from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+
+                return AsyncScheduler
+            from vllm.v1.core.sched.scheduler import Scheduler
+
+            return Scheduler
+
+        # The first half of this warning can be removed once the Scheduler interface is
+        # finalized and we can maintain support for scheduler classes that implement it
+        if not (
+            isinstance(self.scheduler_cls, str)
+            and self.scheduler_cls.startswith("vllm.")
+        ):
+            logger.warning_once(
+                "Using custom scheduler class %s. This scheduler interface is not "
+                "public and compatibility may not be maintained. If you have "
+                "subclassed Scheduler instead of AsyncScheduler, you will see "
+                "degraded performance due to async scheduling being disabled.",
+                self.scheduler_cls,  # type: ignore[arg-type]
+            )
+        if not isinstance(self.scheduler_cls, str):
+            return cast(type["SchedulerInterface"], self.scheduler_cls)
+        return resolve_obj_by_qualname(self.scheduler_cls)
+
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
+        """
+        # max_num_batched_tokens need to be included in the hash due
+        # to two reasons:
+        # 1. LoRA creates static buffers based on max_num_batched_tokens.
+        #   The tensor sizes and strides get captured in the torch.compile
+        #   graph explicitly.
+        # 2. Inductor decides whether using 32-bit or 64-bit indexing integer
+        #   based on the data sizes. `max_num_batched_tokens` has an
+        #   impact on that. For more details, please check
+        #   https://github.com/vllm-project/vllm/issues/29585
+        # PLE and other model components allocate static per-request buffers.
+        # Their shapes are captured in compiled graphs.
+        ignored_factors = {
+            "runner_type",
+            "max_num_scheduled_tokens",
+            "max_num_active_seqs",
+            "max_num_inflight_kv_loads",
+            "long_prefill_token_threshold",
+            "long_prefill_token_threshold_adaptive",
+            "max_num_queued_reqs",
+            "max_num_queued_tokens",
+            "enable_chunked_prefill",
+            "is_multimodal_model",
+            "max_num_encoder_input_tokens",
+            "encoder_cache_size",
+            "policy",
+            "disable_chunked_mm_input",
+            "scheduler_cls",
+            "disable_hybrid_kv_cache_manager",
+            "scheduler_reserve_full_isl",
+            "watermark",
+            "prefill_schedule_interval",
+            "async_scheduling",
+            "stream_interval",
+        }
+        return get_compile_factors(self, ignored_factors)
+
+    @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        return None if value is None else handler(value)
+
+    def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
+        if is_encoder_decoder:
+            # Chunked prefill should be disabled for encoder-decoder models.
+            self.disable_chunked_mm_input = True
+            self.enable_chunked_prefill = False
+            self.long_prefill_token_threshold = 0
+            logger.info(
+                "Encoder-decoder models do not support chunked prefill nor"
+                " prefix caching; disabling both."
+            )
+
+        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
+        self.encoder_cache_size = self.max_num_batched_tokens
+
+        if self.enable_chunked_prefill:
+            logger.info_once(
+                "Chunked prefill is enabled with max_num_batched_tokens=%d.",
+                self.max_num_batched_tokens,
+            )
+
+        self.verify_max_model_len(max_model_len)
+
+    def verify_max_model_len(self, max_model_len: int) -> Self:
+        if (
+            self.max_num_batched_tokens < max_model_len
+            and not self.enable_chunked_prefill
+        ):
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
+                f"smaller than max_model_len ({max_model_len}). "
+                "This effectively limits the maximum sequence length to "
+                "max_num_batched_tokens and makes vLLM reject longer "
+                "sequences. Please increase max_num_batched_tokens or "
+                "decrease max_model_len."
+            )
+
+        if self.max_num_batched_tokens < self.max_num_seqs:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
+                "be greater than or equal to max_num_seqs "
+                f"({self.max_num_seqs})."
+            )
+
+        if (
+            self.max_num_active_seqs is not None
+            and self.max_num_active_seqs > self.max_num_seqs
+        ):
+            raise ValueError(
+                f"max_num_active_seqs ({self.max_num_active_seqs}) cannot be "
+                f"greater than max_num_seqs ({self.max_num_seqs})."
+            )
+
+        if self.max_num_batched_tokens > self.max_num_seqs * max_model_len:
+            logger.warning(
+                "max_num_batched_tokens (%d) exceeds max_num_seqs "
+                "* max_model_len (%d). This may lead to unexpected behavior.",
+                self.max_num_batched_tokens,
+                self.max_num_seqs * max_model_len,
+            )
+
+        if self.long_prefill_token_threshold > max_model_len:
+            raise ValueError(
+                "long_prefill_token_threshold "
+                f"({self.long_prefill_token_threshold}) cannot be greater "
+                f"than the max_model_len ({max_model_len})."
+            )
+
+        return self

@@ -1,0 +1,432 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adapted from
+# https://github.com/sgl-project/sglang/blob/97cb762bb65ebf05025eb342de03c184660427a3/python/sglang/srt/layers/attention/triton_ops/prefill_attention.py
+# Changes:
+# - Add support for sliding window attention
+
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""Memory-efficient attention for prefill.
+It supports page size = 1.
+"""
+
+# Adapted from
+# https://github.com/ModelTC/lightllm/blob/f2a54f0912293f683bf1d1695fd12c4098a5bf82/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py#L1
+from functools import cache
+
+import torch
+
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import RCP_LN2
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
+
+
+def _prefer_narrow_kv_tile() -> bool:
+    """RDNA3/RDNA4 prefer a narrower KV tile than the shared default."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1x
+
+    # RDNA3/RDNA4 only: on_gfx1x() excludes gfx10xx and gfx1250.
+    return on_gfx1x()
+
+
+def on_gfx1151() -> bool:
+    """The only part the head-dim blocking below was tuned on."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1151 as _on_gfx1151
+
+    return _on_gfx1151()
+
+
+@triton.jit
+def _fwd_kernel(
+    Q,
+    K,
+    V,
+    Sinks,
+    sm_scale,
+    B_Start_Loc,
+    B_Seqlen,
+    Out,
+    stride_qbs,
+    stride_qh,
+    stride_kbs,
+    stride_kh,
+    stride_vbs,
+    stride_vh,
+    stride_obs,
+    stride_oh,
+    kv_group_num: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_DMODEL_TAIL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    SLIDING_WINDOW_Q: tl.constexpr,
+    SLIDING_WINDOW_K: tl.constexpr,
+    SINKS_BIAS_KEY0: tl.constexpr,
+    USE_SINKS: tl.constexpr,
+    Lk: tl.constexpr,
+    HEAD_STRIDE_ALIGNED_8: tl.constexpr,
+):
+    cur_batch = tl.program_id(0)
+    cur_head = tl.program_id(1)
+    start_m = tl.program_id(2)
+
+    cur_kv_head = cur_head // kv_group_num
+
+    cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
+    cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
+
+    block_start_loc = BLOCK_M * start_m
+
+    # initialize offsets
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+
+    # Triton only marks stride_*h divisible by 8 when head_dim is a multiple of
+    # 16, so at head_dim=72 the D-contiguous Q/K/V loads lower to scalar ones.
+    # Everywhere else the hint is something the compiler already knew.
+    off_h_q = cur_head * stride_qh
+    off_h_k = cur_kv_head * stride_kh
+    off_h_v = cur_kv_head * stride_vh
+    off_h_o = cur_head * stride_oh
+    if HEAD_STRIDE_ALIGNED_8:
+        off_h_q = tl.multiple_of(off_h_q, 8)
+        off_h_k = tl.multiple_of(off_h_k, 8)
+        off_h_v = tl.multiple_of(off_h_v, 8)
+        off_h_o = tl.multiple_of(off_h_o, 8)
+
+    off_q = (
+        (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
+        + off_h_q
+        + offs_d[None, :]
+    )
+    off_k = offs_n[None, :] * stride_kbs + off_h_k + offs_d[:, None]
+    off_v = offs_n[:, None] * stride_vbs + off_h_v + offs_d[None, :]
+
+    mask_d = offs_d < Lk
+
+    q = tl.load(
+        Q + off_q,
+        mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_d[None, :]),
+        other=0.0,
+    )
+
+    k_ptrs = K + off_k
+    v_ptrs = V + off_v
+
+    # Split-D path: a non-power-of-2 head_dim (e.g. 72) would otherwise force
+    # BLOCK_DMODEL = next_pow2(Lk) = 128, so the qk/pv dots run 8 K-passes when
+    # only ceil(Lk / 16) are needed. Covering D as a power-of-2 main block plus
+    # a power-of-2 tail block (72 -> 64 + 16 = 80) drops that to 5. Constexpr
+    # guarded: BLOCK_DMODEL_TAIL == 0 is dead code, so every power-of-2 head_dim
+    # compiles to the single-block kernel exactly as before.
+    if BLOCK_DMODEL_TAIL > 0:
+        offs_dt = BLOCK_DMODEL + tl.arange(0, BLOCK_DMODEL_TAIL)
+        mask_dt = offs_dt < Lk
+        off_qt = (
+            (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
+            + off_h_q
+            + offs_dt[None, :]
+        )
+        off_kt = offs_n[None, :] * stride_kbs + off_h_k + offs_dt[:, None]
+        off_vt = offs_n[:, None] * stride_vbs + off_h_v + offs_dt[None, :]
+        qt = tl.load(
+            Q + off_qt,
+            mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
+            other=0.0,
+        )
+        kt_ptrs = K + off_kt
+        vt_ptrs = V + off_vt
+
+    # initialize pointer to m and l
+    if USE_SINKS:
+        sink = tl.load(Sinks + cur_head) * 1.4426950408889634
+        if SINKS_BIAS_KEY0:
+            # Sinks bias the logit of key 0, so the softmax starts empty and
+            # normalizes over the biased scores as usual.
+            m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+            l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+        else:
+            # Sinks are a null logit that only inflates the denominator.
+            m_i = tl.full([BLOCK_M], sink, dtype=tl.float32)
+            l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
+    else:
+        m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+        l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+    if BLOCK_DMODEL_TAIL > 0:
+        acc_t = tl.zeros([BLOCK_M, BLOCK_DMODEL_TAIL], dtype=tl.float32)
+
+    block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
+
+    # Calculate the end position for attention computation
+    end_n = cur_batch_seq_len
+
+    # Apply causal attention pruning and sliding window attention pruning
+    end_n = tl.minimum(end_n, (start_m + 1) * BLOCK_M) if IS_CAUSAL else end_n
+
+    # Calculate the start position for backward sliding window.
+    # Keys outside the window are fully masked below, so skip those blocks
+    # rather than loading them and discarding the result. Without this a
+    # windowed pass still costs O(seq_len^2).
+    start_n_limit = 0
+    if SLIDING_WINDOW_Q > 0:
+        first_needed = start_m * BLOCK_M - SLIDING_WINDOW_Q
+        start_n_limit = tl.maximum(0, (first_needed // BLOCK_N) * BLOCK_N)
+    if SLIDING_WINDOW_K > 0:
+        last_needed = (start_m + 1) * BLOCK_M - 1 + SLIDING_WINDOW_K
+        end_n = tl.minimum(end_n, last_needed + 1)
+    end_n_limit = block_mask * end_n
+
+    for start_n in range(start_n_limit, end_n_limit, BLOCK_N):
+        # -- prepare attention mask ----
+        # Position indices in the sequence
+        pos_q = offs_m[:, None]  # Query positions [BLOCK_M, 1]
+        pos_k = start_n + offs_n[None, :]  # Key positions [1, BLOCK_N]
+
+        # Valid sequence mask
+        mask = pos_k < cur_batch_seq_len
+        # Causal mask
+        if IS_CAUSAL:
+            mask &= pos_q >= pos_k
+
+        # Bidirectional sliding window masks
+        sliding_mask_q = (
+            pos_q - pos_k <= SLIDING_WINDOW_Q if SLIDING_WINDOW_Q > 0 else None
+        )
+        sliding_mask_k = (
+            pos_k - pos_q <= SLIDING_WINDOW_K if SLIDING_WINDOW_K > 0 else None
+        )
+        if sliding_mask_q is not None:
+            mask &= sliding_mask_q
+        if sliding_mask_k is not None:
+            mask &= sliding_mask_k
+
+        start_n = tl.multiple_of(start_n, BLOCK_N)
+        # -- compute qk ----
+        k = tl.load(
+            k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+            mask=(pos_k < cur_batch_seq_len) & (mask_d[:, None]),
+            other=0.0,
+        )
+
+        qk = tl.dot(q, k)
+        if BLOCK_DMODEL_TAIL > 0:
+            kt = tl.load(
+                kt_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+                mask=(pos_k < cur_batch_seq_len) & (mask_dt[:, None]),
+                other=0.0,
+            )
+            qk = tl.dot(qt, kt, qk)
+        qk = tl.where(mask, qk * sm_scale, -1.0e8)
+        if USE_SINKS and SINKS_BIAS_KEY0:
+            qk = tl.where(mask & (pos_k == 0), qk + sink, qk)
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk -= m_ij[:, None]
+        p = tl.math.exp2(qk)
+        l_ij = tl.sum(p, 1)
+
+        # -- update m_i and l_i
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
+        # -- update output accumulator --
+        acc = acc * alpha[:, None]
+        if BLOCK_DMODEL_TAIL > 0:
+            acc_t = acc_t * alpha[:, None]
+        # update acc
+        v = tl.load(
+            v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
+            mask=((start_n + offs_n[:, None]) < cur_batch_seq_len) & (mask_d[None, :]),
+            other=0.0,
+        )
+        p = p.to(v.dtype)
+        acc = tl.dot(p, v, acc)
+        if BLOCK_DMODEL_TAIL > 0:
+            vt = tl.load(
+                vt_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
+                mask=((start_n + offs_n[:, None]) < cur_batch_seq_len)
+                & (mask_dt[None, :]),
+                other=0.0,
+            )
+            acc_t = tl.dot(p, vt, acc_t)
+        # update m_i
+        m_i = m_ij
+
+    acc = acc / l_i[:, None]
+    off_o = (
+        (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
+        + off_h_o
+        + offs_d[None, :]
+    )
+    out_ptrs = Out + off_o
+    tl.store(
+        out_ptrs, acc, mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_d[None, :])
+    )
+    if BLOCK_DMODEL_TAIL > 0:
+        acc_t = acc_t / l_i[:, None]
+        off_o_tail = (
+            (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
+            + off_h_o
+            + offs_dt[None, :]
+        )
+        tl.store(
+            Out + off_o_tail,
+            acc_t,
+            mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
+        )
+
+
+def get_block_size(dtype: torch.dtype) -> int:
+    if dtype == torch.float32:
+        return 32
+    elif current_platform.is_cuda_alike() and current_platform.has_device_capability(
+        80
+    ):
+        return 128
+    else:
+        return 64
+
+
+@cache
+def _fit_block_to_shared_memory(block: int, head_dim: int, element_size: int) -> int:
+    """Halve the tile until its Q, K and P tiles fit in shared memory."""
+    max_shared_mem = get_max_shared_memory_bytes()
+    while block > 16 and element_size * block * (2 * head_dim + block) > max_shared_mem:
+        block //= 2
+    return block
+
+
+def context_attention_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    max_input_len: int,
+    is_causal: bool = True,
+    softmax_scale: float | None = None,
+    sliding_window_q: int | None = None,
+    sliding_window_k: int | None = None,
+    sinks: torch.Tensor | None = None,
+    sinks_bias_key0: bool = False,
+):
+    """q, k, v: [b * s, head, head_dim]
+    b_start_loc: [b]
+    b_seq_len: [b]
+    out: [b * s, head, head_dim]
+    """
+    Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
+    BLOCK = get_block_size(q.dtype)
+    if Lk >= 512:
+        BLOCK = min(BLOCK, 32)
+    if current_platform.is_cuda():
+        BLOCK = _fit_block_to_shared_memory(
+            BLOCK, triton.next_power_of_2(Lk), q.element_size()
+        )
+
+    sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
+    # rescale with 1/ln(2) for triton exp2
+    sm_scale *= RCP_LN2
+
+    batch, head = b_seq_len.shape[0], q.shape[1]
+    kv_group_num = q.shape[1] // k.shape[1]
+    if sinks is not None:
+        assert sinks.shape[0] == head, "Sinks must be num_query_heads size"
+
+    grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
+    num_warps = 4 if Lk <= 64 else 8
+
+    # BLOCK_M, num_warps and num_stages stay at the shared defaults; min()
+    # leaves dtypes whose default tile is already 32, such as float32, alone.
+    BLOCK_N = min(BLOCK, 32) if _prefer_narrow_kv_tile() else BLOCK
+
+    BLOCK_DMODEL = triton.next_power_of_2(Lk)
+    if current_platform.is_xpu():
+        BLOCK_DMODEL = max(16, BLOCK_DMODEL)
+
+    BLOCK_DMODEL_TAIL = 0
+    HEAD_STRIDE_ALIGNED_8 = False
+
+    if on_gfx1151() and q.dtype in (torch.bfloat16, torch.float16):
+        # Cover the head dim as a power-of-2 main block plus a power-of-2 tail
+        # instead of padding up to next_power_of_2: 72 runs the dots over
+        # 64 + 16 = 80 lanes rather than 128. Only taken when it narrows the
+        # extent -- 112 would be 64 + 64, the same 128 lanes for 12% more time.
+        main = BLOCK_DMODEL // 2
+        tail = max(16, triton.next_power_of_2(Lk - main))
+        if Lk != BLOCK_DMODEL and main + tail < BLOCK_DMODEL:
+            BLOCK_DMODEL, BLOCK_DMODEL_TAIL = main, tail
+
+        # Keyed off the real strides rather than head_dim, so it stays sound
+        # for non-contiguous views. Only head dims that are 8 mod 16 learn
+        # anything from it; elsewhere it is measured exactly neutral.
+        HEAD_STRIDE_ALIGNED_8 = (
+            q.stride(1) % 8 == 0
+            and k.stride(1) % 8 == 0
+            and v.stride(1) % 8 == 0
+            and o.stride(1) % 8 == 0
+        )
+
+        # The 64 + 16 head dims (72 SigLIP/Qwen3-VL, 80 Qwen2.5-VL) are faster
+        # on a narrower KV tile than _prefer_narrow_kv_tile picks, with 4 warps
+        # -- but only once the loads above are vectorized. A padded head
+        # stride cannot assert the alignment, and without it the narrow tile
+        # measures ~9% slower than the wider one.
+        if HEAD_STRIDE_ALIGNED_8 and (BLOCK_DMODEL, BLOCK_DMODEL_TAIL) == (64, 16):
+            BLOCK_N, num_warps = 16, 4
+
+    sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
+    sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
+
+    _fwd_kernel[grid](
+        q,
+        k,
+        v,
+        sinks if sinks is not None else q,
+        sm_scale,
+        b_start_loc,
+        b_seq_len,
+        o,
+        q.stride(0),
+        q.stride(1),
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        o.stride(0),
+        o.stride(1),
+        kv_group_num=kv_group_num,
+        BLOCK_M=BLOCK,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        BLOCK_DMODEL_TAIL=BLOCK_DMODEL_TAIL,
+        BLOCK_N=BLOCK_N,
+        IS_CAUSAL=is_causal,
+        SLIDING_WINDOW_Q=sliding_window_q,
+        SLIDING_WINDOW_K=sliding_window_k,
+        USE_SINKS=sinks is not None,
+        SINKS_BIAS_KEY0=sinks_bias_key0,
+        num_warps=num_warps,
+        num_stages=1,
+        Lk=Lk,
+        HEAD_STRIDE_ALIGNED_8=HEAD_STRIDE_ALIGNED_8,
+    )

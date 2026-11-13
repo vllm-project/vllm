@@ -1,0 +1,571 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+
+import atexit
+import os
+import random
+import threading
+from typing import Any
+
+import torch
+import torch.distributed as dist
+from torch.distributed import ProcessGroup
+
+import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
+from vllm.config.compilation import PassConfig
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
+)
+from vllm.distributed.parallel_state import _node_count
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+logger = init_logger(__name__)
+
+# The empirical value for small batch
+PDL_ADVANCE_LAUNCH_TOKENS = 16
+
+MiB = 1024 * 1024
+
+fi_ar_available = False
+try:
+    import flashinfer.comm as flashinfer_comm  # type: ignore[no-redef]
+    from flashinfer.comm.mnnvl import (
+        TorchDistBackend,  # type: ignore[import-not-found, no-redef]
+    )
+
+    fi_ar_available = hasattr(flashinfer_comm, "allreduce_fusion")
+except ImportError:
+    pass
+
+# Workspace for standalone allreduce and non-quant ar+rms fusion
+_fi_ar_workspace = None
+# Extra workspace for quant fusion patterns. This may use either the primary
+# allreduce backend or a fallback backend when the primary workspace is not
+# available on the current topology.
+_fi_ar_quant_workspace = None
+# Creation is collective, so a failed attempt must not be retried on every
+# all-reduce call.
+_fi_ar_workspace_failed = False
+_fi_ar_quant_workspace_failed = False
+_fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
+
+
+def _get_tuned_standalone_max_size(
+    world_size: int,
+    backend: str,
+    group: ProcessGroup,
+) -> int | None:
+    if backend != "mnnvl":
+        return None
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return None
+    max_size_mb = FI_MNNVL_ALLREDUCE_MAX_SIZE_MB.get(
+        (capability.to_int(), world_size, _node_count(group))
+    )
+    return None if max_size_mb is None else int(max_size_mb * MiB)
+
+
+def _create_workspace(
+    backend: str,
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+):
+    """Create a flashinfer allreduce workspace, returning None on failure."""
+    comm_backend = TorchDistBackend(group=group)
+    rng_state = random.getstate()
+    try:
+        random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
+        # Creation may run lazily inside the first sync-checked forward (e.g.
+        # with enforce_eager, which skips warmup).
+        with gpu_sync_allowed(first_only=True):
+            workspace = flashinfer_comm.create_allreduce_fusion_workspace(
+                backend=backend,
+                world_size=world_size,
+                rank=rank,
+                max_token_num=max_token_num,
+                hidden_dim=hidden_dim,
+                dtype=dtype,
+                comm_backend=comm_backend,
+                group=group,
+            )
+        if backend == "mnnvl" and not getattr(workspace, "mc_ptr", 0):
+            workspace.destroy()
+            logger.warning_once(
+                "FlashInfer MNNVL multicast is unavailable on the current topology."
+            )
+            return None
+    except Exception as e:
+        if "multicast" in str(e).lower():
+            logger.warning_once(
+                "Failed to initialize FlashInfer All Reduce workspace: %s. "
+                "This is expected on GPUs without NVSwitch (e.g., NVLink "
+                "bridge-only or PCIe topologies).",
+                e,
+            )
+        else:
+            logger.warning_once(
+                "Failed to initialize FlashInfer All Reduce workspace: %s.",
+                e,
+            )
+        return None
+    finally:
+        random.setstate(rng_state)
+    workspace_id = id(workspace)
+    workspace_group = _fi_ar_workspace_groups.get(workspace_id)
+    if workspace_group is not None and workspace_group is not group:
+        raise RuntimeError(
+            "FlashInfer returned an all-reduce workspace already associated "
+            "with a different process group"
+        )
+    _fi_ar_workspace_groups[workspace_id] = group
+    logger.debug(
+        "Initialized FlashInfer All Reduce workspace: backend=%s, "
+        "world_size=%d, rank=%d, max_token_num=%d, hidden_dim=%d, dtype=%s",
+        backend,
+        world_size,
+        rank,
+        max_token_num,
+        hidden_dim,
+        dtype,
+    )
+    return workspace
+
+
+def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
+    """Resolve the flashinfer allreduce backend for the current setup.
+
+    Returns:
+        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None`
+        when automatic selection has no supported backend for the process
+        group.
+
+    """
+    backend = envs.VLLM_FLASHINFER_ALLREDUCE_BACKEND
+    if backend != "auto":
+        logger.debug_once("Using flashinfer allreduce backend: %s", backend)
+        return backend, False
+
+    node_count = _node_count(group)
+    config = get_current_vllm_config_or_none()
+    # TODO: drop once FlashInfer ships flashinfer-ai/flashinfer#7782.
+    if config is not None and config.attention_config.hisparse_config is not None:
+        if node_count == 1:
+            logger.info_once(
+                "Using flashinfer allreduce backend trtllm: the mnnvl fused "
+                "all-reduce + RMSNorm can crash with HiSparse (vllm#64327)."
+            )
+            return "trtllm", False
+        logger.warning_once(
+            "FlashInfer allreduce is disabled: the mnnvl fused all-reduce "
+            "+ RMSNorm can crash with HiSparse (vllm#64327), and trtllm does not "
+            "support multi-node process groups."
+        )
+        return None, False
+
+    if node_count == 1:
+        # MNNVL decodes faster than TRTLLM on single-node NVSwitch systems
+        # (about 3-5% throughput at TP4/TP8 on H200 and B200). Fall back to
+        # TRTLLM where the node lacks NVSwitch multicast and MNNVL cannot
+        # create its workspace.
+        backend = "mnnvl"
+        allow_trtllm_fallback = True
+    elif current_platform.has_device_capability(100):
+        # MNNVL requires Blackwell-class GPUs and is the only supported
+        # FlashInfer backend for a multi-node allreduce process group.
+        backend = "mnnvl"
+        allow_trtllm_fallback = False
+    else:
+        logger.debug_once(
+            "FlashInfer allreduce fusion is disabled: multi-node process groups "
+            "require an MNNVL-capable Blackwell system."
+        )
+        return None, False
+
+    logger.debug_once("Auto-selected flashinfer allreduce backend: %s", backend)
+    return backend, allow_trtllm_fallback
+
+
+def get_fi_ar_workspace(
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+    resolved_backend: tuple[str | None, bool] | None = None,
+):
+    """Return the allreduce workspace for non-quant patterns, initializing if needed.
+
+    Used by AllReduceFusionPass (non-quant patterns) and FlashInferAllReduce
+    for standalone allreduce. Backend is controlled by
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND env var. `resolved_backend` is a
+    `_resolve_fi_ar_backend` result taken while the vLLM config was current;
+    lazy creation can run outside it.
+    """
+    global _fi_ar_workspace, _fi_ar_workspace_failed
+    if _fi_ar_workspace is not None or _fi_ar_workspace_failed:
+        return _fi_ar_workspace
+
+    backend, allow_trtllm_fallback = (
+        _resolve_fi_ar_backend(group) if resolved_backend is None else resolved_backend
+    )
+
+    if backend is None:
+        return None
+
+    if backend == "trtllm" and _node_count(group) > 1:
+        raise ValueError(
+            "Flashinfer allreduce is not supported for multi-node allreduce with "
+            "'trtllm' backend. Please use 'mnnvl' backend instead."
+        )
+
+    if (
+        envs.VLLM_ALLREDUCE_USE_FLASHINFER
+        and (max_size := _get_tuned_standalone_max_size(world_size, backend, group))
+        is not None
+    ):
+        element_size = torch.empty((), dtype=dtype, device="cpu").element_size()
+        max_token_num = max(max_token_num, max_size // (hidden_dim * element_size))
+
+    def _get_or_create(be: str):
+        # Reuse the quant workspace if it was already created with the same backend
+        if _fi_ar_quant_workspace is not None and _fi_ar_quant_workspace.backend == be:
+            return _fi_ar_quant_workspace
+        return _create_workspace(
+            be, world_size, rank, max_token_num, hidden_dim, dtype, group
+        )
+
+    _fi_ar_workspace = _get_or_create(backend)
+    if _fi_ar_workspace is None and allow_trtllm_fallback and backend != "trtllm":
+        logger.warning_once(
+            "FlashInfer mnnvl allreduce workspace unavailable (likely no NVSwitch "
+            "multicast support); falling back to trtllm backend for single node."
+        )
+        backend = "trtllm"
+        _fi_ar_workspace = _get_or_create(backend)
+
+    if _fi_ar_workspace is not None:
+        logger.info_once(
+            "Initialized FlashInfer Allreduce norm fusion workspace "
+            f"with backend={backend}"
+        )
+    else:
+        _fi_ar_workspace_failed = True
+        logger.error_once(
+            "Failed to initialize FlashInfer Allreduce norm fusion workspace "
+            f"with backend={backend}"
+        )
+
+    return _fi_ar_workspace
+
+
+def get_fi_ar_quant_workspace(
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+):
+    """Return the allreduce workspace for quant patterns, initializing if needed.
+
+    Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env var, matching
+    non-quant fusion. With `auto` this prefers mnnvl and falls back to trtllm
+    only on single-node topologies where mnnvl multicast is unavailable.
+    """
+    global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed
+    if _fi_ar_quant_workspace is not None or _fi_ar_quant_workspace_failed:
+        return _fi_ar_quant_workspace
+
+    backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
+
+    if backend is None:
+        return None
+
+    if backend == "trtllm" and _node_count(group) > 1:
+        raise ValueError(
+            "Flashinfer allreduce quantization fusion is not supported for "
+            "multi-node allreduce with 'trtllm' backend. Please use 'mnnvl' "
+            "backend instead."
+        )
+
+    # Reuse the non-quant workspace if it was already created with the same
+    # backend.
+    if _fi_ar_workspace is not None and _fi_ar_workspace.backend == backend:
+        _fi_ar_quant_workspace = _fi_ar_workspace
+        return _fi_ar_quant_workspace
+
+    if (
+        _fi_ar_workspace is not None
+        and _fi_ar_workspace.backend == "trtllm"
+        and allow_trtllm_fallback
+        and backend != "trtllm"
+    ):
+        _fi_ar_quant_workspace = _fi_ar_workspace
+        return _fi_ar_quant_workspace
+
+    _fi_ar_quant_workspace = _create_workspace(
+        backend, world_size, rank, max_token_num, hidden_dim, dtype, group
+    )
+    if _fi_ar_quant_workspace is None and allow_trtllm_fallback and backend != "trtllm":
+        logger.warning_once(
+            "FlashInfer mnnvl allreduce quantization fusion workspace unavailable "
+            "(likely no NVSwitch multicast support); falling back to trtllm "
+            "backend for single node."
+        )
+        backend = "trtllm"
+        if _fi_ar_workspace is not None and _fi_ar_workspace.backend == backend:
+            _fi_ar_quant_workspace = _fi_ar_workspace
+        else:
+            _fi_ar_quant_workspace = _create_workspace(
+                backend, world_size, rank, max_token_num, hidden_dim, dtype, group
+            )
+
+    if _fi_ar_quant_workspace is not None:
+        logger.info_once(
+            "Initialized FlashInfer Allreduce norm quantization "
+            f"fusion workspace with backend={backend}"
+        )
+    else:
+        _fi_ar_quant_workspace_failed = True
+        logger.error_once(
+            "Failed to initialize FlashInfer Allreduce norm quantization "
+            f"fusion workspace with backend={backend}"
+        )
+
+    return _fi_ar_quant_workspace
+
+
+_fi_ar_workspace_lock = threading.Lock()
+
+
+def destroy_fi_ar_workspace():
+    global _fi_ar_workspace, _fi_ar_quant_workspace
+    global _fi_ar_workspace_failed, _fi_ar_quant_workspace_failed
+    with _fi_ar_workspace_lock:
+        is_alias = _fi_ar_workspace is _fi_ar_quant_workspace
+
+        if _fi_ar_workspace is not None:
+            _fi_ar_workspace.destroy()
+        if _fi_ar_quant_workspace is not None and not is_alias:
+            _fi_ar_quant_workspace.destroy()
+
+        _fi_ar_workspace = _fi_ar_quant_workspace = None
+        _fi_ar_workspace_failed = _fi_ar_quant_workspace_failed = False
+        _fi_ar_workspace_groups.clear()
+
+
+def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
+    workspaces = [_fi_ar_workspace]
+    if _fi_ar_quant_workspace is not _fi_ar_workspace:
+        workspaces.append(_fi_ar_quant_workspace)
+
+    group_workspaces = []
+    for workspace in workspaces:
+        if workspace is None:
+            continue
+        workspace_group = _fi_ar_workspace_groups.get(id(workspace))
+        if workspace_group is None:
+            raise RuntimeError(
+                "FlashInfer all-reduce workspace process group was not retained"
+            )
+        if workspace_group is group:
+            group_workspaces.append(workspace)
+    return group_workspaces
+
+
+def checkpoint_prepare_fi_ar_workspaces(
+    group: ProcessGroup, skip_unsupported: bool = False
+) -> None:
+    for workspace in _fi_ar_workspaces_for_group(group):
+        try:
+            workspace.checkpoint_prepare()
+        except NotImplementedError:
+            if not skip_unsupported:
+                raise
+            logger.info_once(
+                "FlashInfer all-reduce workspace backed by torch symmetric memory "
+                "stays resident during suspend."
+            )
+
+
+def checkpoint_restore_fi_ar_workspaces(
+    group: ProcessGroup, skip_unsupported: bool = False
+) -> None:
+    for workspace in _fi_ar_workspaces_for_group(group):
+        try:
+            workspace.checkpoint_restore(TorchDistBackend(group=group))
+        except NotImplementedError:
+            if not skip_unsupported:
+                raise
+
+
+atexit.register(destroy_fi_ar_workspace)
+
+
+class FlashInferAllReduce:
+    def __init__(
+        self,
+        group: ProcessGroup,
+        device: int | str | torch.device,
+    ):
+        self.disabled = True
+
+        if not fi_ar_available:
+            logger.info(
+                "FlashInfer All Reduce is disabled because flashinfer is not available"
+            )
+            return
+
+        if not current_platform.is_cuda():
+            logger.info(
+                "FlashInfer All Reduce is disabled because it requires CUDA platform"
+            )
+            return
+
+        self.group = group
+        self.world_size = dist.get_world_size(self.group)
+        self.rank = dist.get_rank(self.group)
+        self.device = device
+        if self.world_size == 1:
+            return
+
+        default_max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
+            self.world_size
+        )
+        if not default_max_size_mb:
+            logger.warning(
+                "FlashInfer All Reduce is disabled because it "
+                "is not supported for world_size=%d.",
+                self.world_size,
+            )
+            return
+        self.resolved_backend = _resolve_fi_ar_backend(self.group)
+        backend = self.resolved_backend[0]
+        if backend is None:
+            logger.info(
+                "FlashInfer All Reduce is disabled because no supported backend "
+                "is available for this process group."
+            )
+            return
+        tuned_max_size = _get_tuned_standalone_max_size(
+            self.world_size,
+            backend,
+            self.group,
+        )
+        self.max_workspace_size = (
+            tuned_max_size
+            if tuned_max_size is not None
+            else int(default_max_size_mb * MiB)
+        )
+        self.max_num_tokens = 0
+        self.disabled = False
+
+    def _ensure_workspace(self, hidden_dim: int, dtype: torch.dtype) -> bool:
+        """Ensure the all reduce workspace is initialized."""
+        if self.max_num_tokens == 0:
+            element_size = torch.tensor([], dtype=dtype, device="cpu").element_size()
+            self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
+        workspace = get_fi_ar_workspace(
+            world_size=self.world_size,
+            rank=self.rank,
+            max_token_num=self.max_num_tokens,
+            hidden_dim=hidden_dim,
+            dtype=dtype,
+            group=self.group,
+            resolved_backend=self.resolved_backend,
+        )
+        if workspace is None:
+            self.disabled = True
+            return False
+        return True
+
+    def should_use_fi_ar(self, input_tensor: torch.Tensor) -> bool:
+        if self.disabled:
+            return False
+
+        if not input_tensor.is_cuda:
+            return False
+
+        if not input_tensor.is_contiguous():
+            return False
+
+        if len(input_tensor.shape) != 2:
+            return False
+
+        if input_tensor.dtype not in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ):
+            return False
+
+        if input_tensor.nbytes > self.max_workspace_size:
+            return False
+
+        num_tokens, hidden_dim = input_tensor.shape
+        element_size = input_tensor.element_size()
+
+        # The fusion kernels load each token row as float4, so a row must be a
+        # whole number of 16-byte vectors. MNNVL asserts on this.
+        if hidden_dim * element_size % 16 != 0:
+            return False
+
+        if not self.max_num_tokens:
+            self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
+
+        if num_tokens > self.max_num_tokens:
+            return False
+
+        if not self._ensure_workspace(hidden_dim, input_tensor.dtype):
+            return False
+
+        workspace = get_fi_ar_workspace(
+            world_size=self.world_size,
+            rank=self.rank,
+            max_token_num=self.max_num_tokens,
+            hidden_dim=hidden_dim,
+            dtype=input_tensor.dtype,
+            group=self.group,
+        )
+        assert workspace is not None
+        # The token bound above uses the full allocation budget, but mnnvl's
+        # Lamport buffers rotate through three slots, so only ~1/3 is usable per
+        # call. Asking the workspace directly to reject sizes the kernel can't fit.
+        return workspace.is_buffer_size_sufficient(
+            tp_size=self.world_size,
+            num_tokens=num_tokens,
+            hidden_dim=hidden_dim,
+            dtype=input_tensor.dtype,
+        )
+
+    def all_reduce(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_dim = input_tensor.shape
+        workspace = get_fi_ar_workspace(
+            world_size=self.world_size,
+            rank=self.rank,
+            max_token_num=self.max_num_tokens,
+            hidden_dim=hidden_dim,
+            dtype=input_tensor.dtype,
+            group=self.group,
+        )
+        return flashinfer_comm.allreduce_fusion(
+            input=input_tensor,
+            workspace=workspace,
+            pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
+            launch_with_pdl=True,
+            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
+        )
+
+    def destroy(self):
+        if not self.disabled:
+            destroy_fi_ar_workspace()

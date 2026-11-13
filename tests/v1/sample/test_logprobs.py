@@ -1,0 +1,1742 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import itertools
+import math
+from collections.abc import Generator
+from types import SimpleNamespace
+from typing import get_args
+from unittest.mock import patch
+
+import numpy as np
+import pytest
+import torch
+from pydantic import TypeAdapter, ValidationError
+
+from tests.utils import large_gpu_mark
+from tests.v1.sample.utils import (
+    BatchLogprobsComposition,
+    BatchLogprobsSpecType,
+    assert_incr_detok_str_matches_non_incr_detok_str,
+    compute_correct_cumulative_logprob,
+    get_test_batch,
+)
+from vllm import SamplingParams, TokensPrompt
+from vllm.config.model import LogprobsMode
+from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.exceptions import VLLMValidationError
+from vllm.logprobs import Logprob
+from vllm.platforms import current_platform
+from vllm.v1.engine.input_processor import InputProcessor
+
+from ...conftest import HfRunner, VllmRunner
+
+MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+DTYPE = "half"
+
+NONE = BatchLogprobsComposition.NONE
+SAMPLE = BatchLogprobsComposition.SAMPLE
+PROMPT = BatchLogprobsComposition.PROMPT
+SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
+
+# On ROCm, floating-point reductions in attention and GEMM kernels are
+# non-associative and sensitive to batch geometry. If the ref LLM and
+# spec-decode LLM use different scheduling or batch geometry, they can
+# follow different reduction orders and produce numerically divergent
+# logprobs that get misattributed to spec-decode incorrectness.
+#
+# Force LLM instances into an identical, deterministic execution
+# mode so the test isolates spec-decode correctness only:
+if current_platform.is_rocm():
+    GPU_DETERMINISM_KWARGS: dict = dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
+elif current_platform.is_xpu():
+    GPU_DETERMINISM_KWARGS = dict(max_num_seqs=1, attention_backend="FLASH_ATTN")
+else:
+    GPU_DETERMINISM_KWARGS = {}
+
+
+@pytest.fixture(
+    scope="module",
+    # Parameterize APC
+    params=[False, True],
+)
+def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
+    with vllm_runner(
+        MODEL,
+        dtype=DTYPE,
+        max_logprobs=7,
+        # Very small number of batched tokens to ensure
+        # that we test chunking.
+        max_num_batched_tokens=16,
+        max_num_seqs=16,
+        max_model_len=128,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        # TODO: enable this once we support it for
+        # prompt logprobs.
+        enable_prefix_caching=request.param,
+        gpu_memory_utilization=0.4,
+    ) as vllm_model:
+        yield vllm_model
+
+
+@pytest.fixture(scope="module")
+def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
+    with hf_runner(MODEL, dtype=DTYPE) as hf_model:
+        yield hf_model
+
+
+def _model_config(vocab_size: int = 10, max_logprobs: int = 20):
+    return SimpleNamespace(
+        max_logprobs=max_logprobs,
+        max_model_len=16,
+        logits_processors=None,
+        is_diffusion=False,
+        get_vocab_size=lambda: vocab_size,
+    )
+
+
+def _repeat_logprob_config(
+    test_prompts,
+    logprob_prompt_logprob_list: BatchLogprobsSpecType,
+) -> BatchLogprobsSpecType:
+    """Ensure each test prompt has a logprob config.
+
+    A logprob config specifies the optional (i.e.
+    may-be-`None`) number of sample logprobs and
+    the optional number of prompt logprobs.
+
+    If more test prompts than logprob configs are
+    provided, the provided logprob configs are
+    tiled to match the number of test prompts.
+
+    If fewer test prompts than logprob configs
+    are provided, the list of logprob configs
+    is truncated to match the number of test
+    prompts.
+
+    Otherwise, the list of logprob configs
+    is returned as-is.
+
+    Args:
+      test_prompts: list of prompts under test
+      logprob_prompt_logprob_list: list of
+                            (optional num sample logprob,
+                             optional num prompt logprob)
+                             tuples
+
+    Returns:
+      list of
+      (optional num sample logprob,optional num prompt logprob)
+      tuples which is either identical to
+      `logprob_prompt_logprob_list`, or else repeats
+      `logprob_prompt_logprob_list` enough times to match the
+      number of `test_prompts`, or else is truncated to match
+      the number of `test_prompts`
+
+    """
+    num_test_prompts = len(test_prompts)
+    # Make sure there is a logprobs configuration for each test prompt
+    logprob_prompt_logprob_list = list(
+        itertools.islice(itertools.cycle(logprob_prompt_logprob_list), num_test_prompts)
+    )
+    # Now the number of prompts should match the number of sample params combos
+    assert num_test_prompts == len(logprob_prompt_logprob_list)
+    return logprob_prompt_logprob_list
+
+
+def _run_and_validate(
+    vllm_model: VllmRunner,
+    test_prompts: list[str],
+    vllm_sampling_params: SamplingParams | list[SamplingParams],
+    hf_logprobs: list[list[torch.Tensor]],
+    hf_outputs: list[tuple[list[int], str]],
+    logprob_prompt_logprob_list: BatchLogprobsSpecType,
+    temperature: float,
+    max_tokens: int,
+    do_apc: bool,
+) -> None:
+    vllm_results = vllm_model.llm.generate(
+        test_prompts, sampling_params=vllm_sampling_params
+    )
+
+    for vllm_result, hf_logprob, hf_output, logprob_prompt_logprob in zip(
+        vllm_results, hf_logprobs, hf_outputs, logprob_prompt_logprob_list
+    ):
+        # Extract request-level (prompt)logprobs config
+        num_top_logprobs, num_top_prompt_logprobs = logprob_prompt_logprob
+
+        assert vllm_result.prompt_token_ids is not None
+        # Test whether sampled token output is consistent between vLLM and HF
+        # vLLM prompt+completion should match HF output
+        if temperature == 0.0:
+            assert (
+                vllm_result.prompt_token_ids + list(vllm_result.outputs[0].token_ids)
+                == hf_output[0]
+            )
+        else:
+            # Sampled tokens won't match if not greedy
+            assert (
+                vllm_result.prompt_token_ids
+                == hf_output[0][: len(vllm_result.prompt_token_ids)]
+            )
+
+        # Validate sample logprobs
+        if num_top_logprobs is not None:
+            assert num_top_logprobs is not None
+            # Confirm that the structure of the sample logprobs in the result is
+            # correct
+            assert vllm_result.outputs[0].logprobs is not None
+            assert len(vllm_result.outputs[0].logprobs) == max_tokens
+            for logprobs, token_id in zip(
+                vllm_result.outputs[0].logprobs, vllm_result.outputs[0].token_ids
+            ):
+                assert logprobs is not None
+
+                # Confirm that the output token appears among the logprobs
+                assert token_id in logprobs
+                rank = logprobs[token_id].rank
+                assert rank is not None
+                token_in_topk = rank <= num_top_logprobs
+
+                # If the output token is not included in the top K
+                # logprob, it can return 1 more data
+                if token_in_topk and num_top_logprobs != 0:
+                    assert len(logprobs) == num_top_logprobs
+                else:
+                    assert len(logprobs) == num_top_logprobs + 1
+
+                if num_top_logprobs > 0:
+                    # We should have an entry for each of the topk ranks
+                    all_ranks = {lp.rank for lp in logprobs.values()}
+                    assert all(r in all_ranks for r in range(1, num_top_logprobs + 1))
+
+            output_text = vllm_result.outputs[0].text
+            output_string_from_most_likely_tokens_lst: list[str] = []
+            for output_logprobs in vllm_result.outputs[0].logprobs:
+                assert output_logprobs is not None
+                top_logprob = next(iter(output_logprobs.values()))
+                assert top_logprob.decoded_token is not None
+                output_string_from_most_likely_tokens_lst.append(
+                    top_logprob.decoded_token
+                )
+
+            output_string_from_most_likely_tokens = "".join(
+                output_string_from_most_likely_tokens_lst
+            )
+            assert_incr_detok_str_matches_non_incr_detok_str(
+                output_text,
+                output_string_from_most_likely_tokens,
+                "The output text from the top logprob for each token "
+                "position should be the same as the output text in the "
+                "result.",
+            )
+
+            # Compare vLLM sample logprobs to HF
+            vllm_sample_logprobs = vllm_result.outputs[0].logprobs
+            for i, sample_logprobs in enumerate(vllm_sample_logprobs):
+                assert sample_logprobs is not None
+                for token_id, sample_logprob in sample_logprobs.items():
+                    if temperature == 0.0 or i == 0:
+                        logprob = sample_logprob.logprob
+                        torch.testing.assert_close(
+                            logprob,
+                            hf_logprob[i][-1][token_id].item(),
+                            atol=1e-2,
+                            rtol=1e-2,
+                        )
+                    assert isinstance(sample_logprob.decoded_token, str), (
+                        "The token should be decoded by the time it is"
+                        " returned to the user."
+                    )
+
+            # At this point we know the sample logprobs are correct for this
+            # request. Validate that cumulative_logprob is actually the sum.
+            # For each request, assert that the returned cumulative logprob
+            # matches the correct value, which is computed below.
+            torch.testing.assert_close(
+                vllm_result.outputs[0].cumulative_logprob,
+                compute_correct_cumulative_logprob(vllm_result.outputs[0]),
+                atol=1e-6,
+                rtol=1e-6,
+            )
+        else:
+            # Logprobs disabled for this request; should be None
+            assert vllm_result.outputs[0].logprobs is None
+
+        # Validate prompt logprobs
+        if num_top_prompt_logprobs is not None:
+            # Confirm that structure of prompt logprobs in result is correct
+            assert vllm_result.prompt_logprobs is not None
+            # - The first prompt logprob is always None
+            assert vllm_result.prompt_logprobs[0] is None
+            # - Prompt logprobs are returned for all indices in
+            #   the prompt
+            assert len(vllm_result.prompt_logprobs) == len(vllm_result.prompt_token_ids)
+            for prompt_logprobs, prompt_token_id in zip(
+                vllm_result.prompt_logprobs[1:], vllm_result.prompt_token_ids[1:]
+            ):
+                assert prompt_logprobs is not None
+
+                # Confirm that the prompt token appears among the logprobs
+                assert prompt_token_id in prompt_logprobs
+                prompt_rank = prompt_logprobs[prompt_token_id].rank
+                assert prompt_rank is not None
+                token_in_topk = prompt_rank <= num_top_prompt_logprobs
+
+                # If the prompt token is not included in the top K
+                # logprob, it can return 1 more data
+                if token_in_topk and num_top_prompt_logprobs != 0:
+                    assert len(prompt_logprobs) == num_top_prompt_logprobs
+                else:
+                    assert len(prompt_logprobs) == num_top_prompt_logprobs + 1
+
+                if num_top_prompt_logprobs > 0:
+                    # We should have an entry for each of the topk ranks
+                    all_ranks = {lp.rank for lp in prompt_logprobs.values()}
+                    assert all(
+                        r in all_ranks for r in range(1, num_top_prompt_logprobs + 1)
+                    )
+
+            # Compare prompt logprobs to HF
+            # The first prompt logprob is always None, so we compare it from
+            # 1:.
+            vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
+            for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
+                assert vllm_prompt_logprob_dict is not None
+                for token_id, prompt_lp in vllm_prompt_logprob_dict.items():
+                    torch.testing.assert_close(
+                        prompt_lp.logprob,
+                        hf_logprob[0][i][token_id].item(),
+                        atol=2e-2,
+                        rtol=2e-2,
+                    )
+        else:
+            assert vllm_result.prompt_logprobs is None
+
+
+@pytest.mark.parametrize(
+    "batch_logprobs_composition", [NONE, SAMPLE, PROMPT, SAMPLE_PROMPT]
+)
+@pytest.mark.parametrize("temperature", [0.0, 2.0])
+def test_get_logprobs_and_prompt_logprobs(
+    hf_model,
+    vllm_model,
+    batch_logprobs_composition: BatchLogprobsComposition,
+    temperature: float,
+    example_prompts: list[str],
+) -> None:
+    """Test V1 Engine logprobs & prompt logprobs.
+
+    Exercise a variety of combinations of `logprobs` and `prompt_logprobs`
+    settings and validate that
+    * The generated logprobs and prompt logprobs are consistent with the
+      configuration settings, in terms of whether or not the logprobs
+      (of either type) were requested and how many were requested
+    * The generated logprobs are consistent with the generated tokens
+    * The generated (prompt)logprobs are consistent with HuggingFace
+      (prompt)logprobs, as a reference
+
+    batch_logprobs_composition controls the logprobs configurations for
+    requests in the batch under test.
+
+    APC tests run two test iterations so that cache hits occur.
+
+    To save time, only test one APC-enabled scenario
+    (sample & prompt logprobs enabled, temperature>0.0).
+
+    Args:
+      hf_model: HuggingFace reference model fixture
+      vllm_model: vLLM model fixture
+      batch_logprobs_composition: logprobs configuration for test batch
+      temperature: "temperature" sampling parameter
+      example_prompts: example prompt fixture
+
+    """
+    vllm_config = vllm_model.llm.llm_engine.vllm_config
+    do_apc = vllm_config.cache_config.enable_prefix_caching
+    if do_apc and (temperature < 2.0 or batch_logprobs_composition != SAMPLE_PROMPT):
+        # Skip some test-cases to save time.
+        pytest.skip()
+    test_prompts = example_prompts
+
+    max_tokens = 5
+    hf_outputs = hf_model.generate_greedy(
+        test_prompts,
+        max_tokens=max_tokens,
+    )
+    hf_logprobs = hf_model.generate_greedy_logprobs(
+        test_prompts,
+        max_tokens=max_tokens,
+    )
+
+    # Batch has mixed sample params
+    # (different logprobs/prompt logprobs combos)
+    logprob_prompt_logprob_list = get_test_batch(batch_logprobs_composition)
+
+    # Ensure that each test prompt has a logprob config for testing
+    logprob_prompt_logprob_list = _repeat_logprob_config(
+        test_prompts, logprob_prompt_logprob_list
+    )
+    # Generate SamplingParams
+    vllm_sampling_params = [
+        SamplingParams(
+            max_tokens=max_tokens,
+            logprobs=num_lp,
+            prompt_logprobs=num_plp,
+            temperature=temperature,
+            seed=1984,
+        )
+        for num_lp, num_plp in logprob_prompt_logprob_list
+    ]
+    for _ in range(2 if do_apc else 1):
+        _run_and_validate(
+            vllm_model=vllm_model,
+            test_prompts=test_prompts,
+            vllm_sampling_params=vllm_sampling_params,
+            hf_logprobs=hf_logprobs,
+            hf_outputs=hf_outputs,
+            logprob_prompt_logprob_list=logprob_prompt_logprob_list,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            do_apc=do_apc,
+        )
+
+
+def test_max_logprobs():
+    """VLLM v1 engine should fail a request with `logprobs > max_logprobs`
+    Should also fail for `prompt_logprobs > max_logprobs`
+    APC should not matter as this test checks basic request validation.
+    """
+    with VllmRunner(
+        "facebook/opt-125m",
+        max_logprobs=1,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        max_model_len=256,
+    ) as runner:
+        vllm_sampling_params = SamplingParams(logprobs=1)
+        # should pass
+        runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
+
+        bad_sampling_params = SamplingParams(logprobs=2)
+        with pytest.raises(VLLMValidationError):
+            runner.generate(["Hello world"], sampling_params=bad_sampling_params)
+
+
+@pytest.mark.parametrize("token_ids", [[0], [0, 9]])
+def test_logprob_token_ids_validate_vocab_bounds_valid(token_ids: list[int]):
+    SamplingParams(logprob_token_ids=token_ids).verify(
+        _model_config(),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+    )
+
+
+@pytest.mark.parametrize("token_ids", [[-1], [10], [-35, 1873042417]])
+def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
+    with pytest.raises(VLLMValidationError, match="logprob_token_ids"):
+        SamplingParams(logprob_token_ids=token_ids).verify(
+            _model_config(),
+            speculative_config=None,
+            structured_outputs_config=None,
+            tokenizer=None,
+        )
+
+
+def test_prompt_logprob_token_ids_validation():
+    """Rows may be ragged (-1 padded); the width is bounded by max_logprobs."""
+    model_config = _model_config(vocab_size=100, max_logprobs=4)
+
+    def verify(**kwargs):
+        params = SamplingParams(**kwargs)
+        params.verify(
+            model_config,
+            speculative_config=None,
+            structured_outputs_config=None,
+            tokenizer=None,
+        )
+        return params.prompt_logprob_token_ids
+
+    assert verify(prompt_logprob_token_ids=[[], [1], [4, 3, 2, 1]]).tolist() == [
+        [-1] * 4,
+        [1, -1, -1, -1],
+        [4, 3, 2, 1],
+    ]
+    # Any integer layout is normalized to what the worker uploads:
+    # C-contiguous native int32.
+    odd = np.asfortranarray(np.array([[1, 2], [3, -1]], dtype=">i8"))
+    ids = verify(prompt_logprob_token_ids=odd)
+    assert ids.dtype == np.int32 and ids.flags.c_contiguous
+    assert ids.tolist() == [[1, 2], [3, -1]]
+    # The pydantic path (token-in/token-out API, /docs) takes strict integer lists.
+    adapter = TypeAdapter(SamplingParams)
+    for bad in ("[[1.5]]", '[["3"]]', "[[true]]", "[1, 2]"):
+        with pytest.raises(ValidationError):
+            adapter.validate_json(f'{{"prompt_logprob_token_ids": {bad}}}')
+
+    with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
+        verify(prompt_logprob_token_ids=np.array([1, 2]))
+    with pytest.raises(VLLMValidationError, match=r"shape \[num_rows, num_ids\]"):
+        verify(prompt_logprob_token_ids=[1, 2])
+    for bad_ids in ([[None]], [[2**63]], [[[1]]], [[[1], 2]]):
+        with pytest.raises(VLLMValidationError, match="integer token ids"):
+            verify(prompt_logprob_token_ids=bad_ids)
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=np.array([[2**64 - 1]], dtype=np.uint64))
+    # The error names the value to raise max_logprobs to.
+    with pytest.raises(VLLMValidationError, match=r"max_logprobs.*at least 5"):
+        verify(prompt_logprob_token_ids=[[1], [1, 2, 3, 4, 5]])
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=[[1], [100]])
+    with pytest.raises(VLLMValidationError, match="out-of-vocab"):
+        verify(prompt_logprob_token_ids=[[1], [-2]])
+    with pytest.raises(VLLMValidationError, match="non-empty"):
+        verify(prompt_logprob_token_ids=[[], []])
+    # Rows are bounded by max_model_len before the table is padded.
+    with pytest.raises(VLLMValidationError, match="at most 15 scored rows"):
+        verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
+    # prompt_logprob_start alone is a caller mistake, not a silent no-op.
+    with pytest.raises(VLLMValidationError, match="requires prompt_logprobs or"):
+        verify(prompt_logprob_start=3)
+    # It also offsets top-K prompt logprobs.
+    verify(prompt_logprobs=1, prompt_logprob_start=3)
+    with pytest.raises(VLLMValidationError, match="non-negative"):
+        verify(prompt_logprobs=1, prompt_logprob_start=-1)
+
+
+def test_prompt_logprob_token_ids_reject_fast_prefill():
+    """kv-sharing fast prefill would score rows the cross-decoder never ran."""
+    processor = SimpleNamespace(
+        model_config=SimpleNamespace(
+            return_sampling_mask=False, enable_trace_replay=False, is_diffusion=False
+        ),
+        vllm_config=SimpleNamespace(
+            reasoning_config=None,
+            cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        ),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
+    )
+    params = SamplingParams(prompt_logprob_token_ids=[[1, 2]])
+    with patch.object(SamplingParams, "verify"):
+        InputProcessor._validate_params(processor, params, ("generate",))
+        processor.vllm_config.cache_config.kv_sharing_fast_prefill = True
+        with pytest.raises(VLLMValidationError, match="fast-prefill"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+
+        # Top-K prompt logprobs with prompt_logprob_start are accepted.
+        processor.vllm_config.cache_config.kv_sharing_fast_prefill = False
+        params = SamplingParams(prompt_logprobs=1, prompt_logprob_start=2)
+        InputProcessor._validate_params(processor, params, ("generate",))
+
+
+def test_none_logprobs(vllm_model, example_prompts):
+    """Engine should return `logprobs` and `prompt_logprobs` as `None`.
+
+    Args:
+      vllm_model: vLLM model fixture
+      example_prompts: list of example prompts (test fixture)
+
+    """
+    max_tokens = 5
+
+    sampling_params_logprobs_none = SamplingParams(
+        max_tokens=max_tokens,
+        logprobs=None,
+        prompt_logprobs=None,
+        temperature=0.0,
+    )
+    results_logprobs_none = vllm_model.llm.generate(
+        example_prompts,
+        sampling_params=sampling_params_logprobs_none,
+    )
+
+    for i in range(len(results_logprobs_none)):
+        # Check sample logprobs are None
+        assert results_logprobs_none[i].outputs[0].logprobs is None
+        assert results_logprobs_none[i].outputs[0].cumulative_logprob is None
+        # Check prompt logprobs are None
+        assert results_logprobs_none[i].prompt_logprobs is None
+
+
+def test_zero_logprobs(vllm_model, example_prompts):
+    """Engine should return sampled token and prompt token logprobs.
+
+    Args:
+      vllm_model: vLLM model fixture
+      example_prompts: list of example prompts (test fixture)
+
+    """
+    max_tokens = 5
+
+    sampling_params_logprobs_zero = SamplingParams(
+        max_tokens=max_tokens, logprobs=0, prompt_logprobs=0, temperature=0.0
+    )
+    results_logprobs_zero = vllm_model.llm.generate(
+        example_prompts, sampling_params=sampling_params_logprobs_zero
+    )
+
+    for i in range(len(results_logprobs_zero)):
+        # Check that there is one sample logprob dict for each
+        # sample token
+        logprobs = results_logprobs_zero[i].outputs[0].logprobs
+        prompt_logprobs = results_logprobs_zero[i].prompt_logprobs
+        sampled_token_ids = results_logprobs_zero[i].outputs[0].token_ids
+        prompt_token_ids = results_logprobs_zero[i].prompt_token_ids
+        assert logprobs is not None
+        assert len(sampled_token_ids) == len(logprobs)
+        assert results_logprobs_zero[i].outputs[0].cumulative_logprob is not None
+        # Check that there is one prompt logprob dict for each
+        # prompt token
+        assert prompt_logprobs is not None
+        assert len(prompt_token_ids) == len(prompt_logprobs)
+
+
+def test_all_logprobs(example_prompts):
+    """Engine should return all vocabulary logprobs and prompt logprobs.
+
+    Args:
+      example_prompts: list of example prompts (test fixture)
+
+    """
+    with VllmRunner(
+        "facebook/opt-125m",
+        max_logprobs=-1,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        max_model_len=256,
+    ) as runner:
+        sampling_params_logprobs_all = SamplingParams(
+            max_tokens=5, logprobs=-1, prompt_logprobs=-1
+        )
+        results_logprobs_all = runner.llm.generate(
+            example_prompts, sampling_params=sampling_params_logprobs_all
+        )
+        vocab_size = runner.llm.llm_engine.model_config.get_vocab_size()
+
+        for i in range(len(results_logprobs_all)):
+            logprobs = results_logprobs_all[i].outputs[0].logprobs
+            prompt_logprobs = results_logprobs_all[i].prompt_logprobs
+            assert logprobs is not None
+            for logprob in logprobs:
+                assert len(logprob) == vocab_size
+            assert prompt_logprobs is not None
+            assert prompt_logprobs[0] is None
+            for prompt_logprob in prompt_logprobs[1:]:
+                assert len(prompt_logprob) == vocab_size
+
+
+@pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
+def test_logprobs_mode(logprobs_mode: LogprobsMode):
+    """Test with LLM engine with different logprobs_mode.
+    For logprobs, we should have non-positive values.
+    For logits, we should expect at least one positive values.
+    """
+    from vllm import LLM
+
+    llm = LLM(
+        "facebook/opt-125m",
+        max_logprobs=5,
+        enable_prefix_caching=False,
+        # 2 other llms alive during whole session; must also cover the
+        # cudagraph memory reservation from startup profiling.
+        gpu_memory_utilization=0.1,
+        max_model_len=16,
+        logprobs_mode=logprobs_mode,
+    )
+    try:
+        vllm_sampling_params = SamplingParams(logprobs=1)
+        results = llm.generate(["Hello world"], sampling_params=vllm_sampling_params)
+
+        total_token_with_logprobs = 0
+        positive_values = 0
+        for output in results[0].outputs:
+            assert output.logprobs is not None
+            for logprobs in output.logprobs:
+                assert logprobs is not None
+                for token_id in logprobs:
+                    logprob = logprobs[token_id]
+                    if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
+                        assert logprob.logprob <= 0
+                    if logprob.logprob > 0:
+                        positive_values = positive_values + 1
+                    total_token_with_logprobs = total_token_with_logprobs + 1
+        assert total_token_with_logprobs >= len(results[0].outputs)
+        if logprobs_mode in ("raw_logits", "processed_logits"):
+            assert positive_values > 0
+    finally:
+        del llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
+def test_prompt_logprobs_mode():
+    """prompt_logprobs must respect logprobs_mode: *_logits and *_logprobs
+    must return different values. Prompt tokens skip sampling processors,
+    so processed_* == raw_* on the prompt side."""
+    from vllm import LLM
+
+    values: dict[str, float] = {}
+    for mode in get_args(LogprobsMode):
+        llm = LLM(
+            "facebook/opt-125m",
+            enable_prefix_caching=False,
+            gpu_memory_utilization=0.1,
+            max_model_len=16,
+            logprobs_mode=mode,
+        )
+        try:
+            results = llm.generate(
+                ["Hello world"],
+                sampling_params=SamplingParams(
+                    max_tokens=1, prompt_logprobs=0, temperature=0
+                ),
+            )
+            assert results[0].prompt_logprobs is not None
+            assert results[0].prompt_logprobs[1] is not None
+            assert results[0].prompt_token_ids is not None
+            tok_id = results[0].prompt_token_ids[1]
+            values[mode] = results[0].prompt_logprobs[1][tok_id].logprob
+        finally:
+            del llm
+            torch.accelerator.empty_cache()
+            cleanup_dist_env_and_memory()
+
+    assert values["raw_logprobs"] <= 0
+    assert values["processed_logprobs"] <= 0
+    assert values["raw_logits"] != values["raw_logprobs"]
+    assert values["processed_logits"] == values["raw_logits"]
+    assert values["processed_logprobs"] == values["raw_logprobs"]
+
+
+class TestCorrectDecodedToken:
+    """Unit tests for _correct_decoded_token method in LogprobsProcessor.
+
+    This method handles UTF-8 decoding issues where incomplete byte sequences
+    result in the Unicode replacement character "�" (U+FFFD). This commonly
+    happens with byte-fallback tokenization when multi-byte UTF-8 characters
+    are split across tokens.
+
+    The method signature is _correct_decoded_token(token_id, context_token_ids)
+    where token_id is the single token to correct and context_token_ids are
+    the preceding sampled tokens in sequential order.
+    """
+
+    @pytest.fixture
+    def mock_tokenizer(self):
+        """Create a mock tokenizer for testing."""
+        from unittest.mock import Mock
+
+        tokenizer = Mock()
+        return tokenizer
+
+    @pytest.fixture
+    def processor(self, mock_tokenizer):
+        """Create a LogprobsProcessor."""
+        from vllm.v1.engine.logprobs import LogprobsProcessor
+
+        processor = LogprobsProcessor(
+            tokenizer=mock_tokenizer,
+            logprobs=[],
+            prompt_logprobs=None,
+            cumulative_logprob=0.0,
+            num_logprobs=1,
+            num_prompt_logprobs=None,
+        )
+        return processor
+
+    def test_correction_with_context(self, processor):
+        """Test correction using context from preceding sampled tokens.
+
+        Scenario: A byte-fallback token that completes a multi-byte
+        UTF-8 sequence when decoded with context.
+        """
+
+        # Context is [101] (a preceding sampled token)
+        # Token 102 individually decodes to "�"
+        # decode([101, 102]) returns "valid" (complete sequence)
+        def mock_decode(ids):
+            if ids == [101, 102]:
+                return "hello valid"
+            if ids == [101]:
+                return "hello "
+            return "�"
+
+        processor.tokenizer.decode.side_effect = mock_decode
+
+        result = processor._correct_decoded_token(102, [101])
+        assert result == "valid"
+
+    def test_correction_with_context_from_logprobs(self, processor):
+        """Test correction using context from previous logprob entries.
+
+        Scenario: Token decoded with context from previously sampled
+        tokens completes a UTF-8 sequence.
+        """
+
+        # Token 123 was previously sampled (in context)
+        def mock_decode(ids):
+            if ids == [123, 100]:
+                return 'hello "polarized"'
+            if ids == [123]:
+                return "hello "
+            return "�"
+
+        processor.tokenizer.decode.side_effect = mock_decode
+
+        result = processor._correct_decoded_token(100, [123])
+        assert result == '"polarized"'
+
+    def test_correction_no_context(self, processor):
+        """Test correction with no context available.
+
+        Should return empty string as fallback.
+        """
+        processor.tokenizer.decode.return_value = "�"
+
+        result = processor._correct_decoded_token(100, [])
+        assert result == ""
+
+    def test_correction_with_context_succeeds(self, processor):
+        """Test correction with context from previously sampled tokens."""
+
+        def mock_decode(ids):
+            if ids == [123, 200]:
+                return "hello corrected"
+            if ids == [123]:
+                return "hello "
+            return "�"
+
+        processor.tokenizer.decode.side_effect = mock_decode
+
+        result = processor._correct_decoded_token(200, [123])
+        assert result == "corrected"
+
+    def test_fallback_when_all_attempts_fail(self, processor):
+        """Test fallback to empty string when no correction works."""
+        processor.tokenizer.decode.return_value = "still�"
+
+        result = processor._correct_decoded_token(102, [100, 101])
+        assert result == ""
+
+    def test_increasing_context_window(self, processor):
+        """Test that increasing context window finds the correction.
+
+        Scenario: 3-byte UTF-8 char. With 1 context token, still
+        incomplete. With 2 context tokens, completes the sequence.
+        """
+
+        def mock_decode(ids):
+            # 1 context token: still incomplete
+            if ids == [81, 82]:
+                return "�"
+            # 2 context tokens: complete
+            if ids == [80, 81, 82]:
+                return "\u201c"
+            # Context-only decodes
+            if ids == [81]:
+                return "�"
+            if ids == [80, 81]:
+                return "�"
+            return "�"
+
+        processor.tokenizer.decode.side_effect = mock_decode
+
+        # Context has 2 preceding tokens [80, 81]
+        result = processor._correct_decoded_token(82, [80, 81])
+        assert result == "\u201c"
+
+    def test_multiple_consecutive_replacement_chars(self, processor):
+        """Test handling of multiple consecutive replacement characters.
+
+        Scenario: Multi-byte sequence where intermediate bytes return
+        empty string and the final byte returns the complete character.
+        """
+        processor.tokenizer.decode.return_value = "still�"
+
+        # First byte with no useful context: returns ""
+        result1 = processor._correct_decoded_token(100, [50])
+        assert result1 == ""
+
+        # Second byte with same context: still returns ""
+        result2 = processor._correct_decoded_token(101, [50])
+        assert result2 == ""
+
+    def test_correction_with_multibyte_utf8(self, processor):
+        """Test correction involving multi-byte UTF-8 characters.
+
+        Scenario: Byte-fallback tokenization splits curly quotes.
+        The last byte token should produce the complete character.
+        """
+
+        def mock_decode(ids):
+            # Context [123] + first byte: completes to left curly quote
+            if ids == [123, 200]:
+                return "hello \u201c"
+            if ids == [123]:
+                return "hello "
+            # Context [123] + second byte: completes to right curly quote
+            if ids == [123, 201]:
+                return "hello \u201d"
+            return "\ufffd"
+
+        processor.tokenizer.decode.side_effect = mock_decode
+
+        # Each top-k token is corrected independently with same context
+        result1 = processor._correct_decoded_token(200, [123])
+        assert result1 == "\u201c"
+
+        result2 = processor._correct_decoded_token(201, [123])
+        assert result2 == "\u201d"
+
+    def test_topk_tokens_corrected_independently(self, processor):
+        """Test that top-k alternatives at the same position are each
+        corrected independently using only sequential context, not
+        each other.
+
+        This is the core fix for issue #27300: when logprobs > 0,
+        alternative tokens must not be combined with each other.
+        """
+        # Context: previously sampled token 50
+        context = [50]
+
+        def mock_decode(ids):
+            # Token 100 (sampled) with context
+            if ids == [50, 100]:
+                return "prefix \u201c"
+            # Token 200 (top-k alternative) with context
+            if ids == [50, 200]:
+                return "prefix \u2014"
+            # Context alone
+            if ids == [50]:
+                return "prefix "
+            return "\ufffd"
+
+        processor.tokenizer.decode.side_effect = mock_decode
+
+        # Both tokens at the same position use the SAME context [50]
+        result_sampled = processor._correct_decoded_token(100, context)
+        assert result_sampled == "\u201c"
+
+        result_alt = processor._correct_decoded_token(200, context)
+        assert result_alt == "\u2014"
+
+    def test_real_world_opt125m_scenario(self, mock_tokenizer):
+        """Test the real-world scenario from the bug report.
+
+        Simulates the OPT-125m sequence where curly quotes are split
+        into byte-fallback tokens. Each token is corrected using only
+        the preceding sampled tokens as context.
+        """
+        from vllm.v1.engine.logprobs import LogprobsProcessor
+
+        processor = LogprobsProcessor(
+            tokenizer=mock_tokenizer,
+            logprobs=[],
+            prompt_logprobs=None,
+            cumulative_logprob=0.0,
+            num_logprobs=1,
+            num_prompt_logprobs=None,
+        )
+
+        # Simulating: byte tokens 3, 4 form left curly quote "\u201c"
+        # byte tokens 8, 9 form right curly quote "\u201d"
+        def mock_decode(ids):
+            # Context decodes
+            if ids == [2]:
+                return " term"
+            if ids == [1, 2]:
+                return " the term"
+            if ids == [3]:
+                return "\ufffd"
+            if ids == [2, 3]:
+                return " term\ufffd"
+            if ids == [1, 2, 3]:
+                return " the term\ufffd"
+            # Token 4 with context [2, 3] -> completes left curly quote
+            if ids == [3, 4]:
+                return "\u201c"
+            if ids == [2, 3, 4]:
+                return " term\u201c"
+            # Context for right curly quote
+            if ids == [7]:
+                return "ized"
+            if ids == [7, 8]:
+                return "ized\ufffd"
+            if ids == [8, 9]:
+                return "\u201d"
+            if ids == [7, 8, 9]:
+                return "ized\u201d"
+            return "normal_text"
+
+        mock_tokenizer.decode.side_effect = mock_decode
+
+        # First byte (token 3) of left curly quote with no context
+        result = processor._correct_decoded_token(3, [])
+        assert result == ""
+
+        # First byte (token 3) with context [2] -> still incomplete
+        result = processor._correct_decoded_token(3, [2])
+        assert result == ""
+
+        # Second byte (token 4) of left curly quote with context [2, 3]
+        # Token 3 is byte-fallback, so clean context is [2] only.
+        # decode([2, 3, 4]) = " term\u201c", decode([2]) = " term"
+        # result = "\u201c"
+        result = processor._correct_decoded_token(4, [2, 3])
+        assert result == "\u201c"
+
+        # Second byte (token 9) of right curly quote with context [7, 8]
+        result = processor._correct_decoded_token(9, [7, 8])
+        assert result == "\u201d"
+
+    def test_byte_fallback_context_preserves_space(self, mock_tokenizer):
+        """Test that text from byte-fallback context tokens is preserved.
+
+        In OPT-125m, token 44 = space + 2 bytes of curly quote.
+        When token 44 returns "" (incomplete), the space it carried
+        must be attributed to the completing token (48).
+        """
+        from vllm.v1.engine.logprobs import LogprobsProcessor
+
+        processor = LogprobsProcessor(
+            tokenizer=mock_tokenizer,
+            logprobs=[],
+            prompt_logprobs=None,
+            cumulative_logprob=0.0,
+            num_logprobs=1,
+            num_prompt_logprobs=None,
+        )
+
+        def mock_decode(ids):
+            # Token 44 = space + 2 bytes (like OPT-125m's \u0120\u00e2\u0080)
+            if ids == [44]:
+                return " \ufffd"
+            if ids == [48]:
+                return "\ufffd"
+            # Together they form: space + left curly quote
+            if ids == [44, 48]:
+                return " \u201c"
+            # With preceding clean context
+            if ids == [1385]:
+                return " term"
+            if ids == [1385, 44]:
+                return " term \ufffd"
+            if ids == [1385, 44, 48]:
+                return " term \u201c"
+            return "\ufffd"
+
+        mock_tokenizer.decode.side_effect = mock_decode
+
+        # Token 44 with context [1385] -> still ends with replacement
+        result = processor._correct_decoded_token(44, [1385])
+        assert result == ""
+
+        # Token 48 with context [1385, 44]:
+        # Token 44 is byte-fallback, so clean context is [1385].
+        # decode([1385, 44, 48]) = " term \u201c"
+        # decode([1385]) = " term"
+        # result = " \u201c" (space preserved from token 44!)
+        result = processor._correct_decoded_token(48, [1385, 44])
+        assert result == " \u201c"
+
+
+def test_verify_tokens_integration():
+    """Integration test for _verify_tokens with real model.
+
+    This test validates that _verify_tokens correctly identifies and
+    corrects tokens ending with the replacement character "�".
+    Uses facebook/opt-125m which is known to produce these issues.
+    """
+    with VllmRunner(
+        "facebook/opt-125m",
+        max_logprobs=0,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        max_model_len=256,
+    ) as runner:
+        # Use a prompt that triggers multi-byte UTF-8 issues
+        # Based on user's example: "In this example,"
+        test_prompts = ["In this example,"]
+
+        sampling_params = SamplingParams(
+            max_tokens=16,
+            temperature=0,
+            logprobs=0,
+        )
+
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
+
+        # Verify that decoded tokens don't contain replacement characters
+        for result in results:
+            assert result.outputs[0].logprobs is not None
+            for logprob_dict in result.outputs[0].logprobs:
+                for token_id, logprob_info in logprob_dict.items():
+                    decoded_token = logprob_info.decoded_token
+                    # Decoded tokens should not end with replacement character
+                    # They should either be corrected or empty string
+                    assert not decoded_token.endswith("�"), (
+                        f"Token {token_id} decoded to '{decoded_token}' which "
+                        f"ends with replacement character"
+                    )
+                    # Decoded tokens should not contain lone replacement characters
+                    assert decoded_token != "�", (
+                        f"Token {token_id} is a lone replacement character"
+                    )
+
+
+def test_utf8_edge_cases_with_real_model():
+    """Test various UTF-8 edge cases with a real model.
+
+    Tests prompts that are likely to trigger byte-fallback tokenization
+    and multi-byte UTF-8 splitting.
+    """
+    with VllmRunner(
+        "facebook/opt-125m",
+        max_logprobs=1,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        max_model_len=256,
+    ) as runner:
+        # Prompts with various multi-byte UTF-8 characters
+        test_prompts = [
+            'Smart quotes: "Hello"',  # Curly quotes
+            "Em dash — test",  # Em dash
+            "Ellipsis… continues",  # Ellipsis
+            "Chinese: 你好",  # Chinese characters
+            "Emoji: 😀 🎉",  # Emojis
+            'Mixed: "quoted" — with symbols',  # Mixed
+        ]
+
+        sampling_params = SamplingParams(
+            max_tokens=10,
+            temperature=0,
+            logprobs=1,
+        )
+
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
+
+        for i, result in enumerate(results):
+            prompt = test_prompts[i]
+            assert result.outputs[0].logprobs is not None
+
+            # Check that no decoded tokens end with replacement character
+            for logprob_dict in result.outputs[0].logprobs:
+                for token_id, logprob_info in logprob_dict.items():
+                    decoded_token = logprob_info.decoded_token
+                    assert not decoded_token.endswith("�"), (
+                        f"Prompt: '{prompt}'\n"
+                        f"Token {token_id} decoded to '{decoded_token}' which "
+                        f"ends with replacement character"
+                    )
+
+
+def test_correct_decoded_token_preserves_valid_tokens():
+    """Test that valid tokens (not ending with �) are not modified.
+
+    The _correct_decoded_token method should only be called for tokens
+    ending with "�", but this test verifies the broader _verify_tokens
+    logic doesn't affect valid tokens.
+    """
+    with VllmRunner(
+        "facebook/opt-125m",
+        max_logprobs=2,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        max_model_len=256,
+    ) as runner:
+        # Simple prompt with standard ASCII characters
+        test_prompts = ["Hello world, this is a test."]
+
+        sampling_params = SamplingParams(
+            max_tokens=10,
+            temperature=0,
+            logprobs=2,
+        )
+
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
+
+        for result in results:
+            assert result.outputs[0].logprobs is not None
+
+            # All decoded tokens should be valid strings
+            for logprob_dict in result.outputs[0].logprobs:
+                for logprob_info in logprob_dict.values():
+                    decoded_token = logprob_info.decoded_token
+                    # Valid tokens should be non-empty strings (or empty if corrected)
+                    assert isinstance(decoded_token, str)
+                    # Should not contain replacement character
+                    assert "�" not in decoded_token
+
+
+@pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
+@pytest.mark.parametrize(
+    "model_setup",
+    [
+        pytest.param(
+            (
+                "eagle",
+                "meta-llama/Llama-3.2-1B-Instruct",
+                {
+                    "method": "eagle",
+                    "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
+                    "num_speculative_tokens": 3,
+                },
+                0,
+            ),
+            marks=large_gpu_mark(min_gb=32),
+            id="eagle0",
+        ),
+        pytest.param(
+            (
+                "eagle",
+                "meta-llama/Llama-3.2-1B-Instruct",
+                {
+                    "method": "eagle",
+                    "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
+                    "num_speculative_tokens": 3,
+                },
+                3,
+            ),
+            marks=large_gpu_mark(min_gb=32),
+            id="eagle3",
+        ),
+        pytest.param(
+            (
+                "ngram",
+                "meta-llama/Llama-3.2-1B-Instruct",
+                {
+                    "method": "ngram",
+                    "prompt_lookup_max": 5,
+                    "prompt_lookup_min": 3,
+                    "num_speculative_tokens": 3,
+                },
+                3,
+            ),
+            marks=large_gpu_mark(min_gb=32),
+            id="ngram",
+        ),
+    ],
+)
+def test_spec_decode_logprobs(
+    logprobs_mode: LogprobsMode,
+    model_setup: tuple[str, str, dict, int],
+):
+    """Spec decode logprobs should match those of the base model.
+
+    Runs the base model and spec decode model sequentially, ensuring
+    only one LLM instance is alive at a time to avoid GPU memory
+    contention. Both use identical chunked prefill settings and eager
+    mode to control for infrastructure differences.
+
+    Args:
+        logprobs_mode: logprobs mode.
+        model_setup: Tuple of (method, base model name,
+            speculative_config dict, top_logprobs).
+
+    """
+    from vllm import LLM
+
+    method, model_name, spec_config, top_logprobs = model_setup
+
+    prompt = "Hello world " * 50
+    sampling_params = SamplingParams(
+        temperature=0, logprobs=top_logprobs, max_tokens=10, ignore_eos=False
+    )
+    penalty_sampling_params = SamplingParams(
+        temperature=0,
+        logprobs=top_logprobs,
+        max_tokens=10,
+        ignore_eos=False,
+        presence_penalty=-1.0,
+    )
+
+    max_model_len = 256
+    llm_kwargs = dict(
+        max_logprobs=5,
+        max_model_len=max_model_len,
+        seed=42,
+        logprobs_mode=logprobs_mode,
+        gpu_memory_utilization=0.4,
+        # Force the same prefill chunking for both the base model and
+        # spec decode model so the comparison isolates spec decode.
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        enable_prefix_caching=False,
+        **GPU_DETERMINISM_KWARGS,
+    )
+
+    # Run base LLM.
+    ref_llm = LLM(
+        model=model_name,
+        **llm_kwargs,
+    )
+    ref_results = ref_llm.generate(
+        [prompt, prompt], [sampling_params, penalty_sampling_params]
+    )
+    # Collect logprobs outputs from reference LLM.
+    ref_logprobs: list[Logprob] = []
+    for results in ref_results:
+        for output in results.outputs:
+            assert output.logprobs is not None
+            for logprobs in output.logprobs:
+                assert logprobs is not None
+                ref_logprobs.extend(logprobs.values())
+    del ref_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    # Run spec decode LLM.
+    # Add max_model_len to spec_config if not present
+    spec_config_with_len = {**spec_config, "max_model_len": max_model_len}
+    spec_llm = LLM(
+        model_name,
+        speculative_config=spec_config_with_len,
+        **llm_kwargs,
+    )
+    spec_results = spec_llm.generate(
+        [prompt, prompt], [sampling_params, penalty_sampling_params]
+    )
+    # Collect logprobs outputs from spec decode LLM.
+    spec_logprobs: list[Logprob] = []
+    for results in spec_results:
+        for output in results.outputs:
+            assert output.logprobs is not None
+            for logprobs in output.logprobs:
+                assert logprobs is not None
+                spec_logprobs.extend(logprobs.values())
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    # Per-token logprobs are expected to be the same.
+    assert len(ref_logprobs) == len(spec_logprobs)
+    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
+        assert math.isclose(
+            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=2.5e-1
+        ), (
+            f"Logprob mismatch: ref={ref_logprob.logprob} "
+            f"spec={spec_logprob.logprob} "
+            f"diff={abs(ref_logprob.logprob - spec_logprob.logprob)} "
+            f"(token={ref_logprob.decoded_token!r})"
+        )
+        assert ref_logprob.rank == spec_logprob.rank, (
+            f"Rank mismatch: ref={ref_logprob.rank} "
+            f"spec={spec_logprob.rank} "
+            f"(token={ref_logprob.decoded_token!r})"
+        )
+        assert ref_logprob.decoded_token == spec_logprob.decoded_token
+
+
+def test_prompt_logprobs_with_chunking_and_preemption():
+    """Test that prompt logprobs are correctly returned when using
+    both chunked prefill and preemption.
+
+    This test ensures that the num_prompt_logprobs tracking persists
+    across preemptions and prefill chunks.
+    """
+    # Create prompts that will trigger chunking and preemption
+    prompts = [
+        "The following numbers of the sequence "
+        + ", ".join(str(i) for i in range(10))
+        + " are:",
+        "In one word, the capital of France is ",
+    ] + [f"Tell me about the number {i}: " for i in range(32)]
+
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=40,
+        min_tokens=20,
+        prompt_logprobs=2,  # Request prompt logprobs
+    )
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=512,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=48,  # Force prefill chunking
+        num_gpu_blocks_override=33,  # Force preemptions (32 usable + null block)
+        disable_log_stats=False,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
+        metrics_before = vllm_model.llm.get_metrics()
+
+        # Generate with prompt logprobs using generate_w_logprobs which
+        # returns (output_ids, output_str, output_logprobs, prompt_logprobs)
+        outputs = vllm_model.generate_w_logprobs(
+            prompts, sampling_params=sampling_params, include_prompt_token_ids=True
+        )
+
+        # Verify that all outputs have prompt logprobs
+        for i, output in enumerate(outputs):
+            _, _, _, prompt_token_ids, prompt_logprobs = output
+            assert prompt_logprobs is not None and len(prompt_logprobs) > 0, (
+                f"Output {i} missing prompt logprobs"
+            )
+            assert len(prompt_logprobs) == len(prompt_token_ids), (
+                "Unexpected number of prompt logprob positions"
+            )
+
+            assert sampling_params.prompt_logprobs is not None
+            # Each position should have the requested number of logprobs
+            for pos, logprobs_dict in enumerate(prompt_logprobs):
+                if logprobs_dict is not None:  # First token may be None
+                    assert (
+                        sampling_params.prompt_logprobs
+                        <= len(logprobs_dict)
+                        <= sampling_params.prompt_logprobs + 1
+                    ), (
+                        f"Output {i} position {pos} has {len(logprobs_dict)} "
+                        f"logprobs, expected {sampling_params.prompt_logprobs}"
+                    )
+
+        # Check that we actually had preemptions
+        metrics_after = vllm_model.llm.get_metrics()
+        preemptions_before = next(
+            (m.value for m in metrics_before if m.name == "vllm:num_preemptions"), 0
+        )
+        preemptions_after = next(
+            (m.value for m in metrics_after if m.name == "vllm:num_preemptions"), 0
+        )
+        preemptions = preemptions_after - preemptions_before
+        assert preemptions > 0, "Test did not trigger any preemptions"
+
+        print(f"Test passed with {preemptions} preemptions")
+
+
+def test_prompt_logprob_token_ids_with_chunking_and_preemption():
+    """Per-row scores stay row-aligned across chunked prefill and preemption."""
+    prompts = [
+        "The following numbers of the sequence "
+        + ", ".join(str(i) for i in range(10))
+        + " are:",
+        "In one word, the capital of France is ",
+    ] + [f"Tell me about the number {i}: " for i in range(32)]
+
+    start = 2
+
+    def candidate_ids(j):
+        return [10 + j, 100 + j, 1000 + j, 10000 + j]
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=512,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=48,  # Force prefill chunking
+        num_gpu_blocks_override=33,  # Force preemptions (32 usable + null block)
+        disable_log_stats=False,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
+        tokenizer = vllm_model.llm.get_tokenizer()
+        token_prompts = [
+            TokensPrompt(prompt_token_ids=tokenizer(p).input_ids) for p in prompts
+        ]
+
+        def make_params(row_ids):
+            return [
+                SamplingParams(
+                    temperature=0.0,
+                    max_tokens=40,
+                    min_tokens=20,
+                    prompt_logprob_token_ids=[
+                        row_ids(j)
+                        for j in range(len(p["prompt_token_ids"]) - 1 - start)
+                    ],
+                    prompt_logprob_start=start,
+                )
+                for p in token_prompts
+            ]
+
+        metrics_before = vllm_model.llm.get_metrics()
+        full_params = make_params(candidate_ids)
+        for params in full_params:  # the array form, as a top-k tensor would be
+            params.prompt_logprob_token_ids = np.array(params.prompt_logprob_token_ids)
+        outputs = vllm_model.llm.generate(token_prompts, full_params)
+
+        for i, output in enumerate(outputs):
+            scores = output.prompt_token_id_logprobs
+            assert scores is not None, f"Output {i} missing per-row scores"
+            expected_shape = (
+                len(output.prompt_token_ids) - 1 - start,
+                4,
+            )
+            assert scores.shape == expected_shape, (
+                f"Output {i} scored {scores.shape}, expected {expected_shape}"
+            )
+            assert math.isfinite(float(scores.min()))
+            assert float(scores.max()) <= 1e-3, "logprobs must be <= 0"
+
+        # Ragged rows: each row keeps a prefix of the candidates and must
+        # reproduce that prefix of the full scores, with -inf padding. On ROCm
+        # the second generate call picks its own kernels, which moves bf16
+        # tails by up to 0.19; a misaligned row is off by nats either way.
+        ragged_atol = 0.2 if current_platform.is_rocm() else 1e-2
+        ragged_params = make_params(lambda j: candidate_ids(j)[: 1 + j % 4])
+        ragged_outputs = vllm_model.llm.generate(token_prompts, ragged_params)
+        for output, ragged_output in zip(outputs, ragged_outputs):
+            expected = np.full_like(output.prompt_token_id_logprobs, -np.inf)
+            for j in range(len(expected)):
+                n = 1 + j % 4
+                expected[j, :n] = output.prompt_token_id_logprobs[j, :n]
+            np.testing.assert_allclose(
+                ragged_output.prompt_token_id_logprobs, expected, atol=ragged_atol
+            )
+
+        # The row count is checked against the prompt at admission.
+        with pytest.raises(VLLMValidationError, match="scored rows"):
+            vllm_model.llm.generate(token_prompts[0], ragged_params[1])
+
+        metrics_after = vllm_model.llm.get_metrics()
+        preemptions_before = next(
+            (m.value for m in metrics_before if m.name == "vllm:num_preemptions"), 0
+        )
+        preemptions_after = next(
+            (m.value for m in metrics_after if m.name == "vllm:num_preemptions"), 0
+        )
+        assert preemptions_after - preemptions_before > 0, (
+            "Test did not trigger any preemptions"
+        )
+
+    # Row alignment is numerical: chunked and preempted scores must match an
+    # unchunked, unpreempted run of the same requests. Batch composition moves
+    # bf16 tail logprobs by a few percent; a misaligned row differs by nats.
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B", max_model_len=512, gpu_memory_utilization=0.25
+    ) as reference:
+        reference_outputs = reference.llm.generate(token_prompts, full_params)
+        self_scored = reference.llm.generate(
+            token_prompts,
+            [
+                SamplingParams(
+                    max_tokens=1,
+                    prompt_logprobs=0,
+                    prompt_logprob_token_ids=[[t] for t in p["prompt_token_ids"][1:]],
+                )
+                for p in token_prompts
+            ],
+        )
+    for output, ref in zip(outputs, reference_outputs):
+        np.testing.assert_allclose(
+            output.prompt_token_id_logprobs,
+            ref.prompt_token_id_logprobs,
+            rtol=0.1,
+            atol=0.2,
+        )
+    for output in self_scored:
+        scores = output.prompt_token_id_logprobs[:, 0]
+        for row, target in enumerate(output.prompt_token_ids[1:]):
+            expected = output.prompt_logprobs[row + 1][target].logprob
+            assert scores[row] == pytest.approx(expected, abs=1e-3)
+
+
+def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch):
+    """Prefix reuse preserves every requested suffix score, for both fixed-ID
+    scores and top-K prompt logprobs offset by prompt_logprob_start."""
+    start = 17
+    # Cached and uncached prefills have different execution shapes; batch
+    # invariance makes their scores comparable bit for bit.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+    text = "The capital of France is Paris. " * 20
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=512,
+        enable_prefix_caching=True,
+        block_size=16,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
+        token_ids = vllm_model.llm.get_tokenizer()(text).input_ids
+        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            prompt_logprobs=2,
+            prompt_logprob_start=start,
+            prompt_logprob_token_ids=np.tile(
+                [10, 100, 1000], (len(token_ids) - 1 - start, 1)
+            ),
+            skip_reading_prefix_cache=True,
+        )
+
+        first = vllm_model.llm.generate([prompt], sampling_params)[0]
+        assert first.prompt_token_id_logprobs is not None
+        assert math.isfinite(float(first.prompt_token_id_logprobs.min()))
+        # Top-K prompt logprobs start at the same row: position p is predicted
+        # by row p - 1, so positions up to and including start are None.
+        assert first.prompt_logprobs is not None
+        assert len(first.prompt_logprobs) == len(token_ids)
+        assert all(lp is None for lp in first.prompt_logprobs[: start + 1])
+        assert all(first.prompt_logprobs[start + 1 :])
+
+        sampling_params.skip_reading_prefix_cache = False
+        second = vllm_model.llm.generate([prompt], sampling_params)[0]
+        assert second.num_cached_tokens == 16
+        assert second.prompt_token_id_logprobs.shape == (len(token_ids) - 1 - start, 3)
+        np.testing.assert_array_equal(
+            second.prompt_token_id_logprobs, first.prompt_token_id_logprobs
+        )
+        assert second.prompt_logprobs == first.prompt_logprobs
+
+
+@large_gpu_mark(min_gb=24)
+def test_token_logprobs_large_batch_int64_row_offset():
+    """Regression: logprob kernel row offset (row * vocab_size) must use int64.
+
+    The rejection-sampler logprobs path runs the logprob kernels over the
+    spec-expanded logits batch, so batch_size * vocab_size can exceed 2**31
+    (e.g. DFlash drafts K tokens per request). With int32 offset arithmetic the
+    per-row pointer wraps to a negative address and the kernel hits a CUDA
+    illegal memory access. Run over a batch where batch_size * vocab_size > 2**31
+    and check the highest-offset row matches a reference log-softmax.
+    """
+    if not current_platform.is_cuda_alike():
+        pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = torch.device("cuda")
+    vocab_size = 131072
+    batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31
+    # logits (the large input) plus small logprob/rank outputs; ~1 GB headroom.
+    required_bytes = batch_size * vocab_size * 4 + (1 << 30)
+    if torch.accelerator.get_memory_info()[0] < required_bytes:
+        pytest.skip(f"needs ~{required_bytes / 1e9:.0f} GB of free GPU memory")
+
+    logits = torch.randn(batch_size, vocab_size, device=device, dtype=torch.float32)
+    token_ids = torch.full((batch_size, 1), 7, device=device, dtype=torch.int64)
+    logprobs = compute_token_logprobs(logits, token_ids)
+    torch.accelerator.synchronize()  # surface any async illegal memory access
+    last = batch_size - 1
+    ref = torch.log_softmax(logits[last].float(), dim=-1)[7]
+    assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
+        f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
+    )
+
+
+@pytest.mark.parametrize("split_topk", [False, True])
+@pytest.mark.parametrize("num_prompt_logprobs", [-1, 3])
+def test_chunked_prompt_logprobs_match_unchunked(
+    num_prompt_logprobs: int, split_topk: bool, monkeypatch
+):
+    """Chunks, and top-k blocks within them, written into preallocated outputs
+    must match one unchunked pass."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("the logprob kernels are Triton")
+    from vllm.v1.worker.gpu.sample import prompt_logprob
+    from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+    from vllm.v1.worker.gpu.sample.prompt_logprob import (
+        CHUNK_SIZE,
+        compute_prompt_logprobs_with_chunking,
+    )
+
+    if split_topk:
+        # Blocks of 100 rows at full vocab, straddling the chunk boundaries.
+        monkeypatch.setattr(prompt_logprob, "TOPK_MAX_ELEMENTS", 100 * 513)
+    device = torch.device(current_platform.device_type)
+    vocab_size = 512
+    num_tokens = 2 * CHUNK_SIZE + 3
+    # Distinct values per row, since topk's order among ties can vary with the
+    # number of rows ranked together.
+    logits = torch.rand(num_tokens, vocab_size, device=device).argsort(dim=-1)
+    logits = logits.float() / vocab_size
+    prompt_token_ids = torch.randint(vocab_size, (num_tokens,), device=device)
+
+    token_ids, logprobs, ranks = compute_prompt_logprobs_with_chunking(
+        prompt_token_ids,
+        logits,
+        lambda hidden_states: hidden_states,
+        num_prompt_logprobs,
+    )
+
+    num_logprobs = vocab_size if num_prompt_logprobs == -1 else num_prompt_logprobs
+    expected = compute_topk_scores(logits, num_logprobs, prompt_token_ids)
+    assert token_ids.dtype == torch.int32
+    torch.testing.assert_close(token_ids, expected.logprob_token_ids.to(torch.int32))
+    torch.testing.assert_close(logprobs, expected.logprobs)
+    torch.testing.assert_close(ranks, expected.selected_token_ranks)
+
+
+def test_trace_replay_with_spec_decode():
+    prompt = "Hello world " * 50
+    llm_kwargs = dict(
+        max_model_len=512,
+        max_logprobs=5,
+        seed=42,
+        enable_trace_replay=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.25,
+        **GPU_DETERMINISM_KWARGS,
+    )
+
+    def replay(runner, traces):
+        outputs = runner.llm.generate(
+            [prompt] * len(traces),
+            [
+                SamplingParams(
+                    trace_decode_token_ids=trace, max_tokens=len(trace), logprobs=3
+                )
+                for trace in traces
+            ],
+        )
+        results = []
+        for output in outputs:
+            completion = output.outputs[0]
+            assert completion.logprobs is not None
+            results.append((list(completion.token_ids), completion.logprobs))
+        return results
+
+    with VllmRunner("Qwen/Qwen3-0.6B", **llm_kwargs) as ref_runner:
+        sampled = ref_runner.llm.generate(
+            [prompt, prompt],
+            [
+                SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True),
+                SamplingParams(temperature=1.0, seed=7, max_tokens=32, ignore_eos=True),
+            ],
+        )
+        greedy_trace = list(sampled[0].outputs[0].token_ids)
+        sampled_trace = list(sampled[1].outputs[0].token_ids)
+        diverged_trace = greedy_trace[:10] + sampled_trace[10:20] + greedy_trace[20:]
+        traces = [greedy_trace, sampled_trace, diverged_trace]
+        ref_results = replay(ref_runner, traces)
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        speculative_config={
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        },
+        disable_log_stats=False,
+        **llm_kwargs,
+    ) as spec_runner:
+        spec_results = replay(spec_runner, traces)
+        num_accepted = sum(
+            m.value
+            for m in spec_runner.llm.get_metrics()
+            if m.name == "vllm:spec_decode_num_accepted_tokens"
+        )
+    assert num_accepted > 0
+
+    for trace, (ref_ids, ref_lps), (spec_ids, spec_lps) in zip(
+        traces, ref_results, spec_results
+    ):
+        assert ref_ids == trace
+        assert spec_ids == trace
+        assert len(ref_lps) == len(trace)
+        assert len(spec_lps) == len(trace)
+        for token_id, ref_lp, spec_lp in zip(trace, ref_lps, spec_lps):
+            assert math.isclose(
+                ref_lp[token_id].logprob,
+                spec_lp[token_id].logprob,
+                rel_tol=5e-2,
+                abs_tol=2.5e-1,
+            )
