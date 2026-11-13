@@ -225,6 +225,36 @@ def _load_q_td(
 
 
 @triton.jit
+def _load_kv_tile_td(
+    cache_ptr,
+    physical_block_idx_scalar,
+    kv_head_idx,
+    offset_in_block,
+    stride_cache_0: tl.int64,
+    stride_cache_1: tl.int64,
+    stride_cache_2: tl.int64,
+    stride_cache_3: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+):
+    """Load a KV cache tile through the original 2D descriptor path."""
+    base = (
+        cache_ptr
+        + physical_block_idx_scalar * stride_cache_0
+        + kv_head_idx * stride_cache_2
+    )
+    desc = tl.make_tensor_descriptor(
+        base=base,
+        shape=(BLOCK_SIZE, HEAD_SIZE),
+        strides=(stride_cache_1, stride_cache_3),
+        block_shape=(TILE_SIZE, HEAD_SIZE_PADDED),
+    )
+    return desc.load([offset_in_block, 0])
+
+
+@triton.jit
 def _store_output_td(
     base_ptr,
     acc,
@@ -315,7 +345,7 @@ def kernel_unified_attention(
     stride_v_cache_2: tl.int64,  # int
     stride_v_cache_3: tl.constexpr,  # int
     # Block-table dim of the KV cache (``key_cache.shape[0]``). Only read
-    # when ``USE_TD`` — needed as the outer shape dim of the hoisted
+    # when ``USE_TD_HOISTED`` — needed as the outer shape dim of the hoisted
     # tensor descriptor built once before the tile loop.
     num_kv_blocks,
     query_start_len_ptr,
@@ -369,6 +399,9 @@ def kernel_unified_attention(
     # ``USE_TD`` gates KV tile loads; ``USE_TD_QO`` separately gates Q/output
     # (see ``unified_attention`` wrapper for the gating rules).
     USE_TD: tl.constexpr = False,
+    # Keep the original 2D KV descriptor path on non-CUDA backends until the
+    # hoisted 3D layout is validated there.
+    USE_TD_HOISTED: tl.constexpr = False,
     USE_TD_QO: tl.constexpr = False,
     Q_IS_FP8: tl.constexpr = False,
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
@@ -507,7 +540,7 @@ def kernel_unified_attention(
         seq_idx,
     )
 
-    if USE_TD:
+    if USE_TD_HOISTED:
         # Built once, outside the tile loop: must stay loop-invariant for
         # the pipeliner to overlap iterations. Per-tile block is addressed
         # via a load() coordinate rather than baked into the base.
@@ -533,7 +566,7 @@ def kernel_unified_attention(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        if USE_TD:
+        if USE_TD_HOISTED:
             # All TILE_SIZE slots within a single KV tile map to one
             # physical block (guaranteed by ``BLOCK_SIZE % TILE_SIZE == 0``
             # from the static_assert above), so load the block index as
@@ -553,6 +586,39 @@ def kernel_unified_attention(
             V_load = v_tile_desc.load(
                 [physical_block_scalar, offset_in_block, 0]
             ).reshape(TILE_SIZE, HEAD_SIZE_PADDED)
+        elif USE_TD:
+            offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
+            physical_block_scalar = tl.load(
+                block_tables_ptr + block_table_offset + (j * TILE_SIZE) // BLOCK_SIZE
+            ).to(tl.int32)
+            K_load = _load_kv_tile_td(
+                key_cache_ptr,
+                physical_block_scalar,
+                kv_head_idx,
+                offset_in_block,
+                stride_k_cache_0,
+                stride_k_cache_1,
+                stride_k_cache_2,
+                stride_k_cache_3,
+                BLOCK_SIZE,
+                TILE_SIZE,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            ).T
+            V_load = _load_kv_tile_td(
+                value_cache_ptr,
+                physical_block_scalar,
+                kv_head_idx,
+                offset_in_block,
+                stride_v_cache_0,
+                stride_v_cache_1,
+                stride_v_cache_2,
+                stride_v_cache_3,
+                BLOCK_SIZE,
+                TILE_SIZE,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            )
         else:
             v_offset = (
                 physical_block_idx[:, None] * stride_v_cache_0
@@ -1145,6 +1211,7 @@ def unified_attention(
     # ``shape`` already matches ``block_shape`` on the inner axis.
     _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
     _is_pow2_hs = head_size == head_size_padded
+    use_td_hoisted = use_td and current_platform.is_cuda()
     # Performance choice: keep short CUDA decode Q/O on pointers; K/V TD
     # remains enabled for query lengths <= MAX_3D_QUERY_LEN.
     use_td_qo = (
@@ -1367,9 +1434,9 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
-    if use_td and current_platform.is_cuda_alike():
+    if use_td_hoisted:
         # The hoisted 3D descriptor requires a PyTorch-backed scratch
-        # allocator on CUDA-alike TD paths. Triton stores it in the current
+        # allocator on CUDA TD paths. Triton stores it in the current
         # context, so register it immediately before launching the kernel.
         set_triton_allocator(q.device)
 
@@ -1448,6 +1515,7 @@ def unified_attention(
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,
+        USE_TD_HOISTED=use_td_hoisted,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
         **launch_kwargs,
