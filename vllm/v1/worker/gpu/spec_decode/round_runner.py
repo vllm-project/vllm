@@ -97,6 +97,7 @@ class SpecRound:
         limits = layer_spec_limits(
             runner.attn_groups,
             runner.compilation_config.static_forward_context,
+            runner.kv_cache_config.kv_cache_groups,
             kernels=self.registry(),
         )
         why = runner.model_state.tree_decline_reason()
@@ -317,10 +318,10 @@ def spec_kernel_layers(runner: "GPUModelRunner") -> list[SpecLayerSpec]:
                 SpecLayerSpec(name, kind, layer, "recurrent_state", **placement)
             )
         elif isinstance(spec, AttentionSpec):
-            layout = attn_layout(layer, spec)
-            layers.append(
-                SpecLayerSpec(name, attn_layer_kind(spec), layer, layout, **placement)
-            )
+            kv_cache_group = runner.kv_cache_config.kv_cache_groups[gid]
+            layout = attn_layout(layer, kv_cache_group, spec)
+            kind = attn_layer_kind(kv_cache_group, spec)
+            layers.append(SpecLayerSpec(name, kind, layer, layout, **placement))
     return layers
 
 

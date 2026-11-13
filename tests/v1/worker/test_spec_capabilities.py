@@ -10,9 +10,11 @@ from typing import Any
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CacheConfig, CompilationConfig, ParallelConfig
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.rswa_attention import RSWAAttention
 from vllm.model_executor.layers.mamba.gdn.olmo_gdn_linear_attn import (
     OlmoHybridGatedDeltaNetAttention,
 )
@@ -21,12 +23,17 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    RSWAManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     HiddenStateCacheSpec,
+    KVCacheConfig,
     MambaSpec,
-    RSWASpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.spec_decode.resources import (
     SpecCapabilities,
@@ -57,7 +64,7 @@ STATE_COMMIT: KernelKey = ("layout:recurrent_state", "commit")
 KV_COMMIT: KernelKey = ("layout:paged_token", "commit")
 
 
-def _spec(cls=FullAttentionSpec, **kwargs):
+def _spec(cls=AttentionSpec, **kwargs):
     return cls(
         block_size=kwargs.pop("block_size", 16),
         num_kv_heads=2,
@@ -67,9 +74,11 @@ def _spec(cls=FullAttentionSpec, **kwargs):
     )
 
 
-_FULL = _spec()
-_SWA = _spec(SlidingWindowSpec, sliding_window=128)
-_MAMBA = MambaSpec(block_size=16, shapes=((4, 8),), dtypes=(torch.float32,))
+_FULL = FullAttentionManager.layer_config(_spec())
+_SWA = SlidingWindowManager.layer_config(_spec(), sliding_window=128)
+_MAMBA = MambaManager.layer_config(
+    MambaSpec(block_size=16, shapes=((4, 8),), dtypes=(torch.float32,))
+)
 
 
 def _bare_layer(cls=Attention, **attrs):
@@ -92,13 +101,16 @@ class _TreeBackend(FlashAttentionBackend):
 
 
 def _model(*groups, backend=_TreeBackend):
-    """``(attn_groups, layers)`` from ``(spec, prefix, n, layer class)``."""
-    attn_groups, layers = [], {}
-    for gid, (spec, prefix, n, cls) in enumerate(groups):
+    """``(attn_groups, layers, kv_cache_groups)`` from ``(layer config,
+    prefix, n, layer class)``."""
+    attn_groups, layers, kv_cache_groups = [], {}, []
+    for gid, (layer_config, prefix, n, cls) in enumerate(groups):
         names = [f"{prefix}.{i}" for i in range(n)]
+        spec = layer_config.spec
         attn_groups.append([AttentionGroup(backend, names, spec, gid)])
+        kv_cache_groups.append(new_kv_cache_group(names, layer_config))
         layers.update({name: _bare_layer(cls) for name in names})
-    return attn_groups, layers
+    return attn_groups, layers, kv_cache_groups
 
 
 class ToyKernel(SpecKernel):
@@ -166,7 +178,12 @@ _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
     "draft-and-hidden-state": (
         lambda: _model(
             *_LLAMA,
-            (_spec(HiddenStateCacheSpec), "hidden", 1, Attention),
+            (
+                FullAttentionManager.layer_config(_spec(HiddenStateCacheSpec)),
+                "hidden",
+                1,
+                Attention,
+            ),
             (_SWA, "draft", 1, DraftAttention),
         ),
         "slots",
@@ -175,14 +192,21 @@ _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
         [],
     ),
     "gpt-oss": (
-        lambda: _model((_SWA, "swa", 2, Attention), *_LLAMA),
+        lambda: _model((_SWA, "swa", 2, SlidingAttention), *_LLAMA),
         "slots",
         False,
         "chain",
         ["attn:sliding_window, 2 layers: not full attention"],
     ),
     "rswa": (
-        lambda: _model((_spec(RSWASpec, rswa_window=64), "rswa", 2, Attention)),
+        lambda: _model(
+            (
+                RSWAManager.layer_config(_spec(), rswa_window=64),
+                "rswa",
+                2,
+                RSWAAttention,
+            )
+        ),
         "slots",
         False,
         "chain",
@@ -217,6 +241,10 @@ class DraftAttention(Attention):
     is_draft_layer = True
 
 
+class SlidingAttention(Attention):
+    sliding_window = 128
+
+
 @pytest.mark.parametrize("case", list(_MODEL_RULES))
 def test_plan_kind_rules(case):
     """What a model's layers let it verify, and why."""
@@ -226,9 +254,11 @@ def test_plan_kind_rules(case):
         model = lambda: _hybrid(layer_cls)  # noqa: E731
         if reasons is None:
             reasons = [_chains(layer_cls)]
-    attn_groups, layers = model()
+    attn_groups, layers, kv_cache_groups = model()
     kernels = _provided() if provided else _kv_provided()
-    caps = SpecCapabilities.from_limits(layer_spec_limits(attn_groups, layers, kernels))
+    caps = SpecCapabilities.from_limits(
+        layer_spec_limits(attn_groups, layers, kv_cache_groups, kernels)
+    )
     assert caps.plan_kind == plan_kind
     assert [limit.reason for limit in caps.limits] == reasons
 
@@ -236,8 +266,7 @@ def test_plan_kind_rules(case):
 def test_no_kv_commit_verifies_chains():
     """Without a KV commit kernel, attention layers verify chains:
     vLLM keeps no compaction kernel, so a tree speculator lowers at startup."""
-    attn_groups, layers = _model(*_LLAMA)
-    caps = SpecCapabilities.from_limits(layer_spec_limits(attn_groups, layers))
+    caps = SpecCapabilities.from_limits(layer_spec_limits(*_model(*_LLAMA)))
     assert caps.plan_kind == "chain"
     assert [limit.reason for limit in caps.limits] == [
         "attn:full_attention, 4 layers: no layout:paged_token/commit kernel"
@@ -259,7 +288,8 @@ def _resolve(**settings):
     """Resolve the capabilities of a runner over a hybrid whose layers all
     verify trees, with ``settings`` on the runner."""
     runner = object.__new__(GPUModelRunner)
-    runner.attn_groups, layers = _hybrid(TreeGDN)
+    runner.attn_groups, layers, kv_cache_groups = _hybrid(TreeGDN)
+    runner.kv_cache_config = KVCacheConfig(1, [], kv_cache_groups)
     runner.compilation_config = CompilationConfig()
     runner.compilation_config.static_forward_context = layers
     runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()

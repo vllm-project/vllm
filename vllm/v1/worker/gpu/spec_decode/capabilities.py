@@ -4,7 +4,7 @@
 ``round_contract.md``, Startup)."""
 
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 # Their home before resources.py; out-of-tree speculators import them from here.
@@ -18,6 +18,7 @@ from vllm.v1.spec_decode.resources import (  # noqa: F401
 from vllm.v1.worker.gpu.spec_decode.kernels import KernelRegistry, SpecLayerSpec
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheGroup
     from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -26,24 +27,26 @@ def spec_layers(
 ) -> Iterator[tuple["AttentionGroup", str, Any, Any]]:
     """``(group, name, spec, layer)`` for each target layer a round verifies:
     not draft layers, hidden-state caches, or encoder or cross attention."""
-    from vllm.v1.kv_cache_interface import (
-        CrossAttentionSpec,
-        EncoderOnlyAttentionSpec,
-        HiddenStateCacheSpec,
-        UniformTypeKVCacheSpecs,
-    )
+    from vllm.v1.attention.backend import AttentionType
+    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
 
-    skipped = (HiddenStateCacheSpec, EncoderOnlyAttentionSpec, CrossAttentionSpec)
+    skipped_attn_types = (
+        AttentionType.ENCODER,
+        AttentionType.ENCODER_ONLY,
+        AttentionType.ENCODER_DECODER,
+    )
     for groups in attn_groups:
         for group in groups:
+            spec = group.kv_cache_spec
             for name in group.layer_names:
-                spec = group.kv_cache_spec
-                if isinstance(spec, UniformTypeKVCacheSpecs):
-                    spec = spec.kv_cache_specs[name]
                 layer = layers.get(name)
                 # A group's spec can come from a draft layer or a target layer
                 # alike, so the layer says whether it is a draft layer.
-                if getattr(layer, "is_draft_layer", False) or isinstance(spec, skipped):
+                if (
+                    getattr(layer, "is_draft_layer", False)
+                    or isinstance(spec, HiddenStateCacheSpec)
+                    or getattr(layer, "attn_type", None) in skipped_attn_types
+                ):
                     continue
                 yield group, name, spec, layer
 
@@ -51,11 +54,13 @@ def spec_layers(
 def layer_spec_limits(
     attn_groups: Iterable[Iterable["AttentionGroup"]],
     layers: Mapping[str, Any],
+    kv_cache_groups: Sequence["KVCacheGroup"],
     kernels: KernelRegistry | None = None,
 ) -> list[SpecLimit]:
     """The plan kind caps of the target's layers (:func:`spec_layers`), one per
-    (layer kind, reason) with its layer count. ``kernels`` defaults to none:
-    then every layer that needs one verifies chains.
+    (layer kind, reason) with its layer count. ``kv_cache_groups`` are indexed
+    by each attention group's ``kv_cache_group_id``. ``kernels`` defaults to
+    none: then every layer that needs one verifies chains.
     """
     from vllm.model_executor.layers.mamba.abstract import MambaBase
 
@@ -69,9 +74,10 @@ def layer_spec_limits(
             why = layer.tree_decline_reason()
             layout = "recurrent_state"
         else:
-            kind = attn_layer_kind(spec)
+            kv_cache_group = kv_cache_groups[group.kv_cache_group_id]
+            kind = attn_layer_kind(kv_cache_group, spec)
             why = group.backend.tree_decline_reason(layer, spec)
-            layout = attn_layout(layer, spec)
+            layout = attn_layout(layer, kv_cache_group, spec)
         if why is not None:
             num_layers[("chain", kind.key(), why)] += 1
             continue
@@ -87,26 +93,37 @@ def layer_spec_limits(
 
 
 def causal_full_attention(layer: Any, spec: Any) -> bool:
-    """Whether an attention layer attends to its whole context (no window or chunk)."""
-    return attn_layer_kind(spec).variant == "full_attention" and not any(
-        getattr(spec, name, None) or getattr(layer, name, None)
-        for name in ("sliding_window", "attention_chunk_size", "rswa_window")
+    """Whether an attention layer attends to its whole context: a decoder
+    ``Attention`` layer without a sliding window, which ``Attention`` gives a
+    full attention KV cache manager. Subclasses that pick their own manager
+    (chunked, sink, RSWA, ring) are not."""
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backend import AttentionType
+
+    return (
+        isinstance(layer, Attention)
+        and type(layer).get_kv_cache_config is Attention.get_kv_cache_config
+        and getattr(layer, "sliding_window", None) is None
+        and getattr(layer, "attn_type", AttentionType.DECODER) == AttentionType.DECODER
     )
 
 
-def attn_layer_kind(spec: Any) -> SpecLayerKind:
-    """The kind of an attention layer with KV cache spec ``spec``."""
-    from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
+def attn_layer_kind(kv_cache_group: "KVCacheGroup", spec: Any) -> SpecLayerKind:
+    """The kind of an attention layer with KV cache spec ``spec`` in
+    ``kv_cache_group``: the kind of the group's KV cache manager."""
+    from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
 
-    return SpecLayerKind("attn", get_kv_cache_spec_kind(spec).value)
+    return SpecLayerKind(
+        "attn", get_kv_cache_kind(kv_cache_group.manager_config, [spec]).value
+    )
 
 
-def attn_layout(layer: Any, spec: Any) -> str:
+def attn_layout(layer: Any, kv_cache_group: "KVCacheGroup", spec: Any) -> str:
     """What committing an attention layer's accepted path moves (``""``: a
     cache not paged by slot, whose model keeps its own commit)."""
     from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
 
-    if not getattr(spec, "uses_slot_mapping", True):
+    if not (kv_cache_group.manager_cls.uses_slot_mapping and spec.uses_slot_mapping):
         return ""
     mode = get_kv_quant_mode(str(getattr(layer, "kv_cache_dtype", "auto")))
     if mode == KVQuantMode.NVFP4 or mode.is_per_token_head:

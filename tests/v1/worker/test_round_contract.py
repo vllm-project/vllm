@@ -10,13 +10,17 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import CacheConfig, CompilationConfig
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
 )
@@ -344,15 +348,16 @@ class _Staged:
 @requires_kernels
 @pytest.mark.parametrize("last_parent", range(3))
 def test_mrope_tree_positions(last_parent):
-    """Every M-RoPE section of a verify row moves by plan - chain position, so
-    along each root-to-leaf path the positions are the ones that path verified
-    as a chain gets. Prefill rows keep their staged positions."""
+    """M-RoPE reads the plan positions ``lay_out`` writes: every section of a
+    verify row moves by plan - chain position, so along each root-to-leaf path
+    the positions are the ones that path verified as a chain gets. Prefill rows
+    keep their staged positions."""
     num_dims, max_rows, max_model_len = 3, 4, 64
     counts, query_lens = [1, 4, 4], [5, 4, 4]  # request 0: a prefill chunk
     qsl = np.cumsum([0, *query_lens]).astype(np.int32)
     num_tokens = int(qsl[-1])
     idx_mapping = _t([2, 0, 1])
-    num_computed = _t([30, 41, 3])
+    num_computed = [30, 41, 3]  # per request state
     rope = object.__new__(RopeState)
     rope.num_dims, rope.max_model_len = num_dims, max_model_len
     staged = torch.zeros(3 * num_dims, max_model_len, dtype=torch.int32, device=DEVICE)
@@ -364,18 +369,23 @@ def test_mrope_tree_positions(last_parent):
     rope.positions = torch.zeros(num_dims, num_tokens + 1, dtype=torch.int64).to(DEVICE)
     parent = np.full((3, max_rows), -1, dtype=np.int32)
     parent[1:, 1:] = [[0, 0, 1], [0, 1, last_parent]]
-    chain_pos = torch.zeros(num_tokens, dtype=torch.int64, device=DEVICE)
+    chain_pos = torch.tensor(
+        [num_computed[s] + i for s, n in zip([2, 0, 1], query_lens) for i in range(n)],
+        dtype=torch.int64,
+        device=DEVICE,
+    )
+    positions = chain_pos.clone()
     input_ids = torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE)
     layout = PlanLayout(num_tokens, max_rows, DEVICE)
     plan = _plan(parent, counts)
-    layout.apply(plan, _t(counts), _t(qsl), chain_pos, input_ids, 3, num_tokens)
+    layout.apply(plan, _t(counts), _t(qsl), positions, input_ids, 3, num_tokens)
 
-    def rope_positions(pos_delta):
-        args = (idx_mapping, _t(qsl), _t([6, 9, 20]), num_computed)
-        rope.prepare_positions(*args, pos_delta=pos_delta)
+    def rope_positions(input_positions):
+        args = (idx_mapping, _t(qsl), _t([6, 9, 20]), input_positions)
+        rope.prepare_positions(*args)
         return rope.get_positions(num_tokens).clone().cpu()
 
-    tree, chain = rope_positions(layout.pos_delta), rope_positions(None)
+    tree, chain = rope_positions(positions), rope_positions(chain_pos)
 
     assert torch.equal(tree, chain + layout.pos_delta[:num_tokens].cpu())
     assert tree[:, 0].tolist() == [103, 203, 303]
@@ -660,32 +670,39 @@ def test_kv_compaction_moves_the_path(kind):
         assert torch.equal(_token_view(cache, kind).cpu(), expected.cpu())
 
 
-def _spec(cls, block_size=16, num_kv_heads=1, head_size=64):
-    return cls(
-        block_size=block_size,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        dtype=torch.bfloat16,
+def _layer(manager, cls=AttentionSpec, block_size=16, num_kv_heads=1, head_size=64):
+    """A layer's KV cache config: ``manager`` allocates a ``cls`` spec."""
+    return manager.layer_config(
+        cls(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
     )
 
 
-def _runner(specs, modules, kernel_block_size, num_blocks):
+def _runner(layer_configs, modules, kernel_block_size, num_blocks):
     """A runner with the members ``spec_kernel_layers`` reads: one KV cache
-    group per layer of ``specs``; ``modules`` are the forward context."""
+    group per layer of ``layer_configs``; ``modules`` are the forward context."""
     runner = object.__new__(GPUModelRunner)
     runner.device = torch.device("cpu")
     runner.compilation_config = CompilationConfig()
     runner.compilation_config.static_forward_context = modules
-    runner.kv_cache_config = KVCacheConfig(num_blocks, [], [])
+    runner.kv_cache_config = KVCacheConfig(
+        num_blocks,
+        [],
+        [new_kv_cache_group([name], layer) for name, layer in layer_configs.items()],
+    )
     runner.attn_groups = [
-        [AttentionGroup(FlashAttentionBackend, [name], spec, g)]
-        for g, (name, spec) in enumerate(specs.items())
+        [AttentionGroup(FlashAttentionBackend, [name], layer.spec, g)]
+        for g, (name, layer) in enumerate(layer_configs.items())
     ]
-    runner.kernel_block_sizes = [kernel_block_size] * len(specs)
+    runner.kernel_block_sizes = [kernel_block_size] * len(layer_configs)
     runner.block_tables = object.__new__(BlockTables)
     runner.block_tables.input_block_tables = [
         torch.zeros(2, 4, dtype=torch.int32)
-    ] * len(specs)
+    ] * len(layer_configs)
     runner.cache_config = CacheConfig()
     return runner
 
@@ -701,16 +718,18 @@ def test_kv_commit_binds_the_layers_it_moves(case):
         cache = torch.zeros(
             num_blocks * group_block // kernel_block, 4, kernel_block, 512
         ).to(torch.bfloat16)
-        specs = {"attn": _spec(FullAttentionSpec, group_block, 4, 256)}
+        specs = {
+            "attn": _layer(FullAttentionManager, AttentionSpec, group_block, 4, 256)
+        }
         modules = {"attn": _module(kv_cache=cache)}
         runner = _runner(specs, modules, kernel_block, num_blocks)
     else:
         cache = torch.zeros(4, 1, 16, 128, dtype=torch.bfloat16)
         specs = {
-            "attn": _spec(FullAttentionSpec),
-            "ring": _spec(CircularBufferSpec),
-            "hidden": _spec(HiddenStateCacheSpec),
-            "shared": _spec(FullAttentionSpec),
+            "attn": _layer(FullAttentionManager),
+            "ring": _layer(CircularBufferManager),
+            "hidden": _layer(FullAttentionManager, HiddenStateCacheSpec),
+            "shared": _layer(FullAttentionManager),
         }
         modules = {
             "attn": _module(kv_cache=cache),
