@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -34,7 +34,7 @@ steps:
   timeout_in_minutes: 40
   parallelism: 2
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -64,7 +64,7 @@ steps:
   timeout_in_minutes: 65
   parallelism: 2
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -97,7 +97,7 @@ steps:
   timeout_in_minutes: 65
   num_devices: 1
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -129,7 +129,7 @@ steps:
   timeout_in_minutes: 80
   parallelism: 3
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -165,7 +165,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -193,7 +193,7 @@ steps:
   timeout_in_minutes: 120
   parallelism: 3
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -221,7 +221,7 @@ steps:
   timeout_in_minutes: 68
   parallelism: 3
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7

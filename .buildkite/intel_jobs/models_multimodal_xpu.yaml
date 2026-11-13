@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 68
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -36,7 +36,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 75
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -67,7 +67,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 40
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -96,7 +96,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -123,7 +123,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 75
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -156,7 +156,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 98
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -184,7 +184,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -210,7 +210,7 @@ steps:
   key: multi-modal-models-extended-generation-1-xpu
   device: intel_gpu
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -239,7 +239,7 @@ steps:
   key: multi-modal-models-extended-ppl
   device: intel_gpu
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -266,7 +266,7 @@ steps:
   device: intel_gpu
   parallelism: 4
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -292,7 +292,7 @@ steps:
   key: multi-modal-models-extended-generation-3
   device: intel_gpu
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -319,7 +319,7 @@ steps:
   device: intel_gpu
   parallelism: 3
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
