@@ -1515,7 +1515,7 @@ class BeamSearchParams(
         if not ids:
             raise ValueError("Beam search allowed_token_ids must not be empty")
         if self.structured_outputs is not None:
-            # Grammar candidates can exceed the exact-ID limit of 128 tokens.
+            # Grammar candidates can exceed the MAX_LOGPROB_TOKEN_IDS exact-ID limit.
             raise ValueError(
                 "Beam allowlists with structured outputs are not supported"
             )
