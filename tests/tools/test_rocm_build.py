@@ -61,7 +61,8 @@ def run_build(
     tmp_path: Path, mode: str = "ci", existing: tuple[str, ...] = (), **env: str
 ) -> tuple[int, str, list[str]]:
     """build.sh <mode> against fake git, docker and buildkite-agent; returns (status,
-    stderr, calls). `existing` are the image refs the registry already has.
+    stderr, calls). `existing` are the image refs the registry already has, each
+    optionally followed by its digest (`ref sha256:...`).
     FAILURE=bake|missing|upload breaks the kernel symbol map; FAILURE=registry
     makes every registry lookup fail, FAILURE=pushed only lookups of pushed refs,
     FAILURE=appear those of APPEARS refs once they appear, FAILURE=fetch-main and
@@ -115,8 +116,10 @@ case $2 in
       [[ -n $beat ]] && echo "$beat" || exit 1
     elif [[ $3 == inspect ]]; then
       [[ $FAILURE == registry ]] && { echo "503 Service Unavailable" >&2; exit 1; }
-      found=0
-      while read -r ref; do [[ $4 == "$ref"* ]] && found=1; done < "$REGISTRY"
+      found=0 digest=sha256:$(printf '0%.0s' {1..64})
+      while read -r ref d; do
+        [[ $4 == "$ref"* ]] && { found=1; [[ -z $d ]] || digest=$d; }
+      done < "$REGISTRY"
       # Refs starting with APPEARS exist from the APPEAR_AFTER-th lookup of one on
       # (main's build pushing them while this one waits).
       if [[ -n $APPEARS && $4 == "$APPEARS"* ]]; then
@@ -126,10 +129,11 @@ case $2 in
       fi
       [[ $FAILURE == pushed ]] && ((found)) && { echo "503" >&2; exit 1; }
       ((found)) || { echo "$4: not found" >&2; exit 1; }
-      echo "Digest: sha256:$(printf '0%.0s' {1..64})"
+      echo "Digest: $digest"
     else
       echo "create ${@: -1}" >> "$CALLS"
-      echo "$5" >> "$REGISTRY"
+      src=${@: -1}
+      echo "$5 ${src##*@}" >> "$REGISTRY"
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
@@ -659,9 +663,34 @@ def test_promote_never_copies_over_an_image_main_built(tmp_path, existing, expec
 
 
 def test_promote_without_a_request_does_nothing(tmp_path):
-    status, stderr, calls = run_build(tmp_path, "promote")
+    # Nightlies run it: no builder, no build context, no tag fetch.
+    status, stderr, calls = run_build(tmp_path, "promote", NO_BUILDER="1")
     assert status == 0, stderr
     assert "nothing to promote" in stderr
+    assert calls == []
+    assert not (tmp_path / ".rocm-src").exists()
+
+
+def test_promote_finishes_a_chain_an_earlier_attempt_left(tmp_path):
+    # The stack copied, then a registry error on the runtime: the retry must copy
+    # the rest rather than take the stack tags for main's.
+    status, stderr, calls = promote(
+        tmp_path,
+        [PR_WHEELS, PR_STACK, PR_RUNTIME, PR_TEST_DEPS],
+        existing=(
+            f"rocm/vllm-ci:stack-rocm-{PROMOTE_KS}-wheels {PIN[1:]}",
+            f"rocm/vllm-ci:stack-rocm-{PROMOTE_KS} {PIN[1:]}",
+        ),
+    )
+    assert status == 0, stderr
+    assert copied(calls) == [PR_RUNTIME, PR_TEST_DEPS]
+
+
+def test_promote_a_registry_error_on_an_existing_tag_fails_the_step(tmp_path):
+    status, stderr, calls = promote(
+        tmp_path, [PR_WHEELS, PR_STACK, PR_RUNTIME], FAILURE="registry"
+    )
+    assert status == 75, stderr
     assert not copied(calls)
 
 

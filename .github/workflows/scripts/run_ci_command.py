@@ -102,7 +102,7 @@ ROCM_BUILT_KEYS = (
     "rocm-rocm-runtime-built",
     "rocm-rocm-test-deps-built",
 )
-# The one step a cache build runs (.buildkite/hardware_tests/amd_rocm_cache.yaml).
+# The one step a cache build runs (.buildkite/image_build/amd_rocm_cache.yaml).
 ROCM_CACHE_STEP_KEY = "rocm-base-image-cache"
 BUILDS_PER_PAGE = 100
 MAX_BUILD_PAGES = 100

@@ -44,6 +44,15 @@ MODE=$2
 REPO=${ROCM_CI_REPO:?ROCM_CI_REPO must be set (by ci-infra or release-pipeline.yaml)}
 TRUSTED=${ROCM_CI_TRUSTED_REPO:-rocm/vllm-ci}
 
+# promote (/ci rocm cache) runs in every nightly, as an optional step: without a request, leave
+# before the builder, the build context and the tag fetch.
+if [[ $MODE == promote ]]; then
+  [[ -n ${ROCM_PROMOTE_PR:-} ]] || { echo "No /ci rocm cache request: nothing to promote" >&2; exit 0; }
+  [[ $ROCM_PROMOTE_PR =~ ^[0-9]+$ && ${ROCM_PROMOTE_SHA:-} =~ ^[0-9a-f]{40}$ ]] \
+    || { echo "ROCM_PROMOTE_PR or ROCM_PROMOTE_SHA is malformed" >&2; exit 2; }
+  [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
+fi
+
 export STACK PUSH=true
 export CACHE=${ROCM_CI_CACHE_REPO:-rocm/vllm-ci-cache}  # every CI build reads the trusted cache
 export CACHE_TO=$CACHE:                     # ref prefix trusted builds write (HCL appends <stack>-<name>)
@@ -102,6 +111,7 @@ docker buildx version
 # COPY on file modes, which drift on shared agents. umask 022 gives every agent git's modes.
 [[ $(git rev-parse HEAD) == $(git rev-parse "${BUILDKITE_COMMIT:-HEAD}^{commit}") ]] \
   || { echo "HEAD is not BUILDKITE_COMMIT ($BUILDKITE_COMMIT)" >&2; exit 1; }
+if [[ $MODE != promote ]]; then   # promote copies images: no context, no version
 umask 022
 rm -rf .rocm-src && mkdir .rocm-src
 git archive HEAD | tar -x --no-same-permissions -C .rocm-src -f -
@@ -120,6 +130,7 @@ git describe --tags --match 'v[0-9]*' >/dev/null 2>&1 \
 printf 'node: %s\nnode-date: %s\ndescribe-name: %s\n' "$(git rev-parse HEAD)" \
   "$(git log -1 --format=%cI)" "$(git describe --tags --long --abbrev=40 --match 'v[0-9]*')" \
   > .rocm-src/.git_archival.txt
+fi
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -414,11 +425,9 @@ case $MODE in
     # /ci rocm cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
     # ROCM_PROMOTE_SHA pushed. Copy them here under the keys main's keys_at gives that commit, if
     # it was built with main's recipe; main reuses each once it gets that key. The runtime and
-    # test-deps are copied only over the parent this run copied, never over one main built.
-    [[ -n ${ROCM_PROMOTE_PR:-} ]] || { echo "No /ci rocm cache request: nothing to promote" >&2; exit 0; }
-    [[ $ROCM_PROMOTE_PR =~ ^[0-9]+$ && ${ROCM_PROMOTE_SHA:-} =~ ^[0-9a-f]{40}$ ]] \
-      || { echo "ROCM_PROMOTE_PR or ROCM_PROMOTE_SHA is malformed" >&2; exit 2; }
-    [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
+    # test-deps are copied only over a parent of #ROCM_PROMOTE_PR's, never over one main built: an
+    # existing tag holding the recorded digest is an earlier attempt's copy, so a retry finishes the
+    # chain instead of stopping at it.
     git fetch -q origin "${ROCM_PROMOTE_SHA:?}"
     git diff --quiet HEAD "$ROCM_PROMOTE_SHA" -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
       || { echo "$ROCM_PROMOTE_SHA builds with another build.sh or bake file than main" >&2; exit 1; }
@@ -428,12 +437,20 @@ case $MODE in
     for tag in "stack-$STACK-$pKs-wheels" "stack-$STACK-$pKs" \
         "runtime-$STACK-$pKr" "test-deps-$STACK-$pKr"; do   # the stack tag completes the pair
       stacked=0; [[ $tag == stack-* ]] && stacked=1
-      if digest "$TRUSTED:$tag" >/dev/null; then
-        echo "$TRUSTED:$tag already exists" >&2; copied=0; continue
+      ref=$(tr ' ' '\n' <<<"${ROCM_PROMOTE_IMAGES:-}" \
+        | grep -xE "rocm/vllm-dev:pr$ROCM_PROMOTE_PR-$tag@sha256:[0-9a-f]{64}") || ref=""
+      if d=$(digest "$TRUSTED:$tag"); then
+        if [[ -n $ref && $d == "${ref#*@}" ]]; then
+          echo "$TRUSTED:$tag already holds #$ROCM_PROMOTE_PR's image" >&2; copied=1
+        else
+          echo "$TRUSTED:$tag already exists" >&2; copied=0
+        fi
+        continue
+      else
+        rc=$?; ((rc == 1)) || exit $rc   # a registry error is not a missing tag
       fi
-      ((stacked || copied)) || { echo "Not copying $tag over an image this run did not copy" >&2; break; }
-      if ! ref=$(tr ' ' '\n' <<<"${ROCM_PROMOTE_IMAGES:-}" \
-          | grep -xE "rocm/vllm-dev:pr$ROCM_PROMOTE_PR-$tag@sha256:[0-9a-f]{64}"); then
+      ((stacked || copied)) || { echo "Not copying $tag over an image main built" >&2; break; }
+      if [[ -z $ref ]]; then
         ((stacked)) || { echo "#$ROCM_PROMOTE_PR's CI recorded no $tag; main builds it" >&2; break; }
         echo "#$ROCM_PROMOTE_PR's CI recorded no $tag" >&2; exit 1
       fi
