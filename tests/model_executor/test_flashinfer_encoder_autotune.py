@@ -9,6 +9,17 @@ import pytest
 
 from tests.models.utils import check_embeddings_close, check_logprobs_close
 from tests.utils import multi_gpu_marks, multi_gpu_test
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+
+pytestmark = pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(100)
+        and has_flashinfer()
+    ),
+    reason="FlashInfer encoder autotuning tests require SM100+ and FlashInfer",
+)
 
 
 @pytest.mark.usefixtures("enable_pickle")
