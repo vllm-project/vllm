@@ -240,7 +240,8 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
 def _run_python_vllm_dp_server(child_args: argparse.Namespace) -> None:
     from vllm.entrypoints.launchers.api_server.entry import run_server
 
-    uvloop.run(run_server(child_args))
+    # The supervisor forwards its signals to this server and bounds its shutdown.
+    uvloop.run(run_server(child_args, exit_on_repeated_cleanup_signal=False))
 
 
 def _run_rust_vllm_dp_server(child_args: argparse.Namespace) -> None:

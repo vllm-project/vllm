@@ -202,11 +202,17 @@ async def serve_http(
     sock: socket.socket | None,
     enable_ssl_refresh: bool = False,
     peer_loads: tuple[MutableSequence[int], int] | None = None,
+    *,
+    exit_on_repeated_cleanup_signal: bool = True,
     **uvicorn_kwargs: Any,
 ):
     """Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
     options.  Supports http header limits via h11_max_incomplete_event_size and
     h11_max_header_count.
+
+    `exit_on_repeated_cleanup_signal` is False for a server whose parent
+    process signals it and bounds its shutdown, so that a signal delivered
+    twice does not skip HTTP and plugin cleanup.
     """
     logger.info("Available routes are:")
     # post endpoints
@@ -271,12 +277,15 @@ async def serve_http(
 
     engine_client = app.state.engine_client
     engine_stopped = False
+    received_signals: set[int] = set()
 
     def handle_signal(signum: int) -> None:
+        repeated = signum in received_signals
+        received_signals.add(signum)
         cleanup_only = engine_stopped or (
             shutdown_task is not None and shutdown_task.done()
         )
-        if not shutdown_event.is_set() or not cleanup_only:
+        if not (repeated and cleanup_only and exit_on_repeated_cleanup_signal):
             request_shutdown()
             return
         # Only HTTP and plugin cleanup remain. A repeated signal must not wait
@@ -346,6 +355,9 @@ async def serve_http(
         shutdown_task = loop.create_task(handle_shutdown())
 
         await server_task
+        if not server.started:
+            # Uvicorn < 0.50 returns from a failed startup; later versions exit.
+            raise SystemExit(3)
         return dummy_shutdown()
     except asyncio.CancelledError:
         port = uvicorn_kwargs["port"]
