@@ -465,3 +465,11 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
 - The model reads text: `images`, `audio` and `videos` return 400. Top-level
   `instructions` return 400, since the prompt is fixed. Other
   `chat_template_kwargs` reach the template, with thinking off.
+- The OpenAI-style `/v1/decisions` serves the model too, with its stock
+  question rendering: the input is flattened to text, a `predicate` reads
+  as a choice between `false` and `true`, a `score` as a choice over its
+  level labels, a question takes at most 26 options, and `confidence` is
+  the stock one (the top probability times the label mass). These are not
+  the question shapes the checkpoint was trained on, though its answers
+  stay close to `/v1/systemone`'s on the same questions. Prefer
+  `/v1/systemone` for the trained answer shapes.
