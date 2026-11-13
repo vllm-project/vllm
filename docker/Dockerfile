@@ -230,6 +230,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         # Cython 3.3 rejects tilelang's hardcoded Py_LIMITED_API=3.8.
         printf 'cython<3.3\n' > /tmp/build-constraints.txt \
         && export UV_BUILD_CONSTRAINT=/tmp/build-constraints.txt; \
+        # PyNvVideoCodec's cp314 aarch64 wheels are manylinux_2_34 only, and
+        # it has no sdist. The build does not need it; the wheel still
+        # requires it (the build stage re-copies cuda.txt), and the Ubuntu
+        # runtime image installs it.
+        sed -i '/^PyNvVideoCodec==/d' requirements/cuda.txt; \
     fi \
     && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
