@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3 MegaMoE: block-FP8 checkpoint shards requantized to the MXFP8
-MegaMoE kernel layout, and BF16 shards loaded as they are."""
+MegaMoE kernel layout (kept as block-FP8 on SM90), and BF16 shards loaded as
+they are."""
 
 from types import SimpleNamespace
 
@@ -19,6 +20,9 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
+from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import transform_fp8_block_sf_for_sm90_mega_moe
+from vllm.utils.import_utils import has_deep_gemm
 
 BLOCK = (128, 128)
 HIDDEN, INTER = 256, 128
@@ -35,6 +39,9 @@ def sm100_mega_moe_layout(monkeypatch):
         "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
         "check_deep_gemm_mega_moe_supported",
         lambda *args: None,
+    )
+    monkeypatch.setattr(
+        current_platform, "is_device_capability", lambda *args, **kwargs: False
     )
 
 
@@ -156,19 +163,34 @@ def _reference_mega_moe_layout(w13, s13, w2, s2):
     )
 
 
-def _expected_routed(ckpt):
-    w13, s13 = requant_block_fp8_to_ue8m0(
-        ckpt["w13_weight"][LOCAL_EXPERTS], ckpt["w13_weight_scale_inv"][LOCAL_EXPERTS]
+def _sm90_layout(w13, s13, w2, s2):
+    """Block-FP8 weights as loaded, block scales laid out by DeepGEMM."""
+    return (
+        _interleave(w13.view(torch.uint8)),
+        transform_fp8_block_sf_for_sm90_mega_moe(w13, s13, is_l1=True),
+        w2.view(torch.uint8),
+        transform_fp8_block_sf_for_sm90_mega_moe(w2, s2, is_l1=False),
     )
-    w2, s2 = requant_block_fp8_to_ue8m0(
-        ckpt["w2_weight"][LOCAL_EXPERTS], ckpt["w2_weight_scale_inv"][LOCAL_EXPERTS]
-    )
+
+
+def _expected(w13, s13, w2, s2, sm90):
+    if sm90:
+        return _sm90_layout(w13, s13, w2, s2)
+    w13, s13 = requant_block_fp8_to_ue8m0(w13, s13)
+    w2, s2 = requant_block_fp8_to_ue8m0(w2, s2)
     return _reference_mega_moe_layout(w13, s13, w2, s2)
 
 
-def _assert_layout(actual, expected):
+def _expected_routed(ckpt, sm90=False):
+    w13, s13, w2, s2 = (t[LOCAL_EXPERTS] for t in ckpt.values())
+    return _expected(w13, s13, w2, s2, sm90)
+
+
+def _assert_layout(actual, expected, sm90=False):
     for tensor, reference in zip(actual, expected):
         assert torch.equal(tensor.view(reference.dtype), reference)
+        # The SM90 kernel reads the scales with DeepGEMM's strides.
+        assert not sm90 or tensor.stride() == reference.stride()
 
 
 def _routed(experts):
@@ -217,10 +239,9 @@ def _load_shared(experts, ckpt) -> None:
         assert loaded in params
 
 
-def _expected_shared(ckpt):
-    q13, sf13 = requant_block_fp8_to_ue8m0(ckpt["w13"], ckpt["s13"])
-    q2, sf2 = requant_block_fp8_to_ue8m0(ckpt["w2"], ckpt["s2"])
-    return [t[0] for t in _reference_mega_moe_layout(q13, sf13, q2, sf2)]
+def _expected_shared(ckpt, sm90=False):
+    expected = _expected(ckpt["w13"], ckpt["s13"], ckpt["w2"], ckpt["s2"], sm90)
+    return [t[0] for t in expected]
 
 
 def _shared(experts):
@@ -240,14 +261,26 @@ class _Model(torch.nn.Module):
         self.experts = _experts()
 
     def process_weights_after_loading(self):
-        self.experts.requantize_block_fp8()
+        self.experts.finalize_block_fp8_weights()
 
 
+@pytest.mark.parametrize(
+    "sm90",
+    [
+        False,
+        pytest.param(
+            True, marks=pytest.mark.skipif(not has_deep_gemm(), reason="no DeepGEMM")
+        ),
+    ],
+)
 @pytest.mark.parametrize("mode", ["layerwise", "direct"])
-def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode):
+def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode, sm90):
     """A reload writes the block-FP8 shards and finishes with the model's
     process_weights_after_loading; the kernel tensors keep their storage."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability", lambda cap, **_: sm90 and cap == 90
+    )
     model_config = SimpleNamespace(
         word_embeddings_untied_by_checkpoint=False, quantization=None
     )
@@ -259,10 +292,10 @@ def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode):
     _load_shuffled(experts, ckpt, seed=0)
     _load_shared(experts, shared_ckpt)
     process_weights_after_loading(model, model_config, device)  # type: ignore[arg-type]
-    # Already requantized shards are left alone by a second call.
-    experts.requantize_block_fp8()
-    _assert_layout(_routed(experts), _expected_routed(ckpt))
-    _assert_layout(_shared(experts), _expected_shared(shared_ckpt))
+    # A second call leaves the kernel tensors as they are.
+    experts.finalize_block_fp8_weights()
+    _assert_layout(_routed(experts), _expected_routed(ckpt, sm90), sm90)
+    _assert_layout(_shared(experts), _expected_shared(shared_ckpt, sm90), sm90)
     storage = {n: p.data_ptr() for n, p in experts.named_parameters()}
 
     ckpt, shared_ckpt = _checkpoint(seed=1), _shared_checkpoint(seed=1)
@@ -274,8 +307,8 @@ def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode):
     assert not experts.w13_weight.is_meta
     finish_reload(model, model_config, device)  # type: ignore[arg-type]
 
-    _assert_layout(_routed(experts), _expected_routed(ckpt))
-    _assert_layout(_shared(experts), _expected_shared(shared_ckpt))
+    _assert_layout(_routed(experts), _expected_routed(ckpt, sm90), sm90)
+    _assert_layout(_shared(experts), _expected_shared(shared_ckpt, sm90), sm90)
     assert {n: p.data_ptr() for n, p in experts.named_parameters()} == storage
 
 

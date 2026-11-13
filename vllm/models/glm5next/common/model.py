@@ -31,8 +31,8 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    fused_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
@@ -251,6 +251,7 @@ class Glm5NextMoE(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.use_sequence_parallel = False  # Read by the MegaMoE warmup.
         self.tp_rank = get_tensor_model_parallel_rank()
 
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -387,6 +388,10 @@ class Glm5NextMoE(nn.Module):
             )
         if (config.n_group or 1) > 1 or (config.topk_group or 1) > 1:
             raise NotImplementedError("GLM-5.3 MegaMoE requires one expert group.")
+        if config.scoring_func != "sigmoid" or config.topk_method != "noaux_tc":
+            raise NotImplementedError(
+                "GLM-5.3 MegaMoE requires sigmoid routing with a correction bias."
+            )
         weight_block_size = getattr(quant_config, "weight_block_size", None)
         if quant_config is not None and weight_block_size is None:
             raise NotImplementedError(
@@ -399,7 +404,6 @@ class Glm5NextMoE(nn.Module):
                 f"by ep_size={self.ep_size}."
             )
         self.mega_renormalize = config.norm_topk_prob
-        self.mega_scoring_func = config.scoring_func
         self.experts = Glm5NextMegaMoEExperts(
             vllm_config,
             num_experts=self.n_physical_experts,
@@ -419,7 +423,7 @@ class Glm5NextMoE(nn.Module):
 
     def finalize_mega_moe_weights(self) -> None:
         if self.use_mega_moe and self.experts.weight_block_size is not None:
-            self.experts.requantize_block_fp8()
+            self.experts.finalize_block_fp8_weights()
 
     def forward(
         self,
@@ -428,15 +432,15 @@ class Glm5NextMoE(nn.Module):
     ) -> torch.Tensor:
         if self.use_mega_moe:
             router_logits, _ = self.gate(hidden_states)
-            bias = self.gate.e_score_correction_bias
-            topk_weights, topk_ids = fused_topk_bias(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                scoring_func=self.mega_scoring_func,
-                e_score_correction_bias=bias.data if bias is not None else None,
-                topk=self.experts.top_k,
-                renormalize=self.mega_renormalize,
-                indices_type=torch.int64,
+            topk_weights, topk_ids = fused_grouped_topk(
+                hidden_states,
+                router_logits,
+                self.experts.top_k,
+                self.mega_renormalize,
+                self.gate.e_score_correction_bias.data,
+                num_expert_group=1,
+                topk_group=1,
+                scoring_func="sigmoid",
                 routed_scaling_factor=self.routed_scaling_factor,
             )
             return self.experts(hidden_states, topk_weights, topk_ids)
