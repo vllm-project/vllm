@@ -46,11 +46,6 @@ logger = init_logger(__name__)
 MAX_TOKENS = 32
 # The policy choice that takes the stage module's default for the token count.
 AUTO = "auto"
-# Keep every sublayer and boundary input and output of a captured step alive
-# until the step ends, so the graph pool never hands their memory to a later
-# kernel of the same step while an earlier one may still run (PDL lets a
-# kernel start before its predecessor completes).
-HOLD_STEP_TENSORS = False
 # The sparse MLA backend whose metadata and BF16 KV cache the Hopper DSA layer
 # reads (the SM90 default for GLM-5.3-Flash).
 DSA_BACKEND = "FLASHINFER_MLA_SPARSE_SM90"
@@ -74,15 +69,6 @@ class HopperLayerStages(LayerStages):
     calls: Counter
     # The policy entry of each stage, where it is not the stage's name.
     entries: dict[str, str] = {}
-    # The tensors held to the end of the step being captured (`HOLD_STEP_TENSORS`).
-    _held: list | None = None
-
-    def _hold(self, *tensors):
-        """Holds `tensors` to the end of the step (with `HOLD_STEP_TENSORS`);
-        returns the last one."""
-        if self._held is not None:
-            self._held.extend(tensors)
-        return tensors[-1]
 
     def tokens(self, stage: str) -> list[int]:
         """The planned token counts the policy gives `stage`."""
@@ -151,11 +137,11 @@ class HopperLayerStages(LayerStages):
         self.calls[kind, stage is not None] += 1
         if stage is not None:
             out = self._run_attention(stage, layer, x, step, not partial)
-            return self._hold(x, out), partial
+            return out, partial
         o_proj = layer.self_attn.o_proj
         with _override(o_proj, "reduce_results", False, partial):
             out = layer.self_attn(hidden_states=x, positions=step.positions)
-        return self._hold(x, out), partial
+        return out, partial
 
     def _run_attention(self, stage: Stage, layer, x, step: Step, reduce: bool):
         if stage.name == "kda":
@@ -177,7 +163,7 @@ class HopperLayerStages(LayerStages):
         self.calls["moe" if layer._mlp_is_moe else "dense_mlp", hopper] += 1
         if hopper:
             assert stage is not None
-            out = self._hold(x, stage.kernel(x))
+            out = stage.kernel(x)
             return (out if partial else tensor_model_parallel_all_reduce(out)), partial
         if layer._mlp_is_moe:
             config = layer.mlp.experts.moe_config
@@ -186,7 +172,7 @@ class HopperLayerStages(LayerStages):
             unreduced = _override(layer.mlp.down_proj, "reduce_results", False, partial)
         with unreduced:
             out = layer.mlp(x)
-        return self._hold(x, out), partial
+        return out, partial
 
     def _prepare_caches(self) -> None:
         """Compiles the attention stages for the bound KV caches (the KDA
@@ -315,7 +301,6 @@ class HopperSpecializedDecode(HopperLayerStages, SpecializedDecode):
     def boundary(self, layer, x, residual, post, comb, fn, scale, base, norm):
         self.calls["boundary", False] += 1
         out = super().boundary(layer, x, residual, post, comb, fn, scale, base, norm)
-        self._hold(x, residual, post, comb, *out)
         return out
 
     def reduced_boundary(self, layer, x, residual, post, comb, fn, scale, base, norm):
@@ -323,7 +308,6 @@ class HopperSpecializedDecode(HopperLayerStages, SpecializedDecode):
         out = super().reduced_boundary(
             layer, x, residual, post, comb, fn, scale, base, norm
         )
-        self._hold(x, residual, post, comb, *out)
         return out
 
     def prepare_kv(self) -> None:
@@ -351,11 +335,7 @@ class HopperSpecializedDecode(HopperLayerStages, SpecializedDecode):
 
     def run(self, step: Step, input_ids, inputs_embeds) -> torch.Tensor:
         self.calls.clear()
-        self._held = [] if HOLD_STEP_TENSORS else None
-        try:
-            out = super().run(step, input_ids, inputs_embeds)
-        finally:
-            self._held = None
+        out = super().run(step, input_ids, inputs_embeds)
         # One line per captured size: which stages the graph holds.
         logger.info(
             "Hopper specialized decode captured a %d-token step (q=%d): %s",
@@ -515,7 +495,6 @@ class HopperSpecializedDraft(HopperLayerStages, SpecializedDraft):
             x, partial = tensor_model_parallel_all_reduce(x), False
         self.calls["draft_boundary", partial] += 1
         out = super().reduced_norm(x, partial, residual, norm)
-        self._hold(x, residual, *out)
         return out
 
     def _bound_caches(self) -> tuple | None:
@@ -553,13 +532,9 @@ class HopperSpecializedDraft(HopperLayerStages, SpecializedDraft):
         self, mtp, step: Step, input_ids, inputs_embeds, previous_hidden_states, rows
     ):
         self.calls.clear()
-        self._held = [] if HOLD_STEP_TENSORS else None
-        try:
-            out = super().run(
-                mtp, step, input_ids, inputs_embeds, previous_hidden_states, rows
-            )
-        finally:
-            self._held = None
+        out = super().run(
+            mtp, step, input_ids, inputs_embeds, previous_hidden_states, rows
+        )
         logger.info(
             "Hopper specialized draft captured a %d-token step (q=%d): %s",
             step.positions.shape[-1],

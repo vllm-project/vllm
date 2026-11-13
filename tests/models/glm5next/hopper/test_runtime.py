@@ -1111,28 +1111,3 @@ def test_draft_stages_have_their_own_entries(stages):
     assert index in draft.attn_stages and index in draft.ffn_stages
     decode = _build(_backbone(), _config(policy=off.items()))
     assert {s[0].name for s in decode.attn_stages.values()} == {"kda", "dsa"}
-
-
-def test_hold_step_tensors(stages, monkeypatch):
-    """With HOLD_STEP_TENSORS the step still matches stock, and the held
-    tensors are released when the step ends."""
-    stages()
-    monkeypatch.setattr(hopper, "HOLD_STEP_TENSORS", True)
-    backbone = _backbone()
-    decode = _build(backbone, _config())
-    held = []
-    original = hopper.HopperLayerStages._hold
-
-    def spy(self, *tensors):
-        if self._held is not None:
-            held.append(len(tensors))
-        return original(self, *tensors)
-
-    monkeypatch.setattr(hopper.HopperLayerStages, "_hold", spy)
-    x, positions = _rand(2, 12, H), torch.arange(12)
-    step = decode_mod.Step(6, positions, _metadata(backbone, 12, 6))
-    out = decode.run(step, None, x)
-    torch.testing.assert_close(
-        out, _stock_backbone(backbone, x, positions), rtol=0, atol=0
-    )
-    assert len(held) == 2 * len(KINDS) + 9 and decode._held is None
