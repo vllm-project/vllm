@@ -168,7 +168,6 @@ guide: |
 
   - `--max-model-len=65536` is near the model's max context (64K).
   - `--max-num-batched-tokens=32768` for prompt-heavy workloads.
-  - `--gpu-memory-utilization=0.95` maximizes KV cache.
   - Use `uv pip install "transformers>=5.0.0"` before serving GLM-V checkpoints.
   - `--mm-encoder-tp-mode data` runs the vision encoder data-parallel — preferable to TP
     since the encoder is small and TP adds communication overhead.
