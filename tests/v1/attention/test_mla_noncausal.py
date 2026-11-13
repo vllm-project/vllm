@@ -286,6 +286,7 @@ def test_fi_dcp_builders_preserve_shared_sparse_request_mapping(entrypoint):
         )
         builder.topk_tokens = 2048
         builder.use_pcp = False
+        builder.use_shardq = False
         builder.reorder_batch_threshold = 1
         builder.cp_kv_cache_interleave_size = 1
         group = _mla_group(builder, builder.kv_cache_spec)

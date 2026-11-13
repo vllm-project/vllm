@@ -1728,6 +1728,7 @@ class MLADCPManager:
         if (
             vllm_config.kernel_config.enable_jit_warmup
             and self.use_a2a
+            and not self.use_fi_a2a_fused
             and (
                 not self._has_direct_a2a_workspace
                 or self.max_num_tokens
@@ -1786,6 +1787,8 @@ class MLADCPManager:
                 self.num_ubatches,
             )
             logger.info_once("Using FlashInfer NCCL fused DCP A2A + LSE reduction.")
+            # FI is the only collective: no direct workspace and no packed fallback.
+            self._has_direct_a2a_workspace = False
             return functools.partial(
                 workspace.lse_reduce, is_lse_base_on_e=is_lse_base_on_e
             )
