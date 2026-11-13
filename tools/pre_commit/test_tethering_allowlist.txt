@@ -173,6 +173,7 @@ tests/test_request_input_bounds.py  # CI jobs disabled pending locked cmake inst
 tests/test_sampling_params.py  # CI jobs disabled pending locked cmake installation
 tests/test_scalartype.py  # CI jobs disabled pending locked cmake installation
 tests/test_tensorizer_revision_pin.py  # CI jobs disabled pending locked cmake installation
+tests/test_tp_synced_autotune.py  # CI jobs disabled pending locked cmake installation
 tests/test_triton_utils.py  # CI jobs disabled pending locked cmake installation
 tests/test_uvicorn_logging.py  # CI jobs disabled pending locked cmake installation
 tests/test_version.py  # CI jobs disabled pending locked cmake installation

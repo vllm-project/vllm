@@ -120,6 +120,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLMultiModalProcessor,
     MiniMaxM3VLProcessingInfo,
 )
+from vllm.models.minimax_m3.common.replicate import unsupported_layout
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
@@ -741,10 +742,12 @@ class MiniMaxM3Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         use_sequence_parallel: bool = False,
         run_gemm_rs: bool = False,
+        replicate: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all heads, o_proj output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
 
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
@@ -768,6 +771,7 @@ class MiniMaxM3Attention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=replicate,
         )
         # reduce_results=False: under sequence parallelism o_proj reduce-scatters
         # in forward; otherwise the all-reduce is fused with the following
@@ -779,6 +783,7 @@ class MiniMaxM3Attention(nn.Module):
             reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
         self.use_sequence_parallel = use_sequence_parallel
         self.gemm_rs = (
@@ -862,10 +867,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         topk_indices_buffer: torch.Tensor | None = None,
         use_sequence_parallel: bool = False,
         run_gemm_rs: bool = False,
+        replicate: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        # replicate: every rank holds all heads, o_proj output is complete.
+        tp_size = 1 if replicate else get_tensor_model_parallel_world_size()
 
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
@@ -900,6 +907,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=replicate,
         )
         # reduce_results=False: under sequence parallelism o_proj reduce-scatters
         # in forward; otherwise the all-reduce is fused with the following
@@ -911,6 +919,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=replicate,
         )
         self.use_sequence_parallel = use_sequence_parallel
         self.gemm_rs = (
@@ -1239,6 +1248,21 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.use_sequence_parallel = (
             _use_sequence_parallel(vllm_config) and not is_mtp_block
         )
+        self.replicate_attn = envs.VLLM_MINIMAX_M3_REPLICATE_ATTN
+        if self.replicate_attn:
+            # Nothing re-syncs ranks after a replicated block: autotune must agree.
+            from vllm.triton_utils.tp_synced_autotune import install
+
+            install()
+        unsupported = (
+            unsupported_layout(vllm_config.parallel_config)
+            if self.replicate_attn
+            else None
+        )
+        if unsupported:
+            raise NotImplementedError(
+                f"VLLM_MINIMAX_M3_REPLICATE_ATTN is not supported with {unsupported}."
+            )
         if is_mtp_block:
             assert vllm_config.speculative_config is not None
             config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -1271,6 +1295,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 topk_indices_buffer=topk_indices_buffer,
                 use_sequence_parallel=self.use_sequence_parallel,
                 run_gemm_rs=run_gemm_rs,
+                replicate=self.replicate_attn,
             )
         else:
             self.self_attn = MiniMaxM3Attention(
@@ -1281,6 +1306,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 cache_config=cache_config,
                 use_sequence_parallel=self.use_sequence_parallel,
                 run_gemm_rs=run_gemm_rs,
+                replicate=self.replicate_attn,
             )
 
         # Dense layers store the FFN under `mlp`; MoE layers under
@@ -1385,8 +1411,9 @@ class MiniMaxM3DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
-        if self.use_sequence_parallel:
-            # Attention already reduce-scattered its output to this rank's shard.
+        if self.use_sequence_parallel or self.replicate_attn:
+            # Attention already reduce-scattered its output to this rank's shard,
+            # or ran whole on every rank (replicated): nothing to all-reduce.
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
@@ -1446,7 +1473,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # [total_q, num_index_heads, topk] so the indexer writes its native
         # [token, head, topk] top-k; the attend transposes to [H, tokens, topk].
         if _sparse_attention_layer_ids(config):
-            tp_size = get_tensor_model_parallel_world_size()
+            tp_size = (
+                1
+                if envs.VLLM_MINIMAX_M3_REPLICATE_ATTN
+                else get_tensor_model_parallel_world_size()
+            )
             num_index_heads = max(1, config.index_n_heads // tp_size)
             # Pad tokens to a multiple of 4 so the buffer head stride stays
             # int4-aligned for build_k2q_csr's vectorised int4 loads.
