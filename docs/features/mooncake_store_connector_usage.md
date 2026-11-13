@@ -175,26 +175,57 @@ Store. It also covers prompt KV delivered directly by `MooncakeConnector`.
 }
 ```
 
-#### Sharing one Store across multiple Prefill TP sizes
+#### Sharing one Store across Prefill and Decode TP sizes
 
-Heterogeneous-TP sharing normally uses a fixed `store_tp_size`. When several
-prefillers use different TP sizes, opt in to a common Store TP derived from
-their least common multiple:
+Heterogeneous-TP sharing normally uses a fixed `store_tp_size`. To derive it
+from all participating Prefill and Decode TP sizes, enable LCM mode and set
+the same `tp_sizes` list on every endpoint:
 
 ```json
 {
     "kv_connector_extra_config": {
         "enable_store_tp_lcm": true,
-        "prefill_tp_sizes": [4, 2]
+        "tp_sizes": [4, 3]
     }
 }
 ```
 
-Every prefiller and decoder that shares these entries must use the same list.
-The example selects Store TP 4: a TP4 endpoint maps each rank to one Store
-shard, while TP2 endpoints map each rank to two Store shards. Runtime TP sizes
-remain unchanged. A decoder configured with `"save_decode_cache": true` uses
-the same Store TP for decode KV from every prefiller.
+The example selects Store TP 12. With 12 KV heads, a TP4 endpoint maps each
+rank to three Store shards and a TP3 endpoint maps each rank to four. Both
+P4/D3 and P3/D4 use complete Store objects; neither TP size must divide the
+other. Store TP is an object-sharding parameter, not the number of GPUs to
+allocate. A decoder configured with `"save_decode_cache": true` writes back
+the same objects, which all compatible endpoints can reuse.
+
+Include every participating TP size when choosing the common list. For
+example, `[6, 4, 3, 2]` also selects Store TP 12. For non-replicated Attention,
+if every listed TP size divides the global KV-head count, their LCM also
+divides that count. Each endpoint must still be a valid model TP configuration,
+and hybrid state tensors must independently support the resulting shards.
+
+`tp_sizes` takes precedence over the legacy `prefill_tp_sizes` list when
+present. Existing deployments can continue using `prefill_tp_sizes`, or set
+`store_tp_size` directly with LCM mode disabled. These configurations share
+entries when they resolve to the same Store TP and value schema. A new list
+that changes Store TP selects a different namespace; it does not migrate
+existing entries. Finer sharding increases object and descriptor counts,
+although it does not duplicate non-replicated Attention KV payload.
+
+To validate TP4/TP3 sharing and decode writeback with a real model, configure
+an existing Mooncake Store using `MOONCAKE_CONFIG_PATH`, make four GPUs visible,
+and run:
+
+```bash
+uv run --no-project .venv/bin/python \
+    examples/disaggregated/mooncake_store_connector/lcm_tp_sharing.py \
+    --model facebook/opt-125m --tp-sizes 4 3 --result-dir /path/to/new-results
+```
+
+The script starts fresh engines sequentially in both directions. It checks
+external prefix hits, reuse of decode-written tokens, and greedy continuations
+against cold references. It sets `ignore_eos=True` to cross the decode-writeback
+boundary and checks the actual output lengths. It is a correctness test, not
+a throughput benchmark.
 
 The list may contain positive integer TP sizes. Sharing requires a Store TP that
 is at least the local TP and divisible by it. LBHNC, LBNHC, BLHNC, BLNHC, LHBNC,
@@ -246,7 +277,9 @@ Cache groups marked `prefix_cacheable=False` are excluded from shared-layout
 validation, Store transfers, and prefix lookup. Unsupported layouts in participating
 groups use the rank-local fallback.
 
-When `enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect.
+When `enable_store_tp_lcm` is absent or false, neither `tp_sizes` nor
+`prefill_tp_sizes` has any effect. An invalid active list uses the rank-local
+fallback, including when a valid legacy list is also present.
 
 **Proxy:**
 
@@ -365,8 +398,9 @@ reset waits at most 60 seconds.
   incompatible with sleep mode and the CuMem allocator.
 - `cache_prefix` (str): Namespace prepended to every store key. Different prefixes isolate cached blocks, even for identical prompts. Set to `"auto"` to derive a deployment fingerprint automatically (see below). Other strings remain literal custom prefixes. Default: `""` (no prefix; existing key format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
-- `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
-  sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
+- `store_tp_size` (int): Common Store TP, divisible by every participating local TP,
+  for heterogeneous-TP
+  sharing. See [Sharing one Store across Prefill and Decode TP sizes](#sharing-one-store-across-prefill-and-decode-tp-sizes).
 
 #### Automatic cache prefix
 

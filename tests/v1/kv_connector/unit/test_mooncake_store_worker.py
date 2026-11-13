@@ -12,6 +12,7 @@ import threading
 import types
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -66,6 +67,196 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+
+
+def _store_topology_process(
+    rank,
+    tp_size,
+    selected_rank,
+    rendezvous,
+    model_path,
+    result_path,
+    extra_config,
+    kv_role,
+    kv_cache_config,
+):
+    from vllm.config import (
+        CacheConfig,
+        DeviceConfig,
+        KVTransferConfig,
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.v1.attention.backends.utils import record_kv_cache_layout
+
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=model_path,
+            tokenizer=model_path,
+            skip_tokenizer_init=True,
+            dtype="float32",
+            enforce_eager=True,
+            max_model_len=2048,
+        ),
+        cache_config=CacheConfig(
+            block_size=32,
+            prefix_match_unit=16 if kv_cache_config.has_mamba_layers else None,
+        ),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tp_size,
+            rank=rank,
+            distributed_executor_backend="mp",
+        ),
+        device_config=DeviceConfig("cpu"),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=2048,
+            max_num_batched_tokens=2048,
+            max_num_seqs=1,
+            async_scheduling=False,
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role=kv_role,
+            kv_connector_extra_config=extra_config,
+        ),
+    )
+    record_kv_cache_layout(config.cache_config, "LBHNC")
+    with set_current_vllm_config(config), pytest.MonkeyPatch.context() as mp:
+        store = MagicMock()
+        store.setup.return_value = 0
+        _install_fake_mooncake(mp, store)
+        closed = threading.Event()
+
+        def receive_lookup(**kwargs):
+            closed.wait()
+            raise SystemExit
+
+        socket = MagicMock()
+        socket.recv_multipart.side_effect = receive_lookup
+        socket.close.side_effect = lambda **kwargs: closed.set()
+        context = MagicMock()
+        context.socket.return_value = socket
+        mp.setattr(worker.zmq, "Context", lambda: context)
+        init_distributed_environment(
+            world_size=tp_size,
+            rank=rank,
+            local_rank=rank,
+            distributed_init_method=rendezvous,
+            backend="gloo",
+        )
+        initialize_model_parallel(tp_size, backend="gloo")
+        try:
+            if rank == selected_rank:
+                instance = worker.MooncakeStoreWorker(config, kv_cache_config)
+                try:
+                    result = {
+                        "store_tp": instance.store_tp_size,
+                        "can_put": instance.can_put,
+                        "groups": [g.layer_names for g in instance._kv_cache_groups],
+                        "databases": [
+                            {
+                                "type": type(db).__name__,
+                                "layout": type(db.store_layout).__name__,
+                                "shards": list(
+                                    getattr(db.store_layout, "local_shard_ids", ())
+                                ),
+                                "chunk_size": db.chunk_size,
+                                "prefix_count": len(instance._lookup_key_prefixes[i]),
+                                "keys": {
+                                    str(s): db.store_layout.key_for(s, BlockHash(b"h"))
+                                    for s in getattr(
+                                        db.store_layout, "local_shard_ids", (0,)
+                                    )
+                                },
+                            }
+                            for i, db in enumerate(instance.token_dbs)
+                        ],
+                    }
+                    Path(result_path).write_text(json.dumps(result))
+                finally:
+                    instance.close()
+                    if instance.lookup_server is not None:
+                        instance.lookup_server.close()
+                        instance.lookup_server.thread.join(timeout=5)
+                        assert not instance.lookup_server.thread.is_alive()
+            torch.distributed.barrier()
+        finally:
+            destroy_model_parallel()
+            destroy_distributed_environment()
+
+
+@pytest.fixture
+def real_store_topology(tmp_path, monkeypatch):
+    """Exercise worker construction with real configs and CPU process groups."""
+    from tempfile import TemporaryDirectory
+
+    from transformers import LlamaConfig
+
+    monkeypatch.setenv("VLLM_TARGET_DEVICE", "cpu")
+    # Unix-domain socket paths must fit sockaddr_un even with long test names.
+    rpc_dir = TemporaryDirectory(prefix="lcm-", dir="/tmp")
+    monkeypatch.setenv("VLLM_RPC_BASE_PATH", rpc_dir.name)
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "127.0.0.1:50051",
+            },
+        ),
+    )
+    calls = itertools.count()
+
+    def construct(
+        tp_size, tp_rank, extra_config, kv_cache_config, num_heads, kv_role="kv_both"
+    ):
+        index = next(calls)
+        model_path = tmp_path / "model"
+        LlamaConfig(
+            architectures=["LlamaForCausalLM"],
+            hidden_size=1536,
+            intermediate_size=1536,
+            num_attention_heads=24,
+            num_key_value_heads=num_heads,
+            num_hidden_layers=2,
+            vocab_size=96,
+            max_position_embeddings=2048,
+        ).save_pretrained(model_path)
+        result_path = tmp_path / f"result-{index}.json"
+        torch.multiprocessing.spawn(
+            _store_topology_process,
+            args=(
+                tp_size,
+                tp_rank,
+                f"file://{tmp_path}/dist-{index}",
+                str(model_path),
+                str(result_path),
+                extra_config,
+                kv_role,
+                kv_cache_config,
+            ),
+            nprocs=tp_size,
+            join=True,
+        )
+        return json.loads(result_path.read_text())
+
+    try:
+        yield construct
+    finally:
+        rpc_dir.cleanup()
 
 
 @pytest.fixture(autouse=True)
@@ -447,18 +638,22 @@ def _make_kv_cache_config(
 
 
 def _make_hybrid_gdn_kv_cache_config(
-    tp_size: int, conv_layout: str = "DS"
+    tp_size: int,
+    conv_layout: str = "DS",
+    *,
+    store_tp_size: int = 4,
+    num_heads: int = 2,
 ) -> KVCacheConfig:
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import MambaSpec
 
     full = FullAttentionSpec(
-        block_size=1600 // tp_size,
-        num_kv_heads=1,
+        block_size=400 * store_tp_size // tp_size,
+        num_kv_heads=max(1, num_heads // tp_size),
         head_size=64,
         dtype=None,
     )
-    local_factor = 4 // tp_size
+    local_factor = store_tp_size // tp_size
     conv_shape = (6 * local_factor, 3)
     if conv_layout == "SD":
         conv_shape = conv_shape[::-1]
@@ -3171,35 +3366,36 @@ def test_worker_enables_store_tp_layout(
 
 @pytest.mark.parametrize("with_scratch", [False, True])
 @pytest.mark.parametrize("conv_layout", ["DS", "SD"])
-def test_hybrid_gdn_workers_share_group_aware_store_tp_namespace(
-    tmp_path, monkeypatch, conv_layout, with_scratch
-):
-    store = MagicMock()
-    store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
-    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 2)
-    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", conv_layout)
-    monkeypatch.setenv(
-        "MOONCAKE_CONFIG_PATH",
-        _write_mooncake_config(
-            tmp_path,
-            {
-                "metadata_server": "http://metadata/endpoint",
-                "protocol": "tcp",
-                "master_server_address": "10.0.0.7:50051",
-            },
+@pytest.mark.parametrize(
+    ("extra_config", "store_tp", "num_heads", "topologies"),
+    [
+        ({"store_tp_size": 4}, 4, 2, [(2, 0), (4, 1)]),
+        (
+            {"enable_store_tp_lcm": True, "tp_sizes": [4, 3]},
+            12,
+            12,
+            [(4, 0), (3, 0)],
         ),
-    )
+    ],
+)
+@pytest.mark.cpu_test
+def test_hybrid_gdn_workers_share_group_aware_store_tp_namespace(
+    real_store_topology,
+    monkeypatch,
+    conv_layout,
+    with_scratch,
+    extra_config,
+    store_tp,
+    num_heads,
+    topologies,
+):
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", conv_layout)
 
     workers = []
-    for tp_size, tp_rank in ((2, 0), (4, 1)):
-        _patch_worker_runtime(monkeypatch, tp_size=tp_size, tp_rank=tp_rank)
-        config = _make_vllm_config(
-            extra_config={"store_tp_size": 4},
-            tensor_parallel_size=tp_size,
-            prefix_match_unit=16,
+    for tp_size, tp_rank in topologies:
+        kv_cache_config = _make_hybrid_gdn_kv_cache_config(
+            tp_size, conv_layout, store_tp_size=store_tp, num_heads=num_heads
         )
-        kv_cache_config = _make_hybrid_gdn_kv_cache_config(tp_size, conv_layout)
         if with_scratch:
             from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -3215,24 +3411,27 @@ def test_hybrid_gdn_workers_share_group_aware_store_tp_namespace(
                     ),
                 )
             )
-        store_worker = worker.MooncakeStoreWorker(config, kv_cache_config)
-        assert len(store_worker.token_dbs) == 2
-        assert [group.layer_names for group in store_worker._kv_cache_groups] == [
+        store_worker = real_store_topology(
+            tp_size, tp_rank, extra_config, kv_cache_config, num_heads
+        )
+        databases = store_worker["databases"]
+        assert len(databases) == 2
+        assert store_worker["groups"] == [
             ["full"],
             ["gdn"],
         ]
-        assert store_worker.store_tp_size == 4
-        assert isinstance(store_worker.token_dbs[0].store_layout, HeadMajorStoreLayout)
-        assert isinstance(store_worker.token_dbs[1].store_layout, MambaStoreLayout)
-        assert store_worker.token_dbs[0].chunk_size == 16
-        assert len(store_worker._lookup_key_prefixes[0]) == 2
-        assert len(store_worker._lookup_key_prefixes[1]) == 4
+        assert store_worker["store_tp"] == store_tp
+        assert databases[0]["layout"] == "HeadMajorStoreLayout"
+        assert databases[1]["layout"] == "MambaStoreLayout"
+        assert databases[0]["chunk_size"] == 16
+        assert databases[0]["prefix_count"] == min(num_heads, store_tp)
+        assert databases[1]["prefix_count"] == store_tp
         workers.append(store_worker)
 
-    full_key_tp2 = workers[0].token_dbs[0].store_layout.key_for(0, BlockHash(b"h"))
-    full_key_tp4 = workers[1].token_dbs[0].store_layout.key_for(0, BlockHash(b"h"))
-    gdn_key_tp2 = workers[0].token_dbs[1].store_layout.key_for(1, BlockHash(b"h"))
-    gdn_key_tp4 = workers[1].token_dbs[1].store_layout.key_for(1, BlockHash(b"h"))
+    full_key_tp2 = workers[0]["databases"][0]["keys"]["0"]
+    full_key_tp4 = workers[1]["databases"][0]["keys"]["0"]
+    gdn_key_tp2 = workers[0]["databases"][1]["keys"]["1"]
+    gdn_key_tp4 = workers[1]["databases"][1]["keys"]["1"]
     assert full_key_tp2 == full_key_tp4
     assert gdn_key_tp2 == gdn_key_tp4
     assert "@group:0" in full_key_tp2
@@ -3284,6 +3483,33 @@ def test_hybrid_gdn_falls_back_from_incompatible_store_config(
     ("extra_config", "expected"),
     [
         ({"store_tp_size": 4}, 4),
+        ({"enable_store_tp_lcm": True, "tp_sizes": [4, 3]}, 12),
+        ({"enable_store_tp_lcm": True, "tp_sizes": [6, 4, 3, 2, 4]}, 12),
+        (
+            {
+                "enable_store_tp_lcm": True,
+                "tp_sizes": [4, 3],
+                "prefill_tp_sizes": [4, 2],
+                "store_tp_size": 4,
+            },
+            12,
+        ),
+        ({"enable_store_tp_lcm": False, "tp_sizes": [4, 3]}, None),
+        ({"store_tp_size": 4, "tp_sizes": [4, 3]}, 4),
+        ({"enable_store_tp_lcm": True, "tp_sizes": []}, None),
+        ({"enable_store_tp_lcm": True, "tp_sizes": [3, False]}, None),
+        ({"enable_store_tp_lcm": True, "tp_sizes": [3, 0]}, None),
+        ({"enable_store_tp_lcm": True, "tp_sizes": [3, -2]}, None),
+        ({"enable_store_tp_lcm": True, "tp_sizes": [3, 2.0]}, None),
+        ({"enable_store_tp_lcm": True, "tp_sizes": "4,3"}, None),
+        (
+            {
+                "enable_store_tp_lcm": True,
+                "tp_sizes": None,
+                "prefill_tp_sizes": [4, 2],
+            },
+            None,
+        ),
         (
             {
                 "enable_store_tp_lcm": True,
@@ -3307,110 +3533,111 @@ def test_hybrid_gdn_falls_back_from_incompatible_store_config(
         ({"store_tp_size": 4.0}, None),
     ],
 )
+@pytest.mark.cpu_test
 def test_resolve_store_tp_size(extra_config: dict[str, object], expected: int | None):
     assert worker.resolve_store_tp_size(extra_config) == expected
 
 
-def test_lcm_store_tp_gives_prefill_and_decode_common_namespace(tmp_path, monkeypatch):
-    store = MagicMock()
-    store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
-    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
-    monkeypatch.setenv(
-        "MOONCAKE_CONFIG_PATH",
-        _write_mooncake_config(
-            tmp_path,
-            {
-                "metadata_server": "http://metadata/endpoint",
-                "protocol": "tcp",
-                "master_server_address": "10.0.0.7:50051",
-            },
+@pytest.mark.parametrize(
+    ("tp_config", "num_heads", "store_tp", "topologies"),
+    [
+        (
+            {"prefill_tp_sizes": [4, 2]},
+            8,
+            4,
+            [
+                (4, 2, "kv_both", (2,)),
+                (2, 1, "kv_both", (2, 3)),
+                (2, 1, "kv_consumer", (2, 3)),
+            ],
         ),
-    )
+        (
+            {"tp_sizes": [4, 3]},
+            12,
+            12,
+            [
+                (4, 0, "kv_both", (0, 1, 2)),
+                (3, 0, "kv_consumer", (0, 1, 2, 3)),
+                (4, 0, "kv_consumer", (0, 1, 2)),
+            ],
+        ),
+        (
+            {"tp_sizes": [6, 4, 3, 2]},
+            24,
+            12,
+            [
+                (6, 1, "kv_both", (2, 3)),
+                (4, 0, "kv_both", (0, 1, 2)),
+                (3, 0, "kv_consumer", (0, 1, 2, 3)),
+                (2, 0, "kv_consumer", (0, 1, 2, 3, 4, 5)),
+            ],
+        ),
+    ],
+)
+@pytest.mark.cpu_test
+def test_lcm_store_tp_gives_prefill_and_decode_common_namespace(
+    real_store_topology, tp_config, num_heads, store_tp, topologies
+):
     lcm_config = {
         "enable_store_tp_lcm": True,
-        "prefill_tp_sizes": [4, 2],
+        **tp_config,
     }
 
     workers = []
-    topologies = [
-        (4, 2, "kv_both", (2,)),
-        (2, 1, "kv_both", (2, 3)),
-        (2, 1, "kv_consumer", (2, 3)),
-    ]
     for tp_size, tp_rank, kv_role, expected_shards in topologies:
-        _patch_worker_runtime(
-            monkeypatch,
-            tp_size=tp_size,
-            tp_rank=tp_rank,
-        )
         extra_config = dict(lcm_config)
         if kv_role == "kv_consumer":
             extra_config["save_decode_cache"] = True
-        store_worker = worker.MooncakeStoreWorker(
-            _make_vllm_config(extra_config=extra_config, kv_role=kv_role),
-            _make_kv_cache_config(num_kv_heads=8 // tp_size),
+        store_worker = real_store_topology(
+            tp_size,
+            tp_rank,
+            extra_config,
+            _make_kv_cache_config(block_size=32, num_kv_heads=num_heads // tp_size),
+            num_heads,
+            kv_role,
         )
-        assert store_worker.store_tp_size == 4
-        assert isinstance(store_worker.token_dbs[0].store_layout, HeadMajorStoreLayout)
-        assert store_worker.token_dbs[0].store_layout.local_shard_ids == expected_shards
+        assert store_worker["store_tp"] == store_tp
+        assert store_worker["databases"][0]["layout"] == "HeadMajorStoreLayout"
+        assert tuple(store_worker["databases"][0]["shards"]) == expected_shards
         workers.append(store_worker)
 
-    shard_keys = [
-        store_worker.token_dbs[0].store_layout.key_for(2, BlockHash(b"h"))
-        for store_worker in workers
-    ]
+    shard_keys = [store_worker["databases"][0]["keys"]["2"] for store_worker in workers]
     assert len(set(shard_keys)) == 1
-    assert workers[-1].can_put
+    assert workers[-1]["can_put"]
 
 
+@pytest.mark.parametrize("config_key", ["prefill_tp_sizes", "tp_sizes"])
 @pytest.mark.parametrize(
-    ("tp_size", "prefill_tp_sizes"),
+    ("tp_size", "num_heads", "prefill_tp_sizes"),
     [
-        (3, [4, 2]),
-        (2, [4, 3]),
-        (2, []),
-        (2, [4, 0]),
+        (3, 12, [4, 2]),
+        (2, 8, [4, 3]),
+        (2, 8, []),
+        (2, 8, [4, 0]),
     ],
 )
+@pytest.mark.cpu_test
 def test_lcm_store_tp_falls_back_when_topology_is_incompatible(
-    tmp_path,
-    monkeypatch,
+    real_store_topology,
+    config_key,
     tp_size: int,
+    num_heads: int,
     prefill_tp_sizes: list[int],
 ):
-    store = MagicMock()
-    store.setup.return_value = 0
-    _install_fake_mooncake(monkeypatch, store)
-    _patch_worker_runtime(monkeypatch, tp_size=tp_size)
-    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
-    monkeypatch.setenv(
-        "MOONCAKE_CONFIG_PATH",
-        _write_mooncake_config(
-            tmp_path,
-            {
-                "metadata_server": "http://metadata/endpoint",
-                "protocol": "tcp",
-                "master_server_address": "10.0.0.7:50051",
-            },
-        ),
+    store_worker = real_store_topology(
+        tp_size,
+        0,
+        {
+            "enable_store_tp_lcm": True,
+            config_key: prefill_tp_sizes,
+        },
+        _make_kv_cache_config(block_size=32, num_kv_heads=num_heads // tp_size),
+        num_heads,
     )
 
-    store_worker = worker.MooncakeStoreWorker(
-        _make_vllm_config(
-            extra_config={
-                "enable_store_tp_lcm": True,
-                "prefill_tp_sizes": prefill_tp_sizes,
-            }
-        ),
-        _make_kv_cache_config(num_kv_heads=max(1, 8 // tp_size)),
-    )
-
-    assert store_worker.store_tp_size is None
-    assert type(store_worker.token_dbs[0]) is ChunkedTokenDatabase
-    assert "@store_format:rank_local_tp" in store_worker.token_dbs[
-        0
-    ].store_layout.key_for(0, BlockHash(b"h"))
+    assert store_worker["store_tp"] is None
+    assert store_worker["databases"][0]["type"] == "ChunkedTokenDatabase"
+    assert "@store_format:rank_local_tp" in store_worker["databases"][0]["keys"]["0"]
 
 
 @pytest.mark.parametrize("store_tp_size", [1, 3, 6])
