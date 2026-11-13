@@ -347,7 +347,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         # input as MXFP8 for the first GEMM (fused_wqa_wkv / shared gate_up).
         self.attn_seam_mxfp8 = False
         self.ffn_seam_mxfp8 = False
-        # Elsewhere (gfx942), seams with a post block run as one AITER call
+        # On gfx942, seams with a post block run as one AITER call
         # from MHC_SEAM_MIN_TOKENS tokens.
         self.mhc_seam = (
             partial(mhc_pre_delayed_seam, self.mhc_pre_delayed)

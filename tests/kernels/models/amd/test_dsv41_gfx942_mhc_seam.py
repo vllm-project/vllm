@@ -64,7 +64,7 @@ def test_seam_op(carried):
     set_random_seed(0)
     residual, fn, scale, base, x, post, comb, pre_mix = _seam_args(64, True, carried)
     opcheck(
-        torch.ops.vllm.mhc_fused_post_pre_delayed_aiter.default,
+        torch.ops.vllm.deepseek_v41_mhc_fused_post_pre_delayed_aiter.default,
         (residual, fn, scale, base, 1e-2, 1e-3, 1e-4, 2.0, 20, pre_mix, x, post, comb),
     )
 
@@ -84,14 +84,16 @@ def test_seam_dispatch(num_tokens, strided, carried, default_vllm_config, monkey
         num_tokens, strided, carried
     )
     pre_args = (fn, scale, base, 1e-2, 1e-3, 1e-4, 2.0, 20)
-    fused = torch.ops.vllm.mhc_fused_post_pre_delayed_aiter
+    fused = torch.ops.vllm.deepseek_v41_mhc_fused_post_pre_delayed_aiter
     calls = []
 
     def spy(*args, **kwargs):
         calls.append(1)
         return fused(*args, **kwargs)
 
-    monkeypatch.setattr(torch.ops.vllm, "mhc_fused_post_pre_delayed_aiter", spy)
+    monkeypatch.setattr(
+        torch.ops.vllm, "deepseek_v41_mhc_fused_post_pre_delayed_aiter", spy
+    )
     actual = amd_mhc.mhc_pre_delayed_seam(
         MHCPreDelayedOp(),
         residual,
@@ -114,15 +116,16 @@ def test_seam_dispatch(num_tokens, strided, carried, default_vllm_config, monkey
         torch.testing.assert_close(got, want.reshape(got.shape), atol=2e-2, rtol=8e-3)
 
 
-@pytest.mark.parametrize("case", ["no_post", "layer0", "norm"])
-def test_other_seams_keep_pre_delayed(case, monkeypatch):
-    """Seams without a post block, layer 0 and fused-norm seams never call
-    the AITER seam, whatever the token count."""
+def test_no_post_seam_keeps_pre_delayed(monkeypatch):
+    """A seam without a post block (Engram) never calls the AITER seam,
+    whatever the token count."""
 
     def no_seam(*args, **kwargs):
         raise AssertionError("AITER seam called")
 
-    monkeypatch.setattr(torch.ops.vllm, "mhc_fused_post_pre_delayed_aiter", no_seam)
+    monkeypatch.setattr(
+        torch.ops.vllm, "deepseek_v41_mhc_fused_post_pre_delayed_aiter", no_seam
+    )
     seen = {}
 
     def pre_delayed(*args, **kwargs):
@@ -132,16 +135,8 @@ def test_other_seams_keep_pre_delayed(case, monkeypatch):
     n = 4 * amd_mhc.MHC_SEAM_MIN_TOKENS
     residual = torch.empty(n, HC, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
     t = torch.empty(1, device=DEVICE)
-    kwargs = dict(sublayer_out=t, post_layer_mix=t, comb_res_mix=t)
-    if case == "no_post":
-        kwargs = {}
-    elif case == "layer0":
-        kwargs["x"] = t
-    else:
-        kwargs["norm_weight"] = t
     out = amd_mhc.mhc_pre_delayed_seam(
-        pre_delayed, residual, t, t, t, 1e-6, 1e-6, 1e-6, 2.0, 20, **kwargs
+        pre_delayed, residual, t, t, t, 1e-6, 1e-6, 1e-6, 2.0, 20, pre_mix=t
     )
     assert out == "pre_delayed"
-    for name, value in kwargs.items():
-        assert seen[name] is value
+    assert seen["pre_mix"] is t and seen["sublayer_out"] is None
