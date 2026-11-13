@@ -270,8 +270,13 @@ def _fused_moe_lora_kernel_fp8(
     token_mask = offs_token < num_valid_tokens
 
     # get a_ptrs,b_ptrs
+    # Clamp the a row index to a safe range. Padded positions in
+    # sorted_token_ids carry sentinels (>= num_valid_tokens) that would
+    # compute out-of-bounds addresses. The load below is masked, so it
+    # already returns zeros there; clamping keeps the address in bounds.
+    safe_a_rows = tl.where(token_mask, offs_token // token_mapping_factor, 0)
     a_ptrs = cur_a_ptr + (
-        offs_token[:, None] // token_mapping_factor * stride_am
+        safe_a_rows[:, None] * stride_am
         + offs_k[None, :] * stride_ak
     )
 
