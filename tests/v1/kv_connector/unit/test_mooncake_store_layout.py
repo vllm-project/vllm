@@ -414,22 +414,41 @@ def test_rank_local_layer_ranges_store_one_object_per_range():
     assert sizes == [[block_bytes] * 3, [block_bytes] * 2]
 
 
-def test_rank_local_layer_ranges_reject_a_region_across_ranges():
-    """A region holding layers of two ranges, like a block-outermost buffer,
-    cannot be stored as one object per range."""
-    num_blocks = 2
-    raw = torch.zeros(num_blocks, 2, BLOCK_SIZE, 8, dtype=torch.uint8)
-    layout = RankLocalStoreLayout(
-        KeyMetadata("test-model", 0, 0, 0, 0),
-        BLOCK_SIZE,
-        BLOCK_SIZE,
-        layer_ranges=((0, 1), (1, 2)),
+def test_rank_local_layer_ranges_split_a_block_outermost_buffer():
+    """A block-outermost buffer holds every layer in each block. Each layer
+    range stores its own run of the block, so its object has the bytes a
+    layer-first buffer stores for that range."""
+    num_blocks, num_layers = 3, 4
+    block_outermost = (
+        (torch.arange(num_blocks * num_layers * BLOCK_SIZE * 8) % 251)
+        .to(torch.uint8)
+        .view(num_blocks, num_layers, BLOCK_SIZE, 8)
     )
+    layer_first = [block_outermost[:, i : i + 1].clone() for i in range(num_layers)]
 
-    with pytest.raises(ValueError, match="several Store layer ranges"):
-        layout.register_kv_caches(
-            [raw[:, 0:1], raw[:, 1:2]], num_blocks, layer_names=_layer_names([0, 1])
+    def objects(caches: list[torch.Tensor]) -> list[list[bytes]]:
+        layout = RankLocalStoreLayout(
+            KeyMetadata("test-model", 0, 0, 0, 0),
+            BLOCK_SIZE,
+            BLOCK_SIZE,
+            layer_ranges=((0, 2), (2, 4)),
         )
+        layout.register_kv_caches(
+            caches, num_blocks, layer_names=_layer_names(range(num_layers))
+        )
+        addrs, sizes, _ = layout.prepare_values(
+            [(0, BLOCK_SIZE), (0, BLOCK_SIZE)], [1], [0, 1]
+        )
+        return [
+            [ctypes.string_at(a, s) for a, s in zip(row_addrs, row_sizes)]
+            for row_addrs, row_sizes in zip(addrs, sizes)
+        ]
+
+    runs = objects([block_outermost[:, i : i + 1] for i in range(num_layers)])
+    segments = objects(layer_first)
+
+    assert [len(segs) for segs in runs] == [1, 1]
+    assert [b"".join(segs) for segs in runs] == [b"".join(s) for s in segments]
 
 
 def test_rank_local_database_api_rejects_tp_shared_layout():
