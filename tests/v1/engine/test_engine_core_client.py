@@ -64,7 +64,6 @@ PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 TEST_MODULE = "tests.v1.engine.test_engine_core_client"
 
 _REQUEST_COUNTER = 0
-BLOCK_SIZE = 64 if current_platform.is_xpu() else 16
 
 
 def make_request(
@@ -457,7 +456,7 @@ def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=BLOCK_SIZE, num_gpu_blocks=0),
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
         parallel_config=SimpleNamespace(_coord_store_port=0),
     )
@@ -518,7 +517,7 @@ def test_apply_ready_response_syncs_mamba_block_size():
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=BLOCK_SIZE, num_gpu_blocks=0),
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
         parallel_config=SimpleNamespace(_coord_store_port=0),
     )
@@ -1268,7 +1267,7 @@ def test_kv_cache_events(
     model_name: str,
     num_groups: int,
 ):
-    block_size = BLOCK_SIZE
+    block_size = 16
     num_blocks = 2
 
     engine_args = EngineArgs(
@@ -1348,7 +1347,7 @@ async def test_kv_cache_events_dp(
     multiprocessing_mode: bool,
     publisher_config,
 ):
-    block_size = BLOCK_SIZE
+    block_size = 16
     num_blocks = 2
     dp_size = 2
     tp_size = 2
@@ -1494,7 +1493,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
         mock_spec = FullAttentionSpec(
-            block_size=BLOCK_SIZE, num_kv_heads=1, head_size=64, dtype=torch.float16
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
         )
 
         mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
@@ -1589,7 +1588,7 @@ def test_apply_ready_response_retains_kv_event_sources():
     client._effective_attention_block_sizes = set()
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=BLOCK_SIZE, num_gpu_blocks=0),
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
         parallel_config=SimpleNamespace(_coord_store_port=0),
     )
@@ -1599,7 +1598,7 @@ def test_apply_ready_response_retains_kv_event_sources():
             EngineCoreReadyResponse(
                 max_model_len=8192,
                 num_gpu_blocks=100,
-                block_size=BLOCK_SIZE,
+                block_size=16,
                 dp_stats_address=None,
                 dtype="bfloat16",
                 vllm_version="test",

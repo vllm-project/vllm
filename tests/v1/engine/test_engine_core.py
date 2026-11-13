@@ -579,7 +579,7 @@ def test_encoder_instance_zero_kv_cache(
         is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
-        block_size=64 if current_platform.is_xpu() else 16,
+        block_size=16,
         gpu_memory_utilization=gpu_memory_utilization,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
