@@ -138,6 +138,12 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Reject tool calls that omit parameters their schema marks as required.
+    # Such a call is surfaced as text instead of being emitted with an
+    # incomplete ``arguments`` object.  Only applies while the call is still
+    # revocable, i.e. before its name has been streamed to the client.
+    validate_required_args: bool = False
+
     def __post_init__(self) -> None:
         if self.arg_value_extender is not None and (
             self.arg_converter is None or not self.stream_arg_deltas

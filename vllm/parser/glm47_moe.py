@@ -265,6 +265,11 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
         stream_arg_deltas=True,
         tool_args_json=False,
         validate_tool_names=True,
+        # GLM encodes tool calls as plain text rather than special tokens, so a
+        # call quoted in prose is indistinguishable from a real one at the
+        # lexer level. Requiring the schema's mandatory parameters is the only
+        # signal available to tell the two apart.
+        validate_required_args=True,
     )
 
 
