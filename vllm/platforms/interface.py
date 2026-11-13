@@ -249,6 +249,12 @@ class Platform:
         return cumem_available
 
     @classmethod
+    def is_confidential_compute(cls) -> bool:
+        """Whether the device runs in a confidential-computing mode that makes
+        host<->device copies host-synchronous and host mappings incoherent."""
+        return False
+
+    @classmethod
     def get_pass_manager_cls(cls) -> str:
         """Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
@@ -855,7 +861,7 @@ class Platform:
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
-        from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
+        from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -865,7 +871,7 @@ class Platform:
 
         def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
             """Bytes one token occupies in one layer, for the given dtype."""
-            spec = FullAttentionSpec(
+            spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
@@ -961,7 +967,7 @@ class Platform:
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
-            FullAttentionSpec,
+            AttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
             get_kv_quant_mode,
@@ -980,6 +986,9 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
+            from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
+            from vllm.v1.kv_cache_interface import DS_MLA_STATE_CONTENT_BYTES
+
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -987,13 +996,21 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                # Must match MLAAttention.get_kv_cache_spec, else the mamba
+                # state no longer fits the real (smaller) MLA page.
+                # test_hybrid_block_size_matches_the_layer_page checks both.
+                state_content_bytes=(
+                    mxfp4_row_bytes(model_config.get_head_size())
+                    if cache_config.cache_dtype == "mxfp4_mla"
+                    else DS_MLA_STATE_CONTENT_BYTES.get(cache_config.cache_dtype)
+                ),
             ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
             or cache_config.cache_dtype == "ultraquant_4bit"
         ):
             # TurboQuant and UltraQuant have packed K|V layouts; the standard
-            # FullAttentionSpec formula over-sizes them and trips
+            # AttentionSpec formula over-sizes them and trips
             # unify_kv_cache_spec_page_size when all attention layers are
             # packed. With mixed skip+packed the skip layers still use the
             # standard layout — take max so mamba padding covers the largest
@@ -1012,7 +1029,7 @@ class Platform:
 
                 _pack_backend = TurboQuantAttentionBackend
 
-            tq_spec = FullAttentionSpec(
+            tq_spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
@@ -1021,7 +1038,7 @@ class Platform:
             )
             tq_page = _pack_backend.customize_spec(tq_spec).page_size_bytes
             if cache_config.kv_cache_dtype_skip_layers:
-                skip_page = FullAttentionSpec(
+                skip_page = AttentionSpec(
                     block_size=1,
                     num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                     head_size=model_config.get_head_size(),
@@ -1034,7 +1051,7 @@ class Platform:
             else:
                 attn_page_size_1_token = tq_page
         else:
-            attn_spec = FullAttentionSpec(
+            attn_spec = AttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
@@ -1092,22 +1109,38 @@ class Platform:
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
+        checkpoint_alignment = 1
         if cache_config.mamba_cache_mode == "align":
             # Internal prefill checkpoints land on block boundaries.
+            checkpoint_alignment = (
+                get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
+            )
             kernel_block_alignment_size = lcm(
-                kernel_block_alignment_size,
-                get_mamba_prefill_checkpoint_alignment(vllm_config) or 1,
+                kernel_block_alignment_size, checkpoint_alignment
             )
 
-        # Use minimum block size that satisfies both backend alignment and
-        # mamba page size compatibility
-        attn_block_size = kernel_block_alignment_size * cdiv(
-            mamba_page_size,
-            kernel_block_alignment_size * attn_page_size_1_token,
-        )
-        attn_block_size = backend_block_alignment * cdiv(
-            attn_block_size, backend_block_alignment
-        )
+        # Models that pack every layer's page into one block row (BLHNC) size
+        # the row themselves; no page is padded then.
+        packed_block_size = None
+        if hasattr(model_cls, "get_packed_hybrid_block_size"):
+            packed_block_size = model_cls.get_packed_hybrid_block_size(
+                vllm_config,
+                attn_page_size_1_token,
+                mamba_page_size,
+                lcm(backend_block_alignment, checkpoint_alignment),
+            )
+        if packed_block_size is not None:
+            attn_block_size = packed_block_size
+        else:
+            # Use minimum block size that satisfies both backend alignment and
+            # mamba page size compatibility
+            attn_block_size = kernel_block_alignment_size * cdiv(
+                mamba_page_size,
+                kernel_block_alignment_size * attn_page_size_1_token,
+            )
+            attn_block_size = backend_block_alignment * cdiv(
+                attn_block_size, backend_block_alignment
+            )
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
@@ -1119,6 +1152,9 @@ class Platform:
 
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size
+
+        if packed_block_size is not None:
+            return
 
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
@@ -1141,11 +1177,6 @@ class Platform:
                 "exactly equal.",
                 mamba_padding_pct,
             )
-
-    @classmethod
-    def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
-        """Register custom KVCacheSpec class on current platform."""
-        pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -1342,6 +1373,15 @@ class Platform:
         if cls._global_graph_pool is None:
             cls._global_graph_pool = self.graph_pool_handle()
         return cls._global_graph_pool
+
+    @classmethod
+    def reset_global_graph_pool(cls) -> None:
+        """Make the next `get_global_graph_pool` call create a new pool.
+
+        Call this once all graphs in the pool are destroyed. Their outputs can
+        keep the old pool allocated, and capturing into it would fail.
+        """
+        cls._global_graph_pool = None
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

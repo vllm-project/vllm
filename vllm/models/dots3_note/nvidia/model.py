@@ -20,6 +20,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.fused_embed_norm import has_full_vocab_on_rank
+from vllm.model_executor.layers.fused_moe import RoutedScaleMode
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -53,7 +54,7 @@ from vllm.models.deepseek_v32.nvidia.model import (
     DeepseekV32Model,
 )
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig, MLAAttentionSpec
 
 from .attention import (
     Dots3NoteFlashAttnPrefillBackend,
@@ -107,7 +108,7 @@ class Dots3NoteMoE(DeepseekV2MoE):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
-        apply_routed_scale_to_output: bool = False,
+        routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
     ) -> None:
         num_shared_experts = config.n_shared_experts
         routed_config = copy.copy(config)
@@ -118,7 +119,7 @@ class Dots3NoteMoE(DeepseekV2MoE):
             quant_config=quant_config,
             reduce_results=False,
             prefix=prefix,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
+            routed_scale_mode=routed_scale_mode,
         )
         self.n_shared_experts = num_shared_experts
         self.reduce_results = reduce_results
@@ -234,10 +235,13 @@ class Dots3NotePaddedMLAAttention(MLAAttention):
         assert physical_head_size >= self.head_size
         self.physical_head_size = physical_head_size
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MLAAttentionSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MLAAttentionSpec)
-        return replace(spec, head_size=self.physical_head_size)
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        layer_config = super().get_kv_cache_config(vllm_config)
+        assert isinstance(layer_config.spec, MLAAttentionSpec)
+        return replace(
+            layer_config,
+            spec=replace(layer_config.spec, head_size=self.physical_head_size),
+        )
 
 
 class Dots3NoteFullAttention(DeepseekV2MLAAttention):
@@ -548,7 +552,7 @@ class Dots3NoteDecoderLayer(DeepseekV32DecoderLayer):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.mlp",
-                apply_routed_scale_to_output=False,
+                routed_scale_mode=RoutedScaleMode.ROUTER,
             )
         else:
             self.mlp = DeepseekV2MLP(
