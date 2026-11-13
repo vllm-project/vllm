@@ -28,7 +28,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
+from vllm.model_executor.models.qwen3_dspark import (
+    DSparkConfidenceHead,
+    DSparkMarkovHead,
+)
 from vllm.model_executor.models.utils import maybe_prefix
 
 from .model import (
@@ -106,6 +109,12 @@ class DSparkDeepseekV4Model(nn.Module):
             config.dspark_markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if getattr(config, "enable_confidence_head", True):
+            self.confidence_head = DSparkConfidenceHead(
+                config.hidden_size + config.dspark_markov_rank,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+            )
 
         # XPU MHC ops (replaces tilelang)
         self.mhc_post_op = MHCPostOp()
@@ -128,7 +137,7 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Each layer derives its context KV from the SAME projected target hidden
-        ``main_x``, via that layer's own wkv + kv_norm + RoPE + quant, then
+        `main_x`, via that layer's own wkv + kv_norm + RoPE + quant, then
         writes it at the layer's context slots.
         """
         for i, layer in enumerate(self.layers):
@@ -222,6 +231,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     has_own_embed_tokens = False
     has_own_lm_head = False
+    draft_id_to_target_id = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -284,10 +294,17 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
+    def compute_confidence(
+        self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-position acceptance probability for each drafted token."""
+        assert self.model.confidence_head is not None
+        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+
     # --- Weight loading ---
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load ``mtp.{0,1,2}.*`` draft weights from the target checkpoint."""
+        """Load `mtp.{0,1,2}.*` draft weights from the target checkpoint."""
         first_layer = self.model.layers[0]
         use_mega_moe = first_layer.ffn.use_mega_moe
         if use_mega_moe:
@@ -317,12 +334,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        loaded_confidence_head = False
 
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:
                 continue
             name = mapped
+            if "confidence_head." in name:
+                loaded_confidence_head = True
 
             # .scale -> per-method scale suffix
             if name.endswith(".scale"):
@@ -388,22 +408,23 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        self._finalize_moe()
+        if self.model.confidence_head is not None and not loaded_confidence_head:
+            self.model.confidence_head = None
         logger.info_once("DSpark XPU draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
-    def _finalize_moe(self) -> None:
+    def process_weights_after_loading(self) -> None:
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 
     def _remap_dspark_name(self, name: str) -> str | None:
-        """Map checkpoint ``mtp.{i}.*`` name to this model's parameter path."""
+        """Map checkpoint `mtp.{i}.*` name to this model's parameter path."""
         m = re.match(r"mtp\.(\d+)\.(.*)", name)
         if m is None:
             return None
         stage = int(m.group(1))
         rest = m.group(2)
-        if rest.startswith("confidence_head."):
+        if rest.startswith("confidence_head.") and self.model.confidence_head is None:
             return None
         head_prefixes = (
             "norm.",
@@ -411,6 +432,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             "hc_head_base",
             "hc_head_scale",
             "markov_head.",
+            "confidence_head.",
         )
         if rest.startswith(("main_proj.", "main_norm.")) or rest.startswith(
             head_prefixes

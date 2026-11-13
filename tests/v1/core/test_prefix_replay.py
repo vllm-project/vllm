@@ -11,17 +11,17 @@ import torch
 
 from tests.v1.kv_connector.unit.utils import MockKVConfig, create_model_runner_output
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    SlidingWindowMLASpec,
+    MLAAttentionSpec,
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from .utils import create_requests, create_scheduler
+from .utils import create_requests, create_scheduler, new_kv_cache_group
 
 BLOCK_SIZE = 16
 WINDOW = 32
@@ -34,7 +34,7 @@ FULL, SWA = 0, 1
 def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
-    use_kv_connector: MockKVConfig | None = None,
+    use_kv_connector: MockKVConfig | str | None = None,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
@@ -49,22 +49,24 @@ def _replay_scheduler(
         num_blocks=10000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=BLOCK_SIZE,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa"],
-                SlidingWindowMLASpec(
-                    block_size=BLOCK_SIZE,
-                    num_kv_heads=1,
-                    head_size=64,
-                    dtype=torch.bfloat16,
+                SlidingWindowManager.layer_config(
+                    MLAAttentionSpec(
+                        block_size=BLOCK_SIZE,
+                        num_kv_heads=1,
+                        head_size=64,
+                        dtype=torch.bfloat16,
+                    ),
                     sliding_window=WINDOW,
                     bounded_replay=True,
                 ),
@@ -78,7 +80,6 @@ def _replay_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    scheduler.use_v2_model_runner = True
     assert scheduler.prefix_replay_tokens == WINDOW
     return scheduler
 
@@ -98,7 +99,6 @@ def _step_output(out, requests) -> ModelRunnerOutput:
     scheduled = [r for r in requests if r.request_id in out.num_scheduled_tokens]
     return ModelRunnerOutput(
         req_ids=[r.request_id for r in scheduled],
-        req_id_to_index={r.request_id: i for i, r in enumerate(scheduled)},
         sampled_token_ids=[
             [1000] if r.num_computed_tokens >= r.num_prompt_tokens else []
             for r in scheduled
@@ -272,6 +272,19 @@ def test_kv_load_carrying_window_does_not_replay(is_async, matched):
     assert new_req.num_computed_tokens == matched
     assert new_req.replay_start == 0
     assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - matched
+
+
+def test_decode_bench_fill_does_not_replay():
+    """DecodeBenchConnector fills every group like a P/D transfer, so a filled
+    request starts with a one-token decode step, not a replay."""
+    scheduler = _replay_scheduler(use_kv_connector="DecodeBenchConnector")
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    assert _new_req_data(out, request).replay_start == 0
+    assert out.num_scheduled_tokens[request.request_id] == 1
 
 
 @pytest.mark.parametrize("via_connector", [False, True])

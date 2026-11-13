@@ -29,7 +29,11 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.engine import embeds_input
 from vllm.sampling_params import BeamSearchParams
-from vllm.tokenizers import deepseek_v4_encoding, deepseek_v32_encoding
+from vllm.tokenizers import (
+    deepseek_v4_encoding,
+    deepseek_v32_encoding,
+    deepseek_v41_encoding,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
@@ -374,6 +378,43 @@ def test_chat_beam_conversion_accepts_n_at_sequence_cap(
     assert params.beam_width == 4
 
 
+@pytest.mark.parametrize("request_cls", [ChatCompletionRequest, CompletionRequest])
+@pytest.mark.parametrize("conversion", ["to_sampling_params", "to_beam_search_params"])
+@pytest.mark.parametrize("requested", [None, False, True])
+@pytest.mark.parametrize("default", [None, False, True])
+def test_skip_special_tokens_resolves_before_decoding(
+    request_cls, conversion, requested, default
+):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import TokenizersBackend
+
+    inputs = (
+        {"messages": [{"role": "user", "content": "hello"}]}
+        if request_cls is ChatCompletionRequest
+        else {"prompt": "hello"}
+    )
+    request = request_cls(model="test", skip_special_tokens=requested, **inputs)
+    defaults = {} if default is None else {"skip_special_tokens": default}
+    params = getattr(request, conversion)(
+        max_tokens=1, default_sampling_params=defaults
+    )
+    expected = (
+        requested
+        if requested is not None
+        else defaults.get("skip_special_tokens", True)
+    )
+    assert params.skip_special_tokens is expected
+    tokenizer = TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "[EOS]": 1})),
+        unk_token="[UNK]",
+        eos_token="[EOS]",
+    )
+    assert tokenizer.decode([1], skip_special_tokens=params.skip_special_tokens) == (
+        "" if expected else "[EOS]"
+    )
+
+
 # --- DeepSeek encoders: the last-user scan runs once per conversation ------
 
 
@@ -434,8 +475,8 @@ def test_encode_messages_preserves_small_chat_prompt(encoding_module):
 
 @pytest.mark.parametrize(
     "encoding_module",
-    ENCODING_MODULES,
-    ids=["deepseek_v32", "deepseek_v4"],
+    [*ENCODING_MODULES, deepseek_v41_encoding],
+    ids=["deepseek_v32", "deepseek_v4", "deepseek_v41"],
 )
 def test_encode_messages_unknown_role_raises_value_error(encoding_module):
     # An invalid role (e.g. uppercase "SYSTEM") is a client error and must be

@@ -4,10 +4,10 @@
 
 RDT is pull-based, so unlike NCCL this engine broadcasts nothing. It owns a
 per-rank producer server (an internal Ray actor exposing the NIXL serve surface
-the worker engine dials by name), and on each ``send_weights`` gathers this
-rank's weights group-by-group from the ``WeightSource``, shares each group into
+the worker engine dials by name), and on each `send_weights` gathers this
+rank's weights group-by-group from the `WeightSource`, shares each group into
 the server over CUDA IPC, and — on the sender — drives the inference-side
-start/update/finish handshake, whose single empty ``update_weights`` unblocks the
+start/update/finish handshake, whose single empty `update_weights` unblocks the
 workers to pull.
 
 All serve-side state lives on the server actor, so trainer processes need no
@@ -18,10 +18,11 @@ free_group -> release lifecycle and the ownership model.
 """
 
 import contextlib
+import itertools
 import threading
 import time
 import uuid
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Self
@@ -44,9 +45,11 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
+    StagingDevice,
     buffer_alloc_bytes,
     check_ray_rdt_version,
     register_nixl_memory,
+    validate_sharded_rdt_settings,
 )
 from vllm.logger import init_logger
 
@@ -135,7 +138,7 @@ class _SharedPack:
 
     group: int
     slot: int
-    """``seq % ring_depth``. Fixed at creation, so slot reuse follows the
+    """`seq % ring_depth`. Fixed at creation, so slot reuse follows the
     consumers' issue order rather than this side's execution order."""
     arrived: set[int] = field(default_factory=set)
     blob: Any = None
@@ -148,7 +151,7 @@ class _SharedPack:
 class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Trainer init info for the sharded-RDT backend.
 
-    Identical on every rank except ``rank`` (rank 0 is the sender). Carries only
+    Identical on every rank except `rank` (rank 0 is the sender). Carries only
     the must-agree wire params; the sender forwards them verbatim onto the
     worker-side init info so the two cannot drift. Server-actor names are
     generated per rank and all-gathered by the engine, not supplied here.
@@ -160,19 +163,19 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Total inference-worker (consumer) count across the whole fleet
     (DP*TP*PP*PCP), for the M:N block assignment / free ref-count."""
     workers_per_replica: int = 0
-    """Consumers per inference DEPLOYMENT (``num_consumers // num_replicas``).
+    """Consumers per inference DEPLOYMENT (`num_consumers // num_replicas`).
 
     Fixes the slot-sharing groups: consumers whose ids differ by a multiple of
     this are the same worker of different deployments, so they bake identical
     plans and pull byte-identical chunks, and ONE registered serve slot can
     serve all of them. 0 disables sharing, and so does the single-deployment
-    value ``num_consumers``, which makes every group a singleton and the serve
+    value `num_consumers`, which makes every group a singleton and the serve
     path identical to the unshared one.
     """
     trainer_actor_namespace: str | None = None
     """Ray namespace the engine spawns its serve actors in. The inference
     workers (which run in their own EngineCore subprocess with its own
-    ``ray.init``) resolve those actors by name, so this must be the namespace
+    `ray.init`) resolve those actors by name, so this must be the namespace
     they can see. Forwarded to the worker-side init info."""
     num_rdt_buffers: int = 2
     """Serve/receive ring depth K (must match the worker)."""
@@ -180,20 +183,35 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     """Serve-buffer pre-size floor in GiB (avoids NIXL desc-cache churn)."""
     gather_lookahead: int = DEFAULT_GATHER_LOOKAHEAD
     """Gathered-but-unfreed groups the gather loop may run ahead by. Bounds
-    trainer-resident memory at ``gather_lookahead + 1`` groups."""
+    trainer-resident memory at `gather_lookahead + 1` groups."""
     stall_timeout_s: float = DEFAULT_STALL_TIMEOUT_S
     """Seconds of no publish/serve/free progress before the producer fails the
-    sync (see ``DEFAULT_STALL_TIMEOUT_S``)."""
+    sync (see `DEFAULT_STALL_TIMEOUT_S`)."""
+    staging_device: StagingDevice = "gpu"
+    """Where every worker's receive buffers live. Forwarded unchanged."""
+    stages_in_flight: int = 1
+    """Maximum trainer stages each worker pulls from concurrently. Forwarded
+    unchanged."""
+
+    def __post_init__(self) -> None:
+        validate_sharded_rdt_settings(
+            staging_device=self.staging_device,
+            stages_in_flight=self.stages_in_flight,
+            num_rdt_buffers=self.num_rdt_buffers,
+            buffer_presize_gb=self.buffer_presize_gb,
+            num_consumers=self.num_consumers,
+            allow_zero_consumers=False,
+        )
 
 
 class _RDTProducerServer:
     """Per-rank NIXL serve surface: an internal Ray actor sharing the trainer
     rank's GPU over CUDA IPC. Holds the gather cache, per-consumer serve rings,
     the per-group free barrier and the packed serve. The engine feeds it with
-    ``publish_group``; workers pull with ``rdt_produce_weights_batched`` and
-    signal with ``free_group``.
+    `publish_group`; workers pull with `rdt_produce_weights_batched` and
+    signal with `free_group`.
 
-    A plain class — the engine wraps it with ``ray.remote(...)`` at spawn so the
+    A plain class — the engine wraps it with `ray.remote(...)` at spawn so the
     actor options live in one place.
     """
 
@@ -231,6 +249,11 @@ class _RDTProducerServer:
         # ones. Signals may precede the publish, which completes them.
         self._live_count = 1
         self._free_counts: dict[int, int] = {}
+        # The sync begin_sync last opened, and signals already received for a
+        # sync this producer has not begun: the ranks begin at different times,
+        # so a consumer served by an early rank can signal a late one first.
+        self._sync_idx = -1
+        self._early_free_counts: dict[int, dict[int, int]] = {}
         # gi -> the names this producer published for it (what release drops).
         self._group_names: dict[int, list[str]] = {}
 
@@ -289,20 +312,20 @@ class _RDTProducerServer:
     # ---------------- stall watchdog ----------------
 
     def _note_progress_locked(self) -> None:
-        """Record that the credit loop moved. Caller holds ``_cache_cond``."""
+        """Record that the credit loop moved. Caller holds `_cache_cond`."""
         self._last_progress = time.monotonic()
 
     def _wait_for(self, blocked: Callable[[], bool], what: str) -> None:
-        """``_cache_cond.wait()`` with a liveness bound.
+        """`_cache_cond.wait()` with a liveness bound.
 
-        Waits while ``blocked()`` holds, returning early on a gather error. If
-        nothing on this producer progresses for ``_stall_timeout``, self-fires
-        ``set_gather_error``, which every waiter here already checks — so the rank
+        Waits while `blocked()` holds, returning early on a gather error. If
+        nothing on this producer progresses for `_stall_timeout`, self-fires
+        `set_gather_error`, which every waiter here already checks — so the rank
         unwinds through one path and the driver gets a real exception.
 
         The progress stamp is global to the producer, not per-waiter: a merely
         slow waiter is kept alive by its peers' progress. Caller holds
-        ``_cache_cond``.
+        `_cache_cond`.
         """
         while blocked():
             if self._gather_error is not None:
@@ -341,24 +364,32 @@ class _RDTProducerServer:
     # ---------------- engine-facing (per sync) ----------------
 
     def begin_sync(
-        self, live_count: int, live_consumer_ids: list | None = None
+        self,
+        live_count: int,
+        live_consumer_ids: list | None = None,
+        sync_idx: int | None = None,
     ) -> None:
         """Reset per-sync free/backpressure state and set this sync's barrier
         target.
 
-        ``live_count`` is how many consumers take part in THIS sync. Required, no
+        `sync_idx` is the trainer's count of this sync. Free signals tagged
+        with it that arrived before this call are kept, not reset: the ranks
+        begin at different times, and a consumer served by an early rank can
+        finish a group and signal this one first. `None` opens the next sync.
+
+        `live_count` is how many consumers take part in THIS sync. Required, no
         default: a forgotten argument silently targeting 1 would free groups after
         the FIRST signal while others still pull — use-after-free, not an error.
         The driver awaits the previous sync's finish before the next begins, so
         nothing is in flight; a straggler signal would otherwise credit the wrong
         sync, which is why the consumer drains its signals before finishing.
 
-        ``live_consumer_ids`` is that same live set enumerated, which is what
+        `live_consumer_ids` is that same live set enumerated, which is what
         sizes each slot-sharing group's rendezvous; a count cannot, since a group
-        is a specific set of ids. ``None`` leaves every group a singleton.
+        is a specific set of ids. `None` leaves every group a singleton.
 
         The packed-destination cache deliberately survives: the layout repeats
-        every sync. So does ``_plan_digests``, which is init-time state.
+        every sync. So does `_plan_digests`, which is init-time state.
         """
         with self._cache_cond:
             self._gather_error = None
@@ -379,17 +410,23 @@ class _RDTProducerServer:
             self._gens.clear()
             self._inflight_groups.clear()
             self._freed_pending.clear()
-            self._free_counts.clear()
+            self._sync_idx = self._sync_idx + 1 if sync_idx is None else int(sync_idx)
+            self._free_counts = self._early_free_counts.pop(self._sync_idx, {})
+            self._early_free_counts = {
+                idx: counts
+                for idx, counts in self._early_free_counts.items()
+                if idx > self._sync_idx
+            }
             self._group_names.clear()
             self._base_cache.clear()
             self._note_progress_locked()
 
     def _release_group_locked(self, group_idx: int) -> None:
         """Drop a freed group's cache entries and queue it for the engine
-        (whose gather-credit gate blocks in ``wait_freed`` on exactly this).
+        (whose gather-credit gate blocks in `wait_freed` on exactly this).
 
-        Shared by the last ``free_group`` and by ``publish_group`` completing an
-        early-signaled group. Caller must hold ``_cache_cond``.
+        Shared by the last `free_group` and by `publish_group` completing an
+        early-signaled group. Caller must hold `_cache_cond`.
         """
         for name in self._group_names.pop(group_idx, ()):
             self._cache.pop(name, None)
@@ -403,16 +440,16 @@ class _RDTProducerServer:
 
         NEVER blocks: a gathered group is serveable immediately. The memory bound
         lives in the engine's gather loop, which stops GATHERING (not publishing)
-        past ``gather_lookahead`` unfreed groups.
+        past `gather_lookahead` unfreed groups.
 
-        ``entries`` is ``(storages, views)``: one CUDA-IPC export per storage,
-        plus per-name ``(sid, dtype_name, shape, stride, storage_offset)`` rebuilt
-        here as ``as_strided`` views.
+        `entries` is `(storages, views)`: one CUDA-IPC export per storage,
+        plus per-name `(sid, dtype_name, shape, stride, storage_offset)` rebuilt
+        here as `as_strided` views.
 
         Signals can arrive BEFORE their publish — a consumer pulling nothing of a
         group signals it as its plan starts — so a group whose barrier is already
         satisfied is released here. Freed groups reach the engine only through
-        ``wait_freed`` / ``end_sync``: a freed notice riding an unharvested async
+        `wait_freed` / `end_sync`: a freed notice riding an unharvested async
         publish result would wedge the loop.
         """
         storages, views = entries
@@ -445,7 +482,7 @@ class _RDTProducerServer:
     def wait_freed(self) -> list[int]:
         """Block until at least one published group has been freed; return and
         clear the freed backlog. The engine's gather-credit gate calls this once
-        its loop is ``gather_lookahead`` groups ahead, so this wait is where the
+        its loop is `gather_lookahead` groups ahead, so this wait is where the
         trainer paces to the consumers' pull rate.
 
         Raises rather than returning empty when the sync errors or stalls: the
@@ -485,18 +522,28 @@ class _RDTProducerServer:
 
     # ---------------- consumer-facing (called by name over Ray) ----------------
 
-    def free_group(self, group_idx: int) -> None:
-        """Consumer back-edge: one consumer is done with group ``group_idx``,
+    def free_group(self, group_idx: int, sync_idx: int | None = None) -> None:
+        """Consumer back-edge: one consumer is done with group `group_idx`,
         either because its last chunk landed or because it had nothing to pull.
 
         The per-group barrier counts one signal per live consumer against the
-        ``begin_sync`` count; every consumer signals every owner, so the target is
+        `begin_sync` count; every consumer signals every owner, so the target is
         the same integer everywhere. The last signal drops the cache entries and
-        queues the group as gather credit for ``wait_freed``. A signal arriving
-        before its publish is only counted — ``publish_group`` completes it.
+        queues the group as gather credit for `wait_freed`. A signal arriving
+        before its publish is only counted — `publish_group` completes it.
+
+        `sync_idx` names the sync the signal belongs to. One for a sync this
+        producer has not begun is kept for it (see `begin_sync`); one for a
+        sync it has left is dropped. `None` counts toward the current sync.
         """
         gi = int(group_idx)
         with self._cache_cond:
+            if sync_idx is not None and int(sync_idx) != self._sync_idx:
+                if int(sync_idx) > self._sync_idx:
+                    early = self._early_free_counts.setdefault(int(sync_idx), {})
+                    early[gi] = early.get(gi, 0) + 1
+                self._note_progress_locked()
+                return
             count = self._free_counts.get(gi, 0) + 1
             self._free_counts[gi] = count
             if gi in self._group_names and count >= self._live_count:
@@ -522,11 +569,11 @@ class _RDTProducerServer:
 
         The ring is keyed by SLOT-SHARING GROUP, so the sharers of one group
         reserve ONE ring between them. They all call this, same group and same
-        size, so the whole body runs under ``_serve_lock``, or two concurrent
+        size, so the whole body runs under `_serve_lock`, or two concurrent
         first-callers would each allocate a ring and one would be dropped while
         still registered.
 
-        ``plan_digest`` is the caller's ordered chunk plan for THIS producer.
+        `plan_digest` is the caller's ordered chunk plan for THIS producer.
         Sharers must agree on it, and this is where a disagreement is caught
         rather than at serve time, where it is a rendezvous nobody completes.
 
@@ -577,15 +624,15 @@ class _RDTProducerServer:
                     rings[i] = self._new_serve_buffer(alloc)
 
     def _share_group(self, consumer_id: int) -> int:
-        """The slot-sharing group ``consumer_id`` belongs to: its index within
+        """The slot-sharing group `consumer_id` belongs to: its index within
         its own deployment, since that is what fixes the plan. Without a width
         the group is the consumer itself and nothing is shared."""
         return consumer_id % self._share_width if self._share_width > 0 else consumer_id
 
     def _sharers_of(self, sg: int) -> frozenset:
-        """The LIVE consumers of group ``sg``: the rendezvous width. Derived from
-        ``begin_sync``'s live set, so a degraded sync narrows the barrier instead
-        of waiting forever on a dead deployment. Caller holds ``_cache_cond``."""
+        """The LIVE consumers of group `sg`: the rendezvous width. Derived from
+        `begin_sync`'s live set, so a degraded sync narrows the barrier instead
+        of waiting forever on a dead deployment. Caller holds `_cache_cond`."""
         cached = self._sharers.get(sg)
         if cached is None:
             if not self._sharing_active or self._live_ids is None:
@@ -598,12 +645,12 @@ class _RDTProducerServer:
         return cached
 
     def _join_share_group(self, consumer_id: int, seq: int) -> tuple:
-        """Register this call's arrival in its group's rendezvous for ``seq`` and
-        return ``(generation, is_packer)``.
+        """Register this call's arrival in its group's rendezvous for `seq` and
+        return `(generation, is_packer)`.
 
-        Exactly one caller per generation gets ``is_packer=True``, whichever
+        Exactly one caller per generation gets `is_packer=True`, whichever
         completes the arrival set, and it is the only one that touches the GPU.
-        The slot is ``seq % nring``: fixed by the consumers' issue order, so it
+        The slot is `seq % nring`: fixed by the consumers' issue order, so it
         needs no release accounting on this side.
         """
         sg = self._share_group(consumer_id)
@@ -639,9 +686,9 @@ class _RDTProducerServer:
             return gen.blob
 
     def _serve_slot(self, sg: int, idx: int, need: int) -> torch.Tensor:
-        """Group ``sg``'s ring slot ``idx``, grown if this chunk outgrew the
+        """Group `sg`'s ring slot `idx`, grown if this chunk outgrew the
         reservation. Growing registers memory while the fabric is busy, the
-        hazard ``reserve_serve_buffer`` exists to avoid, so it is a backstop: the
+        hazard `reserve_serve_buffer` exists to avoid, so it is a backstop: the
         reservation is sized from the same static plan as this pack."""
         with self._serve_lock:
             buffer = self._serve_rings.setdefault(sg, [None] * self._nring)[idx]
@@ -669,18 +716,18 @@ class _RDTProducerServer:
         other live sharers of this consumer's slot-sharing group. The last to
         arrive replays each spec's op chain (pure views into cached tensors,
         guarded by ALLOWED_OPS) and byte-packs the slices 16B-aligned into the
-        group's ring slot ``seq % nring``, mirroring the consumer's identical
+        group's ring slot `seq % nring`, mirroring the consumer's identical
         layout; every sharer then returns that one packed blob, so R deployments
         cost one pack and one slot instead of R. With a single deployment every
         group is a singleton, so the arriving call is always its own packer and
         this is the unshared serve path exactly.
 
-        ``seq`` is the caller's index in its pull stream to this producer, which
+        `seq` is the caller's index in its pull stream to this producer, which
         is what fixes the slot. Callers that want a single slice pass one spec
         and read the blob back with that slice's dtype/shape.
 
         Raises:
-            ValueError: ``seq`` was not supplied.
+            ValueError: `seq` was not supplied.
 
         """
         needed = sorted({n for n, _ in specs})
@@ -731,7 +778,7 @@ class _RDTProducerServer:
         """Replay the op chains into this generation's slot and publish the blob
         to the sharers waiting on it.
 
-        Runs on exactly one call per generation and OUTSIDE ``_cache_cond``: the
+        Runs on exactly one call per generation and OUTSIDE `_cache_cond`: the
         pack is GPU work and must not block publishes, frees or other groups.
         """
         sliced: list = []  # (byte_off, tensor)
@@ -802,10 +849,14 @@ class ShardedRDTTrainerWeightTransferEngine(
     """Trainer-side engine for the pull-based sharded-RDT backend.
 
     Lives on every trainer rank. Owns a per-rank `_RDTProducerServer` actor
-    (the NIXL serve surface). `send_weights` gathers this rank's weights
-    group-by-group from the `WeightSource`, shares each group into the server
-    over CUDA IPC, and — on the sender — drives the inference-side handshake so
-    the workers pull. Non-sender ranks only gather (staying in the collective).
+    (the NIXL serve surface). `send_weights` drives the source's `iter_full()`
+    over the names this rank owns, re-chunks the stream into layer groups,
+    shares each group into the server over CUDA IPC, and — on the sender —
+    drives the inference-side handshake so the workers pull. Non-sender ranks
+    only gather and publish.
+
+    Ownership comes from `ParamMeta.owners`, which every rank shares, so no
+    exchange is needed to plan who serves what.
     """
 
     init_info_cls = ShardedRDTTrainerInitInfo
@@ -818,7 +869,9 @@ class ShardedRDTTrainerWeightTransferEngine(
         is_sender: bool = True,
         init_info: ShardedRDTTrainerInitInfo,
     ) -> None:
-        super().__init__(client=client, source=source, is_sender=is_sender)
+        super().__init__(
+            client=client, source=source, is_sender=is_sender, rank=init_info.rank
+        )
         self._init_info = init_info
         self._server: Any = None  # the _RDTProducerServer actor handle
         self._server_name: str | None = None
@@ -832,7 +885,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         self._owner_sets: list[list[int]] = []
         self._name_owner_class: list[int] = []
         self._owned_idx: list[int] = []
-        self._held_names: set[str] | None = None
+        self._owned_names: set[str] = set()
         # Strong refs to gathered tensors we've shared into the server, keyed by
         # group index. CUDA-IPC exports must outlive the importer, so we hold
         # them until the server reports the group freed. See send_weights.
@@ -852,6 +905,10 @@ class ShardedRDTTrainerWeightTransferEngine(
         # Set by trainer_init from the server-name all-gather; retained so a
         # restarted consumer can be re-initialized without another collective.
         self._server_names: list[str] | None = None
+        # Index of the sync in flight, counted up at the start of every
+        # send_weights: the producers tag their frees with it (begin_sync) and
+        # the workers echo it in their update. -1 before the first sync.
+        self._sync_idx = -1
 
     def _rpc(self, method: str, *args: Any) -> Any:
         """Call one of the server actor's methods and block for the result.
@@ -871,15 +928,15 @@ class ShardedRDTTrainerWeightTransferEngine(
         return tuple(reversed(stride))
 
     def _pack_group_for_export(self, held: list, slot_idx: int) -> tuple:
-        """Copy ``held`` into ring slot ``slot_idx``; return ``(storages, views,
-        refs)`` in the same shape the per-storage path returns, but with ONE
-        storage. Views are built exactly as ``publish_group`` rebuilds them, so
+        """Copy `held` into ring slot `slot_idx`; return `(storages, views,
+        refs)` in the same shape the per-storage path returns, but with ONE
+        storage. Views are built exactly as `publish_group` rebuilds them, so
         the two sides cannot disagree about layout.
 
         Slot safety is not the credit gate alone: that bounds how MANY groups
         are unfreed, not the order they free in, and barriers do complete out of
-        order. The caller takes ``slot_idx`` from a pool keyed by live group
-        (``_slot_of_group`` / ``_free_slots``); ``_drop_inflight`` returns a slot
+        order. The caller takes `slot_idx` from a pool keyed by live group
+        (`_slot_of_group` / `_free_slots`); `_drop_inflight` returns a slot
         only once its group is freed everywhere.
         """
         offsets: list[int] = []
@@ -926,13 +983,13 @@ class ShardedRDTTrainerWeightTransferEngine(
         # nothing orders the two. Without this sync it packs bytes the copy has
         # not written yet -- silent corruption, and only for ring-packed tensors.
         if slot.is_cuda:
-            torch.cuda.current_stream(slot.device).synchronize()
+            torch.accelerator.current_stream(slot.device).synchronize()
         return {sid: reduce_args}, views, refs
 
     def _publish_async(self, group_idx: int, entries):
         """Fire publish_group WITHOUT waiting on the RPC (the gather loop
         overlaps the publish's server-side rebuild with the next group's
-        gather) and return a handle that ``_await_publish`` resolves. Ray actor
+        gather) and return a handle that `_await_publish` resolves. Ray actor
         handle in production; a plain (non-Ray) fake server runs inline."""
         method = self._server.publish_group
         remote = getattr(method, "remote", None)
@@ -964,6 +1021,11 @@ class ShardedRDTTrainerWeightTransferEngine(
             raise ValueError(
                 "Sharded RDT trainer weight transfer requires a WeightSource."
             )
+        if not source.implements_iter_full():
+            raise TypeError(
+                "Sharded RDT serves full tensors, but "
+                f"{type(source).__name__} does not implement iter_full()."
+            )
         engine = cls(
             client=client,
             source=source,
@@ -985,7 +1047,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                 "weight sync (allocate gather buffers in classic segments)."
             )
 
-        engine._meta = list(source.metadata())
+        engine._meta = list(source.metadata)
         names = [m.name for m in engine._meta]
         engine._groups = layerwise_groups(names)
         flat = [n for g in engine._groups for n in g]
@@ -998,7 +1060,7 @@ class ShardedRDTTrainerWeightTransferEngine(
 
         world, rank = engine._world_and_rank()
         engine._resolve_ownership(world, rank)
-        engine._spawn_server(sorted(engine._held_names or []))
+        engine._spawn_server(sorted(engine._owned_names))
 
         # Every rank's server must exist before the sender's init RPC (the worker
         # init calls reserve_serve_buffer back on ALL producer servers). The
@@ -1023,7 +1085,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         ranks are not at a matching one.
 
         Raises:
-            RuntimeError: called before ``trainer_init`` cached the server names.
+            RuntimeError: called before `trainer_init` cached the server names.
 
         """
         if self._server_names is None:
@@ -1034,77 +1096,37 @@ class ShardedRDTTrainerWeightTransferEngine(
         return asdict(self._build_worker_init_info(self._server_names))
 
     def _world_and_rank(self) -> tuple[int, int]:
+        """The trainer world size and this rank. Owners are trainer ranks and
+        the producer servers are gathered over the default group, so the two
+        rank numberings must agree."""
+        rank = self.rank
         if torch.distributed.is_available() and torch.distributed.is_initialized():
-            return torch.distributed.get_world_size(), torch.distributed.get_rank()
-        return 1, self._init_info.rank
+            if torch.distributed.get_rank() != rank:
+                raise ValueError(
+                    f"Sharded RDT needs TrainerInitInfo.rank ({rank}) to be the "
+                    "default process group rank "
+                    f"({torch.distributed.get_rank()})."
+                )
+            return torch.distributed.get_world_size(), rank
+        return 1, rank
 
     def _resolve_ownership(self, world: int, rank: int) -> None:
-        """Resolve which rank holds which name, and this rank's publish plan.
+        """Resolve which rank owns which name, and this rank's publish plan.
 
-        A source may hold only part of the model — pipeline stages, expert
-        parallelism, or any mix — so each rank declares its held names and the
-        fleet all-gathers them. The consumers route per name, so the wire carries
-        the transposed result: the distinct owner sets, and a per-name index into
-        them.
-
-        The masks are positional over metadata order, which is why the metadata
-        digest is checked first: a rank whose names disagree would transpose into
-        the wrong owners entirely.
+        The consumers route per name, so the wire carries the distinct owner
+        sets and a per-name index into them. Both come straight from metadata,
+        where `owners=None` means every rank.
         """
-        assert self.source is not None  # guaranteed by trainer_init
-        num_groups = len(self._groups)
-        names = [m.name for m in self._meta]
-        held = self.source.held_names()
-        if held is None:
-            held_set = set(names)
-        else:
-            held_set = {str(n) for n in held}
-            unknown = sorted(held_set - set(names))
-            if unknown:
-                raise ValueError(
-                    f"WeightSource.held_names() lists {len(unknown)} name(s) not "
-                    f"in metadata(), e.g. {unknown[:3]}."
-                )
-            if not held_set:
-                raise ValueError(
-                    "WeightSource.held_names() is empty; a rank with nothing to "
-                    "serve cannot take part in the gather"
-                )
-
-        # One collective carries this rank's holdings as a bitmask over metadata
-        # order, plus the digest of the metadata it indexes into. The digest is
-        # what makes partial ownership safe: only the sender's metadata reaches
-        # the consumers, so a rank describing just its own share would silently
-        # serve the wrong weights.
-        digest = self._meta_digest()
-        mask = bytearray((len(names) + 7) // 8)
-        for i, n in enumerate(names):
-            if n in held_set:
-                mask[i >> 3] |= 1 << (i & 7)
-        per_rank = self._all_gather_owned(world, (digest, bytes(mask)))
-        mismatched = [r for r, (d, *_rest) in enumerate(per_rank) if d != digest]
-        if mismatched:
-            raise ValueError(
-                f"WeightSource.metadata() disagrees across trainer ranks "
-                f"(rank {rank} digest {digest}, differing ranks {mismatched[:4]}). "
-                "Every rank must describe the WHOLE model, even when it holds "
-                "only some of it."
-            )
-        masks = [m for _d, m in per_rank]
-
-        # Transpose to per-name owners, then dedup into classes. Numbering by
-        # FIRST APPEARANCE in metadata order keeps it a pure function of
-        # rank-identical inputs, which is what lets a rejoining consumer rebuild
-        # the identical table from get_worker_init_payload.
+        everyone = tuple(range(world))
         owner_sets: list[list[int]] = []
         class_of_owners: dict[tuple[int, ...], int] = {}
         name_owner_class: list[int] = []
-        for i, n in enumerate(names):
-            owners = tuple(r for r, m in enumerate(masks) if m[i >> 3] & (1 << (i & 7)))
-            if not owners:
+        for m in self._meta:
+            owners = everyone if m.owners is None else m.owners
+            if max(owners) >= world:
                 raise ValueError(
-                    f"no trainer rank holds {n!r}; every name in metadata() must "
-                    "be held by at least one rank or it can never be served."
+                    f"parameter {m.name!r} is owned by trainer ranks {owners}, "
+                    f"but there are only {world} trainer ranks."
                 )
             ci = class_of_owners.get(owners)
             if ci is None:
@@ -1112,79 +1134,58 @@ class ShardedRDTTrainerWeightTransferEngine(
                 class_of_owners[owners] = ci
                 owner_sets.append(list(owners))
             name_owner_class.append(ci)
-
+        assert self.source is not None
+        owned = set(self.source.owned_names(rank))
         self._owner_sets = owner_sets
         self._name_owner_class = name_owner_class
-        # Groups holding anything here: exactly what iteration must cover.
         self._owned_idx = [
-            gi
-            for gi in range(num_groups)
-            if any(n in held_set for n in self._groups[gi])
+            gi for gi, g in enumerate(self._groups) if any(n in owned for n in g)
         ]
-        self._held_names = held_set
-
-    def _validate_held_yields(self, gi: int, names, tensors) -> None:
-        """Check ``held_names()`` against what the source actually yields — the
-        one place both sit side by side.
-
-        Without it, a source that claims a name but yields ``None`` for it dies
-        by stall watchdog 300s later: consumers route pulls here, the pull
-        passes the served-names guard, and the cache wait never completes. With
-        it, that is an immediate error naming the weight. One set lookup per
-        name per sync."""
-        if self._held_names is None:
-            return
-        for name, tensor in zip(names, tensors):
-            if (tensor is None) == (name in self._held_names):
-                claim = "does not hold" if tensor is not None else "holds"
-                have = "a real tensor" if tensor is not None else "None"
-                raise RuntimeError(
-                    f"held_names() disagrees with the yielded tensors: group {gi} "
-                    f"name {name!r} yielded {have} but this rank {claim} it. A "
-                    "WeightSource must yield a real tensor for every held name "
-                    "and None for the rest (see WeightSource.held_names)."
-                )
+        self._owned_names = owned
 
     def _meta_digest(self) -> str:
-        """Stable digest of this rank's metadata (name order + count)."""
+        """Stable digest of this rank's metadata: names, order and owners."""
         import hashlib
 
         h = hashlib.sha256()
         h.update(f"{len(self._meta)}\n".encode())
         for m in self._meta:
-            h.update(m.name.encode())
-            h.update(b"\n")
+            h.update(f"{m.name}\t{m.owners}\n".encode())
         return h.hexdigest()[:16]
 
-    def _all_gather_owned(self, world: int, mine: tuple) -> list[tuple]:
-        """All-gather each rank's (metadata digest, held-name bitmask)."""
-        if world <= 1 or not (
-            torch.distributed.is_available() and torch.distributed.is_initialized()
-        ):
-            return [mine]
-        gathered: list[Any] = [None] * world
-        torch.distributed.all_gather_object(gathered, mine)
-        return gathered
-
     def _all_gather_server_names(self, world: int, rank: int) -> list[str]:
+        """All-gather the producer server names, indexed by rank.
+
+        The metadata digest rides along: ownership is planned from each rank's
+        own metadata, so a rank whose metadata differs would serve a different
+        plan than the consumers route by.
+        """
         assert self._server_name is not None
         if world <= 1 or not (
             torch.distributed.is_available() and torch.distributed.is_initialized()
         ):
             return [self._server_name]
-        gathered: list[str | None] = [None] * world
-        torch.distributed.all_gather_object(gathered, self._server_name)
-        return [n for n in gathered if n is not None]
+        digest = self._meta_digest()
+        gathered: list[tuple[str, str] | None] = [None] * world
+        torch.distributed.all_gather_object(gathered, (self._server_name, digest))
+        mismatched = [r for r, g in enumerate(gathered) if g is None or g[1] != digest]
+        if mismatched:
+            raise ValueError(
+                f"WeightSource.metadata disagrees across trainer ranks (rank "
+                f"{rank} digest {digest}, differing ranks {mismatched[:4]}). "
+                "Every rank must describe the WHOLE model, with the same owners."
+            )
+        return [g[0] for g in gathered if g is not None]
 
     def _spawn_server(self, served_names: list[str]) -> None:
         import ray
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+        ii = self._init_info
         # The trainer is usually a separate install from the workers, so it gets
         # its own check rather than trusting the consumer side's.
-        check_ray_rdt_version()
+        check_ray_rdt_version(ii.staging_device)
 
-        ii = self._init_info
         self._server_name = f"vllm_rdt_producer_{uuid.uuid4().hex[:12]}_rk{ii.rank}"
         node_id = ray.get_runtime_context().get_node_id()
         # Pin the server to this rank's physical GPU: num_gpus=0 so Ray does not
@@ -1269,6 +1270,8 @@ class ShardedRDTTrainerWeightTransferEngine(
             num_consumers=self._init_info.num_consumers,
             num_rdt_buffers=self._init_info.num_rdt_buffers,
             buffer_presize_gb=self._init_info.buffer_presize_gb,
+            staging_device=self._init_info.staging_device,
+            stages_in_flight=self._init_info.stages_in_flight,
         )
 
     # ---------------- per-round ----------------
@@ -1276,13 +1279,16 @@ class ShardedRDTTrainerWeightTransferEngine(
     def send_weights(self, live_consumer_ids: Collection[int] | None = None) -> None:
         """Gather this rank's weights and publish them for the consumers to pull.
 
-        ``live_consumer_ids`` restricts the sync to the consumers still alive;
-        ``None`` serves the whole provisioned set. The provisioned geometry is
+        `live_consumer_ids` restricts the sync to the consumers still alive;
+        `None` serves the whole provisioned set. The provisioned geometry is
         FROZEN for the run — a degraded sync only lowers the live count handed to
-        ``begin_sync``. Every rank must get the SAME live set, since they share
+        `begin_sync`. Every rank must get the SAME live set, since they share
         the gather collectives, so the caller computes it once for all of them.
         """
         assert self.source is not None
+        # Every rank calls send_weights once per sync, so every rank's count
+        # agrees; the workers tag their free signals with it.
+        self._sync_idx += 1
         if live_consumer_ids is None:
             live_ids = list(range(self._init_info.num_consumers))
             live_count = len(live_ids)
@@ -1310,11 +1316,11 @@ class ShardedRDTTrainerWeightTransferEngine(
             ShardedRDTWeightTransferUpdateInfo,
         )
 
-        empty_update = asdict(ShardedRDTWeightTransferUpdateInfo())
+        update = asdict(ShardedRDTWeightTransferUpdateInfo(sync_idx=self._sync_idx))
         with ThreadPoolExecutor(max_workers=1) as exe:
             # The workers block inside update_weights until they've pulled every
             # group, so it runs concurrently with the gather/publish loop.
-            future = exe.submit(self.client.update_weights, empty_update)
+            future = exe.submit(self.client.update_weights, update)
             self._run_gather_loop(
                 update_future=future, live_count=live_count, live_ids=live_ids
             )
@@ -1337,11 +1343,10 @@ class ShardedRDTTrainerWeightTransferEngine(
         # The live IDS ride along with the count: the free barrier needs only
         # the count, but the slot-sharing rendezvous needs to know WHICH
         # consumers are live.
-        self._rpc("begin_sync", live_count, live_ids)
-        # One generator resume per GROUP: `iter_groups` yields (names, tensors)
-        # per owned group in metadata order. Every owner must reach a group in the
-        # same order or their shared gather collective mismatches.
-        groups = self.source.iter_groups()
+        self._rpc("begin_sync", live_count, live_ids, self._sync_idx)
+        # Every owner reaches a group in the same (metadata) order, so their
+        # shared gathers line up.
+        groups = self._iter_owned_groups()
         # Publishes fire without an inline ray.get and are harvested this window
         # deep, so the RPC and server-side rebuild overlap the NEXT group's
         # gather/export. The window also surfaces a server-side error at depth 2
@@ -1383,31 +1388,18 @@ class ShardedRDTTrainerWeightTransferEngine(
 
         try:
             for gi in self._owned_idx:
-                group = self._groups[gi]
                 while len(self._inflight) > bound:
                     while pending_publish:
                         self._await_publish(pending_publish.pop(0))
                     self._drop_inflight(self._rpc("wait_freed"))
                 names, tensors = next(groups)
-                if list(names) != list(group):
-                    raise RuntimeError(
-                        f"WeightSource group yielded {len(names)} names starting "
-                        f"{names[:2]!r} but expected {len(group)} starting "
-                        f"{group[:2]!r}; iteration order must match metadata."
-                    )
-                self._validate_held_yields(gi, names, tensors)
                 # Share each unique STORAGE once and describe every name as an
-                # as_strided view onto it. ``None`` means a name this rank does not
-                # hold (a foreign expert); the source keeps it in the list so the
-                # order check stays rank-uniform, and it is dropped here, before
-                # the IPC export, matching the sidecar's served_names.
+                # as_strided view onto it.
                 storages: dict[int, tuple] = {}
                 views: dict[str, tuple] = {}
                 refs: dict[str, torch.Tensor] = {}
                 small: list = []
                 for name, tensor in zip(names, tensors):
-                    if tensor is None:
-                        continue
                     tensor = tensor.detach()
                     if not tensor.is_cuda:
                         tensor = tensor.cuda()
@@ -1492,6 +1484,27 @@ class ShardedRDTTrainerWeightTransferEngine(
             # Keep the slots, drop the handles: the sidecar's base cache is
             # cleared per sync, so a handle must not outlive the sync either.
             self._export_ring_args = [None] * len(getattr(self, "_export_ring", []))
+
+    def _iter_owned_groups(
+        self,
+    ) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
+        """This rank's groups, in `_owned_idx` order, as `(names, tensors)`.
+
+        The source yields one tensor at a time; they are grouped here.
+        """
+        assert self.source is not None
+        pairs = self.source.iter_full()
+        for gi in self._owned_idx:
+            expected = [n for n in self._groups[gi] if n in self._owned_names]
+            got = list(itertools.islice(pairs, len(expected)))
+            names = [name for name, _ in got]
+            if names != expected:
+                raise RuntimeError(
+                    f"WeightSource yielded {names[:2]!r} for group {gi}, but this "
+                    f"rank owns {expected[:2]!r} there; iter_full() must yield "
+                    "the owned names in metadata order."
+                )
+            yield names, [tensor for _, tensor in got]
 
     def _drop_inflight(self, freed_keys: list) -> None:
         """Release a freed group's refs and return its export-ring slot."""

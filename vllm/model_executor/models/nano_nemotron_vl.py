@@ -28,6 +28,7 @@ from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
@@ -38,6 +39,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsMultiModalPruning,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
@@ -333,18 +335,13 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
         processor = self.get_hf_processor()  # we get the CustomProcessor here
         T = processor.video_temporal_patch_size
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
         tokens_per_tubelet = processor.num_video_token
-        max_total_tubelets = (seq_len - max_image_tokens) // tokens_per_tubelet
-        max_tubelets_per_video = max_total_tubelets // max(max_videos, 1)
+        max_total_tubelets = seq_len // tokens_per_tubelet
+        max_tubelets_per_video = max_total_tubelets // max(num_videos, 1)
         max_frames_per_video = max_tubelets_per_video * T
         return max(max_frames_per_video, 1)
 
@@ -634,7 +631,7 @@ class NanoNemotronVLMultiModalProcessor(
 
         Videos whose bytes are missing or that contain no audio stream are
         silently skipped.  The returned *has_audio* mask is aligned with
-        the video list so callers know which ``<video>`` tokens need an
+        the video list so callers know which `<video>` tokens need an
         accompanying audio context.
 
         Returns:
@@ -876,7 +873,7 @@ class NanoNemotronVLDummyInputsBuilder(
                 video_width, video_height = image_size, image_size
 
             target_num_frames = self.info.get_num_frames_with_most_features(
-                seq_len, mm_counts
+                seq_len, mm_counts.get("video", 0)
             )
             mm_config = self.info.ctx.get_mm_config()
             if num_frames := mm_config.media_io_kwargs.get("video", {}).get(
@@ -933,7 +930,9 @@ class NemotronH_Nano_VL_V2(
     SupportsMultiModal,
     SupportsMultiModalPruning,
     SupportsLoRA,
+    SupportsReplaySSM,
 ):
+    supports_mm_device_do_normalize = True
     requires_sequential_video_encoding = True
     """Temporarily needed for dynamic res video w/ conv3d, doesn't support bs>1 yet"""
 
@@ -992,12 +991,23 @@ class NemotronH_Nano_VL_V2(
         assert isinstance(llm_dtype, torch.dtype)
         self.llm_dtype = llm_dtype
         with self._mark_tower_model(vllm_config, {"image", "video", "audio"}):
+            self.input_norm: FusedMMInputNorm | None = (
+                FusedMMInputNorm(
+                    image_mean=config.norm_mean,
+                    image_std=config.norm_std,
+                    rescale_factor=1.0 / 255.0,
+                )
+                if multimodal_config.mm_device_do_normalize
+                else None
+            )
             self.vision_model = self.get_vit_model_from_radio_config(config).to(
                 llm_dtype
             )
 
             # Construct the vision projection.
-            vit_hidden_size = config.vit_hidden_size
+            vit_hidden_size = getattr(config, "vision_hidden_size", None)
+            if vit_hidden_size is None:
+                vit_hidden_size = config.vit_hidden_size
             vision_projection_hidden_size = config.projector_hidden_size
             llm_hidden_size = config.text_config.hidden_size
 
@@ -1099,10 +1109,23 @@ class NemotronH_Nano_VL_V2(
 
         return x
 
+    def _normalize_pixel_values(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        if self.input_norm is None:
+            return pixel_values
+        shape = pixel_values.shape
+        if pixel_values.ndim == 4:
+            flattened = pixel_values.reshape(shape[0], -1)
+        else:
+            assert pixel_values.ndim == 3
+            flattened = pixel_values.reshape(-1, shape[-1])
+        normalized = self.input_norm(flattened, self.llm_dtype)
+        return normalized.reshape(shape)
+
     def extract_feature_dynamic(
         self, pixel_values: torch.Tensor, imgs_sizes: list[tuple[int, int]]
     ):
         """Dynamic resolution extract_feature for images."""
+        pixel_values = self._normalize_pixel_values(pixel_values)
         _, vit_embeds = self.vision_model(pixel_values, imgs_sizes=imgs_sizes)
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
         if self.vision_final_layernorm is not None:
@@ -1134,6 +1157,7 @@ class NemotronH_Nano_VL_V2(
         vit_embeds_list = []
         for i in range(0, N, micro_batch_size):
             chunk = pixel_values[i : i + micro_batch_size]
+            chunk = self._normalize_pixel_values(chunk)
             if num_frames is not None and T > 1:
                 _, vit_embeds = self.vision_model(chunk, num_frames=chunk.shape[0])
             else:
@@ -1620,7 +1644,11 @@ class NemotronH_Nano_VL_V2(
             return weight[0].startswith("mlp1")
 
         def is_vision_weights(name: str) -> bool:
-            return name.startswith("vision_model.radio_model.")
+            # The whole RADIO tower lives under ``vision_model.``: legacy
+            # remote-code checkpoints nest it as ``vision_model.radio_model.*``,
+            # native Transformers checkpoints as ``vision_model.embeddings.*`` /
+            # ``vision_model.encoder.*``. RadioModel.load_weights handles both.
+            return name.startswith("vision_model.")
 
         def is_sound_weights(name: str) -> bool:
             return name.startswith("sound")
@@ -1653,7 +1681,9 @@ class NemotronH_Nano_VL_V2(
                 elif is_vision_weights(name):
                     if not load_multimodal_weights:
                         continue
-                    # Convert: vision_model.radio_model.* → radio_model.*
+                    # Strip the ``vision_model.`` prefix; the remainder is the
+                    # RADIO key (legacy ``radio_model.*`` or native
+                    # ``embeddings.*``/``encoder.*``).
                     hf_key = name[len("vision_model.") :]
                     vision_weights.append((hf_key, w.detach().clone()))
                 elif is_sound_weights(name):

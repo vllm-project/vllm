@@ -161,13 +161,17 @@ _REASONING_PARSERS_TO_REGISTER = {
         "MuseGlimmerReasoningParser",
     ),
     # Alias of "muse".
-    "musespark1x": (
+    "musespark": (
         "muse_reasoning_parser",
         "MuseReasoningParser",
     ),
     "qwen3": (
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",
+    ),
+    "ripple": (
+        "ripple_engine_reasoning_parser",
+        "RippleParserReasoningAdapter",
     ),
     "seed_oss": (
         "seed_oss_engine_reasoning_parser",
@@ -181,9 +185,17 @@ _REASONING_PARSERS_TO_REGISTER = {
         "step3p5_engine_reasoning_parser",
         "Step3p5ParserReasoningAdapter",
     ),
+    "step5": (
+        "deepseek_r1_reasoning_parser",
+        "DeepSeekR1ReasoningParser",
+    ),
     "inkling": (
         "inkling_reasoning_parser",
         "InklingParserReasoningAdapter",
+    ),
+    "zaya": (
+        "zaya_engine_reasoning_parser",
+        "ZayaParserReasoningAdapter",
     ),
 }
 

@@ -3,35 +3,41 @@
 
 //! Protobuf media adaptation into the shared multimodal preparation boundary.
 
-use std::io::Cursor;
-
-use serde::Deserialize as _;
+use llm_multimodal::tracker::{MAX_SAMPLE_FPS, MIN_SAMPLE_FPS};
+use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
 use vllm_chat::MediaContentPart;
 use vllm_chat::multimodal::MultimodalInput;
-use vllm_engine_core_client::protocol::multimodal::{
-    MmFeatureSpec, MmKwargsItem, MmModality, PlaceholderRange,
-};
+use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmModality, PlaceholderRange};
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
+use super::convert::proto_struct_to_json;
 use super::pb;
 
 /// Maximum total serialized kwargs size accepted in one gRPC request.
 const MAX_INLINE_MM_BYTES: usize = 16 * 1024 * 1024;
-const MAX_MSGPACK_DEPTH: usize = 32;
 
 /// Adapt a request containing either raw media or preprocessed features.
 ///
 /// Require a single input kind and bound the total kwargs size before decoding.
 /// Shared media preparation validates features, model support, item limits, and prompt bounds.
-pub(super) fn from_proto(media: Vec<pb::MediaItem>) -> Result<MultimodalInput, Status> {
+pub(super) fn from_proto(
+    media: Vec<pb::MediaItem>,
+    media_io_kwargs: Option<&prost_types::Struct>,
+) -> Result<MultimodalInput, Status> {
+    let video_fps = video_fps(media_io_kwargs)?;
     if !media
         .iter()
         .any(|item| matches!(item.source, Some(pb::media_item::Source::Features(_))))
     {
-        return raw_parts_from_proto(media).map(MultimodalInput::Raw);
+        return raw_parts_from_proto(media, video_fps).map(MultimodalInput::Raw);
+    }
+    if video_fps.is_some() {
+        return Err(Status::invalid_argument(
+            "media_io_kwargs cannot change preprocessed media features",
+        ));
     }
     let mut encoded_bytes = 0usize;
     for item in &media {
@@ -40,11 +46,7 @@ pub(super) fn from_proto(media: Vec<pb::MediaItem>) -> Result<MultimodalInput, S
         };
         encoded_bytes = encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
     }
-    if encoded_bytes > MAX_INLINE_MM_BYTES {
-        return Err(Status::resource_exhausted(format!(
-            "inline multimodal payload exceeds {MAX_INLINE_MM_BYTES} bytes"
-        )));
-    }
+    check_inline_kwargs_size(encoded_bytes)?;
     let features = media
         .into_iter()
         .enumerate()
@@ -84,7 +86,7 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     };
     Ok(MmFeatureSpec {
         modality,
-        data: Some(decode_inline_mm_kwargs(&bytes)?),
+        data: Some(crate::mm_wire::decode_kwargs(&bytes).map_err(Status::invalid_argument)?),
         identifier: feature.identifier,
         mm_hash: feature.mm_hash,
         mm_position: PlaceholderRange {
@@ -95,29 +97,104 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     })
 }
 
-/// Decode one inline item using the engine protocol's typed serde schema.
-fn decode_inline_mm_kwargs(bytes: &[u8]) -> Result<MmKwargsItem, Status> {
-    let mut decoder = rmp_serde::Deserializer::new(Cursor::new(bytes));
-    decoder.set_max_depth(MAX_MSGPACK_DEPTH);
-    let kwargs = MmKwargsItem::deserialize(&mut decoder).map_err(|error| {
+/// The `media_io_kwargs` options the Rust media loader applies; any other
+/// modality or option is rejected rather than ignored.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaIoKwargs {
+    #[serde(default)]
+    video: VideoIoKwargs,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoIoKwargs {
+    /// Frames sampled per second.
+    fps: Option<f64>,
+}
+
+fn video_fps(media_io_kwargs: Option<&prost_types::Struct>) -> Result<Option<f64>, Status> {
+    let Some(kwargs) = media_io_kwargs else {
+        return Ok(None);
+    };
+    let kwargs = proto_struct_to_json(kwargs);
+    // A derived struct also deserializes from a positional array, which would
+    // read `{"video": [1]}` as fps 1.
+    if kwargs.get("video").is_some_and(|video| !video.is_object()) {
+        return Err(Status::invalid_argument(
+            "invalid media_io_kwargs: video must be a map of options",
+        ));
+    }
+    let kwargs = MediaIoKwargs::deserialize(kwargs).map_err(|error| {
         Status::invalid_argument(format!(
-            "invalid multimodal kwargs MessagePack: {}",
+            "invalid media_io_kwargs: {}; only video.fps is supported",
             error.as_report()
         ))
     })?;
-    if decoder.position() != bytes.len() as u64 {
-        return Err(Status::invalid_argument(
-            "kwargs contains trailing MessagePack data",
-        ));
+    let fps = kwargs.video.fps;
+    if let Some(fps) = fps
+        && !(MIN_SAMPLE_FPS..=MAX_SAMPLE_FPS).contains(&fps)
+    {
+        return Err(Status::invalid_argument(format!(
+            "invalid media_io_kwargs.video.fps: {fps} is outside [{MIN_SAMPLE_FPS}, {MAX_SAMPLE_FPS}]"
+        )));
     }
-    Ok(kwargs)
+    Ok(fps)
+}
+
+/// Convert one prepared feature into the preprocessed-media form accepted by
+/// [`from_proto`]. Without `include_kwargs`, the processed tensors are left
+/// out and only the hash and placeholder range remain.
+pub(super) fn feature_to_proto(
+    feature: MmFeatureSpec,
+    include_kwargs: bool,
+) -> Result<pb::MediaItem, Status> {
+    let kwargs = match feature.data.filter(|_| include_kwargs) {
+        Some(data) => Some(crate::mm_wire::encode_kwargs(&data).map_err(Status::internal)?),
+        None => None,
+    };
+    let is_embed = match &feature.mm_position.is_embed {
+        Some(mask) => crate::mm_wire::mask_to_bools(mask).map_err(Status::internal)?,
+        None => Vec::new(),
+    };
+    Ok(pb::MediaItem {
+        modality: match feature.modality {
+            MmModality::Image => pb::Modality::Image,
+            MmModality::Video => pb::Modality::Video,
+            MmModality::Audio => pb::Modality::Audio,
+        } as i32,
+        source: Some(pb::media_item::Source::Features(
+            pb::PreprocessedMediaFeatures {
+                kwargs,
+                identifier: feature.identifier,
+                offset: feature.mm_position.offset as u64,
+                length: feature.mm_position.length as u64,
+                mm_hash: feature.mm_hash,
+                is_embed,
+            },
+        )),
+        ..Default::default()
+    })
+}
+
+/// Reject inline kwargs totalling more than one gRPC request may carry.
+pub(super) fn check_inline_kwargs_size(encoded_bytes: usize) -> Result<(), Status> {
+    if encoded_bytes > MAX_INLINE_MM_BYTES {
+        return Err(Status::resource_exhausted(format!(
+            "inline multimodal payload exceeds {MAX_INLINE_MM_BYTES} bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn mixed_media_error() -> Status {
     Status::invalid_argument("raw media and preprocessed media features cannot be mixed")
 }
 
-fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPart>, Status> {
+fn raw_parts_from_proto(
+    media: Vec<pb::MediaItem>,
+    video_fps: Option<f64>,
+) -> Result<Vec<MediaContentPart>, Status> {
     let mut parts = Vec::with_capacity(media.len());
     for (index, item) in media.into_iter().enumerate() {
         let modality = item.modality();
@@ -149,6 +226,7 @@ fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPar
                 url,
                 detail: None,
                 uuid,
+                max_long_side_pixel: None,
             },
             (pb::Modality::Image, pb::media_item::Source::RawBytes(data)) => {
                 MediaContentPart::ImageData {
@@ -161,7 +239,17 @@ fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPar
             (
                 pb::Modality::Video,
                 pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::VideoUrl { url, uuid },
+            ) => MediaContentPart::VideoUrl {
+                url,
+                uuid,
+                fps: video_fps,
+                max_long_side_pixel: None,
+            },
+            (pb::Modality::Video, pb::media_item::Source::RawBytes(_)) if video_fps.is_some() => {
+                return Err(Status::invalid_argument(format!(
+                    "media[{index}]: media_io_kwargs.video.fps requires a url or data_uri source"
+                )));
+            }
             (pb::Modality::Video, pb::media_item::Source::RawBytes(data)) => {
                 MediaContentPart::VideoData {
                     data,
@@ -210,6 +298,7 @@ fn validate_media_uri(
 mod tests {
     use std::collections::BTreeMap;
 
+    use super::super::convert::json_to_proto_struct;
     use super::*;
     use vllm_engine_core_client::protocol::multimodal::{
         MmBatchedField, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, SliceSpec,
@@ -246,10 +335,81 @@ mod tests {
         };
         for media in [vec![raw.clone(), preprocessed()], vec![preprocessed(), raw]] {
             assert_eq!(
-                from_proto(media).unwrap_err().code(),
+                from_proto(media, None).unwrap_err().code(),
                 tonic::Code::InvalidArgument
             );
         }
+    }
+
+    fn video(source: pb::media_item::Source) -> pb::MediaItem {
+        pb::MediaItem {
+            modality: pb::Modality::Video as i32,
+            source: Some(source),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn media_io_kwargs_video_fps_sets_the_video_url_sampling_rate() {
+        let url = video(pb::media_item::Source::Url(
+            "https://example.com/clip.mp4".to_owned(),
+        ));
+        let kwargs = json_to_proto_struct(&serde_json::json!({"video": {"fps": 1}}));
+        let MultimodalInput::Raw(parts) = from_proto(vec![url], kwargs.as_ref()).unwrap() else {
+            unreachable!()
+        };
+        expect_test::expect![[r#"
+            [
+                VideoUrl {
+                    url: "https://example.com/clip.mp4",
+                    uuid: None,
+                    fps: Some(
+                        1.0,
+                    ),
+                    max_long_side_pixel: None,
+                },
+            ]
+        "#]]
+        .assert_debug_eq(&parts);
+    }
+
+    #[test]
+    fn media_io_kwargs_that_cannot_apply_are_rejected() {
+        let url = video(pb::media_item::Source::Url(
+            "https://example.com/clip.mp4".to_owned(),
+        ));
+        let cases = [
+            (url.clone(), serde_json::json!({"video": {"num_frames": 8}})),
+            (url.clone(), serde_json::json!({"image": {}})),
+            (url.clone(), serde_json::json!({"video": {"fps": 30}})),
+            (url.clone(), serde_json::json!({"video": {"fps": "1"}})),
+            (url, serde_json::json!({"video": [1]})),
+            (
+                video(pb::media_item::Source::RawBytes(vec![1])),
+                serde_json::json!({"video": {"fps": 1}}),
+            ),
+            (preprocessed(), serde_json::json!({"video": {"fps": 1}})),
+        ];
+        let messages = cases
+            .into_iter()
+            .map(|(item, kwargs)| {
+                let kwargs = json_to_proto_struct(&kwargs);
+                let error = from_proto(vec![item], kwargs.as_ref()).unwrap_err();
+                assert_eq!(error.code(), tonic::Code::InvalidArgument);
+                error.message().to_owned()
+            })
+            .collect::<Vec<_>>();
+        expect_test::expect![[r#"
+            [
+                "invalid media_io_kwargs: unknown field `num_frames`, expected `fps`; only video.fps is supported",
+                "invalid media_io_kwargs: unknown field `image`, expected `video`; only video.fps is supported",
+                "invalid media_io_kwargs.video.fps: 30 is outside [0.2, 5]",
+                "invalid media_io_kwargs: invalid type: string \"1\", expected f64; only video.fps is supported",
+                "invalid media_io_kwargs: video must be a map of options",
+                "media[0]: media_io_kwargs.video.fps requires a url or data_uri source",
+                "media_io_kwargs cannot change preprocessed media features",
+            ]
+        "#]].assert_debug_eq(&messages);
     }
 
     #[test]
@@ -267,7 +427,7 @@ mod tests {
         };
         feature.is_embed = vec![true, false];
         for media in [missing_modality, missing_kwargs, invalid_mask] {
-            let error = from_proto(vec![media]).unwrap_err();
+            let error = from_proto(vec![media], None).unwrap_err();
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
             assert!(error.message().starts_with("media[0]:"));
         }
@@ -280,7 +440,7 @@ mod tests {
             unreachable!()
         };
         feature.kwargs = Some(vec![0; MAX_INLINE_MM_BYTES / 2 + 1]);
-        let error = from_proto(vec![item.clone(), item]).unwrap_err();
+        let error = from_proto(vec![item.clone(), item], None).unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
     }
 
@@ -294,7 +454,7 @@ mod tests {
             },
         )]);
         let valid = rmp_serde::to_vec_named(&kwargs).unwrap();
-        assert_eq!(decode_inline_mm_kwargs(&valid).unwrap(), kwargs);
+        assert_eq!(crate::mm_wire::decode_kwargs(&valid).unwrap(), kwargs);
         let mut trailing = valid.clone();
         trailing.push(0);
         let mut nested_kwargs = kwargs.clone();
@@ -309,7 +469,7 @@ mod tests {
             0x81, 0xa1, b'x', 0x81, 0xa4, b'd', b'a', b't', b'a', 0xdd, 0xff, 0xff, 0xff, 0xff,
         ];
         for bytes in [&valid[..valid.len() - 1], &trailing, &nested, &huge_array] {
-            assert!(decode_inline_mm_kwargs(bytes).is_err());
+            assert!(crate::mm_wire::decode_kwargs(bytes).is_err());
         }
     }
 
@@ -321,7 +481,7 @@ mod tests {
             \x00\x00\x80\x3f\x00\x00\x00\x40\
             \xa5field\x92\xa4flat\x83\xabkeep_on_cpu\xc2\
             \xa6slices\x91\x93\x00\x02\xc0\xa3dim\x00";
-        let kwargs = decode_inline_mm_kwargs(bytes).unwrap();
+        let kwargs = crate::mm_wire::decode_kwargs(bytes).unwrap();
         let expected = MmFieldElem {
             data: Some(MmKwargValue::Tensor(
                 WireTensor::from_f32(vec![2], vec![1., 2.]).unwrap(),

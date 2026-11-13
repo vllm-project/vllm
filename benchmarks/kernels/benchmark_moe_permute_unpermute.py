@@ -190,7 +190,7 @@ def benchmark_unpermute(
     end_event = torch.Event(enable_timing=True)
 
     latencies: list[float] = []
-    for i in range(num_iters):
+    for _ in range(num_iters):
         torch.accelerator.synchronize()
         start_event.record()
         graph.replay()

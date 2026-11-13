@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, cast
 
+from transformers import PreTrainedTokenizerBase
+
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media.connector import merge_media_io_kwargs
@@ -11,7 +13,7 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
@@ -24,6 +26,7 @@ from .params import ChatParams
 # and request-level media_io_kwargs still take precedence over this default.
 _K3_MEDIA_IO_DEFAULTS: dict[str, dict[str, Any]] = {"image": {"image_mode": None}}
 _K3_THINKING_EFFORTS = ("low", "high", "max")
+_K31_THINKING_EFFORTS = ("low", "medium", "high", "max")
 
 
 def _merge_k3_media_io_kwargs(
@@ -44,7 +47,9 @@ def _dump_k3_template_value(value: Any) -> Any:
     return value
 
 
-def _apply_k3_thinking_kwargs(kwargs: dict[str, Any]) -> None:
+def _apply_k3_thinking_kwargs(
+    kwargs: dict[str, Any], thinking_efforts: tuple[str, ...]
+) -> None:
     if (enable_thinking := kwargs.pop("enable_thinking", None)) is not None:
         kwargs.setdefault("thinking", enable_thinking)
 
@@ -55,10 +60,10 @@ def _apply_k3_thinking_kwargs(kwargs: dict[str, Any]) -> None:
         kwargs.setdefault("thinking_effort", reasoning_effort)
 
     thinking_effort = kwargs.get("thinking_effort")
-    if thinking_effort is not None and thinking_effort not in _K3_THINKING_EFFORTS:
-        supported = ", ".join(_K3_THINKING_EFFORTS)
+    if thinking_effort is not None and thinking_effort not in thinking_efforts:
+        supported = ", ".join(thinking_efforts)
         raise VLLMValidationError(
-            f"Kimi K3 supports thinking_effort values: {supported}",
+            f"This model supports thinking_effort values: {supported}",
             parameter="thinking_effort",
             value=thinking_effort,
         )
@@ -69,8 +74,8 @@ def _normalize_k3_tool_messages(
 ) -> list[dict[str, Any]]:
     """Reorder tool-result messages to match assistant tool_call order.
 
-    Supports matching by ``tool_call_id`` or by the synthetic
-    ``"{tool}:{zero_based_index}"`` alias. When any tool message in a
+    Supports matching by `tool_call_id` or by the synthetic
+    `"{tool}:{zero_based_index}"` alias. When any tool message in a
     block cannot be resolved, the whole block is left in its original
     order (graceful fallback).
 
@@ -144,13 +149,18 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
     """Render chat prompts with Kimi K3's Python XTML encoding.
 
     K3 ships no Jinja chat template; its tokenizer renders messages through
-    ``encoding_k3`` instead. We tokenize eagerly so the structural markers keep
+    `encoding_k3` instead. We tokenize eagerly so the structural markers keep
     their special-token ids while user- and tool-supplied text stays ordinary.
     """
 
     def __init__(self, config: VllmConfig, tokenizer: HfTokenizer | None) -> None:
         super().__init__(config, tokenizer)
 
+        self._thinking_efforts = (
+            _K31_THINKING_EFFORTS
+            if self.model_config.hf_config.model_type == "kimi_k31"
+            else _K3_THINKING_EFFORTS
+        )
         self._apply_chat_template_async = make_async(
             self._apply_chat_template, executor=self._executor
         )
@@ -160,17 +170,34 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         conversation: list[dict[str, Any]],
         params: ChatParams,
     ) -> list[int]:
+        tokenizer = self.get_tokenizer()
+        tokenizer_cls: type[PreTrainedTokenizerBase] = type(tokenizer)
+        if issubclass(tokenizer_cls, ThreadSafeHFTokenizerMixin):
+            # The pool overrides apply_chat_template to route calls to its
+            # copies; check the class it wraps.
+            tokenizer_cls = cast(
+                type[PreTrainedTokenizerBase], tokenizer_cls.__bases__[0]
+            )
+        if (
+            tokenizer_cls.apply_chat_template
+            is PreTrainedTokenizerBase.apply_chat_template
+        ):
+            raise VLLMValidationError(
+                "The kimi_k3 tokenizer mode requires native chat encoding.",
+                parameter="tokenizer_mode",
+            )
+
         # Tokenize eagerly: K3 encodes structural markers as special tokens and
         # user/tool text as ordinary tokens, so we cannot defer to a plain
         # re-tokenization of the rendered string downstream.
         kwargs = params.get_apply_chat_template_kwargs()
-        _apply_k3_thinking_kwargs(kwargs)
+        _apply_k3_thinking_kwargs(kwargs, self._thinking_efforts)
         if params.tool_choice not in (None, "auto"):
             kwargs["tool_choice"] = _dump_k3_template_value(params.tool_choice)
         if params.response_format is not None:
             kwargs["response_format"] = _dump_k3_template_value(params.response_format)
         kwargs["tokenize"] = True
-        return self.get_tokenizer().apply_chat_template(conversation, **kwargs)
+        return tokenizer.apply_chat_template(conversation, **kwargs)
 
     def render_messages(
         self,

@@ -1,41 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import multiprocessing as mp
-import os
-import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-import datasets
 import pytest
 import torch
 
 import vllm.envs as envs
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
-from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateCopyFunc,
     is_conv_state_dim_first,
 )
 from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import SamplerOutput
 from vllm.v1.request import Request
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 
@@ -71,107 +57,6 @@ NUM_HIDDEN_LAYERS = 1
 cur_step_action_idx = 0
 cur_step_action: StepAction | None = None
 step_actions: list[StepAction] = []
-
-
-def get_fake_sample_fn() -> SamplerOutput:
-    def fake_sample_fn(
-        self: GPUModelRunner,
-        logits: torch.Tensor | None,
-        spec_decode_metadata: SpecDecodeMetadata | None,
-    ) -> SamplerOutput:
-        assert logits is not None
-        num_computed_tokens_cpu_tensor = self.input_batch.num_computed_tokens_cpu_tensor
-        num_computed_tokens = num_computed_tokens_cpu_tensor[0].item()
-        if num_computed_tokens < self.input_batch.num_prompt_tokens[0].item():
-            first_token_id_index = self.input_batch.num_prompt_tokens[0].item()
-        else:
-            first_token_id_index = num_computed_tokens + 1
-        if spec_decode_metadata is None:
-            return SamplerOutput(
-                sampled_token_ids=async_tensor_h2d(
-                    [[prompt_token_ids[first_token_id_index]]],
-                    device=DEVICE_TYPE,
-                    dtype=torch.int32,
-                ),
-                logprobs_tensors=None,
-            )
-        accepted_tokens = prompt_token_ids[
-            first_token_id_index : first_token_id_index
-            + min(num_accepted_tokens, logits.shape[0])
-        ]
-        sampled_token_ids = accepted_tokens
-        return SamplerOutput(
-            sampled_token_ids=async_tensor_h2d(
-                [sampled_token_ids],
-                device=DEVICE_TYPE,
-                dtype=torch.int32,
-            ),
-            logprobs_tensors=None,
-        )
-
-    return fake_sample_fn
-
-
-def get_fake_propose_draft_token_ids_fn():
-    def fake_propose_draft_token_ids_fn(
-        self: GPUModelRunner,
-        scheduler_output: SchedulerOutput,
-        sampled_token_ids: torch.Tensor | list[list[int]],
-        sampling_metadata: SamplingMetadata,
-        hidden_states: torch.Tensor,
-        sample_hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        spec_decode_metadata: SpecDecodeMetadata | None,
-        common_attn_metadata: CommonAttentionMetadata,
-        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
-    ) -> list[list[int]]:
-        num_computed_tokens_cpu_tensor = self.input_batch.num_computed_tokens_cpu_tensor
-        num_computed_tokens = num_computed_tokens_cpu_tensor[0].item()
-        if (
-            self.input_batch.num_tokens_no_spec[0].item()
-            <= self.input_batch.num_prompt_tokens[0].item()
-        ):
-            first_token_id_index = self.input_batch.num_prompt_tokens[0].item()
-        else:
-            first_token_id_index = (
-                num_computed_tokens + 1
-            )  # bonus token isn't considered as computed
-        # num_accepted_tokens_cpu is filled by a non-blocking D2H copy in the
-        # same step; wait for it or a lagging GPU yields stale counts.
-        if self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-        first_token_id_index += self.input_batch.num_accepted_tokens_cpu[0].item()
-        proposed_draft_token_ids = [
-            prompt_token_ids[
-                first_token_id_index : first_token_id_index + num_speculative_tokens
-            ]
-        ]
-
-        next_token_ids = async_tensor_h2d(
-            prompt_token_ids[
-                first_token_id_index - 1 : first_token_id_index
-                - 1
-                + num_accepted_tokens
-            ],
-            device=DEVICE_TYPE,
-            dtype=torch.int32,
-        )
-
-        valid_sampled_tokens_count = async_tensor_h2d(
-            [num_accepted_tokens],
-            device=DEVICE_TYPE,
-            dtype=torch.int32,
-        )
-
-        self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
-
-        return async_tensor_h2d(
-            proposed_draft_token_ids,
-            device=DEVICE_TYPE,
-            dtype=torch.int32,
-        )
-
-    return fake_propose_draft_token_ids_fn
 
 
 def get_fake_step_action_fn(original_step_action_fn: Callable):
@@ -232,325 +117,12 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
     return fake_allocate_slots_fn
 
 
-mamba_kv_cache_dict = {}
-
-
-def get_fake_execute_model_fn(original_execute_model_fn: Callable):
-    last_num_computed_tokens = 0
-    num_prompt_tokens = None
-
-    def fake_execute_model_fn(
-        self: GPUModelRunner,
-        scheduler_output: SchedulerOutput,
-        intermediate_tensors: IntermediateTensors | None = None,
-    ):
-        if cur_step_action is not None:
-            num_scheduled_tokens = next(
-                iter(scheduler_output.num_scheduled_tokens.values())
-            )
-            assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
-        mamba_groups = get_mamba_groups(self.kv_cache_config)
-        mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
-        mamba_group_id = mamba_group_ids[0]
-        mamba_layer_name = self.kv_cache_config.kv_cache_groups[
-            mamba_group_id
-        ].layer_names[0]
-        nonlocal last_num_computed_tokens
-        nonlocal num_prompt_tokens
-
-        if (
-            len(scheduler_output.scheduled_new_reqs) > 0
-            and scheduler_output.scheduled_new_reqs[0].prompt_token_ids is not None
-        ):
-            # record number of prompt tokens
-            num_prompt_tokens = len(
-                scheduler_output.scheduled_new_reqs[0].prompt_token_ids
-            )
-
-        if len(scheduler_output.scheduled_cached_reqs.req_ids) > 0:
-            num_computed_tokens = (
-                scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
-            )
-            if (
-                async_scheduling_mode
-                and self.num_spec_tokens
-                and num_prompt_tokens is not None
-                and num_computed_tokens > num_prompt_tokens
-            ):
-                # NOTE (tdoublep) with async scheduling, the scheduler does not have an
-                # accurate measure of the number of computed tokens; we need to subtract
-                # the number of reject tokens from the previous timestep.
-                num_computed_tokens -= num_speculative_tokens + 1 - num_accepted_tokens
-            if (
-                num_computed_tokens // BLOCK_SIZE
-                > last_num_computed_tokens // BLOCK_SIZE
-            ):
-                # generated a new aligned block in this step
-                block_idx = num_computed_tokens // mamba_spec.block_size - 1
-                block_id = (
-                    self.input_batch.block_table.block_tables[mamba_group_id]
-                    .block_table.cpu[0, block_idx]
-                    .item()
-                )
-                if block_id != 0:
-                    kv_cache = self.compilation_config.static_forward_context[
-                        mamba_layer_name
-                    ].kv_cache
-                    mamba_kv_cache_dict[
-                        num_computed_tokens - num_computed_tokens % BLOCK_SIZE
-                    ] = (
-                        kv_cache[0][block_id].clone(),
-                        kv_cache[1][block_id].clone(),
-                    )
-
-            last_num_computed_tokens = num_computed_tokens
-        else:
-            last_num_computed_tokens = 0
-
-        ret = original_execute_model_fn(self, scheduler_output, intermediate_tensors)
-
-        if cur_step_action is not None:
-            assert (
-                cur_step_action.num_computed_tokens_start
-                == self.input_batch.num_computed_tokens_cpu[0].item()
-            )
-
-        return ret
-
-    return fake_execute_model_fn
-
-
-def get_fake_process_mamba_fn(
-    original_preprocess_mamba_fn: Callable,
-    original_copy_fn: Callable,
-):
-    copy_info: tuple[list[int], list[int], list[int]] | None = None
-
-    def check_copy_info(
-        action: tuple[int, int],
-        kv_cache_config: KVCacheConfig,
-        forward_context: dict[str, Any],
-        input_batch: InputBatch,
-    ):
-        assert copy_info is not None
-        if action == (-1, -1):
-            assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 0
-        else:
-            assert len(copy_info[0]) == len(copy_info[1]) == len(copy_info[2]) == 2
-            mamba_groups = get_mamba_groups(kv_cache_config)
-            mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
-            mamba_group_id = mamba_group_ids[0]
-            mamba_layer_name = kv_cache_config.kv_cache_groups[
-                mamba_group_id
-            ].layer_names[0]
-            mamba_kv_cache = forward_context[mamba_layer_name].kv_cache[-1]
-            mamba_block_table = input_batch.block_table.block_tables[
-                mamba_group_id
-            ].block_table.cpu[0]
-            expected_temporal_src = mamba_kv_cache[
-                mamba_block_table[action[0]]
-            ].data_ptr()
-            expected_temporal_dest = mamba_kv_cache[
-                mamba_block_table[action[1]]
-            ].data_ptr()
-            # -1 is qwen3-next's temporal. We skip checking conv as it is more complex.
-            assert copy_info[0][-1] == expected_temporal_src
-            assert copy_info[1][-1] == expected_temporal_dest
-
-    def check_fused_copy_info(
-        action: tuple[int, int],
-        align_ctx: mamba_utils.MambaSpecDecodeGPUContext,
-    ):
-        # Align + spec-decode on a hybrid model routes the pre-copy through the
-        # fused kernel (preprocess_mamba -> run_fused_precopy) instead of
-        # do_mamba_copy_block, so copy_info is never populated. Verify from the
-        # fused buffers (req-0 scope, mirroring check_copy_info):
-        #   - the copy DECISION: src_col is -1 iff no pre-copy is scheduled;
-        #   - the DESTINATION column: state_idx == action[1] (curr_state_idx;
-        #     maps directly through block_ids, exactly as check_copy_info's dst).
-        # The source column is NOT asserted here: on the scalar path the source
-        # address is produced by the per-state copy func with an accept-token
-        # bias offset (collect_mamba_copy_meta), so prev_state_idx does not map
-        # to action[0] by plain equality. Source block-level exactness (incl.
-        # the accept-bias) is covered by test_precopy_mamba_align.py.
-        src_col = int(align_ctx.precopy_src_col_buf.np[0])
-        state_idx = int(align_ctx.mamba_state_idx_buf.np[0])
-        if action == (-1, -1):
-            assert src_col == -1
-        else:
-            assert src_col != -1
-            assert state_idx == action[1]
-
-    def fake_preprocess_mamba_fn(
-        scheduler_output: SchedulerOutput,
-        kv_cache_config: KVCacheConfig,
-        cache_config: CacheConfig,
-        mamba_state_idx: dict[str, int],
-        input_batch: InputBatch,
-        requests: dict[str, CachedRequestState],
-        forward_context: dict[str, Any],
-        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
-        copy_bufs: mamba_utils.MambaCopyBuffers,
-        align_ctx: mamba_utils.MambaSpecDecodeGPUContext | None = None,
-    ):
-        nonlocal copy_info
-        copy_info = None
-        ret = original_preprocess_mamba_fn(
-            scheduler_output,
-            kv_cache_config,
-            cache_config,
-            mamba_state_idx,
-            input_batch,
-            requests,
-            forward_context,
-            mamba_state_copy_funcs,
-            copy_bufs,
-            align_ctx,
-        )
-        if cur_step_action is not None:
-            if align_ctx is not None:
-                check_fused_copy_info(
-                    cur_step_action.preprocess_copy_idx,
-                    align_ctx,
-                )
-            else:
-                check_copy_info(
-                    cur_step_action.preprocess_copy_idx,
-                    kv_cache_config,
-                    forward_context,
-                    input_batch,
-                )
-        return ret
-
-    def fake_copy_fn(copy_bufs: mamba_utils.MambaCopyBuffers):
-        nonlocal copy_info
-        assert copy_info is None
-        n = copy_bufs.offset
-        src_state_list = copy_bufs.src_ptrs.cpu[:n].tolist()
-        dest_state_list = copy_bufs.dst_ptrs.cpu[:n].tolist()
-        num_elements_list = copy_bufs.sizes.cpu[:n].tolist()
-        copy_info = (src_state_list, dest_state_list, num_elements_list)
-        return original_copy_fn(copy_bufs)
-
-    return fake_preprocess_mamba_fn, fake_copy_fn
-
-
-def run_ref_mamba_state_in_subprocess() -> None:
-    ctx = mp.get_context("spawn")
-    proc = ctx.Process(target=_run_ref_mamba_state_worker)
-    proc.start()
-    proc.join(timeout=600)
-    if proc.exitcode != 0:
-        raise RuntimeError(f"Ref mamba state process exited with code {proc.exitcode}.")
-
-
-def _run_ref_mamba_state_worker():
-    try:
-        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-        num_generated_tokens = 8000
-        num_prompt_tokens = 500
-        sampling_params = SamplingParams(
-            temperature=0.0, max_tokens=num_generated_tokens
-        )
-        prompt_dataset = datasets.load_dataset("heheda/a_long_article")
-        full_prompt = prompt_dataset["train"][0]["text"]
-        fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
-        GPUModelRunner.execute_model = fake_execute_model_fn
-        fake_sample_fn = get_fake_sample_fn()
-        GPUModelRunner._sample = fake_sample_fn
-        engine = LLM(
-            model=MODEL,
-            load_format="dummy",
-            block_size=BLOCK_SIZE,
-            hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
-            seed=42,
-        )
-        global prompt_token_ids
-        prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
-        print(f"Token IDs length: {len(prompt_token_ids)}")
-
-        _outputs = engine.generate(
-            [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
-            sampling_params,
-        )
-        # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
-        # check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
-        # torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
-        cpu_state_ref = {
-            key: tuple(tensor.detach().cpu() for tensor in tensors)
-            for key, tensors in mamba_kv_cache_dict.items()
-        }
-        torch.save(cpu_state_ref, "mamba_kv_cache_dict_ref.pth")
-        mamba_kv_cache_dict.clear()
-        del engine
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
-    except Exception:
-        traceback.print_exc()
-        raise
-
-
-def check_mamba_state_equal(
-    mamba_state_ref: dict, mamba_state_new: dict, keys_to_check: list[int]
-):
-    atol = 1e-2
-    rtol = 1e-2
-    for key in keys_to_check:
-        assert key in mamba_state_new
-        assert key in mamba_state_ref
-        # mamba state new is a subset of mamba state ref
-        for i, (ref, new) in enumerate(zip(mamba_state_ref[key], mamba_state_new[key])):
-            if ref.device != new.device:
-                new = new.to(ref.device)
-            new = new[: ref.shape[0]]
-            if not torch.allclose(ref, new, atol=atol, rtol=rtol):
-                diff_mask = ~torch.isclose(ref, new, atol=atol, rtol=rtol)
-                diff_idx = torch.nonzero(diff_mask)
-                if diff_idx.shape[0] * 100 < ref.numel():
-                    print(
-                        f"[WARNING] found {diff_idx.shape[0] * 100 / ref.numel()}% of the elements are different"  # noqa: E501
-                    )
-                    continue
-                raise ValueError(
-                    f"Mamba state is not equal for key: {key} at index {i}"
-                )
-    return True
-
-
 @dataclass
 class TestConfig:
     num_prompt_tokens: int
     num_generated_tokens: int
     num_accepted_tokens: int
     step_actions: list[StepAction]
-
-
-def apply_patch(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-
-    fake_sample_fn = get_fake_sample_fn()
-    monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
-
-    fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn()
-    monkeypatch.setattr(
-        GPUModelRunner, "propose_draft_token_ids", fake_propose_draft_token_ids_fn
-    )
-
-    fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
-    monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
-
-    fake_step_action_fn = get_fake_step_action_fn(InprocClient.get_output)
-    monkeypatch.setattr(InprocClient, "get_output", fake_step_action_fn)
-
-    fake_allocate_slots_fn = get_fake_allocate_slots_fn(KVCacheManager.allocate_slots)
-    monkeypatch.setattr(KVCacheManager, "allocate_slots", fake_allocate_slots_fn)
-
-    fake_preprocess_mamba_fn, fake_copy_fn = get_fake_process_mamba_fn(
-        mamba_utils.preprocess_mamba,
-        mamba_utils.do_mamba_copy_block,
-    )
-    monkeypatch.setattr(mamba_utils, "preprocess_mamba", fake_preprocess_mamba_fn)
-    monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
 def get_mamba_prefix_cache_step_configs(
@@ -780,17 +352,20 @@ def get_mamba_prefix_cache_step_configs(
                 ),
             ],
         ),
+        # Lookahead hashes reuse the last aligned boundary below the logits
+        # token, so prompts with a partial tail no longer stop one Mamba
+        # page early.
         "prompt_2_block_size_10": TestConfig(
             num_prompt_tokens=B * 2 + 10,
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, B, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(B, B + 10, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
+                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B * 2, 10, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
                 StepAction(
                     B * 2 + 10,
                     4,
-                    [1, 0, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
+                    [0, 1, 1, 1, 1, 1] if a else [0, 0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -817,12 +392,18 @@ def get_mamba_prefix_cache_step_configs(
             num_generated_tokens=10,
             num_accepted_tokens=4,
             step_actions=[
-                StepAction(0, B * 2, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(B * 2, B + 10, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
+                StepAction(0, B * 3, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(
+                    B * 3,
+                    10,
+                    [0, 0, 1, 1, 1, 1, 1],
+                    (2, 3),
+                    (-1, -1),
+                ),
                 StepAction(
                     B * 3 + 10,
                     4,
-                    [0, 1, 0, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
+                    [0, 0, 1, 1, 1, 1, 1] if a else [0, 0, 0, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -869,18 +450,18 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(0, B * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
                 StepAction(
                     B * 5,
-                    B * 4,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
-                    (4, 8),
+                    B * 5,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1],
+                    (4, 9),
                     (-1, -1),
                 ),
                 StepAction(
-                    B * 9,
-                    B + 10,
-                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1]
+                    B * 10,
+                    10,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1]
                     if a
-                    else [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
-                    (8, 10),
+                    else [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (9, 10),
                     (-1, -1),
                 ),
             ],
@@ -894,7 +475,7 @@ def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
     the prompt's last block boundary itself, so the final chunk runs whole.
 
     The checkpoint goes in the second-to-last block the chunk reaches, keyed to
-    the boundary: column 1 holds the state at B for a 2B + 10 prompt.
+    the boundary: column 1 holds the state at 2B for a 2B + 10 prompt.
     """
     B = BLOCK_SIZE
     return {
@@ -956,81 +537,6 @@ def get_internal_checkpoint_step_configs() -> dict[str, TestConfig]:
     }
 
 
-def _run_mamba_prefix_cache_mrv1(
-    monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
-):
-    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
-    # models like Qwen3-Next now default to the V2 runner.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    envs.disable_envs_cache()
-    global async_scheduling_mode
-    async_scheduling_mode = async_scheduling
-    run_ref_mamba_state_in_subprocess()
-    apply_patch(monkeypatch)
-    prompt_dataset = datasets.load_dataset("heheda/a_long_article")
-    full_prompt = prompt_dataset["train"][0]["text"]
-    tests = get_mamba_prefix_cache_step_configs(async_scheduling)
-
-    engine = LLM(
-        model=MODEL,
-        load_format="dummy",
-        enable_prefix_caching=True,
-        block_size=BLOCK_SIZE,
-        additional_config=GDN_PREFILL_CONFIG,
-        speculative_config={
-            "method": "qwen3_next_mtp",
-            "num_speculative_tokens": num_speculative_tokens,
-        },
-        max_num_batched_tokens=3072,
-        hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
-        async_scheduling=async_scheduling,
-        seed=42,
-    )
-    global prompt_token_ids
-    prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
-    print(f"Token IDs length: {len(prompt_token_ids)}")
-    for test_case_name, test_config in tests.items():
-        print(f"Running test case: {test_case_name}")
-        num_generated_tokens = test_config.num_generated_tokens
-        num_prompt_tokens = test_config.num_prompt_tokens
-        global num_accepted_tokens
-        num_accepted_tokens = test_config.num_accepted_tokens
-        sampling_params = SamplingParams(
-            temperature=0.0, max_tokens=num_generated_tokens
-        )
-        global cur_step_action_idx
-        cur_step_action_idx = 0
-        global step_actions
-        step_actions = test_config.step_actions
-        _ = engine.generate(
-            [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
-            sampling_params,
-        )
-        assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
-        print(f"End test case: {test_case_name}")
-        keys_to_check = [
-            (action.postprocess_copy_idx[1] + 1) * BLOCK_SIZE
-            for action in test_config.step_actions
-            if action.postprocess_copy_idx and action.postprocess_copy_idx[0] != -1
-        ]
-        mamba_state_ref = torch.load("mamba_kv_cache_dict_ref.pth")
-        check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
-        mamba_kv_cache_dict.clear()
-    del engine
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
-
-@create_new_process_for_each_test("spawn")
-def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
-    _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=False)
-
-
-@create_new_process_for_each_test("spawn")
-def test_mamba_prefix_cache_mrv1_async(monkeypatch: pytest.MonkeyPatch):
-    _run_mamba_prefix_cache_mrv1(monkeypatch, async_scheduling=True)
-
-
 def _run_mamba_prefix_cache_mrv2(
     monkeypatch: pytest.MonkeyPatch,
     async_scheduling: bool,
@@ -1040,7 +546,6 @@ def _run_mamba_prefix_cache_mrv2(
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     envs.disable_envs_cache()
 
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as MRV2GPUModelRunner
@@ -1266,6 +771,7 @@ def _run_mamba_prefix_cache_mrv2(
         async_scheduling=async_scheduling,
         seed=42,
     )
+    assert isinstance(engine.llm_engine.engine_core, InprocClient)
 
     try:
         tests = (
@@ -1320,13 +826,13 @@ def _run_mamba_prefix_cache_mrv2(
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
 
         if internal_checkpoints:
-            # The checkpoint a 2B + 10 prefill exports at B (column 1) is the
-            # final state of a prefill that stops at B (column 0). Distinct
+            # The checkpoint a 2B + 10 prefill exports at 2B (column 1) is the
+            # final state of a prefill that stops at 2B (column 1). Distinct
             # tokens make a shifted conv window visible.
             tokens = [(i * 7919) % 30000 + 1 for i in range(BLOCK_SIZE * 2 + 10)]
             scheduler = engine.llm_engine.engine_core.engine_core.scheduler
             states = []
-            for num_tokens, col in ((BLOCK_SIZE, 0), (len(tokens), 1)):
+            for num_tokens, col in ((BLOCK_SIZE * 2, 1), (len(tokens), 1)):
                 captured["snapshot_col"] = col
                 _ = engine.generate(
                     [TokensPrompt(prompt_token_ids=tokens[:num_tokens])],
