@@ -243,6 +243,11 @@ def test_nvfp4_linear_fp16_partial_sums(kernel_cls: type[NvFp4LinearKernel]) -> 
         rms = float(ref.float().pow(2).mean().sqrt())
         diff = float((part.float() * 4 - ref.float()).abs().mean()) / rms
         assert diff < 1e-2, (bias_epilogue, diff)
+        # A pre-quantized input (fused activation quant) gives the same output.
+        qa = kernel.prepare_input(layer, x)
+        torch.testing.assert_close(
+            kernel.apply_weights(layer, qa, b), part, rtol=0, atol=0
+        )
         # alpha prescaled after loading: same output as per call; a weight
         # reload refills it in place.
         store_partial_sum_prescaled(layer, "partial_sum_alpha", layer.alpha)
