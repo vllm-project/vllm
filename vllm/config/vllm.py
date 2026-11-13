@@ -75,13 +75,13 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.sampling_params import BeamSearchParams, SamplingParams
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroup
 else:
     PreTrainedConfig = Any
 
     QuantizationConfig = Any
 
-    KVCacheGroupSpec = Any
+    KVCacheGroup = Any
 
 logger = init_logger(__name__)
 
@@ -1047,15 +1047,18 @@ class VllmConfig:
             speculative_config is None
             or not speculative_config.uses_dynamic_speculative_decoding()
             or self.parallel_config.data_parallel_size <= 1
+            # Non-MoE DP ranks run as independent engines with no DP
+            # collectives, so each rank can pick its own K.
+            or (self.model_config is not None and not self.model_config.is_moe)
         ):
             return
 
         logger.warning_once(
             "Dynamic speculative decoding is not supported with data "
-            "parallelism because data-parallel ranks can select different "
-            "speculative-token counts, causing DP divergence and deadlocks. "
-            "Disabling num_speculative_tokens_per_batch_size and falling back "
-            "to static num_speculative_tokens=%d.",
+            "parallelism for MoE models because data-parallel ranks can select "
+            "different speculative-token counts, causing DP divergence and "
+            "deadlocks. Disabling num_speculative_tokens_per_batch_size and "
+            "falling back to static num_speculative_tokens=%d.",
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
@@ -1845,7 +1848,7 @@ class VllmConfig:
                     "--no-scheduler-reserve-full-isl."
                 )
             if self.model_config is not None and not hasattr(
-                self.model_config.hf_config, "index_topk"
+                self.model_config.hf_text_config, "index_topk"
             ):
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk."
@@ -2831,7 +2834,7 @@ class VllmConfig:
                 if compile_range_end is not None and x < compile_range_end and x > 1:
                     computed_compile_ranges_endpoints.append(x)
         compilation_config.compile_ranges_endpoints = sorted(
-            computed_compile_ranges_endpoints
+            set(computed_compile_ranges_endpoints)
         )
 
     def try_verify_and_update_config(self):
@@ -3490,7 +3493,7 @@ class VllmConfig:
                 )
 
     def adjust_dcp_kv_cache_interleave_size(
-        self, kv_cache_groups: list["KVCacheGroupSpec"]
+        self, kv_cache_groups: list["KVCacheGroup"]
     ) -> None:
         """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
 
@@ -3526,7 +3529,7 @@ class VllmConfig:
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
         # scaling by dcp_size (we need the local block_size here).
-        local_block_size = min(g.kv_cache_spec.block_size for g in kv_cache_groups)
+        local_block_size = min(g.block_size for g in kv_cache_groups)
         if self.parallel_config.cp_kv_cache_interleave_size != local_block_size:
             interleave = self.parallel_config.cp_kv_cache_interleave_size
             self.parallel_config.cp_kv_cache_interleave_size = local_block_size
