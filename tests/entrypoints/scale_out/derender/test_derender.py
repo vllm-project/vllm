@@ -1679,6 +1679,54 @@ async def test_e2e_parser_uses_caller_prompt_token_ids(qwen3_client):
 
 
 # ---------------------------------------------------------------------------
+# E2E: Hunyuan A13B reasoning parser
+# ---------------------------------------------------------------------------
+
+HUNYUAN_A13B_MODEL = "tencent/Hunyuan-A13B-Instruct"
+
+
+@pytest.fixture(scope="module")
+def hunyuan_a13b_server():
+    args = ["--reasoning-parser", "hunyuan_a13b", "--trust-remote-code"]
+    with RemoteLaunchRenderServer(HUNYUAN_A13B_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def hunyuan_a13b_client(hunyuan_a13b_server):
+    async with httpx.AsyncClient(
+        base_url=hunyuan_a13b_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_hunyuan_a13b_text_before_think_kept_as_content(
+    hunyuan_a13b_client,
+):
+    """Output that does not start with <think> is returned whole as content."""
+    messages = [{"role": "user", "content": "Weather in Paris?"}]
+    gen_req = await _e2e_render_chat(hunyuan_a13b_client, HUNYUAN_A13B_MODEL, messages)
+    output_text = "Let me check. <think>\nIt is sunny.\n</think>\n<answer>\nSunny."
+    tokenizer = get_tokenizer(HUNYUAN_A13B_MODEL, trust_remote_code=True)
+    output_ids = _encode(tokenizer, output_text)
+
+    resp = await hunyuan_a13b_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HUNYUAN_A13B_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": HUNYUAN_A13B_MODEL, "messages": messages},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    message = resp.json()["choices"][0]["message"]
+    assert message.get("reasoning") is None
+    assert message["content"] == output_text
+
+
+# ---------------------------------------------------------------------------
 # E2E: HarmonyParser + GPT-OSS
 # ---------------------------------------------------------------------------
 
