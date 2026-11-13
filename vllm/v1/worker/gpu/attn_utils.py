@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping, Sequence
+
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -14,11 +15,8 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.compilation import CUDAGraphMode
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
@@ -29,11 +27,10 @@ from vllm.v1.hisparse.binding import (
     resolve_hisparse_specs,
 )
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     KVCacheConfig,
+    KVCacheLayerConfig,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.ubatch_utils import get_num_ubatches
@@ -42,12 +39,10 @@ from vllm.v1.worker.utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
     bind_kv_cache_to_layers,
-    customize_attention_spec,
+    customize_layer_config,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
 )
-
-logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
@@ -65,9 +60,9 @@ class AttentionCGSupportInfo:
     def narrow(
         self, support: AttentionCGSupport, backend: str | None
     ) -> "AttentionCGSupportInfo":
-        """Return an info tightened by ``support`` if it is more restrictive.
+        """Return an info tightened by `support` if it is more restrictive.
 
-        Lets attention groups built outside ``init_attn_backend`` (e.g.
+        Lets attention groups built outside `init_attn_backend` (e.g.
         encoder-only layers) contribute to the runner's cudagraph decision.
         """
         if support.value < self.min_cg_support.value:
@@ -109,6 +104,8 @@ class FastPrefillHelper:
             not has_prefill
             or batch_desc.cg_mode == CUDAGraphMode.FULL
             or batch_desc.num_ubatches > 1
+            # LoRA metadata describes the full batch, not the logits-only batch.
+            or num_active_loras > 0
         ):
             return None
         buf = self.logits_indices_buf
@@ -136,28 +133,32 @@ class FastPrefillHelper:
         )
 
 
-def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
-    kv_cache_spec: dict[str, KVCacheSpec] = {}
+def get_kv_cache_layer_configs(
+    vllm_config: VllmConfig,
+) -> dict[str, KVCacheLayerConfig]:
+    layer_configs: dict[str, KVCacheLayerConfig] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
-        if getattr(attn_module, "kv_sharing_target_layer_name", None):
+        if attn_module.kv_sharing_target_layer_name:
             # This layer will use KV cache of the sharing target layer.
             continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
-        if spec := attn_module.get_kv_cache_spec(vllm_config):
-            if isinstance(spec, AttentionSpec):
-                spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
+        if layer_config := attn_module.get_kv_cache_config(vllm_config):
+            layer_config = customize_layer_config(
+                attn_module.get_attn_backend(), layer_config
+            )
             if attn_module.is_draft_layer:
-                spec = replace(spec, is_draft=True)
-            kv_cache_spec[layer_name] = spec
+                layer_config = replace(layer_config, is_draft=True)
+            layer_configs[layer_name] = layer_config
     if vllm_config.attention_config.hisparse_config is not None:
-        kv_cache_spec = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
-    return kv_cache_spec
+        layer_configs = resolve_hisparse_specs(vllm_config, layer_configs, attn_layers)
+    return layer_configs
 
 
-def get_shared_kv_cache_layers(vllm_config: VllmConfig):
-    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+def get_shared_kv_cache_layers(vllm_config: VllmConfig) -> dict[str, str]:
+    layer_type = cast(type[Any], AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     return {
         layer_name: kv_tgt_layer
         for layer_name, attn_module in attn_layers.items()
@@ -207,8 +208,9 @@ def init_attn_backend(
 
     # Add KV-sharing layers to their target's kv cache group so they are
     # discovered alongside the target layer in Phase 1 below.
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     add_kv_sharing_layers_to_kv_cache_groups(
-        get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
+        shared_kv_cache_layers, kv_cache_config.kv_cache_groups
     )
     fast_prefill_eligible_layers = get_kv_sharing_fast_prefill_eligible_layers(
         vllm_config, draft_layer_names
@@ -219,7 +221,9 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
-        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
+        if not all(
+            spec.has_layer_views for spec in kv_cache_group_spec.kv_cache_specs.values()
+        ):
             attn_groups.append([])
             continue
         if active_layer_names is not None:
@@ -246,9 +250,7 @@ def init_attn_backend(
                     "FastPrefill", attn_backend
                 )
 
-            layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
-            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+            layer_kv_cache_spec = kv_cache_group_spec.kv_cache_specs[layer_name]
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate
@@ -269,20 +271,6 @@ def init_attn_backend(
     # by all backends within that group.
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
-    if current_platform.is_xpu():
-        for kv_cache_group_id, selected_kernel_block_size in enumerate(
-            kernel_block_sizes
-        ):
-            if selected_kernel_block_size % 64 != 0:
-                for attn_group in attn_groups[kv_cache_group_id]:
-                    logger.warning_once(
-                        "On XPU platform, current selected kernel block size is "
-                        "not fully optimized: kernel_block_size=%s, backend=%s, "
-                        "kv_cache_spec=%s",
-                        selected_kernel_block_size,
-                        attn_group.backend,
-                        repr(attn_group.kv_cache_spec),
-                    )
     # Phase 3: create metadata builders and determine cudagraph support.
     attn_backend_workspace: torch.Tensor | None = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
@@ -294,6 +282,7 @@ def init_attn_backend(
                 vllm_config=vllm_config,
                 device=device,
                 kernel_block_size=kernel_block_size,
+                kv_cache_group=kv_cache_config.kv_cache_groups[kv_cache_group_id],
                 # Microbatches build attention metadata concurrently, and some
                 # builders keep the prepared metadata on themselves (MLA stores
                 # it on the prefill backend), so each ubatch needs its own.
@@ -405,6 +394,7 @@ def init_kv_cache(
     *,
     block_tables: "BlockTables | None" = None,
     attn_groups: Iterable[AttentionGroup] = (),
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
@@ -417,6 +407,7 @@ def init_kv_cache(
                 vllm_config,
                 forward_context,
                 block_tables,
+                allocate=allocate,
             )
         else:
             kv_caches = allocate_kv_cache(
@@ -424,24 +415,28 @@ def init_kv_cache(
                 device,
                 vllm_config.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
+                allocate=allocate,
             )
+    return bind_kv_caches(
+        kv_caches, forward_context, kv_cache_config, vllm_config, attn_groups
+    )
+
+
+def bind_kv_caches(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    attn_groups: Iterable[AttentionGroup] = (),
+) -> dict[str, Any]:
+    """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
-    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
-    # decoder layer, so a layer name carries two integers (layer + module index).
-    num_attn_module = (
-        2 if vllm_config.model_config.hf_config.model_type == "longcat_flash" else 1
-    )
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
-    bind_kv_cache_to_layers(
-        bindable_caches,
-        forward_context,
-        num_attn_module,
-        kv_cache_groups=kv_cache_config.kv_cache_groups,
-    )
+    bind_kv_cache_to_layers(bindable_caches, forward_context)
     return kv_caches
 
 
@@ -483,6 +478,12 @@ def build_attn_metadata(
     req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
+    if rswa_prefix_lens is not None and rswa_prefix_lens.shape[0] < num_reqs:
+        # FULL graphs include inactive padded requests. Their prompt lengths
+        # must be zero, just like the padded sequence lengths and slot mapping.
+        rswa_prefix_lens = torch.nn.functional.pad(
+            rswa_prefix_lens, (0, num_reqs - rswa_prefix_lens.shape[0])
+        )
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
     if dcp_local_seq_lens_cpu_upper_bound is not None:
@@ -581,27 +582,3 @@ def build_attn_metadata(
                 attn_metadata[layer_name] = metadata
         token_to_req_indices = common_attn_metadata._token_to_req_indices_cache
     return attn_metadata
-
-
-def compute_mm_prefix_ranges(
-    req_ids: list[str],
-    mm_features: dict[str, list[MultiModalFeatureSpec]],
-    sliding_window: int | None = None,
-) -> dict[int, list[tuple[int, int]]]:
-    """Compute PrefixLM bidirectional ranges for multimodal tokens.
-
-    Ranges exceeding sliding_window are skipped to prevent early tokens
-    from attending across the entire image span.
-    """
-    req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
-    for req_idx, req_id in enumerate(req_ids):
-        image_doc_ranges = []
-        for mm_feature in mm_features.get(req_id, ()):
-            if mm_feature.modality not in ("image", "video"):
-                continue
-            for r in mm_feature.mm_position.extract_embeds_range():
-                if sliding_window is not None and (r[1] - r[0] + 1) > sliding_window:
-                    continue
-                image_doc_ranges.append(r)
-        req_doc_ranges[req_idx] = image_doc_ranges
-    return req_doc_ranges

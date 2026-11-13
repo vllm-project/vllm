@@ -8,6 +8,7 @@ use thiserror::Error;
 use thiserror_ext::Macro;
 
 use crate::protocol::utility::UtilityCallId;
+use crate::transport::EngineId;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -38,6 +39,8 @@ pub enum Error {
     ZmqRuntimeTask(#[from] tokio::task::JoinError),
     #[error("engine core reported fatal failure")]
     EngineCoreDead,
+    #[error("engine core {engine_id:?} disconnected")]
+    EngineDisconnected { engine_id: EngineId },
     #[error("startup handshake timed out while waiting for {stage} after {timeout:?}")]
     HandshakeTimeout {
         stage: &'static str,

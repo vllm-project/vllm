@@ -94,6 +94,11 @@ class DispatchPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
+        tasks = pooling_metadata.tasks
+        pooler = poolers_by_task.get(tasks[0]) if tasks else None
+        if pooler and tasks.count(tasks[0]) == len(tasks):
+            return pooler(hidden_states, pooling_metadata)
+
         cursor = pooling_metadata.pooling_cursor
 
         outputs = list[torch.Tensor | None]()

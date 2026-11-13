@@ -6,17 +6,19 @@ Prefill and mixed batches expand the latent cache and use FlashAttention-3
 varlen MHA. Decode-only batches use the Triton absorbed-MQA kernel.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
 
 import vllm._custom_ops as ops
+from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonDecodeMetadata,
     MLACommonMetadata,
     QueryLenSupport,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
@@ -35,6 +37,7 @@ from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
 )
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+    FA4MLALayerConfig,
     FlashAttnPrefillBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
@@ -285,6 +288,14 @@ class Dots3NoteFlashAttnPrefillBackend(FlashAttnPrefillBackend):
         # equal-dimension varlen kernel.
         self.requires_v_padding = True
 
+    def fa4_warmup_layer_configs(self) -> tuple[FA4MLALayerConfig, ...]:
+        # The base constructor registers before V padding is forced on above.
+        # Sliding-window layers also run run_sliding_window's windowed prefill.
+        (config,) = super().fa4_warmup_layer_configs()
+        config = replace(config, requires_v_padding=True)
+        window = self.vllm_config.model_config.hf_text_config.sliding_window_size
+        return (config, replace(config, window_size=(window - 1, 0)))
+
     def supports_quant_output(self, quant_key) -> bool:
         return False
 
@@ -323,7 +334,16 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
     query_len_support = QueryLenSupport.UNIFORM
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        self.sliding_window = kv_cache_spec.sliding_window
+        windows = set()
+        for layer in get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            layer_names,
+        ).values():
+            assert isinstance(layer.impl, Dots3NoteTritonMLAImpl)
+            windows.add(layer.impl.sliding_window)
+        assert len(windows) == 1, f"Mixed sliding windows in a group: {windows}"
+        self.sliding_window = windows.pop()
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
     def _reserve_attn_logits_workspace(self) -> None:
@@ -480,6 +500,13 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
             **mla_args,
         )
         self.sliding_window = sliding_window
+
+    def register_decode_warmup(
+        self, kv_cache: torch.Tensor, kv_cache_dtype: str
+    ) -> None:
+        # forward_mqa runs _forward_swa_mqa, which never reaches the split-KV
+        # Triton decode kernels.
+        return
 
     def _forward_swa_mqa(
         self,
@@ -723,6 +750,7 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         super().do_kv_cache_update(
             kv_c_normed,
@@ -731,6 +759,7 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
             slot_mapping,
             kv_cache_dtype,
             k_scale,
+            skip_scale=skip_scale,
         )
 
     def forward_mha(  # type: ignore[override]

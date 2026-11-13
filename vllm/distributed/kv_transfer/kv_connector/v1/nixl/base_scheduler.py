@@ -33,10 +33,10 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
 )
 
 if TYPE_CHECKING:
@@ -96,14 +96,13 @@ class NixlBaseConnectorScheduler:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                not issubclass(g.manager_cls, FullAttentionManager)
                 for g in kv_cache_config.transfer_groups
             )
         )
         self._has_mamba = kv_cache_config.has_mamba_layers
         self._bounded_replay = any(
-            g.kv_cache_spec.prefix_replay_tokens > 0
-            for g in kv_cache_config.kv_cache_groups
+            g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -141,8 +140,8 @@ class NixlBaseConnectorScheduler:
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            (p.sliding_window, g.block_size)
+            if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
             else (0, self.block_size)
             for g in kv_cache_config.transfer_groups
         ]
@@ -156,8 +155,8 @@ class NixlBaseConnectorScheduler:
         # Trailing scratch slots that mamba managers co-allocate per request
         # for speculative decoding; None for non-SSM groups.
         self._ssm_spec_blocks = [
-            g.kv_cache_spec.num_speculative_blocks
-            if isinstance(g.kv_cache_spec, MambaSpec)
+            g.manager_config.params.num_speculative_blocks
+            if isinstance(g.manager_config.params, MambaManager.Params)
             else None
             for g in kv_cache_config.transfer_groups
         ]
@@ -264,7 +263,7 @@ class NixlBaseConnectorScheduler:
         speculative scratch slots and everything before the running state
         (null placeholders and the previous step's superseded state) go.
 
-        Use this at every block-id exchange point. Pass ``clip_ssm=False``
+        Use this at every block-id exchange point. Pass `clip_ssm=False`
         for per-step partial lists (host-buffer save), where the SSM strip
         does not apply.
         """
@@ -401,7 +400,7 @@ class NixlBaseConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
-        Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
+        Stops short of the trailing `_prefill_backoff()` tokens that the decoder
         will recompute locally."""
         backoff = self._prefill_backoff()
         if backoff and num_prompt_tokens > backoff:
@@ -409,12 +408,12 @@ class NixlBaseConnectorScheduler:
         return num_prompt_tokens
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the trailing ``_prefill_backoff()`` prompt tokens
+        """P-side only: drop the trailing `_prefill_backoff()` prompt tokens
         so the prefiller stops short of what the decoder recomputes locally.
         For Mamba that is the single token needed to yield h(N-1); for
         multi-module MTP it is the drafter's whole lookahead window.
 
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         backoff = self._prefill_backoff()
         params = request.kv_transfer_params
@@ -424,9 +423,9 @@ class NixlBaseConnectorScheduler:
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > backoff
-            # A request that skips reading the prefix cache (prompt logprobs)
-            # loads nothing on the decoder, which recomputes its whole prompt.
-            and not request.get_skip_reading_prefix_cache()
+            # A request that skips reading external KV (prompt logprobs)
+            # loads nothing on the decoder, which recomputes past its local hit.
+            and not request.skip_reading_external_kv
         ):
             if request.prompt_token_ids is not None:
                 del request.prompt_token_ids[-backoff:]
@@ -438,6 +437,11 @@ class NixlBaseConnectorScheduler:
             del request._all_token_ids[-backoff:]
             request.num_prompt_tokens -= backoff
             request.max_tokens = 1
+            hash_block_size = self.kv_cache_config.hash_block_size
+            assert hash_block_size is not None
+            request.truncate_block_hashes(
+                hash_block_size, self.vllm_config.num_hash_lookahead_tokens
+            )
             params["_p_side_truncated"] = True
 
     def _build_save_meta(

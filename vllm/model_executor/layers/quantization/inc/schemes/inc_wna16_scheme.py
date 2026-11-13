@@ -31,7 +31,7 @@ XPU_ONEDNN_BACKENDS = ("w4a16", "w4a8")
 
 
 def _check_xpu_w4a8_supported(layer_config: "INCLayerConfig", prefix: str) -> None:
-    """Raise unless ``int4_gemm_w4a8`` can serve this layer.
+    """Raise unless `int4_gemm_w4a8` can serve this layer.
 
     The backend is requested explicitly, so an unusable configuration is an
     error rather than something to silently fall back from.

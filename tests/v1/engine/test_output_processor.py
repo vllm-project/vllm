@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import math
 import time
 from unittest.mock import MagicMock, Mock
@@ -19,7 +20,7 @@ from tests.v1.engine.utils import (
 )
 from vllm import PoolingParams
 from vllm.config.watermarking import WatermarkConfig
-from vllm.exceptions import RetryableRequestError
+from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -214,6 +215,35 @@ def test_incremental_detokenization(
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
+
+
+def test_request_lists_are_untracked():
+    """A request's prompt and output token lists live as long as the request
+    and grow with it, so they are hidden from the cyclic GC."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    prompt_tokens = [1, 2, 3, 4]
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=prompt_tokens,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+    state = output_processor.request_states["request-0-int"]
+    output_processor.process_outputs(
+        [EngineCoreOutput(request_id="request-0-int", new_token_ids=[42])]
+    )
+
+    assert state.prompt_token_ids is prompt_tokens
+    assert not gc.is_tracked(prompt_tokens)
+    assert state.detokenizer.token_ids == [42]
+    assert not gc.is_tracked(state.detokenizer.token_ids)
 
 
 @pytest.mark.parametrize("do_remote_prefill", [True, False])
@@ -1814,15 +1844,29 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
-def test_request_rejected_by_engine(runner: str, dummy_test_vectors):
+@pytest.mark.parametrize(
+    "error,exception_type",
+    [
+        (
+            RequestError(code="engine_paused", message="paused", retryable=True),
+            RetryableRequestError,
+        ),
+        (
+            RequestError(code="validation_error", message="incompatible backend"),
+            VLLMValidationError,
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_request_rejected_by_engine(runner: str, error, exception_type):
     """A request the engine rejects on arrival (e.g. while paused) raises its
-    retryable error to the caller, leaves no stats behind, and ends a
+    corresponding exception to the caller, leaves no stats behind, and ends a
     streaming-input session, including any input chunks sent since."""
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
     request = EngineCoreRequest(
         request_id="request-0",
         external_req_id="external-0",
-        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        prompt_token_ids=[1, 2],
         mm_features=None,
         arrival_time=0,
         lora_request=None,
@@ -1834,7 +1878,6 @@ def test_request_rejected_by_engine(runner: str, dummy_test_vectors):
     )
     queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
     output_processor.add_request(request, None, queue=queue)
-    error = RequestError(code="engine_paused", message="paused", retryable=True)
     iteration_stats = IterationStats()
 
     result = output_processor.process_outputs(
@@ -1850,7 +1893,7 @@ def test_request_rejected_by_engine(runner: str, dummy_test_vectors):
     assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
     assert not iteration_stats.finished_requests
     assert not iteration_stats.time_to_first_tokens_iter
-    with pytest.raises(RetryableRequestError, match="paused"):
+    with pytest.raises(exception_type, match=error.message):
         queue.get_nowait()
 
 
