@@ -98,9 +98,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 SHELL ["/bin/bash", "-c"]
 # Install PyTorch wheels (nightly for latest torch, release as fallback) together
-# with the AMD-compiled device code for every arch in ROCM_DEVICE_EXTRAS.
-# torchaudio has no device extras.
-#
+# with the AMD-compiled device code for every arch in ROCM_DEVICE_EXTRAS:
 # gfx90a (MI210/250), gfx942 (MI300), gfx950 (MI350), gfx1100 (7900XTX),
 # gfx1101 (7800XT), gfx1200 (9070XT), gfx1201 (9070), gfx1150/1151 (Strix APU)
 ARG TORCH_VERSION
