@@ -5,6 +5,7 @@ rounds, failure latching, stale-response discard, and shutdown recovery."""
 
 import contextlib
 import dataclasses
+import logging
 import math
 import os
 import socket
@@ -1040,6 +1041,7 @@ def test_ipc_prefill_timeout_quarantines_instead_of_reusing_lease(make_ipc_sessi
 def test_ipc_cleanup_errors_preserve_failure_policy_and_block_reconnect(
     make_ipc_session, monkeypatch, caplog, policy, failed_cleanup
 ):
+    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
     session, adapter, runtime, _ = make_ipc_session(failure_policy=policy, num_hidden=0)
     key = ready(session, 1)
     adapter.hold_batches.add(0)
