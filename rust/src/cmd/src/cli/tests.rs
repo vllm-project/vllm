@@ -310,6 +310,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
@@ -1059,6 +1060,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&[]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
+    assert!(!config.keep_alive_on_engine_death);
     assert!(!config.api_server_options.skip_model_name_validation);
     assert!(!config.api_server_options.server_dev_mode);
     assert_eq!(config.api_server_options.max_n_sequences, 16384);
@@ -1069,6 +1071,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
 
     // Set through `VLLM_LOG_STATS_INTERVAL`,
     // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
+    // `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`,
     // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
     // `VLLM_SERVER_DEV_MODE`, and `VLLM_MAX_N_SEQUENCES`, which bind these
     // hidden flags.
@@ -1077,6 +1080,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         "2.5",
         "--disable-request-id-randomization",
         "1",
+        "--keep-alive-on-engine-death",
+        "2",
         "--http-max-request-body-size",
         "1048576",
         "--skip-model-name-validation",
@@ -1088,6 +1093,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
+    assert!(config.keep_alive_on_engine_death);
     assert!(config.api_server_options.skip_model_name_validation);
     assert!(config.api_server_options.server_dev_mode);
     assert_eq!(config.api_server_options.max_n_sequences, 8);
@@ -1127,6 +1133,7 @@ fn args_json_reads_env_only_settings_from_env() {
     let args = apply(&[]).unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
+    assert!(!args.keep_alive_on_engine_death);
     assert!(!args.api_server_options().skip_model_name_validation);
     assert!(!args.api_server_options().server_dev_mode);
     assert_eq!(args.api_server_options().max_n_sequences, 16384);
@@ -1138,6 +1145,7 @@ fn args_json_reads_env_only_settings_from_env() {
     let args = apply(&[
         ("VLLM_LOG_STATS_INTERVAL", "0.5"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
+        ("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "-1"),
         ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
         ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
         ("VLLM_SERVER_DEV_MODE", " 1"),
@@ -1146,6 +1154,7 @@ fn args_json_reads_env_only_settings_from_env() {
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
+    assert!(args.keep_alive_on_engine_death);
     assert!(args.api_server_options().skip_model_name_validation);
     assert!(args.api_server_options().server_dev_mode);
     assert_eq!(args.api_server_options().max_n_sequences, 8);
@@ -1162,6 +1171,7 @@ fn args_json_reads_env_only_settings_from_env() {
     let errors = [
         apply(&[("VLLM_LOG_STATS_INTERVAL", "ten")]).unwrap_err(),
         apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
+        apply(&[("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "true")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
         apply(&[("VLLM_SERVER_DEV_MODE", "true")]).unwrap_err(),
@@ -1171,6 +1181,7 @@ fn args_json_reads_env_only_settings_from_env() {
         [
             "invalid VLLM_LOG_STATS_INTERVAL: `ten` is not a number of seconds",
             "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
+            "invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: `true` is not an integer",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `32MiB` is not a number of bytes",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
             "invalid VLLM_SERVER_DEV_MODE: `true` is not an integer",
@@ -2304,6 +2315,7 @@ fn frontend_args_accept_json() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
@@ -3262,6 +3274,7 @@ fn serve_args_accept_handshake_aliases() {
                         ),
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
+                        keep_alive_on_engine_death: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
@@ -3595,6 +3608,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 10s,
             ),
             disable_request_id_randomization: false,
+            keep_alive_on_engine_death: false,
             shutdown_timeout: 0ns,
             manages_engine: true,
             keep_alive_timeout: 5s,
@@ -3728,6 +3742,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 10s,
             ),
             disable_request_id_randomization: false,
+            keep_alive_on_engine_death: false,
             shutdown_timeout: 0ns,
             manages_engine: true,
             keep_alive_timeout: 5s,
@@ -3974,6 +3989,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 10s,
             ),
             disable_request_id_randomization: false,
+            keep_alive_on_engine_death: false,
             shutdown_timeout: 0ns,
             manages_engine: false,
             keep_alive_timeout: 5s,
