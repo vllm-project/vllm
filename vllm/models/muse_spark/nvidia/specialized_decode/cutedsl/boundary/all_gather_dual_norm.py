@@ -12,10 +12,10 @@
 
 """The input boundary of every Muse Spark decoder layer, and the final boundary.
 
-The MoE of layer ``l - 1`` leaves this rank's unpooler output as a column
-block ``[b, H / tp]`` BF16 (block ``rank`` of the row). The boundary of layer
-``l`` gathers the blocks of every rank through a Lamport mailbox in NVLink
-multicast memory (``MailboxSlot``), then runs the dual norm over the full row::
+The MoE of layer `l - 1` leaves this rank's unpooler output as a column
+block `[b, H / tp]` BF16 (block `rank` of the row). The boundary of layer
+`l` gathers the blocks of every rank through a Lamport mailbox in NVLink
+multicast memory (`MailboxSlot`), then runs the dual norm over the full row::
 
     b = branch * (post_weight + post_gain_center)  # or branch
     stream = alpha * stream + (beta * b) * rsqrt(mean(b**2) + post_eps)
@@ -23,22 +23,22 @@ multicast memory (``MailboxSlot``), then runs the dual norm over the full row::
         stream * rsqrt(mean(stream**2) + next_eps) * (next_weight + next_gain_center)
     )
 
-with layer ``l - 1``'s post_ffn_norm and residual gates and layer ``l``'s
+with layer `l - 1`'s post_ffn_norm and residual gates and layer `l`'s
 pre_qkv_proj_norm (model.norm at the final boundary, after the last layer).
-The stream (FP32 [b, H]) is updated in place; ``aux`` receives it when layer
-``l`` is an aux layer of the drafter.
+The stream (FP32 [b, H]) is updated in place; `aux` receives it when layer
+`l` is an aux layer of the drafter.
 
 Two kernels per call, as the stock fused path: the publisher (or the unpooler's
 zero-copy epilogue, which writes the same bytes) multicasts this rank's block
-into slot ``[NEXT_STAGE, rank]`` of every rank's ``[3, tp, capacity, H / tp]``
-mailbox and sets ``ACTIVE_STAGE``; the consumer reads each 8-column fragment
-from the one rank that owns it, re-arms it, rotates ``NEXT_STAGE`` and runs
+into slot `[NEXT_STAGE, rank]` of every rank's `[3, tp, capacity, H / tp]`
+mailbox and sets `ACTIVE_STAGE`; the consumer reads each 8-column fragment
+from the one rank that owns it, re-arms it, rotates `NEXT_STAGE` and runs
 the dual norm. Each boundary has its own mailbox and stage words.
 
-The consumer releases its PDL dependents right after ``griddepcontrol.wait``,
+The consumer releases its PDL dependents right after `griddepcontrol.wait`,
 before the poll, so the next kernel (the QKV front loading its weights) starts
 while the gather waits on the other ranks. A dependent still waits for this
-whole grid in its own ``griddepcontrol.wait``. Like the stock consumer it
+whole grid in its own `griddepcontrol.wait`. Like the stock consumer it
 loads the stream and the parameters before its wait: no kernel between the
 stream's last writer and this one may trigger its dependents before its own
 wait.
@@ -105,11 +105,11 @@ WARM_UP_ROWS = 8
 class MailboxSlot(NamedTuple):
     """One boundary's slot in its symmetric-memory Lamport buffer.
 
-    The buffer is ``[LAMPORT_GENERATIONS, tp, capacity, H / tp]`` BF16 on every
-    rank; row ``t`` of rank ``r``'s block in generation ``g`` starts at element
-    ``((g * tp + r) * capacity + t) * row_stride``. The generation a writer
-    uses is ``NEXT_STAGE`` of the mailbox's stage words (``BoundaryMailbox.
-    stage_state``) and the writer sets ``ACTIVE_STAGE`` to it; ``phase`` is
+    The buffer is `[LAMPORT_GENERATIONS, tp, capacity, H / tp]` BF16 on every
+    rank; row `t` of rank `r`'s block in generation `g` starts at element
+    `((g * tp + r) * capacity + t) * row_stride`. The generation a writer
+    uses is `NEXT_STAGE` of the mailbox's stage words (`BoundaryMailbox.
+    stage_state`) and the writer sets `ACTIVE_STAGE` to it; `phase` is
     the caller's label of the slot and does not select the generation.
     """
 
@@ -125,7 +125,7 @@ class MailboxSlot(NamedTuple):
 
 
 class BoundaryMailbox:
-    """The mailbox of one boundary: a ``LamportMailbox`` of ``[b, H / tp]``
+    """The mailbox of one boundary: a `LamportMailbox` of `[b, H / tp]`
     column blocks and its publisher, built collectively (every rank, the same
     order) before CUDA graph capture. Raises on every rank without NVLink
     multicast."""
@@ -160,12 +160,12 @@ class BoundaryMailbox:
 
     @property
     def tensor(self) -> torch.Tensor:
-        """This rank's ``[3, tp, capacity, H / tp]`` BF16 buffer."""
+        """This rank's `[3, tp, capacity, H / tp]` BF16 buffer."""
         return self.lamport.tensor
 
     @property
     def stage_state(self) -> torch.Tensor:
-        """Int32 [2]: ``NEXT_STAGE`` (set by the consumer), ``ACTIVE_STAGE``
+        """Int32 [2]: `NEXT_STAGE` (set by the consumer), `ACTIVE_STAGE`
         (set by the writer)."""
         return self.lamport.stage_state
 
@@ -187,7 +187,7 @@ class BoundaryMailbox:
             raise ValueError(f"the slot is not the mailbox of layer {self.layer}")
 
     def publish(self, cols: torch.Tensor, slot: MailboxSlot) -> None:
-        """Multicast this rank's ``[b, H / tp]`` BF16 block into every rank's
+        """Multicast this rank's `[b, H / tp]` BF16 block into every rank's
         copy (what the zero-copy epilogue writes). Graph-capturable."""
         self.check(slot)
         rows = cols.shape[0]
@@ -215,7 +215,7 @@ def all_gather_fragment(
     next_eps: float,
     row_sum,
 ):
-    """``dual_norm_fragment`` in the form of the public all-gather dual norm
+    """`dual_norm_fragment` in the form of the public all-gather dual norm
     (all_gather_dual_norm.py at the sha above): FP32 constants, the zero-init
     reductions and the gated add written as one expression after the first row
     sum. The serial consumer must use it to be bitwise to that op; the tree
@@ -250,7 +250,7 @@ def all_gather_fragment(
 
 class _AllGatherDualNormKernel:
     """Grid (b, CLUSTER_N), cluster (1, CLUSTER_N, 1), THREADS threads; thread
-    ``(cluster rank, tid)`` owns columns ``8 * (cluster rank * THREADS + tid)``
+    `(cluster rank, tid)` owns columns `8 * (cluster rank * THREADS + tid)`
     and the 7 after it."""
 
     def __init__(
@@ -440,12 +440,12 @@ def compile_all_gather_dual_norm(
 ):
     """Compile the consumer for one boundary's constants (before capture).
 
-    Call it as ``compiled(mailbox, stage_state, stream, alpha, beta,
-    post_weight, next_weight, out, aux, Int32(b), cu_stream)``: the flattened
-    ``[3, tp, capacity, H / tp]`` BF16 mailbox, its Int32 [2] stage words,
+    Call it as `compiled(mailbox, stage_state, stream, alpha, beta,
+    post_weight, next_weight, out, aux, Int32(b), cu_stream)`: the flattened
+    `[3, tp, capacity, H / tp]` BF16 mailbox, its Int32 [2] stage words,
     stream FP32 [b * H] (in place), alpha and beta FP32 [H], the weights BF16
     [H] (post_weight unused without a post weight), out BF16 [b * H] and aux
-    FP32 [b * H] (unused without ``aux``).
+    FP32 [b * H] (unused without `aux`).
     """
     weight = make_fake_compact_tensor(BFloat16, (HIDDEN,), assumed_align=16)
     gate = make_fake_compact_tensor(Float32, (HIDDEN,), assumed_align=32)
@@ -503,10 +503,10 @@ def _rows(tensor: torch.Tensor, rows: int, dtype: torch.dtype, name: str) -> Non
 
 class AllGatherDualNorm:
     """The consumer of one boundary with its constants and weights bound and its
-    kernel compiled (build time). ``mailbox`` is a ``BoundaryMailbox`` (or any
-    object with its ``tp``, ``capacity``, ``tensor`` and ``stage_state``).
+    kernel compiled (build time). `mailbox` is a `BoundaryMailbox` (or any
+    object with its `tp`, `capacity`, `tensor` and `stage_state`).
 
-    ``run`` is graph-capturable and allocates nothing; every rank of the group
+    `run` is graph-capturable and allocates nothing; every rank of the group
     must call it once per publish, with the same row count.
     """
 
@@ -599,8 +599,8 @@ class BoundaryOperands(NamedTuple):
 
 
 def boundary_operands(post_norm, connection, next_norm) -> BoundaryOperands:
-    """Constants and weights of the stock boundary ``post_norm`` (the previous
-    layer's post_ffn_norm) -> ``connection`` (its add_ffn) -> ``next_norm``
+    """Constants and weights of the stock boundary `post_norm` (the previous
+    layer's post_ffn_norm) -> `connection` (its add_ffn) -> `next_norm`
     (this layer's pre_qkv_proj_norm, or model.norm), under the stock fused
     path's preconditions."""
     if (
@@ -622,7 +622,7 @@ def boundary_operands(post_norm, connection, next_norm) -> BoundaryOperands:
 
 def stock_gathers(previous_layer: nn.Module, aux: bool, rows: int) -> bool:
     """Whether the stock forward runs this boundary as the fused all-gather
-    (serial reduction) at ``rows`` tokens: the previous layer defers its
+    (serial reduction) at `rows` tokens: the previous layer defers its
     unpooler's column gather and this layer is not an aux layer (the stock
     forward gathers the columns before an aux state and then runs the
     standalone dual norm, tree reduction)."""
@@ -633,8 +633,8 @@ def stock_gathers(previous_layer: nn.Module, aux: bool, rows: int) -> bool:
 
 
 class GatherBoundary:
-    """The input boundary (a ``BoundaryProvider``) of decoder layer
-    ``layer_idx >= 1``: gathers the previous layer's unpooler blocks from this
+    """The input boundary (a `BoundaryProvider`) of decoder layer
+    `layer_idx >= 1`: gathers the previous layer's unpooler blocks from this
     boundary's mailbox and runs the dual norm into the layer's
     pre_qkv_proj_norm."""
 

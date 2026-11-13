@@ -33,7 +33,7 @@ class Mxfp8LinearKernel(ABC):
     """
 
     supports_pre_processed_weights: bool = False
-    """True if ``process_weights_after_loading`` only rewrites parameters, so
+    """True if `process_weights_after_loading` only rewrites parameters, so
     weights exported by the weight cache daemon can be used as-is."""
 
     def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
@@ -53,6 +53,16 @@ class Mxfp8LinearKernel(ABC):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod

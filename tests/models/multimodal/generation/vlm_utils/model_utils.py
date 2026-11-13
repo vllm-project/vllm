@@ -257,8 +257,8 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return BatchFeature(data=inputs, tensor_type="pt")
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language.model.embed_tokens
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language.model.embed_tokens
     )
     return hf_model
 
@@ -362,8 +362,8 @@ def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         )
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.transformer.output_layer
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.transformer.output_layer
     )
     return hf_model
 
@@ -451,8 +451,8 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = H2OVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -686,8 +686,8 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = SkyworkR1VProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -795,8 +795,8 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = InternVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -949,8 +949,8 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.llm.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.llm.get_output_embeddings()
     )
 
     def processor(*args, text="", images=None, **kwargs):
@@ -985,8 +985,8 @@ def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.llm.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.llm.get_output_embeddings()
     )
 
     def processor(*args, text="", images=None, videos=None, **kwargs):
@@ -1039,27 +1039,10 @@ def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def paddleocr_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches the HfRunner to fix create_causal_mask API mismatch.
-
-    The PaddleOCR-VL HF model passes `inputs_embeds` to create_causal_mask,
-    but transformers renamed this parameter to `input_embeds`.
-    """
-    import sys
-
-    model_module = sys.modules.get(type(hf_model.model.model).__module__)
-    if model_module is None:
-        return hf_model
-
-    original_create_causal_mask = getattr(model_module, "create_causal_mask", None)
-    if original_create_causal_mask is None:
-        return hf_model
-
-    def patched_create_causal_mask(*args, **kwargs):
-        if "inputs_embeds" in kwargs:
-            kwargs["input_embeds"] = kwargs.pop("inputs_embeds")
-        return original_create_causal_mask(*args, **kwargs)
-
-    model_module.create_causal_mask = patched_create_causal_mask  # type: ignore[attr-defined]
+    # TODO: Remove this patch once CI uses Transformers 5.23, which defaults to False.
+    # Match the original checkpoint's position embedding interpolation.
+    embeddings = hf_model.model.model.visual.vision_model.embeddings
+    embeddings.interpolation_align_corners = False
     return hf_model
 
 
@@ -1122,7 +1105,7 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 def cohere_compass_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Declare the video modality that CohereCompass omits upstream.
 
-    Without it ``generate`` leaves ``pixel_values_videos`` unconsumed and the
+    Without it `generate` leaves `pixel_values_videos` unconsumed and the
     forward pass rejects it, see huggingface/transformers#49320. Drop this once
     the pinned transformers declares the modality itself.
     """
@@ -1137,15 +1120,15 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
 
     Two issues in HfRunner require patching:
 
-    1. VoxtralProcessor requires ``apply_chat_template()`` with conversation
-       dicts (accepting ``url``, ``path``, or ``base64`` audio) rather than
-       the standard ``processor(text=, audio=, sampling_rate=)`` interface.
+    1. VoxtralProcessor requires `apply_chat_template()` with conversation
+       dicts (accepting `url`, `path`, or `base64` audio) rather than
+       the standard `processor(text=, audio=, sampling_rate=)` interface.
     2. HfRunner.get_inputs cannot handle multi-audio per prompt because it
-       incorrectly unpacks ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
+       incorrectly unpacks `[(arr1, sr1), (arr2, sr2)]` via a `len == 2` check.
 
-    We override ``get_inputs`` to build conversation dicts and call
-    ``apply_chat_template`` directly, bypassing both issues. We also wrap
-    ``model.generate`` to strip prompt tokens before decoding, since
+    We override `get_inputs` to build conversation dicts and call
+    `apply_chat_template` directly, bypassing both issues. We also wrap
+    `model.generate` to strip prompt tokens before decoding, since
     HfRunner.generate calls batch_decode on the full sequence (prompt +
     generated).
     """

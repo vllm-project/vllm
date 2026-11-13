@@ -55,7 +55,7 @@ def _popc(m):
 
 
 def _below(mask, base):
-    """The set bits of ``mask`` below this lane, plus ``base`` (v_mbcnt)."""
+    """The set bits of `mask` below this lane, plus `base` (v_mbcnt)."""
     lo = mask.to(fx.Int32)
     hi = (mask >> 32).to(fx.Int32)
     r = fx.rocdl.mbcnt_lo(T.i32, lo.ir_value(), fx.Int32(base).ir_value())
@@ -207,7 +207,7 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
             return t
 
         def compact(keys, wbase, base, pred):
-            """Append the keys ``pred`` keeps at ``base`` if they fit below CAP."""
+            """Append the keys `pred` keeps at `base` if they fit below CAP."""
             oks = [
                 _one(pred(keys[j], wbase + (j * 64) + lane))
                 for j in range_constexpr(STRIPS)
@@ -262,7 +262,7 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
 
         def lane_max_bound(m, d1=12, d0=0, key=INT_MIN):
             """The 16th largest lane maximum m, to its top d1 bits (from d0 on,
-            above the bound ``key`` of the top d0)."""
+            above the bound `key` of the top d0)."""
             p = fx.Int32(key ^ INT_MIN)
             for d in range_constexpr(d0, d1):
                 t = p | _s32(1 << (31 - d))

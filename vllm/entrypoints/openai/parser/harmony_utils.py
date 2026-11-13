@@ -38,7 +38,7 @@ def is_function_recipient(
 
     The optional *allowed_function_tool_names* parameter is used by the
     Responses API to distinguish bare function-call recipients (missing the
-    ``functions.`` prefix) from MCP tool calls.  When provided, a bare
+    `functions.` prefix) from MCP tool calls.  When provided, a bare
     recipient is only treated as a function call if it appears in the set.
     The Chat Completions path omits this parameter so that all bare
     recipients are accepted as function calls (the heuristic fallback).
