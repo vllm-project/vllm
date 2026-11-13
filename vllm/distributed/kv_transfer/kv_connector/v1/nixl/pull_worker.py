@@ -104,8 +104,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         )
 
     def poll_finished_recving(self) -> set[str]:
-        if not self.has_pending_recving():
-            return set()
         assert self._early_recved is not None
         # Ineligible and failed requests stay untouched for ordinary collection.
         eligible = [r for r in self._recving_transfers if self._can_early_recv(r)]

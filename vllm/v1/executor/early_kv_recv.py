@@ -46,7 +46,7 @@ class EarlyKVOutputAggregator(KVOutputAggregator):
             for req_id in kv_output.finished_recving or ()
         }
         output = super().aggregate(outputs, output_rank)
-        if output is not None and (voted or self._step_output_recving):
+        if output is not None:
             self._step_output_recving = {
                 req_id
                 for req_id in self._step_output_recving | voted
