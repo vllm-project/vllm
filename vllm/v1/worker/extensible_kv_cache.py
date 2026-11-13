@@ -5,7 +5,7 @@
 import copy
 import gc
 from bisect import bisect_right
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import replace
 from itertools import pairwise
@@ -700,7 +700,7 @@ def kv_cache_lent_for_weight_update(
     *,
     reclaimable: bool,
     fail_if_short: bool,
-) -> Iterator[None]:
+) -> Generator[None]:
     """Make room for a layerwise weight update of model within the context.
 
     Only an extensible KV cache (kv_cache, None for a standard one) leaves
