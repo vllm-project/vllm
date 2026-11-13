@@ -360,6 +360,7 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
     speculative_config = SimpleNamespace(
         draft_model_config=draft_model_config,
         draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        moe_backend=None,
         attention_backend=None,
         kv_cache_dtype=None,
         draft_load_config=None,
@@ -369,6 +370,9 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
     )
     speculative_config.apply_draft_eplb_overrides = partial(
         SpeculativeConfig.apply_draft_eplb_overrides, speculative_config
+    )
+    speculative_config.apply_draft_overrides = partial(
+        SpeculativeConfig.apply_draft_overrides, speculative_config
     )
     vllm_config = SimpleNamespace(
         speculative_config=speculative_config,
