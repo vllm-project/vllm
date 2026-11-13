@@ -778,10 +778,23 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
                 "cls.predictions.decoder.weight": "mlm_head.decoder.weight",
                 "cls.predictions.decoder.bias": "mlm_head.decoder.bias",
             }
+            if not any(n == "cls.predictions.decoder.bias" for n, _ in mlm_side):
+                name_map["cls.predictions.bias"] = "mlm_head.decoder.bias"
             remapped = [(name_map[n], w) for n, w in mlm_side if n in name_map]
             if remapped:
                 loaded_mlm = AutoWeightsLoader(self).load_weights(remapped)
                 loaded.update(loaded_mlm)
+
+        if (
+            self.model.config.tie_word_embeddings
+            and "mlm_head.decoder.weight" not in loaded
+        ):
+            tied_weights = (
+                ("mlm_head.decoder.weight", weight)
+                for name, weight in model_side
+                if name == "embeddings.word_embeddings.weight"
+            )
+            loaded.update(AutoWeightsLoader(self).load_weights(tied_weights))
 
         return loaded
 

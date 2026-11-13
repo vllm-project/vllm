@@ -484,3 +484,20 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 `embed&token_classify` task is an internal execution contract for this plugin,
 not a generic Pooling API response format. Without the plugin, select one of
 the three concrete tasks above.
+
+## SPLADE Checkpoints
+
+BERT-based SPLADE models can load Hugging Face masked-language-model checkpoints,
+including sharded safetensors and checkpoints that omit tied decoder aliases.
+Use the SPLADE architecture override to obtain sparse vocabulary embeddings:
+
+```shell
+vllm serve /path/to/splade-checkpoint \
+    --runner pooling \
+    --hf-overrides '{"architectures": ["BertSpladeSparseEmbeddingModel"]}'
+```
+
+When `tie_word_embeddings` is enabled, a missing decoder weight is restored from
+the checkpoint's full input embedding weight. An explicitly saved decoder weight takes precedence.
+The loader accepts both `cls.predictions.bias` and the decoder bias alias.
+If both are present, the explicit decoder bias takes precedence, regardless of checkpoint key order.
