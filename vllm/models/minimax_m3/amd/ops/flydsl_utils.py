@@ -27,7 +27,7 @@ PRELOAD_HINTS = {
 
 
 def run_compiled(exe, *args, waves_per_eu: int | None = None):
-    """Compiles and runs ``exe`` on the first call, then dispatches the cache."""
+    """Compiles and runs `exe` on the first call, then dispatches the cache."""
     import flydsl.compiler as flyc
     from flydsl.compiler.kernel_function import CompilationContext
 
@@ -84,7 +84,7 @@ def maxf_nn(a, b):
 
 
 def xlane4(x, op):
-    """``op`` over lanes L, L^16, L^32, L^48, broadcast to all four."""
+    """`op` over lanes L, L^16, L^32, L^48, broadcast to all four."""
     a, b = permlane_swap(rocdl.permlane32_swap, bits(x), bits(x))
     m = op(as_f32(a), as_f32(b))
     a, b = permlane_swap(rocdl.permlane16_swap, bits(m), bits(m))
@@ -102,7 +102,7 @@ def exp2(x):
 
 
 def pk_bf16(a, b):
-    """Two fp32 -> one dword of two bf16 (RNE), ``a`` low."""
+    """Two fp32 -> one dword of two bf16 (RNE), `a` low."""
     return fx.Int32(
         fx.rocdl.cvt_pk_bf16_f32(
             fx.as_ir_value(fx.Float32(a)), fx.as_ir_value(fx.Float32(b))
@@ -111,7 +111,7 @@ def pk_bf16(a, b):
 
 
 def pk_f16(a, b):
-    """Two fp32 -> one dword of two fp16 (RNE), ``a`` low."""
+    """Two fp32 -> one dword of two fp16 (RNE), `a` low."""
     return (
         Vec.from_elements([fx.Float32(a), fx.Float32(b)], fx.Float32)
         .to(fx.Float16)
@@ -120,7 +120,7 @@ def pk_f16(a, b):
 
 
 def cvt_fp4x2_f16(word, sel):
-    """The two e2m1 codes of byte ``sel`` of ``word`` as two fp16 (exact)."""
+    """The two e2m1 codes of byte `sel` of `word` as two fp16 (exact)."""
     return Vec(
         fx.rocdl.cvt_scalef32_pk_f16_fp4(
             Vec.make_type(2, fx.Float16),
@@ -132,7 +132,7 @@ def cvt_fp4x2_f16(word, sel):
 
 
 def cvt_fp8x2_f16(word, hi):
-    """E4M3 bytes 0, 1 (``hi``: 2, 3) of ``word`` as two fp16 (exact)."""
+    """E4M3 bytes 0, 1 (`hi`: 2, 3) of `word` as two fp16 (exact)."""
     return Vec(
         fx.rocdl.cvt_scalef32_pk_f16_fp8(
             Vec.make_type(2, fx.Float16),

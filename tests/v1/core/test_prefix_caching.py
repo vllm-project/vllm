@@ -3,6 +3,8 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import gc
+import weakref
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -58,23 +60,42 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import (
+    HiSparseHotManager,
+    HiSparseResidentManager,
+    HiSparseSourceManager,
+)
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
+    AttentionSpec,
+    HiSparsePageSpec,
     KVCacheConfig,
     KVCacheGroupRole,
-    KVCacheGroupSpec,
+    KVCacheLayerConfig,
     KVCacheSpecKind,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
+from .utils import mamba_layer, new_kv_cache_group, sliding_window_layer
+
 pytestmark = pytest.mark.cpu_test
+
+
+def _swa_layer(sliding_window: int, **spec_kwargs) -> KVCacheLayerConfig:
+    return sliding_window_layer(AttentionSpec(**spec_kwargs), sliding_window)
+
+
+def _mamba_layer(
+    mamba_cache_mode: str = "none", num_speculative_blocks: int = 0, **spec_kwargs
+) -> KVCacheLayerConfig:
+    return mamba_layer(
+        MambaSpec(**spec_kwargs),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -135,14 +156,14 @@ def make_request(
 def make_kv_cache_manager(
     kv_cache_config: KVCacheConfig, vllm_config: VllmConfig | None = None, **kwargs
 ) -> KVCacheManager:
-    """Build a ``KVCacheManager``, deriving ``scheduler_block_size`` from the
+    """Build a `KVCacheManager`, deriving `scheduler_block_size` from the
     config (LCM of group block sizes) unless explicitly provided. This mirrors
-    ``resolve_kv_cache_block_sizes`` for the non-context-parallel case used by
+    `resolve_kv_cache_block_sizes` for the non-context-parallel case used by
     these tests, so callers don't have to pass it at every site. With
-    ``vllm_config``, a HiSparseConnector builds the HiSparse coordinator."""
+    `vllm_config`, a HiSparseConnector builds the HiSparse coordinator."""
     kwargs.setdefault(
         "scheduler_block_size",
-        lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
+        lcm(*(g.block_size for g in kv_cache_config.kv_cache_groups)),
     )
     if "retention_interval" in kwargs:
         kv_cache_config = replace(
@@ -165,9 +186,9 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -188,20 +209,20 @@ def make_hisparse_kv_cache_config(
     transfer_device_cache: bool = False,
     num_resident_groups: int = 1,
 ) -> KVCacheConfig:
-    source_spec = FullAttentionSpec(
+    source_spec = AttentionSpec(
         block_size=HISPARSE_BLOCK_SIZE,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
     )
     groups = [
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["source"],
             source_spec,
-            role=KVCacheGroupRole.HISPARSE_SOURCE,
+            HiSparseSourceManager.config(),
             host_resident=True,
         ),
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["indexer"],
             source_spec,
             enable_kv_transfer=transfer_device_cache,
@@ -209,30 +230,35 @@ def make_hisparse_kv_cache_config(
         ),
     ]
     groups.append(
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["resident"],
-            HiSparseResidentSpec(
+            HiSparsePageSpec(
                 block_size=HISPARSE_BLOCK_SIZE,
                 page_size=HISPARSE_BLOCK_SIZE * 4,
             ),
+            HiSparseResidentManager.config(),
             enable_kv_transfer=transfer_device_cache,
         )
     )
     groups.append(
-        KVCacheGroupSpec(
+        new_kv_cache_group(
             ["hot"],
-            HiSparseHotSpec(
+            HiSparsePageSpec(
                 block_size=HISPARSE_BLOCK_SIZE,
                 page_size=HISPARSE_BLOCK_SIZE * 4,
-                blocks_per_request=2,
             ),
+            HiSparseHotManager.config(blocks_per_request=2),
             enable_kv_transfer=False,
         )
     )
     for group_idx in range(1, num_resident_groups):
         groups.extend(
             replace(
-                group, layer_names=[f"{name}_{group_idx}" for name in group.layer_names]
+                group,
+                kv_cache_specs={
+                    f"{name}_{group_idx}": spec
+                    for name, spec in group.kv_cache_specs.items()
+                },
             )
             for group in groups[2:4]
         )
@@ -252,6 +278,7 @@ def make_hisparse_kv_cache_manager(
     max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
     num_prefill_lookahead: int = 0,
+    num_hash_lookahead_tokens: int = 0,
     vllm_config: VllmConfig | None = None,
     **config_kwargs,
 ) -> KVCacheManager:
@@ -264,6 +291,7 @@ def make_hisparse_kv_cache_manager(
         enable_caching=enable_caching,
         hash_block_size=HISPARSE_BLOCK_SIZE,
         num_prefill_lookahead=num_prefill_lookahead,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -276,7 +304,7 @@ def _allocate_scheduled(
     num_external_computed_tokens: int = 0,
     **kwargs,
 ) -> KVCacheBlocks | None:
-    """``allocate_slots`` plus the per-step residency work the connector runs."""
+    """`allocate_slots` plus the per-step residency work the connector runs."""
     blocks = manager.allocate_slots(
         request,
         num_new_tokens,
@@ -434,6 +462,37 @@ def test_hisparse_residency_update_sends_only_changed_pages():
 
     assert update[request.request_id].pages == [0]
     assert update[request.request_id].block_ids == ([0],)
+
+
+def test_hisparse_teardown_with_live_request_frees_pools():
+    """Untracked request block lists must not keep the pools alive through
+    block -> pool -> reuse watcher -> coordinator -> manager -> list."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    tokens = list(range(6 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator = get_hisparse_coordinator(manager)
+    for hot_manager in coordinator.hot_managers:
+        hot_manager.require_hot(request.request_id)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator.take_residency_updates([request.request_id])
+    _publish_hisparse_pages(manager)
+    pool = manager.block_pool
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    # The request is never freed, so its lists are alive at teardown.
+    assert pool._reuse_watchers
+    assert not gc.is_tracked(
+        coordinator.resident_managers[0].req_to_blocks[request.request_id]
+    )
+    host_manager = coordinator.host_manager
+    assert host_manager is not None
+    assert not gc.is_tracked(host_manager.req_to_blocks[request.request_id])
+
+    refs = [weakref.ref(obj) for obj in (coordinator, pool, host_pool)]
+    del coordinator, host_manager, hot_manager, host_pool, manager, pool
+    gc.collect()
+    assert [ref() for ref in refs] == [None, None, None]
 
 
 def test_hisparse_readmitted_request_resends_its_full_residency():
@@ -659,10 +718,11 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert not coordinator.build_offload_command().page_transfers
 
     coordinator.finish_host_import(request.request_id, failed=False)
-    transfers = coordinator.build_offload_command().page_transfers
-    assert len(transfers) == 1
-    restore = transfers[0]
-    assert restore.restore and not restore.after_forward
+    # The tail comes first; the pool has room to promote the rest.
+    restore, *promotions = coordinator.build_offload_command().page_transfers
+    assert len(promotions) == len(source) - 1
+    assert all(promotion.restore for promotion in promotions)
+    assert restore.restore
     assert restore.host_block_id == source[-1].block_id
     assert restore.resident_block_ids == (resident[-1].block_id,)
     request.num_computed_tokens = count
@@ -708,13 +768,86 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     host_tail, gpu_tail = source[-1], resident[-1]
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
-    restore = coordinator.build_offload_command().page_transfers[0]
+    transfers = coordinator.build_offload_command().page_transfers
     manager.free(request)
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
-    coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
+    coordinator.update_spills(
+        {t.transfer_id: 2 for t in transfers}, {t.transfer_id: 1 for t in transfers}
+    )
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
-    coordinator.update_spills({}, {restore.transfer_id: 1})
+    coordinator.update_spills({}, {t.transfer_id: 1 for t in transfers})
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 0
+    assert not coordinator.has_pending_work()
+
+
+@pytest.mark.parametrize("has_room", [True, False])
+def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
+    """An import lands on host; spare GPU pages bring its whole prefix back."""
+    manager = make_hisparse_kv_cache_manager(256, 16)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE + 1
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, request, num_tokens) is not None
+    source, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    coordinator = get_hisparse_coordinator(manager)
+    pool = coordinator.gpu_pool
+    if not has_room:
+        # Other requests hold everything above the transition watermark.
+        pool.get_new_blocks(
+            pool.get_num_free_blocks() - coordinator.transition_watermark
+        )
+
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert all(transfer.restore for transfer in transfers)
+    promoted = range(4) if has_room else range(0)
+    assert [t.host_block_id for t in transfers] == [
+        source[-1].block_id,
+        *(source[page].block_id for page in promoted),
+    ]
+    row = _resident_block_ids(manager, request.request_id)
+    assert [block_id != 0 for block_id in row] == [has_room] * 4 + [True]
+    assert [t.resident_block_ids for t in transfers[1:]] == [
+        (row[page],) for page in promoted
+    ]
+    # The worker reads promoted pages only once the residency update ships with
+    # the restores that fill them.
+    updates = coordinator.take_residency_updates([request.request_id])
+    assert updates[request.request_id].block_ids == (row,)
+
+    gpu_blocks = [pool.blocks[block_id] for block_id in row]
+    counts = {t.transfer_id: 1 for t in transfers}
+    coordinator.update_spills(counts, counts)
+    # Promoted pages are clean copies of host pages, so the residency policy
+    # treats them like any other clean page: readable, but reclaimable.
+    state = coordinator.request_states[request.request_id]
+    assert state.pinned_clean | state.unpinned_pages == set(promoted)
+
+    manager.free(request)
+    assert all(block.ref_cnt == 0 for block in gpu_blocks if not block.is_null)
+    assert not coordinator.has_pending_work()
+
+
+def test_hisparse_aborted_promotion_keeps_pages_until_restored():
+    """An abort cannot recycle GPU pages a queued promotion still writes."""
+    manager = make_hisparse_kv_cache_manager(256, 16)
+    num_tokens = 2 * HISPARSE_BLOCK_SIZE + 1
+    request = make_request(
+        "import", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert allocate_external_prefix(manager, request, num_tokens) is not None
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.finish_host_import(request.request_id, failed=False)
+    transfers = coordinator.build_offload_command().page_transfers
+    assert len(transfers) == 3
+    row = _resident_block_ids(manager, request.request_id)
+    gpu_blocks = [coordinator.gpu_pool.blocks[block_id] for block_id in row]
+    manager.free(request)
+    assert all(block.ref_cnt == 1 for block in gpu_blocks)
+    counts = {t.transfer_id: 1 for t in transfers}
+    coordinator.update_spills(counts, counts)
+    assert all(block.ref_cnt == 0 for block in gpu_blocks)
     assert not coordinator.has_pending_work()
 
 
@@ -791,7 +924,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks(
 
     spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
     assert len(spills) == 2
-    assert all(spill.after_forward for spill in spills)
+    assert not any(spill.restore for spill in spills)
     resident_blocks = manager.get_blocks(request.request_id).blocks[2]
     assert [block.ref_cnt for block in resident_blocks] == [2, 2]
     spill_counts = {spill.transfer_id: 1 for spill in spills}
@@ -937,7 +1070,7 @@ def _make_hisparse_scheduler(
     tmp_path, host_num_blocks: int, matched_tokens: int, **kwargs
 ) -> tuple[Scheduler, KVCacheManager]:
     """A scheduler over a HiSparse manager whose async mock connector matches
-    ``matched_tokens``."""
+    `matched_tokens`."""
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
@@ -1235,7 +1368,8 @@ def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     get_hisparse_coordinator(manager).update_spills(counts, counts)
 
 
-def test_hisparse_events_report_host_and_device_placement():
+@pytest.mark.parametrize("lookahead", [0, 1])
+def test_hisparse_events_report_host_and_device_placement(lookahead):
     """Host publication and eviction must not advertise GPU-resident KV."""
     manager = make_kv_cache_manager(
         make_hisparse_kv_cache_config(32, 16),
@@ -1243,8 +1377,16 @@ def test_hisparse_events_report_host_and_device_placement():
         enable_caching=True,
         hash_block_size=HISPARSE_BLOCK_SIZE,
         enable_kv_cache_events=True,
+        num_hash_lookahead_tokens=lookahead,
     )
-    request = make_request("request", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    tokens = list(range(64 + lookahead))
+    request = make_request(
+        "request",
+        tokens,
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
     assert _allocate_scheduled(manager, request, 64) is not None
     _publish_hisparse_pages(manager)
 
@@ -1255,6 +1397,16 @@ def test_hisparse_events_report_host_and_device_placement():
         (0, MEDIUM_CPU),
         (1, MEDIUM_GPU),
     }
+
+    for event in stored:
+        assert event.lookahead_token_ids == (
+            [
+                tokens[end : end + lookahead]
+                for end in range(HISPARSE_BLOCK_SIZE, 65, HISPARSE_BLOCK_SIZE)
+            ]
+            if lookahead
+            else None
+        )
 
     host_block = manager.get_blocks(request.request_id).blocks[0][0]
     get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
@@ -1273,9 +1425,9 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
             num_blocks=16,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                new_kv_cache_group(
                     ["mamba"],
-                    MambaSpec(
+                    _mamba_layer(
                         block_size=16,
                         shapes=((1,),),
                         dtypes=(torch.float32,),
@@ -1341,7 +1493,7 @@ def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
 
     Admission counts free GPU copies as free, but adopting a copy pins it. When
     adoption ran before the hit's allocation, it took blocks the allocation was
-    promised and the pool ran dry (``Cannot get N free blocks``). The allocation
+    promised and the pool ran dry (`Cannot get N free blocks`). The allocation
     now goes first, evicting a prefix's copies tail first; the copies it leaves
     are adopted.
     """
@@ -1402,6 +1554,70 @@ def test_hisparse_host_backed_request_accepts_local_prefix_hit():
     )
 
 
+def test_hisparse_clean_pages_unpin_in_write_completion_order():
+    """The pool reuses unpinned pages in the order their host writes completed."""
+    manager = make_hisparse_kv_cache_manager(
+        64, 32, enable_caching=True, num_resident_groups=2
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.max_spill_pages = 1
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    requests = [
+        make_request(name, list(range(i, i + num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+        for i, name in enumerate(("a", "b"))
+    ]
+    spills = []
+    for request in requests:
+        for hot in coordinator.hot_managers:
+            hot.require_hot(request.request_id)
+            hot.allocate_new_blocks(request.request_id, num_tokens, num_tokens)
+        assert _allocate_scheduled(manager, request, num_tokens) is not None
+        spills += coordinator.build_offload_command().page_transfers
+    for request in requests:
+        coordinator.plan_prefix_materialization(request.request_id, num_tokens)
+        spills += coordinator.build_offload_command().page_transfers
+    pages = [coordinator.pending_spills[spill.transfer_id].page for spill in spills]
+    assert pages == [("a", 0), ("b", 0), ("a", 1), ("b", 1)]
+
+    counts = {spill.transfer_id: 1 for spill in spills}
+    coordinator.update_spills(counts, counts)
+
+    expected = [
+        resident.req_to_blocks[request_id][page_idx].block_id
+        for request_id, page_idx in pages
+        for resident in coordinator.resident_managers
+    ]
+    free_ids = [
+        block.block_id
+        for block in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    assert free_ids[-len(expected) :] == expected
+
+
+def test_hisparse_freed_request_spills_are_reused_newest_first():
+    """Acked spills of a freed request free their blocks as if one at a time."""
+    manager = make_hisparse_kv_cache_manager(
+        64, 32, enable_caching=True, num_resident_groups=2
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    request = make_request("a", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_tokens) is not None
+    spills = coordinator.build_offload_command().page_transfers
+    assert len(spills) == 4
+    manager.free(request)
+
+    counts = {spill.transfer_id: 1 for spill in spills}
+    coordinator.update_spills(counts, counts)
+
+    spilled = [block_id for spill in spills for block_id in spill.resident_block_ids]
+    free_ids = [
+        block.block_id
+        for block in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    assert free_ids[: len(spilled)] == spilled[::-1]
+
+
 def test_hisparse_finished_request_leaves_free_copies():
     """Clean pages of a finished request are free-queue blocks, not pins."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
@@ -1431,13 +1647,25 @@ def test_hisparse_finished_request_leaves_free_copies():
     ],
     ids=["stopped", "aborted", "running"],
 )
+@pytest.mark.parametrize("lookahead", [0, 3])
 def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
-    status, expected_cached_pages
+    status, expected_cached_pages, lookahead
 ):
     """Only terminal cleanup may publish completed, finalized pages."""
-    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    manager = make_hisparse_kv_cache_manager(
+        32, 16, enable_caching=True, num_hash_lookahead_tokens=lookahead
+    )
     coordinator = get_hisparse_coordinator(manager)
-    request = make_request("terminal", list(range(33)), HISPARSE_BLOCK_SIZE, sha256)
+    request = make_request(
+        "terminal",
+        list(range(33)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    expected_cached_pages = min(
+        expected_cached_pages, (33 - lookahead) // HISPARSE_BLOCK_SIZE
+    )
     request.spec_token_ids = list(range(33, 49))
     assert (
         _allocate_scheduled(manager, request, 49, num_lookahead_tokens=16) is not None
@@ -1669,7 +1897,7 @@ def make_kv_cache_config_hybrid_model(
     second_spec_type: str = "sliding_window",
 ) -> KVCacheConfig:
     if second_spec_type == "sliding_window":
-        second_spec = SlidingWindowSpec(
+        second_spec = _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
@@ -1677,7 +1905,7 @@ def make_kv_cache_config_hybrid_model(
             sliding_window=sliding_window_blocks * block_size,
         )
     elif second_spec_type == "mamba":
-        second_spec = MambaSpec(
+        second_spec = _mamba_layer(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
@@ -1688,20 +1916,20 @@ def make_kv_cache_config_hybrid_model(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
                 second_spec,
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer3"],
                 second_spec,
             ),
@@ -1713,14 +1941,14 @@ def make_kv_cache_config_three_types(
     block_size: int, num_blocks: int, third_spec_type: str = "mamba"
 ) -> KVCacheConfig:
     if third_spec_type == "mamba":
-        third_spec = MambaSpec(
+        third_spec = _mamba_layer(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
             mamba_cache_mode="align",
         )
     elif third_spec_type == "sliding_window":
-        third_spec = SlidingWindowSpec(
+        third_spec = _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
@@ -1732,18 +1960,18 @@ def make_kv_cache_config_three_types(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -1751,7 +1979,7 @@ def make_kv_cache_config_three_types(
                     sliding_window=2 * block_size,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer3"],
                 third_spec,
             ),
@@ -1773,16 +2001,16 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
         num_blocks=64,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["target_mla"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["draft_mla"],
                 MLAAttentionSpec(
                     dcp_sharded=draft_sharded,
@@ -1792,9 +2020,9 @@ def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba"],
-                MambaSpec(
+                _mamba_layer(
                     block_size=block_size,
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
@@ -2343,6 +2571,23 @@ def _test_partial_request_hit(
     manager.free(req)
 
 
+def _replace_group(
+    config: KVCacheConfig, group_id: int, block_size: int | None = None, **changes
+) -> None:
+    """Rebuild a group with a new block size and manager config fields."""
+    group = config.kv_cache_groups[group_id]
+    block_size = group.block_size if block_size is None else block_size
+    config.kv_cache_groups[group_id] = replace(
+        group,
+        kv_cache_specs={
+            name: replace(spec, block_size=block_size)
+            for name, spec in group.kv_cache_specs.items()
+        },
+        manager_config=group.manager_config.replace_params(**changes),
+        block_size=block_size,
+    )
+
+
 def _make_hybrid_kv_cache_config(
     block_size: int, num_blocks: int, spec_types: list[str]
 ) -> KVCacheConfig:
@@ -2352,34 +2597,34 @@ def _make_hybrid_kv_cache_config(
         block_size: The block size for KV cache.
         num_blocks: The number of blocks in the KV cache.
         spec_types: List of spec type strings. Supported types:
-            - "full": FullAttentionSpec
-            - "sliding_window": SlidingWindowSpec with window=2*block_size
-            - "sliding_window_large": SlidingWindowSpec with window=4*block_size
+            - "full": full attention
+            - "sliding_window": sliding window with window=2*block_size
+            - "sliding_window_large": sliding window with window=4*block_size
             - "mamba": MambaSpec in prefix-caching ("align") mode
 
     """
     spec_map = {
-        "full": lambda: FullAttentionSpec(
+        "full": lambda: AttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
         ),
-        "sliding_window": lambda: SlidingWindowSpec(
+        "sliding_window": lambda: _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
             sliding_window=2 * block_size,
         ),
-        "sliding_window_large": lambda: SlidingWindowSpec(
+        "sliding_window_large": lambda: _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
             dtype=torch.float32,
             sliding_window=4 * block_size,
         ),
-        "mamba": lambda: MambaSpec(
+        "mamba": lambda: _mamba_layer(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
@@ -2388,7 +2633,7 @@ def _make_hybrid_kv_cache_config(
     }
 
     kv_cache_groups = [
-        KVCacheGroupSpec([f"layer{i}"], spec_map[spec_type]())
+        new_kv_cache_group([f"layer{i}"], spec_map[spec_type]())
         for i, spec_type in enumerate(spec_types)
     ]
 
@@ -3652,8 +3897,11 @@ def test_reset_prefix_cache():
     manager.free(req0)
     manager.free(req1)
 
+    cache = manager.block_pool.cached_block_hash_to_block
     assert manager.reset_prefix_cache()
-    assert not manager.block_pool.cached_block_hash_to_block
+    # Cleared in place, so the map stays out of the cyclic GC.
+    assert manager.block_pool.cached_block_hash_to_block is cache
+    assert not cache and not gc.is_tracked(cache._cache)
     assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
 
 
@@ -3702,33 +3950,27 @@ def test_maybe_evict_cached_block():
         pool.cached_block_hash_to_block.insert(block_hash, block)
 
     block0, block1, block2, block3 = pool.blocks
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {
-            block0.block_id: block0,
-            block3.block_id: block3,
-        },
-        block_hash1: block1,
-        block_hash2: block2,
-    }
+    cache = pool.cached_block_hash_to_block
+    # Only bytes and block ids, and explicitly untracked: never traversed by GC.
+    assert not gc.is_tracked(cache._cache)
+    assert cache._cache == {block_hash0: 0, block_hash1: 1, block_hash2: 2}
+    assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block1
     pool._maybe_evict_cached_block(block1)
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block0.block_id: block0, block3.block_id: block3},
-        block_hash2: block2,
-    }
+    assert cache._cache == {block_hash0: 0, block_hash2: 2}
+    assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block0: block_hash0 entry should NOT be removed, as block3
     # also use the same hash
     pool._maybe_evict_cached_block(block0)
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block3.block_id: block3},
-        block_hash2: block2,
-    }
+    assert cache._cache == {block_hash0: 3, block_hash2: 2}
+    assert cache.get_one_block(block_hash0) is block3
+    assert cache._dup_ids == {}
     # Evict block2
     pool._maybe_evict_cached_block(block2)
-    assert pool.cached_block_hash_to_block._cache == {block_hash0: {3: block3}}
+    assert cache._cache == {block_hash0: 3}
     # Evict block3
     pool._maybe_evict_cached_block(block3)
-    assert pool.cached_block_hash_to_block._cache == {}
+    assert cache._cache == {}
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
@@ -4055,18 +4297,18 @@ def test_block_stored_event_group_idx_multiple_groups():
             num_blocks=5,
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(
+                new_kv_cache_group(
                     ["layer1"],
-                    FullAttentionSpec(
+                    AttentionSpec(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
                         dtype=torch.float32,
                     ),
                 ),
-                KVCacheGroupSpec(
+                new_kv_cache_group(
                     ["layer2"],
-                    SlidingWindowSpec(
+                    _swa_layer(
                         block_size=block_size,
                         num_kv_heads=1,
                         head_size=1,
@@ -4365,6 +4607,33 @@ def test_eagle_identical_prompt_hit(
     assert num_tokens == expected_blocks * block_size
 
 
+@pytest.mark.parametrize("lookahead", [1, 3])
+def test_sparse_retention_keeps_the_lookahead_replay_boundary(lookahead: int):
+    """A resend reaches only the blocks whose lookahead tokens are known."""
+    block_size, num_tokens = 16, 66
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(block_size, 64, 2),
+        max_model_len=1024,
+        enable_caching=True,
+        hash_block_size=block_size,
+        num_hash_lookahead_tokens=lookahead,
+        retention_interval=0,
+    )
+    token_ids = list(range(num_tokens))
+    prime = make_request(
+        "prime", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    assert manager.allocate_slots(prime, num_tokens) is not None
+    manager.free(prime)
+
+    resend = make_request(
+        "resend", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    _, num_computed_tokens, _ = manager.get_computed_blocks(resend)
+    # With three lookahead tokens, the block ending at 64 has no hash.
+    assert num_computed_tokens == (64 if lookahead == 1 else 48)
+
+
 @pytest.mark.parametrize("lookahead", [1, 2])
 def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
     block_size = 2
@@ -4434,11 +4703,10 @@ def test_lookahead_checkpoint_has_available_hash(
 ):
     """Prefill checkpoints must be reusable at the boundary their hash proves."""
     config = _make_hybrid_kv_cache_config(64, 100, ["full", "mamba", "full"])
-    config.kv_cache_groups[0].kv_cache_spec = replace(
-        config.kv_cache_groups[0].kv_cache_spec, block_size=full_block_size
-    )
-    config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec,
+    _replace_group(config, 0, block_size=full_block_size)
+    _replace_group(
+        config,
+        1,
         block_size=512,
         num_prefill_checkpoint_blocks=checkpoint_blocks,
         prefill_checkpoint_alignment=64 if checkpoint_blocks else None,
@@ -4496,9 +4764,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
     mamba_block_size = 544
     token_ids = list(range(1249))
     config = _make_hybrid_kv_cache_config(hash_block_size, 200, ["full", "mamba"])
-    config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec, block_size=mamba_block_size
-    )
+    _replace_group(config, 1, block_size=mamba_block_size)
     manager = make_kv_cache_manager(
         config,
         max_model_len=8192,
@@ -4550,9 +4816,7 @@ def test_mamba_partial_hit_requires_matching_lookahead_tokens(
     mamba_block_size = 544
     prompt_len = 1249
     config = _make_hybrid_kv_cache_config(hash_block_size, 200, ["full", "mamba"])
-    config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec, block_size=mamba_block_size
-    )
+    _replace_group(config, 1, block_size=mamba_block_size)
     manager = make_kv_cache_manager(
         config,
         max_model_len=8192,
@@ -4600,7 +4864,7 @@ def test_mamba_partial_hit_requires_matching_lookahead_tokens(
 def test_eagle_with_sliding_window():
     """Test Eagle behavior with sliding window."""
     block_size = 16
-    sliding_window_spec = SlidingWindowSpec(
+    sliding_window_spec = _swa_layer(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
@@ -4611,7 +4875,7 @@ def test_eagle_with_sliding_window():
         KVCacheConfig(
             num_blocks=10,
             kv_cache_tensors=[],
-            kv_cache_groups=[KVCacheGroupSpec(["layer"], sliding_window_spec)],
+            kv_cache_groups=[new_kv_cache_group(["layer"], sliding_window_spec)],
         ),
         max_model_len=8192,
         enable_caching=True,
@@ -4668,9 +4932,9 @@ def test_eagle_swa_alignment_caches_extra_block():
 
     When the cache-hit alignment (lcm of per-group block sizes) is larger than
     the SWA window, the SWA mask only kept the last block of each aligned
-    segment. EAGLE/MTP lookup needs ``tail + 1`` contiguous cached blocks and
+    segment. EAGLE/MTP lookup needs `tail + 1` contiguous cached blocks and
     that +1 block lives at the next segment's first position, which was left
-    uncached. The fix caches that extra block when ``use_eagle=True``.
+    uncached. The fix caches that extra block when `use_eagle=True`.
     """
     block_size = 8
     # Full group uses 4 * block_size, so lcm/alignment is 4 * block_size.
@@ -4681,18 +4945,18 @@ def test_eagle_swa_alignment_caches_extra_block():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa_mtp"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -4751,18 +5015,18 @@ def test_eagle_swa_boundary_caches_post_boundary_block():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa_mtp"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -4805,7 +5069,7 @@ def test_eagle_swa_boundary_caches_post_boundary_block():
 def test_eagle_grouped_swa_siblings_use_same_cache_mask():
     """Grouped SWA siblings must cache the EAGLE lookahead block together."""
     block_size = 8
-    swa_spec = SlidingWindowSpec(
+    swa_spec = _swa_layer(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
@@ -4816,17 +5080,17 @@ def test_eagle_grouped_swa_siblings_use_same_cache_mask():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(["swa_main"], swa_spec),
-            KVCacheGroupSpec(["swa_mtp"], swa_spec, is_eagle_group=True),
+            new_kv_cache_group(["swa_main"], swa_spec),
+            new_kv_cache_group(["swa_mtp"], swa_spec, is_eagle_group=True),
         ],
     )
     manager = make_kv_cache_manager(
@@ -4866,18 +5130,18 @@ def test_different_block_size():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size * 2,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -4934,11 +5198,11 @@ def test_different_block_size():
 
 
 def test_hybrid_cache_blocks_swa_tail_window_only():
-    """Within each lcm-aligned segment, SWA's ``find_longest_cache_hit`` only
-    returns the trailing ``ceil((sliding_window - 1) / block_size)`` blocks
+    """Within each lcm-aligned segment, SWA's `find_longest_cache_hit` only
+    returns the trailing `ceil((sliding_window - 1) / block_size)` blocks
     (its right-to-left scan stops once a contiguous match is found). Blocks
     earlier in the segment can never serve a hit, so
-    ``HybridKVCacheCoordinator.cache_blocks`` should skip them rather than
+    `HybridKVCacheCoordinator.cache_blocks` should skip them rather than
     polluting the prefix-cache hash map."""
     block_size = 8
     # Full attn block_size=32, SWA block_size=8, sw=8 -> lcm=32.
@@ -4949,18 +5213,18 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5017,18 +5281,18 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size * 2,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5079,18 +5343,18 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5151,18 +5415,18 @@ def test_hybrid_local_kv_retention_interval_rejects_invalid(interval, expected_m
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5213,7 +5477,7 @@ def test_hybrid_local_kv_retention_interval_survives_recycling():
         num_blocks=800,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
                 MLAAttentionSpec(
                     block_size=64 * hash_block_size,
@@ -5223,9 +5487,9 @@ def test_hybrid_local_kv_retention_interval_survives_recycling():
                     tokens_per_state=4,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=16 * hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5233,9 +5497,9 @@ def test_hybrid_local_kv_retention_interval_survives_recycling():
                     sliding_window=512,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["c128"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=2 * hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5243,9 +5507,9 @@ def test_hybrid_local_kv_retention_interval_survives_recycling():
                     sliding_window=128,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["c4"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=hash_block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5296,18 +5560,18 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5375,18 +5639,18 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["swa_mtp"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5451,18 +5715,18 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["mamba_mtp"],
-                MambaSpec(
+                _mamba_layer(
                     block_size=block_size,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
@@ -5525,10 +5789,7 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
     """Sparse retention keeps the last boundary covered by lookahead hashes."""
     block_size = 32
     kv_cache_config = _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"])
-    kv_cache_config.kv_cache_groups[1].kv_cache_spec = replace(
-        kv_cache_config.kv_cache_groups[1].kv_cache_spec,
-        num_speculative_blocks=1,
-    )
+    _replace_group(kv_cache_config, 1, num_speculative_blocks=1)
     manager = make_kv_cache_manager(
         kv_cache_config=kv_cache_config,
         max_model_len=8192,
@@ -5567,12 +5828,11 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
 
 
 def test_block_lookup_cache_single_block_per_key():
-    cache = BlockHashToBlockMap()
+    block0, block1 = blocks = [KVCacheBlock(0), KVCacheBlock(1)]
+    cache = BlockHashToBlockMap(blocks)
     key0 = BlockHashWithGroupId(b"hash0")
     key1 = BlockHashWithGroupId(b"hash1")
     key2 = BlockHashWithGroupId(b"hash2")
-    block0 = KVCacheBlock(0)
-    block1 = KVCacheBlock(1)
 
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
@@ -5610,13 +5870,11 @@ def test_block_lookup_cache_single_block_per_key():
 
 
 def test_block_lookup_cache_multi_blocks_per_key():
-    cache = BlockHashToBlockMap()
+    blocks = [KVCacheBlock(i) for i in range(12)]
+    cache = BlockHashToBlockMap(blocks)
     key0 = BlockHashWithGroupId(b"hash0")
     key1 = BlockHashWithGroupId(b"hash1")
-    block00 = KVCacheBlock(0)
-    block01 = KVCacheBlock(1)
-    block10 = KVCacheBlock(10)
-    block11 = KVCacheBlock(11)
+    block00, block01, block10, block11 = blocks[0], blocks[1], blocks[10], blocks[11]
 
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
@@ -5658,18 +5916,18 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer_full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer_swa"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5711,9 +5969,9 @@ def test_full_sequence_admission_reserves_device_blocks_for_immediate_chunk(
         num_blocks=11,  # Ten usable blocks after the null block.
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5751,18 +6009,18 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer_full"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer_swa"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -5855,10 +6113,10 @@ def test_cache_hit_local_and_external():
 
 
 def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheBlock]:
-    """Grab the first ``num_blocks`` blocks at the head of the free queue
+    """Grab the first `num_blocks` blocks at the head of the free queue
     without removing them. These ref_cnt==0 blocks stand in for evictable
     cache-hit blocks left behind by a previous (e.g. preempted) request, and
-    sitting at the head guarantees a later group's external ``get_new_blocks``
+    sitting at the head guarantees a later group's external `get_new_blocks`
     would contend for them on unpatched code (issue #33775)."""
     blocks: list[KVCacheBlock] = []
     head = manager.block_pool.free_block_queue.fake_free_list_head
@@ -5884,7 +6142,7 @@ def _assert_no_double_allocation(manager: KVCacheManager, req_id: str) -> None:
 
 
 def _two_phase_block_size(manager: KVCacheManager) -> int:
-    return manager.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+    return manager.kv_cache_config.kv_cache_groups[0].block_size
 
 
 def _cross_group_cache_hit(
@@ -5895,7 +6153,7 @@ def _cross_group_cache_hit(
     num_external_blocks: int = 2,
     num_new_blocks: int = 1,
 ) -> Request:
-    """Allocate ``req_id`` with a per-group local prefix hit plus external
+    """Allocate `req_id` with a per-group local prefix hit plus external
     (connector) computed tokens, driving the coordinator's two-phase path.
     Returns the allocated request so callers can free it (e.g. to preempt)."""
     block_size = _two_phase_block_size(manager)
@@ -5998,18 +6256,18 @@ def test_swa_free_split_keeps_cached_tail_ahead_of_scratch():
         num_blocks=100,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer1"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4 * block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float16,
                 ),
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer2"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6079,9 +6337,9 @@ def _make_pure_swa_manager(block_size, sliding_window, num_blocks=100, **kwargs)
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                SlidingWindowSpec(
+                _swa_layer(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
@@ -6174,7 +6432,7 @@ def test_pure_swa_retention_latest_only():
 
 
 def test_pure_swa_dense_retention_caches_all():
-    """With retention set to ``None``, a pure-SWA model keeps dense behavior:
+    """With retention set to `None`, a pure-SWA model keeps dense behavior:
     every block boundary is a potential hit, so all blocks are cached."""
     block_size = 16
     manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
@@ -6208,7 +6466,7 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     block_size = 16
-    spec = MambaSpec(
+    spec = _mamba_layer(
         block_size=block_size,
         shapes=(1, 1),
         dtypes=(torch.float32,),
@@ -6220,7 +6478,8 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
             start_block=0,
             end_block=end_block,
             alignment_tokens=block_size,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=retention_interval,
             reachable_boundaries=(num_prompt_tokens - 1,),
@@ -6239,14 +6498,14 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
 
 
 def test_mamba_reachable_block_mask_pins_shared_prefix():
-    """A Marconi-detected shared prefix (``shared_prefix_boundary``) lands before
-    ``num_prompt`` so the replay-boundary rule alone would drop it. The mask must
+    """A Marconi-detected shared prefix (`shared_prefix_boundary`) lands before
+    `num_prompt` so the replay-boundary rule alone would drop it. The mask must
     pin the single state block ending on that boundary so sparse retention does
     not defeat cross-request shared-prefix reuse."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     block_size = 16
-    spec = MambaSpec(
+    spec = _mamba_layer(
         block_size=block_size,
         shapes=(1, 1),
         dtypes=(torch.float32,),
@@ -6261,7 +6520,8 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
             start_block=0,
             end_block=end_block,
             alignment_tokens=block_size,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=retention_interval,
             reachable_boundaries=boundaries,
@@ -6325,7 +6585,7 @@ def test_mamba_align_siblings_hit_committed_boundary_in_one_step():
 def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under
-    ``prefix_cache_retention_interval=0``. Without the pin the junction is
+    `prefix_cache_retention_interval=0`. Without the pin the junction is
     masked out and the later request misses; with it (and under dense) the reuse
     is preserved."""
     block_size = 16
@@ -6377,7 +6637,7 @@ def test_swa_reachable_block_mask_final_partial_segment():
     """Only a final SWA horizon makes its incomplete segment tail reachable."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
-    spec = SlidingWindowSpec(
+    spec = _swa_layer(
         block_size=4,
         num_kv_heads=1,
         head_size=1,
@@ -6394,7 +6654,8 @@ def test_swa_reachable_block_mask_final_partial_segment():
             start_block=start_block,
             end_block=end_block,
             alignment_tokens=36,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=use_eagle,
             final_segment_end_block=final_segment_end_block,
         )
@@ -6409,14 +6670,14 @@ def test_swa_reachable_block_mask_final_partial_segment():
 
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
-    ``need``-block sliding-window tail ending on that boundary (not a single
+    `need`-block sliding-window tail ending on that boundary (not a single
     block), so a windowed hit can land there under sparse retention."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
     block_size = 16
 
     def retained(retention, boundary, window, end_block=16):
-        spec = SlidingWindowSpec(
+        spec = _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
@@ -6430,7 +6691,8 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
             start_block=0,
             end_block=end_block,
             alignment_tokens=block_size,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=retention,
             reachable_boundaries=boundaries,
@@ -6462,7 +6724,7 @@ def test_swa_reachable_block_mask_with_dcp_scaling():
     sliding_window = 32  # need = cdiv(31, 16) = 2
 
     def get_mask(dcp_world_size):
-        spec = SlidingWindowSpec(
+        spec = _swa_layer(
             block_size=block_size,
             num_kv_heads=1,
             head_size=1,
@@ -6473,7 +6735,8 @@ def test_swa_reachable_block_mask_with_dcp_scaling():
             start_block=0,
             end_block=16,
             alignment_tokens=64,  # alignment constraint
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=64,  # sparse: 1 state per 64-token segment
             reachable_boundaries=(255,),
@@ -6517,7 +6780,7 @@ def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
     must fall back to dense (None) rather than raise."""
     from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 
-    spec = SlidingWindowSpec(
+    spec = _swa_layer(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
@@ -6529,7 +6792,8 @@ def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
         start_block=0,
         end_block=16,
         alignment_tokens=alignment_tokens,
-        kv_cache_spec=spec,
+        block_size=spec.spec.block_size,
+        manager_config=spec.manager_config,
         use_eagle=False,
         retention_interval=alignment_tokens,
         reachable_boundaries=(),
@@ -6540,12 +6804,12 @@ def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
 
 def test_mamba_reachable_block_mask_ignores_dcp():
     """Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
-    state block spans kv_cache_spec.block_size tokens regardless of DCP. The
+    state block spans the group block_size tokens regardless of DCP. The
     mask must not scale by dcp_world_size, so retention granularity is
     identical for any DCP world size."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
-    spec = MambaSpec(
+    spec = _mamba_layer(
         block_size=16,
         shapes=(1, 1),
         dtypes=(torch.float32,),
@@ -6557,7 +6821,8 @@ def test_mamba_reachable_block_mask_ignores_dcp():
             start_block=0,
             end_block=16,
             alignment_tokens=64,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=64,  # sparse: one state per 64-token segment
             reachable_boundaries=(255,),
@@ -6579,7 +6844,7 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
     never collapse sparse retention into dense caching."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
-    spec = MambaSpec(
+    spec = _mamba_layer(
         block_size=8,
         shapes=(1, 1),
         dtypes=(torch.float32,),
@@ -6591,7 +6856,8 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
             start_block=0,
             end_block=16,
             alignment_tokens=64,
-            kv_cache_spec=spec,
+            block_size=spec.spec.block_size,
+            manager_config=spec.manager_config,
             use_eagle=False,
             retention_interval=64,
             reachable_boundaries=(255,),
@@ -6610,7 +6876,7 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
 @pytest.mark.parametrize("use_eagle", [False, True])
 def test_swa_shared_prefix_reuse_under_zero_retention(use_eagle):
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
-    must stay reusable under ``prefix_cache_retention_interval=0``. Without
+    must stay reusable under `prefix_cache_retention_interval=0`. Without
     the pin the junction window is masked out and a later request misses; with
     it (and under dense) reuse is preserved. With only the SWA group drafting
     under EAGLE, the full group reports the junction at the shared prefix, but
@@ -6711,3 +6977,34 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(
+            block_size, num_blocks=50, sliding_window_blocks=2
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    token_ids = list(range(4 * block_size + 1))
+    request = make_request("0", token_ids, block_size, sha256)
+    assert (
+        manager.allocate_slots(request, len(token_ids), delay_cache_blocks=True)
+        is not None
+    )
+    assert manager.estimate_cached_tokens(request) == 0
+
+    # The block table has an unhashed tail.
+    manager.cache_blocks(request, 2 * block_size)
+    assert manager.estimate_cached_tokens(request) == 2 * block_size
+
+    manager.cache_blocks(request, 4 * block_size)
+    assert manager.estimate_cached_tokens(request) == 4 * block_size
+
+    # Evicting one group's last hashed block lowers the estimate to that group's.
+    full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
+    manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
+    assert manager.estimate_cached_tokens(request) == 3 * block_size
