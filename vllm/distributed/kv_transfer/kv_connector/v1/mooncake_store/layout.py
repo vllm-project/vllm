@@ -445,24 +445,43 @@ class TPShardedStoreLayout(StoreLayout):
         store_tp_size: int,
         tp_rank: int,
         store_chunk_size: int | None = None,
+        layer_ranges: Sequence[tuple[int, int]] | None = None,
     ) -> None:
         super().__init__(metadata, block_size, hash_block_size)
         self.store_chunk_size = store_chunk_size or block_size
         if block_size % self.store_chunk_size:
             raise ValueError("Store chunk size must divide the local block size")
         self.shards_per_rank = store_tp_size // local_tp_size
-        first_shard = tp_rank * self.shards_per_rank
-        self.store_shard_ids = tuple(
-            range(first_shard, first_shard + self.shards_per_rank)
-        )
+        self._first_shard = tp_rank * self.shards_per_rank
         self.store_tp_size = store_tp_size
+        # With layer ranges, a Store shard is a (layer range, head shard) pair
+        # numbered `range * store_tp_size + head shard`; a local slot numbers
+        # the pairs this rank owns as `range * shards_per_rank + local shard`.
+        self.layer_ranges = tuple(layer_ranges) if layer_ranges else None
+        self._range_metadata = (
+            [replace(metadata, layer_range=r) for r in self.layer_ranges]
+            if self.layer_ranges
+            else [metadata]
+        )
+        self.store_shard_ids = tuple(
+            range_index * store_tp_size + shard
+            for range_index in range(len(self._range_metadata))
+            for shard in range(
+                self._first_shard, self._first_shard + self.shards_per_rank
+            )
+        )
         self._shard_key_prefixes = {
-            shard_id: PoolKey.build_prefix(metadata, tp_rank=shard_id)
+            shard_id: PoolKey.build_prefix(
+                self._range_metadata[shard_id // store_tp_size],
+                tp_rank=shard_id % store_tp_size,
+            )
             for shard_id in self.store_shard_ids
         }
-        self._chunk_addr_bases: np.ndarray | list[np.ndarray] = []
-        self._chunk_block_strides: np.ndarray | list[np.ndarray] = []
-        self._chunk_sizes: np.ndarray | list[np.ndarray] = []
+        # Indexed [chunk][slot]: a stacked array when every slot has the same
+        # number of segments, else nested lists of per-slot arrays.
+        self._chunk_addr_bases: np.ndarray | list[list[np.ndarray]] = []
+        self._chunk_block_strides: np.ndarray | list[list[np.ndarray]] = []
+        self._chunk_sizes: np.ndarray | list[list[np.ndarray]] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
@@ -479,27 +498,56 @@ class TPShardedStoreLayout(StoreLayout):
     ) -> tuple[str, ...]:
         pp_ranks = sorted({namespace[3] for namespace in rank_namespaces})
         return tuple(
-            PoolKey.build_prefix(self.metadata, tp_rank=shard_id, pp_rank=pp_rank)
+            PoolKey.build_prefix(metadata, tp_rank=shard_id, pp_rank=pp_rank)
+            for metadata in self._range_metadata
             for shard_id in range(self.store_tp_size)
             for pp_rank in pp_ranks
         )
+
+    def _slots(self, shard_ids: np.ndarray) -> np.ndarray:
+        """Local slots of Store shards, rejecting shards of other ranks."""
+        range_indices, shards = np.divmod(shard_ids, self.store_tp_size)
+        local_shards = shards - self._first_shard
+        if np.any(
+            (local_shards < 0)
+            | (local_shards >= self.shards_per_rank)
+            | (range_indices >= len(self._range_metadata))
+        ):
+            raise ValueError("Store shard is not owned by this TP rank")
+        return range_indices * self.shards_per_rank + local_shards
 
     def _set_segment_templates(
         self,
         templates: Sequence[Sequence[tuple[list[int], list[int], list[int]]]],
     ) -> None:
-        self._chunk_addr_bases = []
-        self._chunk_block_strides = []
-        self._chunk_sizes = []
-        for chunk in templates:
-            bases, strides, sizes = zip(*chunk, strict=True)
-            self._chunk_addr_bases.append(np.asarray(bases, dtype=np.uint64))
-            self._chunk_block_strides.append(np.asarray(strides, dtype=np.uint64))
-            self._chunk_sizes.append(np.asarray(sizes, dtype=np.uint64))
-        if len({chunk.shape for chunk in self._chunk_addr_bases}) == 1:
-            self._chunk_addr_bases = np.stack(self._chunk_addr_bases)
-            self._chunk_block_strides = np.stack(self._chunk_block_strides)
-            self._chunk_sizes = np.stack(self._chunk_sizes)
+        if len({len(bases) for chunk in templates for bases, _, _ in chunk}) == 1:
+            self._chunk_addr_bases = np.asarray(
+                [[bases for bases, _, _ in chunk] for chunk in templates],
+                dtype=np.uint64,
+            )
+            self._chunk_block_strides = np.asarray(
+                [[strides for _, strides, _ in chunk] for chunk in templates],
+                dtype=np.uint64,
+            )
+            self._chunk_sizes = np.asarray(
+                [[sizes for _, _, sizes in chunk] for chunk in templates],
+                dtype=np.uint64,
+            )
+            return
+        # Layer ranges with different layer counts give slots of different
+        # segment counts.
+        self._chunk_addr_bases = [
+            [np.asarray(bases, dtype=np.uint64) for bases, _, _ in chunk]
+            for chunk in templates
+        ]
+        self._chunk_block_strides = [
+            [np.asarray(strides, dtype=np.uint64) for _, strides, _ in chunk]
+            for chunk in templates
+        ]
+        self._chunk_sizes = [
+            [np.asarray(sizes, dtype=np.uint64) for _, _, sizes in chunk]
+            for chunk in templates
+        ]
 
     def prepare_values(
         self,
@@ -512,7 +560,6 @@ class TPShardedStoreLayout(StoreLayout):
         if len(chunks) != len(shard_ids):
             raise ValueError("Each Store chunk must have one shard ID")
 
-        first_shard = self.store_shard_ids[0]
         # Small batches avoid NumPy indexing setup.
         if len(chunks) > 16 and isinstance(self._chunk_addr_bases, np.ndarray):
             starts, ends = np.asarray(chunks, dtype=np.int64).T
@@ -523,9 +570,7 @@ class TPShardedStoreLayout(StoreLayout):
                 raise ValueError("Invalid Store chunk boundary")
             block_indices, offsets = np.divmod(starts, self.block_size)
             chunk_indices = offsets // self.store_chunk_size
-            local_shards = np.asarray(shard_ids, dtype=np.int64) - first_shard
-            if np.any((local_shards < 0) | (local_shards >= self.shards_per_rank)):
-                raise ValueError("Store shard is not owned by this TP rank")
+            local_shards = self._slots(np.asarray(shard_ids, dtype=np.int64))
             if np.any(block_indices >= len(block_ids)):
                 raise ValueError("Store chunk has no local cache block")
             selected_blocks = np.fromiter(
@@ -554,9 +599,7 @@ class TPShardedStoreLayout(StoreLayout):
                 raise ValueError("Invalid Store chunk boundary")
             block_index, block_offset = divmod(start, self.block_size)
             chunk_index = block_offset // self.store_chunk_size
-            local_shard = shard_id - first_shard
-            if not 0 <= local_shard < self.shards_per_rank:
-                raise ValueError("Store shard is not owned by this TP rank")
+            local_shard = int(self._slots(np.asarray([shard_id]))[0])
             if block_index >= len(block_ids):
                 raise ValueError("Store chunk has no local cache block")
             block_id = block_ids[block_index]
@@ -592,6 +635,7 @@ class AttentionStoreLayout(TPShardedStoreLayout):
         tp_rank: int,
         layer_specs: Sequence[AttentionSpec],
         store_chunk_size: int | None = None,
+        layer_ranges: Sequence[tuple[int, int]] | None = None,
     ) -> None:
         super().__init__(
             metadata,
@@ -601,6 +645,7 @@ class AttentionStoreLayout(TPShardedStoreLayout):
             store_tp_size,
             tp_rank,
             store_chunk_size,
+            layer_ranges,
         )
         self.layer_specs = tuple(layer_specs)
         self.chunks_per_block = block_size // self.store_chunk_size
@@ -729,11 +774,22 @@ class AttentionStoreLayout(TPShardedStoreLayout):
         num_blocks: int,
         layer_names: Sequence[str] | None = None,
     ) -> None:
+        """Build descriptors from the local KV cache tensors, one per layer.
+        With layer ranges, a tensor's segments go to its range's slots."""
+        tensor_ranges = _tensor_ranges(
+            self.layer_ranges, len(kv_caches), layer_names
+        ) or [0] * len(kv_caches)
         templates: list[list[tuple[list[int], list[int], list[int]]]] = [
-            [([], [], []) for _ in range(self.shards_per_rank)]
+            [
+                ([], [], [])
+                for _ in range(len(self._range_metadata) * self.shards_per_rank)
+            ]
             for _ in range(self.chunks_per_block)
         ]
-        for cache, spec in zip(kv_caches, self.layer_specs, strict=True):
+        for cache, spec, range_index in zip(
+            kv_caches, self.layer_specs, tensor_ranges, strict=True
+        ):
+            first_slot = range_index * self.shards_per_rank
             strides = self._cache_strides(cache, spec, num_blocks)
             for chunk_index, chunk_templates in enumerate(templates):
                 state_start, state_end = self._state_range(
@@ -741,11 +797,10 @@ class AttentionStoreLayout(TPShardedStoreLayout):
                 )
                 if state_end > strides.kernel_blocks * strides.num_states:
                     raise ValueError("Store chunk exceeds the local attention block")
-                for local_shard, (
-                    addr_bases,
-                    block_strides,
-                    sizes,
-                ) in enumerate(chunk_templates):
+                for local_shard in range(self.shards_per_rank):
+                    addr_bases, block_strides, sizes = chunk_templates[
+                        first_slot + local_shard
+                    ]
                     head_start = local_shard * self.heads_per_store_shard
                     for offset, size in self._shard_segments(
                         strides, head_start, state_start, state_end

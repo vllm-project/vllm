@@ -1759,8 +1759,10 @@ class MooncakeStoreWorker:
             self._select_store_layout(extra_config)
         )
         store_layer_ranges = self._resolve_store_layer_ranges(
-            extra_config, model_config.get_total_num_hidden_layers()
+            extra_config, model_config.get_total_num_hidden_layers(), store_group_plans
         )
+        if store_namespace and store_layer_ranges is None:
+            store_namespace = f"@store_pp:{self.pp_size}{store_namespace}"
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
             tp_rank=self.tp_rank,
@@ -1887,8 +1889,7 @@ class MooncakeStoreWorker:
             return requested_store_tp_size, "", tuple(plans)
 
         store_namespace = (
-            f"@store_pp:{self.pp_size}@store_format:"
-            f"rank_local_tp{self.tp_size}_layout_{cache_layout.name}"
+            f"@store_format:rank_local_tp{self.tp_size}_layout_{cache_layout.name}"
         )
         requested_topology = (
             extra_config.get("prefill_tp_sizes")
@@ -1906,7 +1907,10 @@ class MooncakeStoreWorker:
         return None, store_namespace, None
 
     def _resolve_store_layer_ranges(
-        self, extra_config: dict[str, Any], num_layers: int
+        self,
+        extra_config: dict[str, Any],
+        num_layers: int,
+        plans: tuple[_StoreGroupPlan | None, ...] | None = None,
     ) -> tuple[tuple[int, int], ...] | None:
         """Layer ranges this PP stage stores per object, or None for one object.
 
@@ -1924,13 +1928,18 @@ class MooncakeStoreWorker:
             raise ValueError(
                 f"pp_sizes must be a list of positive integers, got {pp_sizes!r}"
             )
+        plan = plans[0] if plans else None
         fallback_reason: str | None = None
-        if self.store_tp_size is not None:
-            fallback_reason = "the Store TP layout is in use"
-        elif len(self._kv_cache_groups) != 1:
+        if len(self._kv_cache_groups) != 1:
             fallback_reason = "the KV cache has several groups"
         elif self._kv_cache_config.hisparse_host_num_blocks is not None:
             fallback_reason = "HiSparse host cache registration is per group"
+        elif plan is not None and not issubclass(plan.layout_cls, AttentionStoreLayout):
+            fallback_reason = "the Store TP layout is not an attention layout"
+        elif plan is not None and any(
+            spec != plan.layer_specs[0] for spec in plan.layer_specs
+        ):
+            fallback_reason = "the Store TP layout has layers with different specs"
         if fallback_reason is not None:
             logger.warning(
                 "Mooncake store ignores pp_sizes=%s because %s",
@@ -1998,10 +2007,23 @@ class MooncakeStoreWorker:
                 )
                 continue
             assert self.store_tp_size is not None
+            store_pp = f"@store_pp:{self.pp_size}"
+            schema_fingerprint = plan.schema_fingerprint
+            if layer_ranges is not None:
+                # Keys name their layer range and every layer has the same
+                # spec, so instances of all PP sizes share one namespace.
+                assert plan.store_chunk_size is not None
+                store_pp = ""
+                schema_fingerprint = AttentionStoreLayout.schema_fingerprint(
+                    cast(tuple[AttentionSpec, ...], plan.layer_specs[:1]),
+                    plan.logical_tp_size,
+                    plan.store_shard_count,
+                    plan.store_chunk_size,
+                )
             group_namespace = (
-                f"@store_tp:{self.store_tp_size}@store_pp:{self.pp_size}"
+                f"@store_tp:{self.store_tp_size}{store_pp}"
                 f"@store_format:{plan.layout_cls.store_format}"
-                f"@store_schema:{plan.schema_fingerprint}"
+                f"@store_schema:{schema_fingerprint}"
             )
             group_metadata = dataclasses.replace(
                 metadata,
@@ -2020,6 +2042,7 @@ class MooncakeStoreWorker:
                     tp_rank=plan.tp_rank,
                     layer_specs=cast(tuple[AttentionSpec, ...], plan.layer_specs),
                     store_chunk_size=plan.store_chunk_size,
+                    layer_ranges=layer_ranges,
                 )
             else:
                 store_layout = MambaStoreLayout(

@@ -578,6 +578,87 @@ def test_tp_shared_layout_round_trip_across_tp_sizes(
             torch.testing.assert_close(layer, expected)
 
 
+def test_tp_shared_layer_ranges_round_trip_across_pp_and_tp_sizes():
+    """PP=2 x TP=1 stages store one object per layer range and head shard, and
+    a PP=1 x TP=2 instance with the same ranges loads them into its layers.
+    The ranges hold one and two layers, so its slots differ in length."""
+    block_size = 16
+    layer_ranges = ((0, 1), (1, 3))
+    block_hash = BlockHash(b"h")
+    stored: dict[str, bytes] = {}
+    written: dict[int, torch.Tensor] = {}
+
+    for pp_rank, layer_range in enumerate(layer_ranges):
+        num_layers = layer_range[1] - layer_range[0]
+        _, layers = _physical_layer_views(
+            KVCacheLayout.LBHNC, num_layers, 1, 4, block_size, 4
+        )
+        for layer_index, layer in enumerate(layers, start=layer_range[0]):
+            layer.copy_(
+                torch.arange(layer.numel(), dtype=torch.float16).view_as(layer)
+                + layer_index * 300
+            )
+            written[layer_index] = layer
+        layout = HeadMajorStoreLayout(
+            KeyMetadata("test-model", 0, 0, 0, pp_rank),
+            block_size,
+            block_size,
+            local_tp_size=1,
+            store_tp_size=2,
+            tp_rank=0,
+            layer_specs=_attention_specs(num_layers, block_size, 4),
+            layer_ranges=(layer_range,),
+        )
+        layout.register_kv_caches(
+            layers, 1, layer_names=_layer_names(range(*layer_range))
+        )
+        shard_ids = layout.local_shard_ids
+        addrs, sizes, _ = layout.prepare_values(
+            [(0, block_size)] * len(shard_ids), [0], shard_ids
+        )
+        for shard_id, shard_addrs, shard_sizes in zip(
+            shard_ids, addrs, sizes, strict=True
+        ):
+            stored[layout.key_for(shard_id, block_hash)] = b"".join(
+                ctypes.string_at(addr, size)
+                for addr, size in zip(shard_addrs, shard_sizes, strict=True)
+            )
+
+    for tp_rank in range(2):
+        physical, layers = _physical_layer_views(
+            KVCacheLayout.LBHNC, 3, 1, 2, block_size, 4
+        )
+        physical.zero_()
+        layout = HeadMajorStoreLayout(
+            KeyMetadata("test-model", tp_rank, 0, 0, 0),
+            block_size,
+            block_size,
+            local_tp_size=2,
+            store_tp_size=2,
+            tp_rank=tp_rank,
+            layer_specs=_attention_specs(3, block_size, 2),
+            layer_ranges=layer_ranges,
+        )
+        layout.register_kv_caches(layers, 1, layer_names=_layer_names(range(3)))
+        shard_ids = layout.local_shard_ids
+        addrs, sizes, _ = layout.prepare_values(
+            [(0, block_size)] * len(shard_ids), [0], shard_ids
+        )
+        for shard_id, shard_addrs, shard_sizes in zip(
+            shard_ids, addrs, sizes, strict=True
+        ):
+            payload = stored[layout.key_for(shard_id, block_hash)]
+            offset = 0
+            for addr, size in zip(shard_addrs, shard_sizes, strict=True):
+                ctypes.memmove(addr, payload[offset : offset + size], size)
+                offset += size
+            assert offset == len(payload)
+
+        for layer_index, layer in enumerate(layers):
+            heads = slice(tp_rank * 2, tp_rank * 2 + 2)
+            torch.testing.assert_close(layer, written[layer_index][:, heads])
+
+
 @pytest.mark.parametrize(
     ("cache_layout", "layout_cls"),
     [

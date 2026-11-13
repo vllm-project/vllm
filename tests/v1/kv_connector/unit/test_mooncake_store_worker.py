@@ -3585,9 +3585,15 @@ def test_pp_stage_keys_name_their_layers(tmp_path, monkeypatch):
 
 
 @pytest.mark.cpu_test
-def test_pp_sizes_share_layer_range_keys_across_pp_sizes(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("store_config", "layout_cls"),
+    [({}, RankLocalStoreLayout), ({"store_tp_size": 2}, HeadMajorStoreLayout)],
+)
+def test_pp_sizes_share_layer_range_keys_across_pp_sizes(
+    tmp_path, monkeypatch, store_config, layout_cls
+):
     """With pp_sizes=[1, 2], a PP=1 instance stores each block as one object
-    per PP=2 stage, under the keys the PP=2 stages use."""
+    per PP=2 stage, under the keys the PP=2 stages use, also with Store TP."""
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -3616,18 +3622,22 @@ def test_pp_sizes_share_layer_range_keys_across_pp_sizes(tmp_path, monkeypatch):
             _make_vllm_config(
                 rank=rank,
                 pipeline_parallel_size=pp_size,
-                extra_config={"pp_sizes": [1, 2]},
+                extra_config={"pp_sizes": [1, 2], **store_config},
             ),
             _make_kv_cache_config(),
         )
-        return w.token_dbs[0].store_layout
+        store_layout = w.token_dbs[0].store_layout
+        assert type(store_layout) is layout_cls
+        return store_layout
 
     pp1 = layout(1, 0)
     stages = [layout(2, rank) for rank in (0, 1)]
     block_hash = BlockHash(b"h")
 
     assert [pp1.key_for(shard, block_hash) for shard in pp1.local_shard_ids] == [
-        stage.key_for(0, block_hash) for stage in stages
+        stage.key_for(shard, block_hash)
+        for stage in stages
+        for shard in stage.local_shard_ids
     ]
 
 
