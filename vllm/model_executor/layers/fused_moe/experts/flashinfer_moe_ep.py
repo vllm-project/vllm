@@ -161,7 +161,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 getattr(layer, "w2_input_scale", None),
             )
             layer._experts_sm107_loaded = True
-        # Layer parameters alias the megakernel's weight and block-scale buffers.
+        # Alias kernel buffers so supported EPLB paths permute the live weights.
         # Block-FP8 layers may name their scales weight_scale_inv.
         scale = (
             "weight_scale_inv"
