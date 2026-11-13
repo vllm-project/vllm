@@ -11,8 +11,7 @@ per decoder layer (`wide/layer.py`):
 | attention (23) | vLLM's attention, `attn` | q / k norms, RoPE and attention stay vLLM's; then o_proj (gated) + all-reduce + post-attention norm and the MoE as above |
 
 Up to 16 rows (`wide.layer.SPLIT_MAX`) each layer's MLP half is
-`mono.blocks.layer_block` from the Qwen3.8 mono decode (#60833, vendored
-unchanged under `mono/`) after the layer's split launch: a GDN layer's
+`mono.blocks.layer_block` after the layer's split launch: a GDN layer's
 residual add, input norm and GDN to the core output, an attention layer's
 input norm and qkv_proj. Up to 2 rows (`runtime.layers.MONO_GDN_MAX`) a GDN
 layer whose in_proj_qkvz is plain MXFP4 (out_proj not Hadamard-rotated) runs
@@ -83,7 +82,8 @@ FAILED after every step and the ranks raise together.
   `stages/`: the batch-tiled GEMM (`tiled`), tagged hand-offs (`tagged`),
   norms and combines (`norm`), the gated delta net (`gdn`), the MoE (`moe`),
   MXFP4 activations (`mx`), the TP exchange (`exchange`).
-- `mono/`: #60833's `gdn_block` and `layer_block`.
+- `mono/`: the narrow steps' blocks, `gdn_block` and `layer_block`, on their
+  own common code (`mono/common/`) and stages.
 
 For profiling, `runtime.layers.TRACE = True` (set in the worker before the
 model is built) builds every wide launch with per-phase clock stamps

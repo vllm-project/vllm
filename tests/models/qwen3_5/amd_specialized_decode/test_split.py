@@ -7,7 +7,7 @@ to its core, then layer_block; attention layer 1's input combine and
 qkv_proj, then layer_block on synthetic attention rows; GDN layer 2 on layer
 1's output and residual. Each reference is fed the kernels' previous outputs.
 
-layer_block's MoE is judged as #60833's tests judge it: its error to the
+layer_block's MoE is judged against the exact one: its error to the
 exact MoE (float64 on the dequantized weights, activations unquantized) at
 most `MOE_ERR_RATIO` times the stock `fused_moe`'s on the same input,
 its cosine to the exact one above `1 - 5e-2`.
@@ -334,9 +334,9 @@ def _worker(rank, S, variant, port, out_q):
         )
 
     def check_mlp(tag, res_ref, n_post, i):
-        """layer_block's residual, and its MoE output as #60833's test judges
-        it: its error to the exact MoE (of the kernel's residual's norm) at
-        most 1.02x the stock fused_moe's, cosine to the exact above 0.95."""
+        """layer_block's residual, and its MoE output: its error to the exact
+        MoE (of the kernel's residual's norm) at most `MOE_ERR_RATIO` times
+        the stock fused_moe's, cosine to the exact above 0.95."""
         note(f"{tag} residual", rel(res, res_ref), 1e-2)
         xn = R.gemma_norm(res.double(), n_post, eps)
         m = moes[i]
