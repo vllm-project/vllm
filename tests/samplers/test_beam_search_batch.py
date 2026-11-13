@@ -55,9 +55,7 @@ def beam_batch_llm(tmp_path_factory, vllm_runner):
 @pytest.mark.parametrize("concurrency_limit", [None, 1, 8])
 @pytest.mark.parametrize("use_tqdm", [False, True])
 @pytest.mark.parametrize("structured", [False, True])
-def test_beam_batch_empty(
-    beam_batch_llm, concurrency_limit, use_tqdm, structured
-):
+def test_beam_batch_empty(beam_batch_llm, concurrency_limit, use_tqdm, structured):
     params = BeamSearchParams(
         beam_width=2,
         max_tokens=3,
@@ -65,19 +63,20 @@ def test_beam_batch_empty(
         if structured
         else None,
     )
-    assert beam_batch_llm.beam_search(
-        [],
-        params,
-        concurrency_limit=concurrency_limit,
-        use_tqdm=use_tqdm,
-    ) == []
+    assert (
+        beam_batch_llm.beam_search(
+            [],
+            params,
+            concurrency_limit=concurrency_limit,
+            use_tqdm=use_tqdm,
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize("concurrency_limit", [0, -1, -8])
 @pytest.mark.parametrize("empty", [False, True])
-def test_beam_batch_reject_nonpositive_limit(
-    beam_batch_llm, concurrency_limit, empty
-):
+def test_beam_batch_reject_nonpositive_limit(beam_batch_llm, concurrency_limit, empty):
     prompts = [] if empty else [{"prompt_token_ids": [1, 5, 6]}]
     with pytest.raises(ValueError, match="concurrency_limit must be greater than zero"):
         beam_batch_llm.beam_search(
@@ -89,9 +88,7 @@ def test_beam_batch_reject_nonpositive_limit(
 
 @pytest.mark.parametrize("concurrency_limit", [None, 1, 2, 8])
 @pytest.mark.parametrize("tokenized", [False, True])
-def test_beam_batch_preserves_generation(
-    beam_batch_llm, concurrency_limit, tokenized
-):
+def test_beam_batch_preserves_generation(beam_batch_llm, concurrency_limit, tokenized):
     prompts = (
         [
             {"prompt_token_ids": [1, 5, 6]},
@@ -99,12 +96,14 @@ def test_beam_batch_preserves_generation(
             {"prompt_token_ids": [1, 11, 12, 13]},
         ]
         if tokenized
-        else [{"prompt": "word1 word2"}, {"prompt": "word4"}, {"prompt": "word7 word8 word9"}]
+        else [
+            {"prompt": "word1 word2"},
+            {"prompt": "word4"},
+            {"prompt": "word7 word8 word9"},
+        ]
     )
     params = BeamSearchParams(beam_width=2, max_tokens=3, ignore_eos=True)
-    reference = [
-        beam_batch_llm.beam_search([prompt], params)[0] for prompt in prompts
-    ]
+    reference = [beam_batch_llm.beam_search([prompt], params)[0] for prompt in prompts]
     outputs = beam_batch_llm.beam_search(
         prompts, params, concurrency_limit=concurrency_limit
     )
