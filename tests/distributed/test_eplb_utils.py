@@ -486,3 +486,19 @@ def test_fault_tolerance_reset_refuses_a_running_async_eplb_cycle(
     assert run.state.async_worker_error is run.failure
     reset_eplb_async_state(runner)
     assert run.state.async_worker_error is None
+
+
+def test_fault_tolerance_reset_succeeds_after_failed_rearrange_signal(
+    dist_init, monkeypatch
+):
+    """A rearrange signal that fails queues no cycle, so the FT reset must not
+    wait for one."""
+    run = _start_ft_async_eplb(monkeypatch)
+    run.state.parallel_config.cpu_distributed_timeout_seconds = 0
+    monkeypatch.setattr(
+        run.state.rearrange_event, "record", Mock(side_effect=RuntimeError("injected"))
+    )
+    with pytest.raises(RuntimeError, match="injected"):
+        _signal_rearrangement(run.state)
+
+    reset_eplb_async_state(SimpleNamespace(eplb_state=run.state))
