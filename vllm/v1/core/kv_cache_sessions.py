@@ -82,7 +82,7 @@ class KVCacheSessions:
     def register(
         self,
         session_id: str,
-        block_hashes: Sequence[BlockHash],
+        block_hashes: list[BlockHash],
         blocks_by_group: Sequence[Sequence[KVCacheBlock]],
     ) -> None:
         """Make a request's blocks the session's retained prefix. Must be
@@ -104,7 +104,7 @@ class KVCacheSessions:
                     # and only take new ones for the tail.
                     kept, keys = old_blocks, old_keys
                     num_lookup_blocks = old.num_lookup_blocks[group_id]
-                    old.blocks[group_id] = old.keys[group_id] = []
+                    old.blocks[group_id], old.keys[group_id] = [], []
             for block in blocks[len(kept) :]:
                 if block.block_hash is not None:
                     block.session_ref += 1
@@ -137,7 +137,7 @@ class KVCacheSessions:
             self._release(self._sessions.popitem(last=False)[1])
 
     def get_blocks(
-        self, session_id: str, block_hashes: Sequence[BlockHash]
+        self, session_id: str, block_hashes: list[BlockHash]
     ) -> dict[int, list[KVCacheBlock]] | None:
         """Return, per KV cache group, the session's cached blocks that hold
         the start of a request with `block_hashes`, or None if it does not

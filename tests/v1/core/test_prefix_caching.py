@@ -7248,7 +7248,7 @@ def _check_session_invariants(manager: KVCacheManager) -> None:
         b.block_id for b in pool.blocks if b.ref_cnt == 0 and not b.is_null
     }
 
-    expected = Counter()
+    expected: Counter[int] = Counter()
     if manager.sessions is not None:
         for session in manager.sessions._sessions.values():
             expected.update(
