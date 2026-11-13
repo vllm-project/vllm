@@ -6,6 +6,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    make_kv_cache_group,
+    make_kv_cache_group_from_specs,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     TransferJob,
@@ -13,20 +17,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    CanonicalKVCacheTensor,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingManager,
@@ -120,6 +123,15 @@ def _make_worker(
         kv_cache_config=kv_cache_config,
     )
     worker.worker = MagicMock()
+
+    page_size = 128
+    tensor = torch.zeros(NUM_BLOCKS, page_size, dtype=torch.int8, device=DEVICE_TYPE)
+    worker._kv_caches = CanonicalKVCaches(
+        tensors=[CanonicalKVCacheTensor(tensor=tensor, page_size_bytes=page_size)],
+        group_data_refs=[
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size)]
+        ],
+    )
 
     return worker, spec
 
@@ -403,9 +415,6 @@ def test_register_kv_caches(backend):
     run of the shared allocation starting at offset 0, so layer i of every group
     aliases the same bytes.
 
-    Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
-    the raw per-layer kv_caches registered by the connector.
-
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
     """
@@ -430,7 +439,7 @@ def test_register_kv_caches(backend):
     backend_cls = AttentionBackendEnum[backend].get_class()
     indexer_backend_cls = cast(type[AttentionBackend], DeepseekV32IndexerBackend)
 
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -503,14 +512,10 @@ def test_register_kv_caches(backend):
     ]
 
     kv_cache_groups = [
-        KVCacheGroupSpec(layer_names=attn_layer_names, kv_cache_spec=attn_spec),
-        KVCacheGroupSpec(layer_names=mla_layer_names, kv_cache_spec=mla_spec),
-        KVCacheGroupSpec(
-            layer_names=unaligned_mamba_layer_names, kv_cache_spec=unaligned_mamba_spec
-        ),
-        KVCacheGroupSpec(
-            layer_names=aligned_mamba_layer_names, kv_cache_spec=aligned_mamba_spec
-        ),
+        make_kv_cache_group(attn_layer_names, attn_spec),
+        make_kv_cache_group(mla_layer_names, mla_spec),
+        make_kv_cache_group(unaligned_mamba_layer_names, unaligned_mamba_spec),
+        make_kv_cache_group(aligned_mamba_layer_names, aligned_mamba_spec),
     ]
 
     attn_groups = [
@@ -622,7 +627,7 @@ def test_register_kv_caches(backend):
 
 
 def test_register_packed_kv_caches_skips_scratch_group():
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -641,12 +646,11 @@ def test_register_packed_kv_caches_skips_scratch_group():
             )
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layers, attn_spec),
-            KVCacheGroupSpec(
+            make_kv_cache_group(layers, attn_spec),
+            make_kv_cache_group(
                 ["scratch"],
-                CircularBufferSpec(
-                    block_size=4, num_kv_heads=1, head_size=1, dtype=DTYPE
-                ),
+                AttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=DTYPE),
+                CircularBufferManager,
             ),
         ],
     )
@@ -664,11 +668,11 @@ def test_register_packed_kv_caches_skips_scratch_group():
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
 def test_register_kv_caches_uniform_type(backend):
-    """Test register_kv_caches with UniformTypeKVCacheSpecs.
+    """Test register_kv_caches with a group whose layer layouts differ.
 
     Two attention layers use the same backend but different num_kv_heads,
     giving them different per-layer page sizes. Each has its own
-    KVCacheTensor and are wrapped in a UniformTypeKVCacheSpecs group.
+    KVCacheTensor and they share one KV cache group.
     Verifies that each layer gets the correct tensor_idx and
     page_size_bytes in its block data ref.
     """
@@ -678,24 +682,19 @@ def test_register_kv_caches_uniform_type(backend):
 
     layer_a = "model.layers.0.self_attn"
     layer_b = "model.layers.1.self_attn"
-    spec_a = FullAttentionSpec(
+    spec_a = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    spec_b = FullAttentionSpec(
+    spec_b = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS * 2,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
     assert spec_a.page_size_bytes != spec_b.page_size_bytes
-
-    uniform_spec = UniformTypeKVCacheSpecs(
-        block_size=BLOCK_SIZE,
-        kv_cache_specs={layer_a: spec_a, layer_b: spec_b},
-    )
 
     # The group packs its two layers densely, one run each as their pages differ:
     # layer_a occupies the first page of every block, layer_b the rest.
@@ -718,10 +717,7 @@ def test_register_kv_caches_uniform_type(backend):
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=[layer_a, layer_b],
-                kv_cache_spec=uniform_spec,
-            )
+            make_kv_cache_group_from_specs({layer_a: spec_a, layer_b: spec_b})
         ],
     )
 

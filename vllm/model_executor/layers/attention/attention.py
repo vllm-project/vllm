@@ -45,10 +45,14 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
+    KVCacheLayerConfig,
     KVCacheSpec,
-    SlidingWindowSpec,
     get_kv_quant_mode,
 )
 
@@ -104,14 +108,18 @@ def _largest_kernel_block_within(
     page_budget: int,
     fallback: int,
     kv_cache_spec: KVCacheSpec | None = None,
+    divisor_of: int | None = None,
 ) -> int:
-    """Largest supported kernel block size whose page fits in ``page_budget``.
+    """Largest supported kernel block size whose page fits in `page_budget`.
 
     A padded spec (e.g. skip-quant layer) that pads its page up to a large shared page
-    wastes ``page_budget - block*per_token`` bytes per block. Picking the largest kernel
-    block whose natural page still fits under ``page_budget`` minimizes that waste.
-    ``MultipleOf`` declarations are expanded to the largest aligned block that fits.
+    wastes `page_budget - block*per_token` bytes per block. Picking the largest kernel
+    block whose natural page still fits under `page_budget` minimizes that waste.
+    `MultipleOf` declarations are expanded to the largest aligned block that fits.
     Falls back to the smallest supported block when nothing fits.
+
+    With `divisor_of`, prefer the largest fitting block that divides it, so the
+    page can be scaled to `divisor_of` by an integer ratio instead of padded.
     """
     from vllm.v1.attention.backend import MultipleOf
 
@@ -127,6 +135,17 @@ def _largest_kernel_block_within(
         return fallback
     smallest = min(candidates)
     fitting = [b for b in candidates if b * per_token_bytes <= page_budget]
+    if divisor_of is not None:
+        dividing = [b for b in fitting if divisor_of % b == 0]
+        dividing.extend(
+            b
+            for s in sizes
+            if isinstance(s, MultipleOf)
+            for b in range(s.base, max_block_size + 1, s.base)
+            if divisor_of % b == 0
+        )
+        if dividing:
+            return max(dividing)
     return max(fitting) if fitting else smallest
 
 
@@ -352,6 +371,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
+        self.act_dtype = dtype
         if attn_backend is None:
             self.attn_backend = get_attn_backend(
                 head_size,
@@ -601,8 +621,8 @@ class Attention(nn.Module, AttentionLayerBase):
         s += f", backend={self.impl.__class__.__name__}"
         return s
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        self.impl.process_weights_after_loading(act_dtype)
+    def process_weights_after_loading(self) -> None:
+        self.impl.process_weights_after_loading(self.act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -618,7 +638,7 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
         # Encoder-only attention is prefill-only and keeps no autoregressive KV
@@ -652,37 +672,42 @@ class Attention(nn.Module, AttentionLayerBase):
             shared_page = vllm_config.cache_config.skip_page_size_padded
             # The backend owns its packing
             kv_cache_spec = self.attn_backend.customize_spec(
-                SlidingWindowSpec(
+                AttentionSpec(
                     block_size=1,
                     num_kv_heads=self.num_kv_heads,
                     head_size=self.head_size,
                     head_size_v=self.head_size_v,
                     dtype=self.kv_cache_torch_dtype,
                     kv_quant_mode=quant_mode,
-                    sliding_window=self.sliding_window,
                 )
             )
             sw_per_token = kv_cache_spec.real_page_size_bytes
             page_budget = shared_page or sw_per_token * block_size
+            # Without a shared page, prefer a block that divides the primary
+            # block: ``unify`` pads any other block's page, and a padded page
+            # disables fine-grained prefix-cache hits on this group.
             sw_block_size = _largest_kernel_block_within(
                 self.attn_backend,
                 sw_per_token,
                 page_budget,
                 block_size,
                 kv_cache_spec,
+                divisor_of=None if shared_page else block_size,
             )
-            return SlidingWindowSpec(
+            spec = AttentionSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
-                sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
             )
+            return SlidingWindowManager.layer_config(
+                spec, sliding_window=self.sliding_window
+            )
         else:
-            return FullAttentionSpec(
+            spec = AttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
@@ -690,6 +715,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
             )
+            return FullAttentionManager.layer_config(spec)
 
 
 def get_attention_context(

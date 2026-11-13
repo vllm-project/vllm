@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import torch
 
-from tests.utils import multi_gpu_marks
+from tests.utils import multi_gpu_marks, multi_gpu_only
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -19,8 +19,9 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.reader import Counter, Metric
 
-DEEPSEEK_MTP_MAIN_RANDOM = "luccafong/deepseek_mtp_main_random"
-DEEPSEEK_MTP_DRAFT_RANDOM = "luccafong/deepseek_mtp_draft_random"
+DEEPSEEK_MTP_MAIN_RANDOM = "vllm-project/deepseek_mtp_main_random"
+DEEPSEEK_MTP_DRAFT_RANDOM = "vllm-project/deepseek_mtp_draft_random"
+QWEN3_NEXT = "Qwen/Qwen3-Next-80B-A3B-Instruct"
 
 PROMPT = "The capital of France is"
 MAX_TOKENS = 8
@@ -267,3 +268,33 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: in
         f"  spec_tokens   = {spec_tokens}\n"
         f"  no_spec_tokens= {no_spec_tokens}"
     )
+
+
+@multi_gpu_only(num_gpus=2)
+def test_mtp_drafter_runs_as_one_pp_stage(vllm_runner):
+    """The drafter runs whole on the last PP rank, as one pipeline stage.
+
+    Qwen3-Next's MTP head branches on its pipeline stage. Built and run with the
+    target's stage, the last rank's drafter expects intermediate tensors and the
+    engine fails to start.
+    """
+    with vllm_runner(
+        QWEN3_NEXT,
+        block_size=None,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+        load_format="dummy",
+        # Leaves a full-attention layer on each of the two stages.
+        hf_overrides={"num_hidden_layers": 8},
+        pipeline_parallel_size=2,
+        distributed_executor_backend="mp",
+        speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+        max_model_len=MAX_MODEL_LEN,
+        gpu_memory_utilization=GPU_MEM_UTIL,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        disable_log_stats=False,
+        trust_remote_code=False,
+    ) as runner:
+        _generate_token_ids_inline(runner.llm)
+        assert _spec_decode_num_drafts(runner.llm.get_metrics()) > 0

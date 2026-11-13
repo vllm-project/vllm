@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.kv_connector.unit.utils import create_vllm_config
+from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -22,19 +25,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventsTracker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
-    GroupOffloadConfig,
     OffloadingConnectorScheduler,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
-    KVCacheSpecKind,
-    MambaSpec,
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
+    GroupOffloadConfig,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    MambaManager,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpecKind,
+)
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -43,10 +48,12 @@ from vllm.v1.kv_offload.base import (
     OffloadingKVEventsConfig,
     OffloadKey,
     ReqContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+from vllm.v1.request import Request
 
 _CPU_MEDIUM = Medium.CPU
 _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
@@ -102,35 +109,22 @@ def _group_config(
         tokens_per_hash = block_size
     tokens_per_chunk = block_size * blocks_per_chunk
     assert tokens_per_chunk % tokens_per_hash == 0
-    kv_spec: KVCacheSpec
     if mamba:
         # A recurrent group: one state per chunk, offloaded in align mode.
-        kv_spec = MambaSpec(
-            block_size=block_size,
-            shapes=((1, 1),),
-            dtypes=(torch.float32,),
-            mamba_cache_mode="align",
-        )
+        manager_config = MambaManager.config(mamba_cache_mode="align")
         sliding_window_size_in_chunks = 1
         event_spec = _MAMBA_EVENT_SPEC
     else:
-        kv_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-        )
+        manager_config = FullAttentionManager.config()
         event_spec = _FULL_ATTENTION_EVENT_SPEC
-    manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
-    assert manager_cls is not None
     return GroupOffloadConfig(
         group_idx=group_idx,
         tokens_per_block=block_size,
         tokens_per_chunk=tokens_per_chunk,
         hashes_per_chunk=tokens_per_chunk // tokens_per_hash,
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
-        kv_cache_spec=kv_spec,
-        manager_cls=manager_cls,
+        block_size=block_size,
+        manager_config=manager_config,
         kv_event_group_spec=event_spec,
         requires_cow_source=mamba,
     )
@@ -351,6 +345,93 @@ def test_take_events_forwards_locality_to_remove():
     assert len(events) == 1
     assert isinstance(events[0], BlockRemoved)
     assert events[0].locality == "LOCAL"
+
+
+@pytest.mark.parametrize("record_snapshot", [False, True])
+def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(block_size=4, blocks_per_chunk=2)
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[1], group_config.group_idx)
+    context.set_offload_key_position(key, 8)
+    tracker = _tracker()
+    tracker.num_hash_lookahead_tokens = 5
+    tracker.on_new_request(context, request, (group_config,))
+    if record_snapshot:
+        tracker.record_store(request, group_config, 0, key)
+        # Reuse the existing snapshot instead of rebuilding from the request.
+        tracker._pending_event_metadata[key].token_ids = ()
+    request_ref = weakref.ref(request)
+    del request
+    gc.collect()
+    assert request_ref() is None
+
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key],
+                medium=Medium.CPU,
+                removed=False,
+                removal_expected=True,
+                req_context=context,
+            )
+        ]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+    assert stored.token_ids == ([] if record_snapshot else list(range(1, 9)))
+    assert stored.block_size == 4
+    assert stored.lookahead_token_ids == [
+        list(range(5, 10)),
+        list(range(9, 14)),
+    ]
+    assert key in tracker._pending_event_metadata
+
+    [removed] = tracker.take_events(
+        [OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True)]
+    )
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+    assert key not in tracker._pending_event_metadata
+
+
+def test_mamba_store_uses_request_context():
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(
+        group_idx=1, block_size=8, tokens_per_hash=4, mamba=True
+    )
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[3], group_config.group_idx)
+    context.set_offload_key_position(key, 16)
+    tracker = _tracker()
+    tracker.on_new_request(context, request, (group_config,))
+
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key], medium=Medium.CPU, removed=False, req_context=context
+            )
+        ]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(block_hashes[3])]
+    assert stored.parent_block_hash == _wire_hash(block_hashes[1])
+    assert stored.token_ids == []
+    assert stored.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
 
 
 def test_take_events_publishes_routable_block_stored():
@@ -696,7 +777,8 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
 
     primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
     ctx = ReqContext(req_id="promotion")
-    primary.prepare_store([key], ctx)
+    primary.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     assert (
         OffloadingConnectorScheduler._maximal_prefix_lookup(
@@ -719,8 +801,11 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
         assert event.token_ids == req.all_token_ids
         assert event.block_hashes == [_wire_hash(_hash(0))]
 
-    primary.complete_store([key], ctx, success=success)
-    events = list(tracker.take_events(primary.take_events()))
+    primary.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=success)
+    raw_events = list(primary.take_events())
+    if success:
+        assert raw_events[0].removal_expected
+    events = list(tracker.take_events(raw_events))
     if success:
         assert primary.lookup(key, ctx) is LookupResult.HIT
         assert len(events) == 1 and isinstance(events[0], BlockStored)
@@ -744,13 +829,13 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
     ready_key, failed_key = [make_offload_key(_hash(i), 0) for i in (1, 2)]
     primary = CPUOffloadingManager(num_chunks=2, enable_events=True)
     ctx = ReqContext(req_id="shared-prefix")
-    primary.prepare_store([ready_key], ctx)
+    primary.prepare_store([ready_key], ctx, trigger=StoreTrigger.ON_COMPUTE)
     tracker.record_store(ready_req, group, 0, ready_key)
-    primary.complete_store([ready_key], ctx)
+    primary.complete_store([ready_key], ctx, trigger=StoreTrigger.ON_COMPUTE)
     [stored] = tracker.take_events(primary.take_events())
     assert stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
 
-    primary.prepare_store([failed_key], ctx)
+    primary.prepare_store([failed_key], ctx, trigger=StoreTrigger.ON_COMPUTE)
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     assert (
         OffloadingConnectorScheduler._maximal_prefix_lookup(
@@ -758,7 +843,9 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
         )
         is None
     )
-    primary.complete_store([failed_key], ctx, success=False)
+    primary.complete_store(
+        [failed_key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=False
+    )
     assert list(tracker.take_events(primary.take_events())) == []
     assert primary.lookup(ready_key, ctx) is LookupResult.HIT
     assert ready_key in tracker._pending_event_metadata
@@ -775,7 +862,8 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
     ctx = ReqContext(req_id="retry")
     scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
     for attempt in range(2):
-        primary.prepare_store([key], ctx)
+        primary.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
         assert (
             OffloadingConnectorScheduler._maximal_prefix_lookup(
                 scheduler, [key], ctx, req, group, 0
@@ -783,7 +871,9 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
             is None
         )
         if attempt == 0:
-            primary.complete_store([key], ctx, success=False)
+            primary.complete_store(
+                [key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=False
+            )
     # Drain the old failure only after the retry captured its metadata.
     old_cleanup = list(tracker.take_events(primary.take_events()))
     [inventory] = tracker.take_events(
@@ -793,7 +883,7 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
     assert inventory.token_ids == req.all_token_ids
     assert old_cleanup == []
     assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
-    primary.complete_store([key], ctx, success=success)
+    primary.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=success)
     events = list(tracker.take_events(primary.take_events()))
     assert len(events) == int(success)
     assert key in tracker._pending_event_metadata
@@ -961,9 +1051,9 @@ def test_tiering_accepts_self_describing_kv_events():
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4,
                     num_kv_heads=1,
                     head_size=1,
@@ -1003,9 +1093,9 @@ def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
         num_blocks=0,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=4,
                     num_kv_heads=1,
                     head_size=1,
@@ -1020,8 +1110,8 @@ def _build_tiering_spec(secondary_tiers, *, top_level_backpressure=None):
 def test_partial_tier_backpressure_inherits_top_level_defaults():
     """A partial tier override still inherits missing fields.
 
-    Field-by-field merge means an override that sets only ``high_water_s``
-    keeps ``backpressure_cls`` (and any other field) from the top-level
+    Field-by-field merge means an override that sets only `high_water_s`
+    keeps `backpressure_cls` (and any other field) from the top-level
     default, so the resolved dict reaching the factory is complete.
     """
     spec = _build_tiering_spec(
@@ -1068,3 +1158,36 @@ def test_tier_override_wins_over_top_level():
 def test_tier_without_backpressure_stays_unconfigured():
     spec = _build_tiering_spec([{"type": "example"}])
     assert "backpressure" not in spec.secondary_tier_configs[0]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.cpu_test
+def test_events_preserve_lookahead_tokens(partial):
+    from vllm import SamplingParams
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+    from vllm.v1.request import Request
+
+    init_none_hash(sha256)
+    tracker = _tracker()
+    tracker.num_hash_lookahead_tokens = 5
+    req = Request(
+        "lookahead",
+        list(range(21)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, 5),
+    )
+    group = _group_config(block_size=8, blocks_per_chunk=2, tokens_per_hash=4)
+    end = 12 if partial else 16
+    key = make_offload_key(req.block_hashes[end // 4 - 1], 0)
+    if partial:
+        tracker.record_partial_store(req, group, end, key)
+    else:
+        tracker.record_store(req, group, 0, key)
+    [event] = tracker.take_events([_stored_event([key])])
+    step = 4 if partial else 8
+    assert event.token_ids == list(range(end))
+    assert event.lookahead_token_ids == [
+        list(range(i, i + 5)) for i in range(step, end + 1, step)
+    ]

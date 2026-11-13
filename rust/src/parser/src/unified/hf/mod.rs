@@ -17,7 +17,7 @@
 
 mod content;
 mod parser;
-mod pattern;
+mod pcre;
 mod spec;
 mod template;
 mod transform;

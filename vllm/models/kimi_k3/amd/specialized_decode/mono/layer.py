@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2 ``layer_post``: one Kimi-K3 layer from the attention's core output (the
+"""K2 `layer_post`: one Kimi-K3 layer from the attention's core output (the
 o_proj input) to the layer's MoE output, in one launch -- K2a's o_proj, its
-all-reduce and the MLP AttnRes seam, then K2b's latent MoE (``moe``).
+all-reduce and the MLP AttnRes seam, then K2b's latent MoE (`moe`).
 
-As ATOM's ``layer_post``, the two halves share the launch so that the MoE's
+As ATOM's `layer_post`, the two halves share the launch so that the MoE's
 static weights stream while the AttnRes chain (partials -> reduce -> slice ->
 gate -> mix) is still settling: the CTAs that will run the router, latent and
 shared gate/up GEMVs issue their weights before they first wait.
@@ -17,8 +17,8 @@ shared gate/up GEMVs issue their weights before they first wait.
     every CTA        ug; down (0 .. 223) or the shared down (224 .. 255);
                      lnorm (56 .. 83), up (0 .. 55), reduce (200 .. 255)
 
-An MLA layer's K2 runs its M1b (``mla_back``) first, in the same launch: every
-CTA pushes, CTAs 0 .. 55 combine and write ``core`` (a flag a head and 4
+An MLA layer's K2 runs its M1b (`mla_back`) first, in the same launch: every
+CTA pushes, CTAs 0 .. 55 combine and write `core` (a flag a head and 4
 tokens), and the o_proj CTAs, their weights in flight, poll the flags of a core
 tile before they load it. That removes the M1b -> K2 launch boundary.
 """
@@ -169,7 +169,7 @@ class K2Build:
 
 
 def k2_sent(key: K2Build) -> bool:
-    """(OPT_SENTS) Whether build ``key``'s all-reduces go through the sentinel
+    """(OPT_SENTS) Whether build `key`'s all-reduces go through the sentinel
     regions. The one predicate the push and the reduce of every one of them
     use: a push the reduce does not take would leave words neither polled nor
     re-armed, and the next launch's reader would hang."""
@@ -215,7 +215,7 @@ def sent_bytes() -> int:
 
 def rlogp_half_bytes() -> int:
     """(OPT_RLOG_PARTS) One epoch parity's RLOGP, tagged pairs
-    [src rank][part][token][router row], SENT_ROWS rows."""
+    `[src rank][part][token][router row]`, SENT_ROWS rows."""
     return TP_ * k2b.R_PARTS * SENT_ROWS * (k2b.E // TP_) * 8
 
 
@@ -239,7 +239,7 @@ def k2_rlogp(key: K2Build) -> bool:
 def tag_layout() -> dict:
     """(OPT_TAG_X) The tagged rows' scratch region (name -> (byte offset,
     bytes)), past every launch's layout at its largest (K1's, M1a's,
-    K2's: as ``MonoRunner`` sizes the scratch), so no other launch's plain
+    K2's: as `MonoRunner` sizes the scratch), so no other launch's plain
     word sits where these keep tags."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda, mla
 
@@ -365,7 +365,7 @@ def scratch_bytes(key: K2Build) -> int:
 
 
 def xl_words(s):
-    """The int32 words of the bf16 row tile LDS ``xl`` the GEMV stages share:
+    """The int32 words of the bf16 row tile LDS `xl` the GEMV stages share:
     the core tile (o_proj), the early stages' x tiles, every h row (the shared
     down) and the LN tile (up)."""
     tiled = [k2a.OK, HIDDEN // k2b.R_PARTS, HIDDEN // k2b.L_PARTS, HIDDEN, k2b.LAT]
@@ -1081,11 +1081,11 @@ def k2_launch(
     m1b_in=None,
     m1c_in=None,
 ):
-    """Host launcher: ``core`` [S, 1536] (o_proj's input), ``prefix`` updated in
-    place, ``out`` the MoE output [S, 7168]; MoE weights as ``moe``. With
-    ``key.m1b_qlen``, ``m1b_in`` is ``mla_back.mla_post``'s (o, lse, seq_lens,
-    qsl, w_v, w_v_scale, gate) and this launch writes ``core`` first. With
-    ``key.m1c``, ``m1c_in`` is ``mla_attn.mla_attn``'s (q, kv, pages, indptr,
+    """Host launcher: `core` [S, 1536] (o_proj's input), `prefix` updated in
+    place, `out` the MoE output [S, 7168]; MoE weights as `moe`. With
+    `key.m1b_qlen`, `m1b_in` is `mla_back.mla_post`'s (o, lse, seq_lens,
+    qsl, w_v, w_v_scale, gate) and this launch writes `core` first. With
+    `key.m1c`, `m1c_in` is `mla_attn.mla_attn`'s (q, kv, pages, indptr,
     scale, kv_scale), its partials M1b's o / lse (split 0's views)."""
     assert (m1b_in is not None) == (key.m1b_qlen > 0)
     assert (m1c_in is not None) == key.m1c
