@@ -799,8 +799,6 @@ class JinaRankingTokenEmbedIOProcessor(
 
         # The JinaForRanking model concatenates docs first, then query.
         # Let's stay consistent with this novel design.
-        # `format_docs_prompts_func` returns a single composed prompt, so wrap
-        # it in a one-element list to match `inputs_seq: list[PoolingInput]`.
         new_inputs_seq: list[PoolingInput] = [
             self.format_docs_prompts_func(
                 query=text_prompts[-1], docs=text_prompts[:-1]

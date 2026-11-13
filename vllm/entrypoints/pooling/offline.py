@@ -73,7 +73,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
     def encode(
         self,
-        prompts: PoolingInput | list[PoolingInput] | DataPrompt,
+        prompts: PoolingInput | Sequence[PoolingInput] | DataPrompt,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
@@ -249,7 +249,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
     def embed(
         self,
-        prompts: PoolingInput | list[PoolingInput],
+        prompts: PoolingInput | Sequence[PoolingInput],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
@@ -338,7 +338,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
     def classify(
         self,
-        prompts: PoolingInput | list[PoolingInput],
+        prompts: PoolingInput | Sequence[PoolingInput],
         *,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,

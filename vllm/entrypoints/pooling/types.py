@@ -207,7 +207,7 @@ class OfflineInputsContext:
     def to_encode_context(
         self,
         *,
-        inputs_seq: list[PoolingInput],
+        inputs_seq: Sequence[PoolingInput],
         pooling_params: PoolingParams | Sequence[PoolingParams] | None,
     ) -> "OfflineEncodeInputsContext":
         """Derive an `OfflineEncodeInputsContext` from this context."""
@@ -234,7 +234,7 @@ class OfflineInputsContext:
 
 @dataclass
 class OfflineEncodeInputsContext(OfflineInputsContext):
-    inputs_seq: list[PoolingInput]
+    inputs_seq: Sequence[PoolingInput]
     pooling_params: PoolingParams | Sequence[PoolingParams] | None
 
 
@@ -246,7 +246,7 @@ class OfflineScoringInputsContext(OfflineInputsContext):
     def to_encode_context(
         self,
         *,
-        inputs_seq: list[PoolingInput],
+        inputs_seq: Sequence[PoolingInput],
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
     ) -> "OfflineEncodeInputsContext":
         # Default to the scoring ctx's own `pooling_params` so callers do not
@@ -342,10 +342,10 @@ def is_conversations(prompt_or_conversations: PoolingInput) -> TypeGuard[ChatTyp
 
 
 def input_to_seq(
-    input_or_inputs: PoolingInput | list[PoolingInput],
-) -> list[PoolingInput]:
+    input_or_inputs: PoolingInput | Sequence[PoolingInput],
+) -> Sequence[PoolingInput]:
     # Non-list input is a single prompt (str / prompt dict / embeds prompt).
-    if not isinstance(input_or_inputs, list):
+    if not isinstance(input_or_inputs, (list, tuple)):
         return [input_or_inputs]
 
     # Empty list: nothing to normalize.
