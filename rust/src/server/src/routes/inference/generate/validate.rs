@@ -17,11 +17,12 @@ pub(crate) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
-    // TODO: support `output_mode: "text"`.
-    if request.output_mode == Some(GenerateOutputMode::Text) {
+    if request.output_mode == Some(GenerateOutputMode::Text)
+        && request.sampling_params.detokenize == Some(false)
+    {
         bail_invalid_request!(
             param = "output_mode",
-            "Only output_mode=\"tokens\" is supported."
+            "output_mode='text' requires sampling_params.detokenize to be true"
         );
     }
 
@@ -129,23 +130,26 @@ mod tests {
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
+    /// Like Python, the `text` level needs the output to be detokenized.
     #[test]
-    fn validate_request_compat_rejects_text_output_mode() {
-        for (output_mode, accepted) in [
-            (json!(null), true),
-            (json!("tokens"), true),
-            (json!("text"), false),
+    fn validate_request_compat_rejects_text_output_mode_without_detokenize() {
+        for (output_mode, detokenize, accepted) in [
+            (json!(null), json!(false), true),
+            (json!("tokens"), json!(false), true),
+            (json!("text"), json!(null), true),
+            (json!("text"), json!(true), true),
+            (json!("text"), json!(false), false),
         ] {
             let request: GenerateRequest = serde_json::from_value(json!({
                 "token_ids": [11, 22],
-                "sampling_params": {},
+                "sampling_params": {"detokenize": detokenize},
                 "output_mode": output_mode,
             }))
             .expect("parse request");
             assert_eq!(
                 validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
                 accepted,
-                "{output_mode}"
+                "{output_mode} {detokenize}"
             );
         }
     }
