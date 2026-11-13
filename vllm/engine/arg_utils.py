@@ -835,6 +835,7 @@ class EngineArgs:
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
+    mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -1141,6 +1142,9 @@ class EngineArgs:
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
         mamba_group.add_argument(
             "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
+        )
+        mamba_group.add_argument(
+            "--mamba-prefill-backend", **mamba_kwargs["prefill_backend"]
         )
         mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
@@ -2672,6 +2676,14 @@ class EngineArgs:
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
         )
+        if (
+            envs.VLLM_PP_LAYER_PARTITION is not None
+            and parallel_config.pipeline_parallel_size == 1
+        ):
+            logger.warning(
+                "VLLM_PP_LAYER_PARTITION is ignored because pipeline "
+                "parallelism is disabled."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -2820,6 +2832,12 @@ class EngineArgs:
             mamba_config.backend = self.mamba_backend
         if self.mamba_ssu_algorithm is not None:
             mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
+        if isinstance(self.mamba_prefill_backend, str):
+            mamba_config.prefill_backend = MambaBackendEnum[
+                self.mamba_prefill_backend.upper()
+            ]
+        else:
+            mamba_config.prefill_backend = self.mamba_prefill_backend
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding

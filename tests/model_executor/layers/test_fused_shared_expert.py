@@ -5,6 +5,7 @@ import importlib
 import inspect
 import sys
 from copy import deepcopy
+from functools import partial
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
@@ -33,6 +34,8 @@ from vllm.model_executor.models.qwen3_next import (
     _should_replicate_misaligned_shared_expert,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
     get_fused_shared_expert_layers,
     maybe_fuse_shared_experts,
 )
@@ -1383,6 +1386,16 @@ class _SingleRankGroup:
         return None
 
 
+def _load_minimax_m3_weights(
+    model: nn.Module, weights: list[tuple[str, torch.Tensor]]
+) -> set[str]:
+    """Load like `MiniMaxM3SparseForCausalLM`; the inner model has no loader."""
+    redirect = partial(minimax_m3_model._redirect_fused_shared_experts, model=model)
+    mapper = minimax_m3_model.MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
+    mapper = mapper | WeightsMapper(weights_transforms=[redirect])
+    return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
+
+
 @pytest.fixture
 def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
     """Single rank parallel groups without initializing a process group.
@@ -1545,6 +1558,9 @@ def test_models_fse_init(
     if model_type == "glm5_next":
         from vllm.models.glm5next.common import model as glm5_next_model
 
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here.
+        vllm_config.additional_config = {"decode_backend": "stock"}
         for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
             monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
         # The gate allows fusion only at TP4/TP8 on gfx950, and this test
@@ -1562,7 +1578,8 @@ def test_models_fse_init(
     if model_type == "glm4_moe_lite":
         from vllm.model_executor.models import glm4_moe_lite as glm4_moe_lite_model
 
-        # Only the MoE/shared-expert wiring is under test here; the MLA backend
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here. the MLA backend
         # does not accept this test's default dtype.
         for attention in ("Glm4MoeLiteAttention", "Glm4MoeLiteMLAAttention"):
             monkeypatch.setattr(glm4_moe_lite_model, attention, _StubGlm5NextAttention)
@@ -1577,7 +1594,8 @@ def test_models_fse_init(
     if model_type == "qwen4_exp":
         from vllm.models.qwen4_exp.amd import model as qwen4_exp_model
 
-        # Only the MoE/shared-expert wiring is under test here.
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here.
         monkeypatch.setattr(
             qwen4_exp_model, "Qwen3NextAttention", _StubGlm5NextAttention
         )
@@ -1725,7 +1743,10 @@ def test_models_fse_init(
                         )
                     )
             with set_current_vllm_config(vllm_config):
-                loaded = model.load_weights(checkpoint)
+                if model_type == "minimax_m3":
+                    loaded = _load_minimax_m3_weights(model, checkpoint)
+                else:
+                    loaded = model.load_weights(checkpoint)
                 base = config.num_hidden_layers
                 mtp_cases = [
                     (
