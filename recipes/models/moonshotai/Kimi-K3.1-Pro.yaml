@@ -774,6 +774,301 @@ presets:
 
       Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
 
+  # B300: the Dynamo + vLLM disaggregated AgentX lane
+  # kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg of
+  # SemiAnalysisAI/InferenceX#5068, one point per benchmark concurrency.
+  # Every worker is one B300 node (TP8 + DCP8), and KV moves between nodes over
+  # AWS EFA.
+  b300_agentx_pd:
+    label: "AgentX xPyD TP8 + DCP8"
+    hardware: b300
+    strategy: pd_cluster
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Concurrency 1 to 660 on 2 to 9 B300 nodes: TP8 + DCP8 prefill workers with EP8 on MegaMoE and TP8 + DCP8 decode workers on the low-latency decode backend, one node each, served by Dynamo with the K3.1 DSpark draft and a shared Mooncake KV store in host DRAM; NIXL and Mooncake move KV over AWS EFA."
+    source: { label: "InferenceX #5068", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5068", key: "kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg", revision: "c3406a12cda081e005045d7a701908d6830a7fef" }
+    image:
+      vllm: "vllm/vllm-openai:kimi-k31-mc-dbbc9e3@sha256:0507dd0ba274bdb5bb8223f3248c0772db2a9517cfd1c06f132ec2989713635e"
+      dynamo: "229be5cff1156859b0e3e43b598ee800b2f81ccc"
+    select:
+      pd_router: dynamo
+      frontend: rust
+      # Named in full: the builder keeps any feature a preset doesn't name. The
+      # Low-latency decode toggle isn't offered under PD, so the decode role
+      # sets --additional-config itself.
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, low_latency_decode: false, nvfp4_kv_cache: false }
+      dcp: 8
+      # NIXL P/D plus the shared Mooncake store in host DRAM (embedded mode).
+      kv_offload: kv_store_distributed_mooncake
+    args:
+      - "--decode-context-parallel-size"
+      - "8"
+      - "--dcp-comm-backend"
+      - "a2a"
+      # Pinned on both roles: NIXL P/D would otherwise raise the DCP KV
+      # interleave after the specialized decode has read it.
+      - "--cp-kv-cache-interleave-size"
+      - "1"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--attention-config"
+      - '{"indexer_kv_dtype":"mxfp4"}'
+      # The K3.1 precision policy keeps the KDA state in FP32.
+      - "--mamba-cache-dtype"
+      - "float32"
+      - "--mamba-ssm-cache-dtype"
+      - "float32"
+      - "--enable-prefix-caching"
+      - "--prefix-match-unit"
+      - "128"
+      - "--no-enable-flashinfer-autotune"
+      - "--stream-interval"
+      - "10"
+      # With the Tool calling toggle's Dynamo parser flags.
+      - "--dyn-enable-structural-tag"
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_DIRECT_DCP_A2A: "1"
+      VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
+      VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
+      VLLM_ALLREDUCE_USE_FLASHINFER: "1"
+      VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "0"
+      VLLM_USE_NCCL_SYMM_MEM: "0"
+      TOKENSPEED_MLA_FP16_PARTIALS: "0"
+      # NCCL stays inside the node's NVLink domain.
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "0"
+      NCCL_NVLS_ENABLE: "1"
+      NCCL_P2P_LEVEL: "NVL"
+      NCCL_NET_PLUGIN: "none"
+      NCCL_TUNER_PLUGIN: "ofi"
+      # NIXL on its LIBFABRIC backend over EFA.
+      UCX_MEMTYPE_REG_WHOLE: "n"
+      UCX_TCP_AF_PRIO: "inet"
+      NIXL_DISABLE_CUDA_ADDR_WA: "1"
+      FI_EFA_ENABLE_SHM_TRANSFER: "0"
+      VLLM_MOONCAKE_LOAD_RECV_THREADS: "4"
+      # Store lookups lease only the keys a hit loads.
+      VLLM_MOONCAKE_STORE_SELECTIVE_LEASE: "1"
+      MC_SLICE_SIZE: "1048576"
+      # A rank registers tens of GB of GPU KV cache; a 4 GiB cap fails that
+      # registration over EFA.
+      MC_MAX_MR_SIZE: "68719476736"
+      MC_ENABLE_DEST_DEVICE_AFFINITY: "1"
+      MC_EFA_NIC_SELECTION: "local"
+      # The lane nodes' 16 EFA devices; list yours with `fi_info -p efa`.
+      MC_MS_FILTERS: "rdmap86s0,rdmap87s0,rdmap101s0,rdmap102s0,rdmap116s0,rdmap117s0,rdmap131s0,rdmap132s0,rdmap146s0,rdmap147s0,rdmap161s0,rdmap162s0,rdmap176s0,rdmap177s0,rdmap191s0,rdmap192s0"
+      # For hosts without the nvidia-peermem module.
+      WITH_NVIDIA_PEERMEM: "0"
+      DYN_TCP_REQUEST_TIMEOUT: "120"
+      ETCD_LEASE_TTL: "600"
+      VLLM_RPC_TIMEOUT: "600000"
+      # Long agentic prefills; VLLM_ENGINE_READY_TIMEOUT_S comes from the
+      # recipe's Blackwell block.
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1800"
+      TILELANG_CLEANUP_TEMP_FILES: "1"
+    # The lane's connector options on the composed MultiConnector, and its
+    # draft revision and length.
+    json_args:
+      "--speculative-config": { revision: "6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94", num_speculative_tokens: 4, rejection_sample_method: block }
+      "--kv-transfer-config":
+        kv_load_failure_policy: recompute
+        NixlConnector: { kv_buffer_device: cuda, kv_connector_extra_config: { backends: ["LIBFABRIC"], enforce_handshake_compat: false, enable_cross_layers_blocks: false } }
+        MooncakeStoreConnector: { kv_load_failure_policy: recompute, kv_connector_extra_config: { enable_cross_layers_blocks: false, enable_offload: false, lookup_timeout_s: 60, store_tp_size: 1, store_chunk_size: 4096 } }
+    roles:
+      prefill:
+        # TP8 + EP8 with MegaMoE on one node, eager.
+        parallelism: tep
+        nodes: 1
+        args:
+          - "--moe-backend"
+          - "deep_gemm_mega_moe"
+          - "--max-num-seqs"
+          - "32"
+          - "--gpu-memory-utilization"
+          - "0.97"
+          - "--enforce-eager"
+          # Start up to 4 store loads per step; chunk prompts over 4096 new
+          # tokens.
+          - "--max-async-kv-loads-per-step"
+          - "4"
+          - "--long-prefill-token-threshold"
+          - "4096"
+        env:
+          VLLM_ENABLE_GEMM_RS: "1"
+          DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT: "1024"
+          DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT: "1024"
+      decode:
+        # TP8 + DCP8 without expert parallelism, on the specialized decode.
+        # The capture sizes replace the PD strategy's FULL_DECODE_ONLY, so the
+        # CUDA graph mode is vLLM's default, as in the lane.
+        parallelism: tp
+        nodes: 1
+        args:
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--additional-config"
+          - '{"decode_backend":"latency_specialized"}'
+          - "--use-replayssm"
+          - "--max-num-seqs"
+          - "64"
+          - "--max-cudagraph-capture-size"
+          - "320"
+          - "--compilation-config"
+          - '{"cudagraph_capture_sizes":[5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120,125,130,135,140,145,150,155,160,165,170,175,180,185,190,195,200,205,210,215,220,225,230,235,240,245,250,255,260,265,270,275,280,285,290,295,300,305,310,315,320]}'
+          - "--max-async-kv-loads-per-step"
+          - "2"
+        env:
+          VLLM_ENABLE_GEMM_RS: "0"
+    # The builder renders one prefill and one decode worker; the labels give
+    # the lane's worker counts (one node each). Decode capture sizes are
+    # multiples of 1 + draft tokens per request.
+    points:
+      c1:
+        label: "1 (1P1D)"
+        concurrency: 1
+        description: "One prefill and one decode worker (16 GPUs), 7 draft tokens."
+        json_args:
+          "--speculative-config": { num_speculative_tokens: 7 }
+        roles:
+          decode:
+            args:
+              - "--max-cudagraph-capture-size"
+              - "64"
+              - "--compilation-config"
+              - '{"cudagraph_capture_sizes":[8,16,24,32,40,48,56,64]}'
+      c20:
+        label: "20 (1P3D)"
+        concurrency: 20
+        description: "One prefill and three decode workers (32 GPUs), 64 decode sequences."
+      c48:
+        label: "48 (1P3D)"
+        concurrency: 48
+        description: "One prefill and three decode workers (32 GPUs), 64 decode sequences."
+      c64:
+        label: "64 (1P2D)"
+        concurrency: 64
+        description: "One prefill and two decode workers (24 GPUs), 64 decode sequences."
+      c264:
+        label: "264 (2P3D)"
+        concurrency: 264
+        description: "Two prefill and three decode workers (40 GPUs), 128 decode sequences, Mooncake store tail cleanup and lookup prefetch."
+        env:
+          VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL: "1"
+          VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS: "1"
+        json_args:
+          "--kv-transfer-config": { MooncakeStoreConnector: { kv_connector_extra_config: { lookup_prefetch_limit: 16, lookup_prefetch_ttl_s: 30 } } }
+        roles:
+          decode:
+            args:
+              - "--gpu-memory-utilization"
+              - "0.98"
+              - "--max-num-seqs"
+              - "128"
+              - "--max-cudagraph-capture-size"
+              - "640"
+              - "--compilation-config"
+              - '{"cudagraph_capture_sizes":[20,40,60,80,100,120,140,160,180,200,220,240,260,280,300,320,340,360,380,400,420,440,460,480,500,520,540,560,580,600,620,640]}'
+      c660:
+        label: "660 (4P5D)"
+        concurrency: 660
+        description: "Four prefill and five decode workers (72 GPUs): the 264-client settings plus BF16 indexer logits and the deep_select indexer top-k on prefill."
+        args:
+          - "--attention-config"
+          - '{"indexer_kv_dtype":"mxfp4","indexer_logits_dtype":"bfloat16"}'
+        env:
+          VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL: "1"
+          VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS: "1"
+        json_args:
+          "--kv-transfer-config": { MooncakeStoreConnector: { kv_connector_extra_config: { lookup_prefetch_limit: 16, lookup_prefetch_ttl_s: 30 } } }
+        roles:
+          prefill:
+            args:
+              - "--kernel-config"
+              - '{"sparse_indexer_topk_backend":"deep_select"}'
+          decode:
+            args:
+              - "--gpu-memory-utilization"
+              - "0.98"
+              - "--max-num-seqs"
+              - "128"
+              - "--max-cudagraph-capture-size"
+              - "640"
+              - "--compilation-config"
+              - '{"cudagraph_capture_sizes":[20,40,60,80,100,120,140,160,180,200,220,240,260,280,300,320,340,360,380,400,420,440,460,480,500,520,540,560,580,600,620,640]}'
+    runbook: |
+      The disaggregated B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3.1-fp4-b300-dynamo-vllm-agentic-dspark-mooncake-dcp8-disagg`, [SemiAnalysisAI/InferenceX#5068](https://github.com/SemiAnalysisAI/InferenceX/pull/5068)). Dynamo + vLLM run TP8 + DCP8 prefill and decode workers, one B300 node each. The prefill workers also run the routed experts EP8 on MegaMoE; the decode workers use no expert parallelism and run the low-latency decode backend. KV moves from prefill to decode over NIXL on its LIBFABRIC backend, and all workers share a Mooncake store in host DRAM on its EFA transport. The lane ran the image digest the preset pins, Dynamo built from `229be5cff1156859b0e3e43b598ee800b2f81ccc` (`v1.7.0-kimi-k3.1-pro-dev.1`) and Mooncake `0.3.14`; the preset has been measured only on that combination, on AWS B300 nodes with 16 EFA devices each.
+
+      | Clients | Prefill workers | Decode workers | Nodes | Draft tokens | Decode `--max-num-seqs` | Decode `--gpu-memory-utilization` | Decode capture sizes |
+      |---:|---:|---:|---:|---:|---:|---:|---|
+      | 1 | 1 | 1 | 2 | 7 | 64 | 0.95 | 8 to 64 in steps of 8 |
+      | 20, 48 | 1 | 3 | 4 | 4 | 64 | 0.95 | 5 to 320 in steps of 5 |
+      | 64 | 1 | 2 | 3 | 4 | 64 | 0.95 | 5 to 320 in steps of 5 |
+      | 264 | 2 | 3 | 5 | 4 | 128 | 0.98 | 20 to 640 in steps of 20 |
+      | 660 | 4 | 5 | 9 | 4 | 128 | 0.98 | 20 to 640 in steps of 20 |
+
+      Each point renders one prefill worker and one decode worker; start the table's number of workers per role with the same commands, one node each.
+
+      **Serving config.**
+      - **Prefill:** TP8 + DCP8 with `--enable-expert-parallel` and `--moe-backend deep_gemm_mega_moe`, `--max-num-seqs 32`, `--gpu-memory-utilization 0.97` and `--enforce-eager`. `--max-async-kv-loads-per-step 4` starts up to four Mooncake store loads per engine step, and `--long-prefill-token-threshold 4096` chunks prompts with more than 4096 new tokens so that one long prompt does not hold back the others. `VLLM_ENABLE_GEMM_RS=1` turns on the fused GEMM + reduce-scatter. `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` and `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` set Dynamo's admission limits for the prefill engine to 1024 requests each.
+      - **Decode:** TP8 + DCP8 without expert parallelism, with `VLLM_ENABLE_GEMM_RS=0` and `--max-async-kv-loads-per-step 2`. `--additional-config '{"decode_backend":"latency_specialized"}'` runs pure decode steps on the fused low-latency path; the Low-latency decode toggle is not offered under PD, so the preset sets the flag in the decode args. `--use-replayssm` makes KDA verification replay the accepted prefix instead of keeping one recurrent state per draft token. The decode `--compilation-config` sets only the capture sizes (multiples of 1 + draft tokens per request) and replaces the PD strategy's `FULL_DECODE_ONLY`, so the CUDA graph mode is vLLM's default, as in the lane. From 264 clients, decode admits up to 128 requests at `--gpu-memory-utilization 0.98` and captures up to 640 rows.
+      - **Both roles:** FP8 MLA KV cache with an MXFP4 indexer key cache (`indexer_kv_dtype`); FP32 KDA conv and recurrent state (`--mamba-cache-dtype float32 --mamba-ssm-cache-dtype float32`), as the K3.1 precision policy requires; the A2A DCP backend and the direct DCP all-to-all and gather paths (`VLLM_USE_DIRECT_DCP_*`); prefix caching with `--prefix-match-unit 128`; `--no-enable-flashinfer-autotune` and `--stream-interval 10`. Both roles pin `--cp-kv-cache-interleave-size 1`: left unset, NIXL P/D raises the DCP KV interleave after the specialized decode has read it.
+      - **Spec decoding** (on in this preset) uses the K3.1 DSpark draft [`Inferact/Kimi-K3.1-Pro-DSpark-preview`](https://huggingface.co/Inferact/Kimi-K3.1-Pro-DSpark-preview) at revision `6a2ef20a`, with probabilistic drafting and block rejection: 7 draft tokens at 1 client, 4 from 20 clients up.
+      - **Collectives and kernels:** FlashInfer all-reduce stays on (`VLLM_ALLREDUCE_USE_FLASHINFER=1`); NCCL symmetric memory and the sharded sequence-parallel shared expert stay off (`VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`), and so do TOKENSPEED_MLA's FP16 partials (`TOKENSPEED_MLA_FP16_PARTIALS=0`). NCCL runs only inside a node (`NCCL_MNNVL_ENABLE=0`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`, `NCCL_NET_PLUGIN=none`, `NCCL_TUNER_PLUGIN=ofi`).
+      - **KV transfer over EFA:** the NIXL connector uses `"backends": ["LIBFABRIC"]`, with `NIXL_DISABLE_CUDA_ADDR_WA=1`, `FI_EFA_ENABLE_SHM_TRANSFER=0`, `UCX_MEMTYPE_REG_WHOLE=n` and `UCX_TCP_AF_PRIO=inet`. The Mooncake transfer engine uses `MC_SLICE_SIZE=1048576`, `MC_MAX_MR_SIZE=68719476736`, `MC_ENABLE_DEST_DEVICE_AFFINITY=1`, `MC_EFA_NIC_SELECTION=local` and `MC_MS_FILTERS` set to the node's 16 EFA devices, and `WITH_NVIDIA_PEERMEM=0` for hosts without the nvidia-peermem module. A rank registers tens of GB of GPU KV cache with the store, so `MC_MAX_MR_SIZE` must be above that: at the 4 GiB of the GB300 presets, every registration fails over EFA. vLLM loads from the store with 4 receive threads (`VLLM_MOONCAKE_LOAD_RECV_THREADS=4`), and `VLLM_MOONCAKE_STORE_SELECTIVE_LEASE=1` makes a store lookup lease only the keys that a hit loads. The connector options add a 60 s store lookup timeout, `store_tp_size: 1` and `store_chunk_size: 4096`. From 264 clients, the store keeps the tail pages a request loaded and drops the older tails it consumed (`VLLM_MOONCAKE_STORE_KEEP_LOADED_TAIL=1`, `VLLM_MOONCAKE_STORE_DROP_CONSUMED_TAILS=1`), and store lookups start before admission, up to 16 at a time and kept for 30 s (`lookup_prefetch_limit: 16`, `lookup_prefetch_ttl_s: 30`); this cuts store evictions and the prefill work they cause.
+      - **660 clients:** the indexer computes its logits in BF16 on both roles (`"indexer_logits_dtype":"bfloat16"` in `--attention-config`), prefill selects the indexer top-k with `--kernel-config '{"sparse_indexer_topk_backend":"deep_select"}'`, and the Mooncake master evicts 2% of the store per round instead of 10% (`--eviction_ratio=0.02`, see Services).
+      - **Timeouts and housekeeping:** `VLLM_ENGINE_READY_TIMEOUT_S=3600` (from the recipe's Blackwell settings), `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `VLLM_RPC_TIMEOUT=600000`, `DYN_TCP_REQUEST_TIMEOUT=120` and `ETCD_LEASE_TTL=600`. `TILELANG_CLEANUP_TEMP_FILES=1` removes TileLang's temporary build files.
+
+      **Tool calling and reasoning** are on in this preset. Under Dynamo the builder renders `--dyn-tool-call-parser kimi_k3`, `--dyn-reasoning-parser kimi_k3` and vLLM's `--reasoning-parser kimi_k3`, and the preset adds `--dyn-enable-structural-tag`: the flags of the lane's accuracy runs.
+
+      The preset selects the distributed (embedded) Mooncake store on the **KV Offload** row, which wraps NIXL and the `MooncakeStoreConnector` in one `MultiConnector` on both roles; the preset sets the lane's connector options on it. Documented here only: the worker counts, the lane's Mooncake master options and store sizing (the builder's Mooncake option shows its own defaults), and the frontend's router mode and session affinity (the builder renders round-robin).
+
+      ### Services
+
+      Start etcd, NATS and a Mooncake master once:
+
+      ```bash
+      etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://<infra-host>:2379
+      printf 'max_payload: 33554432\n' > nats.conf && nats-server -c nats.conf
+      mooncake_master --default_kv_lease_ttl=60000 --eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10
+      ```
+
+      For 660 clients, start the master with `--eviction_ratio=0.02`.
+
+      Every worker reads the Mooncake store configuration from the JSON file that `MOONCAKE_CONFIG_PATH` points to. The lane registered 190GB of host DRAM per GPU over the EFA transport:
+
+      ```json
+      {"master_server_address": "<infra-host>:<master-port>", "metadata_server": "P2PHANDSHAKE",
+       "global_segment_size": "190GB", "local_buffer_size": "4GB", "protocol": "efa",
+       "mode": "embedded", "enable_offload": false}
+      ```
+
+      ### Frontend
+
+      ```bash
+      export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TOKENIZER_CACHE_BYTES=8589934592 DYN_TCP_REQUEST_TIMEOUT=120
+      export DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1
+      python3 -m dynamo.frontend --router-mode least-loaded --router-session-affinity-ttl-secs 1
+      ```
+
+      `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` skips the frontend's preflight validation of tool parameter schemas marked `strict: true`. Session affinity keys on the `X-Dynamo-Session-Id` request header, so send one ID per conversation.
+
+      ### Benchmark-only settings left out
+
+      The lane also passes `--served-model-name moonshotai/Kimi-K3.1-Pro`, which equals the model ID here, and sets `VLLM_SERVER_DEV_MODE=1`, which turns on vLLM's development-only endpoints, and `NCCL_DEBUG=WARN` for its logs; serving needs none of them. Its throughput runs leave out the tool-call and reasoning parser flags. Its job settings (model cache path, health-check polling, telemetry and the benchmark client's own environment) are not server settings.
+
+      ### Throughput measurement only (synthetic acceptance)
+
+      To measure throughput the AgentX way, replace real verification with synthetic acceptance at InferenceX's K3.1 DSpark golden acceptance length for the draft length: 3.69 for 7 draft tokens (1 client) and 3.19 for 4 (20 clients and up). Only `--speculative-config` changes, on both roles:
+
+      ```bash
+      # 1 client
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","revision":"6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94","num_speculative_tokens":7,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.69}'
+      # 20 clients and up
+      --speculative-config '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","revision":"6a2ef20a05efe88aabbf9ecaa12d020c3b0edf94","num_speculative_tokens":4,"method":"dspark","draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.19}'
+      ```
+
+      Synthetic acceptance skips real verification. Never use it to serve users or to evaluate accuracy.
+
   # The exact configuration vllm-project/vllm-torchtpu#2775 validated on a
   # 2x2x4 TPU v7x slice (TP32 / EP32, 4 hosts, 16 chips, 32 devices).
   v7x_validated:
