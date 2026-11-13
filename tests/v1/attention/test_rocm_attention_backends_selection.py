@@ -1063,3 +1063,50 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
     assert layouts
     assert all(layout.is_block_compact for layout in layouts)
+
+
+@pytest.mark.parametrize(
+    "required_kernel_block_size, expected_backend",
+    [
+        # AITER FA takes kernel blocks of 16 or 32 only, so a model whose other
+        # layers need 128 (MiniMax-M3's sparse layers) must not get it.
+        (128, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        # Without the constraint the KV-connector priority order is unchanged.
+        (None, AttentionBackendEnum.ROCM_AITER_FA),
+    ],
+)
+def test_kv_connector_selection_honors_required_kernel_block_size(
+    required_kernel_block_size,
+    expected_backend,
+    mock_vllm_config,
+    mock_get_cdna_version,
+):
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = _kv_connector_selector_config()._replace(
+        block_size=128, required_kernel_block_size=required_kernel_block_size
+    )
+    with (
+        patch("vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled", return_value=True),
+        patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=True),
+    ):
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=None, attn_selector_config=attn_selector_config
+        )
+
+    assert backend_path == expected_backend.get_path()
+
+
+def test_selected_backend_rejects_unsupported_required_kernel_block_size(
+    mock_vllm_config, mock_get_cdna_version
+):
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = _kv_connector_selector_config()._replace(
+        block_size=128, required_kernel_block_size=128
+    )
+    with pytest.raises(ValueError, match="kernel block size 128 not supported"):
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
+            attn_selector_config=attn_selector_config,
+        )

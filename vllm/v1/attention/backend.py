@@ -132,6 +132,26 @@ class AttentionBackend(ABC):
         )
 
     @classmethod
+    def supports_kernel_block_size(cls, kernel_block_size: int) -> bool:
+        """Whether a kernel block of exactly this size is supported.
+
+        Unlike supports_block_size, which also accepts a KV-manager block that
+        splits into supported kernel blocks, this is for a layer whose kernel
+        block size is fixed by other layers of the model (all layers share
+        one kernel block size, see select_common_block_size).
+        """
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_kernel_block_sizes:
+            return True
+        for supported_size in supported_kernel_block_sizes:
+            if isinstance(supported_size, MultipleOf):
+                if kernel_block_size % supported_size.base == 0:
+                    return True
+            elif kernel_block_size == supported_size:
+                return True
+        return False
+
+    @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
         if block_size is None:
             return True
@@ -315,6 +335,7 @@ class AttentionBackend(ABC):
         use_dcp: bool = False,
         use_rswa: bool = False,
         use_hisparse: bool = False,
+        required_kernel_block_size: int | None = None,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -325,6 +346,13 @@ class AttentionBackend(ABC):
             invalid_reasons.append("kv_cache_dtype not supported")
         if not cls.supports_block_size(block_size):
             invalid_reasons.append("block_size not supported")
+        if (
+            required_kernel_block_size is not None
+            and not cls.supports_kernel_block_size(required_kernel_block_size)
+        ):
+            invalid_reasons.append(
+                f"kernel block size {required_kernel_block_size} not supported"
+            )
         if use_mm_prefix and not cls.supports_mm_prefix():
             invalid_reasons.append(
                 "partial multimodal token full attention not supported"
