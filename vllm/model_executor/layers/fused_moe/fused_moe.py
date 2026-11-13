@@ -13,6 +13,9 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant_configs import (
+    get_batch_invariant_moe_config,
+)
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -299,6 +302,7 @@ def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
     b_ptr,
+    b_desc,
     c_ptr,
     b_bias_ptr,
     a_scale_ptr,
@@ -307,6 +311,7 @@ def fused_moe_kernel(
     sorted_token_ids_ptr,
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
+    a_desc,
     # Matrix dimensions
     N,
     K,
@@ -347,10 +352,14 @@ def fused_moe_kernel(
     use_int8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
+    per_out_ch_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     SWAP_AB: tl.constexpr,
     # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
+    USE_TMA_B: tl.constexpr = False,
+    USE_TMA_A: tl.constexpr = False,
+    C_IS_SORTED: tl.constexpr = False,
 ):
     """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -429,8 +438,8 @@ def fused_moe_kernel(
             stride_cn,
             pid_n,
             N,
-            offs_token,
-            token_mask,
+            offs_token_id if C_IS_SORTED else offs_token,
+            (offs_token_id < EM) if C_IS_SORTED else token_mask,
             BLOCK_SIZE_M,
             BLOCK_SIZE_N,
             compute_type,
@@ -441,6 +450,10 @@ def fused_moe_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     # TD gather and the SWAP_AB accumulator layout are mutually exclusive.
     tl.static_assert(not (USE_TD and SWAP_AB))
+    tl.static_assert(not (USE_TD and USE_TMA_B))
+    tl.static_assert(not (USE_TMA_A and USE_TD))
+    tl.static_assert(not USE_TMA_A or USE_TMA_B)
+    tl.static_assert(not (C_IS_SORTED and naive_block_assignment))
     if USE_TD:
         # ``tt.descriptor_gather`` requires block_shape[0] == 1 and i32 idx.
         m_td = num_valid_tokens // top_k
@@ -467,9 +480,10 @@ def fused_moe_kernel(
             + (offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk)
         )
     else:
-        a_ptrs = a_ptr + (
-            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
-        )
+        if not USE_TMA_A:
+            a_ptrs = a_ptr + (
+                offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+            )
         b_ptrs = (
             b_ptr
             + off_experts * stride_be
@@ -484,24 +498,32 @@ def fused_moe_kernel(
     if use_fp8_w8a8 or use_int8_w8a8:
         # block-wise
         if group_k > 0 and group_n > 0:
-            a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
-            offs_bsn = offs_bn // group_n
+            a_scale_rows = offs_token_id if USE_TMA_A else offs_token // top_k
+            a_scale_ptrs = a_scale_ptr + a_scale_rows * stride_asm
+            if group_n >= BLOCK_SIZE_N and group_n % BLOCK_SIZE_N == 0:
+                offs_bsn = pid_n * BLOCK_SIZE_N // group_n
+            else:
+                offs_bsn = offs_bn // group_n
             b_scale_ptrs = (
                 b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
             )
-        # channel-wise
-        elif per_channel_quant:
-            b_scale_ptrs = (
-                b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
-            )
-            b_scale = tl.load(b_scale_ptrs)
-            # Load per-token scale for activations
-            a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
-            a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
-        # tensor-wise
+        # Weight-scale layout (per-channel vs per-expert tensor) is independent
+        # of activation-scale layout (per-token vs per-tensor).
         else:
-            a_scale = tl.load(a_scale_ptr)
-            b_scale = tl.load(b_scale_ptr + off_experts)
+            if per_out_ch_quant:
+                b_scale_ptrs = (
+                    b_scale_ptr
+                    + off_experts * stride_bse
+                    + offs_bn[None, :] * stride_bsn
+                )
+                b_scale = tl.load(b_scale_ptrs)
+            else:
+                b_scale = tl.load(b_scale_ptr + off_experts)
+            if per_channel_quant:
+                a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+                a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
+            else:
+                a_scale = tl.load(a_scale_ptr)
     if HAS_BIAS:
         # bias shape: [num_experts, N]
         bias_ptrs = b_bias_ptr + off_experts * stride_bbe + offs_bn * stride_bbn
@@ -521,18 +543,32 @@ def fused_moe_kernel(
         if USE_TD:
             a = a_desc.gather(gather_idx, k * BLOCK_SIZE_K)
             b = b_desc.load([pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]).T
+        elif USE_TMA_A:
+            a = a_desc.load([pid_m * BLOCK_SIZE_M, k * BLOCK_SIZE_K])
+            if SWAP_AB:
+                a = a.T
         elif SWAP_AB:
             a_mask = (offs_k[:, None] < K - k * BLOCK_SIZE_K) & token_mask[None, :]
-            b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
             a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+            if not USE_TMA_B:
+                b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+                b = tl.load(b_ptrs, mask=b_mask, other=0.0)
         else:
             a = tl.load(
                 a_ptrs,
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                 other=0.0,
             )
-            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+            if not USE_TMA_B:
+                b = tl.load(
+                    b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0
+                )
+        if USE_TMA_B:
+            b = b_desc.load(
+                [off_experts.to(tl.int32), pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]
+            ).reshape((BLOCK_SIZE_N, BLOCK_SIZE_K))
+            if not SWAP_AB:
+                b = b.T
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -544,7 +580,12 @@ def fused_moe_kernel(
                     a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
                 )
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-                if SWAP_AB:
+                if group_n >= BLOCK_SIZE_N and group_n % BLOCK_SIZE_N == 0:
+                    if SWAP_AB:
+                        accumulator += tl.dot(b, a) * b_scale * a_scale[None, :]
+                    else:
+                        accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale
+                elif SWAP_AB:
                     accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
                 else:
                     accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
@@ -561,7 +602,8 @@ def fused_moe_kernel(
             accumulator += tl.dot(a, b)
         if not USE_TD:
             # Advance the ptrs to the next K block.
-            a_ptrs += BLOCK_SIZE_K * stride_ak
+            if not USE_TMA_A:
+                a_ptrs += BLOCK_SIZE_K * stride_ak
             b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if SWAP_AB:
@@ -603,8 +645,13 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    c_rows = offs_token_id if C_IS_SORTED else offs_token
+    c_ptrs = c_ptr + stride_cm * c_rows[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (c_rows[:, None] < EM if C_IS_SORTED else token_mask[:, None]) & (
+        offs_cn[None, :] < N
+    )
+    if C_IS_SORTED:
+        accumulator = tl.where(token_mask[:, None], accumulator, 0)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
@@ -617,7 +664,7 @@ def invoke_fused_moe_wna16_cuda_kernel(
     B_scale: torch.Tensor | None,
     B_zp: torch.Tensor | None,
     topk_weights: torch.Tensor | None,
-    sorted_token_ids: torch.Tensor | None,
+    sorted_token_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     mul_routed_weight: bool,
@@ -779,10 +826,21 @@ def invoke_fused_moe_triton_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
+    A_is_sorted: bool = False,
+    C_is_sorted: bool = False,
 ):
     assert topk_weights is not None or not mul_routed_weight
-    assert topk_weights is None or topk_weights.stride(1) == 1
+    if topk_weights is not None and not topk_weights.is_contiguous():
+        raise ValueError("topk_weights must be contiguous")
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
+    assert not (A_is_sorted or C_is_sorted) or sorted_token_ids is not None
+
+    # Callers that predate the split of the activation and weight scale layouts
+    # got per-channel weight scales whenever the activations were per-channel.
+    # Keep that behaviour unless the caller states the weight layout explicitly.
+    if per_out_ch_quant is None:
+        per_out_ch_quant = per_channel_quant
 
     if use_fp8_w8a8:
         SWAP_AB = enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
@@ -818,10 +876,10 @@ def invoke_fused_moe_triton_kernel(
         assert B_scale is None
 
     M = A.size(0)
-    num_tokens = M * top_k
+    num_tokens = C.size(0) * C.size(1) if A_is_sorted else M * top_k
     if sorted_token_ids is not None:
         EM = sorted_token_ids.size(0)
-        if A.size(0) < config["BLOCK_SIZE_M"]:
+        if not A_is_sorted and A.size(0) < config["BLOCK_SIZE_M"]:
             # optimize for small batch_size.
             # We assume that top_ids of each token is unique,
             # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
@@ -842,6 +900,44 @@ def invoke_fused_moe_triton_kernel(
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
+    use_tma_b = (
+        bool(config.pop("USE_TMA", True))
+        and use_fp8_w8a8
+        and block_shape is not None
+        and all(block_shape)
+        and current_platform.is_cuda()
+        and (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(100)
+        )
+        and B.device.type == "cuda"
+        and B.is_contiguous()
+        and B.size(1) % config["BLOCK_SIZE_N"] == 0
+        and B.size(2) % BLOCK_SIZE_K == 0
+    )
+    b_desc = None
+    if use_tma_b:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        set_triton_allocator(B.device)
+        b_desc = TensorDescriptor.from_tensor(
+            B, [1, config["BLOCK_SIZE_N"], BLOCK_SIZE_K]
+        )
+    use_tma_a = (
+        A_is_sorted
+        and use_tma_b
+        and A.is_contiguous()
+        and A.size(0) == EM
+        and A.size(1) % BLOCK_SIZE_K == 0
+        and A_scale is not None
+        and A_scale.ndim == 2
+        and A_scale.size(0) == EM
+    )
+    if A_is_sorted and not use_tma_a:
+        raise ValueError("Sorted MoE activation requires a valid A TMA descriptor")
+    a_desc = None
+    if use_tma_a:
+        a_desc = TensorDescriptor.from_tensor(A, [config["BLOCK_SIZE_M"], BLOCK_SIZE_K])
     if use_td and A.size(1) % BLOCK_SIZE_K != 0:
         # TD gather/load feeding tl.dot with a non-block-aligned K
         # miscompiles (~74% of output elements wrong) on real HW;
@@ -864,6 +960,7 @@ def invoke_fused_moe_triton_kernel(
     fused_moe_kernel[grid](
         A,
         B,
+        b_desc,
         C,
         B_bias,
         A_scale,
@@ -872,6 +969,7 @@ def invoke_fused_moe_triton_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
+        a_desc,
         B.size(1),
         B.size(2),
         EM,
@@ -885,9 +983,11 @@ def invoke_fused_moe_triton_kernel(
         C.stride(2),
         A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
         A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(0) if B_scale is not None else 0,
         B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(1)
+        if B_scale is not None and B_scale.ndim >= 2 and B_scale.size(1) > 1
+        else 0,
         B_bias.stride(0) if B_bias is not None else 0,
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
@@ -899,11 +999,15 @@ def invoke_fused_moe_triton_kernel(
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
+        per_out_ch_quant=per_out_ch_quant,
         naive_block_assignment=(sorted_token_ids is None),
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         SWAP_AB=SWAP_AB,
         USE_TD=use_td,
+        USE_TMA_B=use_tma_b,
+        USE_TMA_A=use_tma_a,
+        C_IS_SORTED=C_is_sorted,
         **config,
     )
 
@@ -930,10 +1034,15 @@ def dispatch_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
-    assert topk_weights is None or topk_weights.stride(1) == 1
+    if topk_weights is not None and not topk_weights.is_contiguous():
+        raise ValueError("topk_weights must be contiguous")
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
+
+    if per_out_ch_quant is None:
+        per_out_ch_quant = per_channel_quant
 
     M = A.size(0)
     num_tokens = M * top_k
@@ -942,6 +1051,7 @@ def dispatch_fused_moe_kernel(
         block_shape is not None and block_shape[1] > 0
     ):
         assert B_bias is None
+        assert sorted_token_ids is not None
 
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(
             num_valid_tokens=num_tokens,
@@ -1008,6 +1118,7 @@ def dispatch_fused_moe_kernel(
             per_channel_quant,
             block_shape,
             B_bias,
+            per_out_ch_quant,
         )
 
 
@@ -1112,6 +1223,7 @@ def get_moe_configs(
     dtype: str | None,
     block_n: int | None = None,
     block_k: int | None = None,
+    down_moe: bool = False,
 ) -> dict[int, Any] | None:
     """Return optimized configurations for the fused MoE kernel.
 
@@ -1119,6 +1231,7 @@ def get_moe_configs(
     batch sizes to configurations of the fused_moe kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
+    A down-projection config is optional and uses a separate `_down.json` file.
     """
     # Avoid optimizing for the batch invariant case. Use default config
     if envs.VLLM_BATCH_INVARIANT:
@@ -1128,6 +1241,8 @@ def get_moe_configs(
     # directory
     block_shape = [block_n, block_k] if block_n and block_k else None
     json_file_name = get_config_file_name(E, N, dtype, block_shape)
+    if down_moe:
+        json_file_name = json_file_name.removesuffix(".json") + "_down.json"
 
     config_file_paths = []
 
@@ -1160,11 +1275,12 @@ def get_moe_configs(
 
     # If no optimized configuration is available, we will use the default
     # configuration
-    logger.warning_once(
-        "Using default MoE config. Performance might be sub-optimal! "
-        "Config file not found at %s",
-        ", ".join(config_file_paths),
-    )
+    if not down_moe:
+        logger.warning_once(
+            "Using default MoE config. Performance might be sub-optimal! "
+            "Config file not found at %s",
+            ", ".join(config_file_paths),
+        )
     return None
 
 
@@ -1285,6 +1401,8 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     return (
         current_platform.is_cuda()
         and bit == 4
@@ -1303,13 +1421,7 @@ def get_default_config(
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
     if envs.VLLM_BATCH_INVARIANT:
-        return {
-            "BLOCK_SIZE_M": 64,
-            "BLOCK_SIZE_N": 64,
-            "BLOCK_SIZE_K": 32,
-            "GROUP_SIZE_M": 8,
-            "SPLIT_K": 1,
-        }
+        return get_batch_invariant_moe_config(E, N, K, dtype, block_shape)
 
     # num_stages can cause triton.runtime.errors.OutOfResources on ROCm.
     num_stages_rocm = 2
@@ -1416,6 +1528,51 @@ def get_default_config(
     return config
 
 
+def _moe_config_shape(w2_shape: tuple[int, ...], dtype: str | None) -> tuple[int, int]:
+    """(E, N) as used by both the tuned-config lookup and the default heuristic."""
+    E, _, N = w2_shape
+    if dtype == "int4_w4a16":
+        N = N * 2
+    return E, N
+
+
+def _get_configured_moe_config(
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> dict[str, int] | None:
+    """Config from an override or a tuned file, or None if neither applies."""
+    from vllm.model_executor.layers.fused_moe import get_config
+
+    override_config = get_config()
+    if override_config:
+        return override_config
+
+    E, N = _moe_config_shape(w2_shape, dtype)
+    block_n = block_shape[0] if block_shape else 0
+    block_k = block_shape[1] if block_shape else 0
+    configs = get_moe_configs(E, N, dtype, block_n, block_k)
+    if configs:
+        # Pick the config tuned for the closest batch size
+        return configs[min(configs.keys(), key=lambda x: abs(x - M))]
+    return None
+
+
+def has_configured_moe_config(
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> bool:
+    """Whether try_get_optimal_moe_config resolves to an override or a tuned config.
+
+    False means it falls back to get_default_config, so a caller whose layout that
+    heuristic does not model may adjust the tiles it returns.
+    """
+    return _get_configured_moe_config(w2_shape, dtype, M, block_shape) is not None
+
+
 def try_get_optimal_moe_config(
     w1_shape: tuple[int, ...],
     w2_shape: tuple[int, ...],
@@ -1424,27 +1581,10 @@ def try_get_optimal_moe_config(
     M: int,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
-    from vllm.model_executor.layers.fused_moe import get_config
-
-    override_config = get_config()
-    if override_config:
-        config = override_config
-    else:
-        # First try to load optimal config from the file
-        E, _, N = w2_shape
-        if dtype == "int4_w4a16":
-            N = N * 2
-        block_n = block_shape[0] if block_shape else 0
-        block_k = block_shape[1] if block_shape else 0
-        configs = get_moe_configs(E, N, dtype, block_n, block_k)
-
-        if configs:
-            # If an optimal configuration map has been found, look up the
-            # optimal config
-            config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-        else:
-            # Else use the default config
-            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+    config = _get_configured_moe_config(w2_shape, dtype, M, block_shape)
+    if config is None:
+        E, N = _moe_config_shape(w2_shape, dtype)
+        config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
     return config
 
 
@@ -1473,6 +1613,7 @@ def fused_experts_op(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -1499,6 +1640,7 @@ def fused_experts_op(
         block_shape,
         w1_bias,
         w2_bias,
+        per_out_ch_quant,
     )
 
 
@@ -1527,6 +1669,7 @@ def fused_experts_op_fake(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -1536,6 +1679,12 @@ direct_register_custom_op(
     op_func=fused_experts_op,
     fake_impl=fused_experts_op_fake,
 )
+
+
+def _weights_host_resident(*weights: torch.Tensor) -> bool:
+    """True when any of the expert weights is read from host memory in place,
+    as UVA weight offloading (`--offload-backend uva`) leaves them."""
+    return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
 
 
 def _prepare_expert_assignment(
@@ -1550,14 +1699,18 @@ def _prepare_expert_assignment(
     use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     ignore_invalid_experts: bool = False,
+    weights_host_resident: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Prepare expert assignments for the aligned and low-latency Triton paths."""
     # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
     # activates only a small fraction of total experts
     # Skips moe_align_block_size and activates the `sorted_token_ids is None`
-    # path of the fused_moe_kernel kernel
+    # path of the fused_moe_kernel kernel, which reads an expert's weights once
+    # per (token, expert) pair. Not for weights in host memory: there every
+    # repeated read crosses PCIe, so group each expert's tokens instead.
     naive_block_assignment = (
         expert_map is None
+        and not weights_host_resident
         and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
@@ -1617,6 +1770,7 @@ def fused_experts(
         use_int4_w4a16=quant_config.use_int4_w4a16,
         ocp_mx_scheme=quant_config.ocp_mx_scheme,
         per_channel_quant=quant_config.per_act_token_quant,
+        per_out_ch_quant=quant_config.per_out_ch_quant,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
         w1_scale=quant_config.w1_scale,
@@ -1674,12 +1828,18 @@ def fused_experts_impl(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool | None = None,
 ) -> torch.Tensor:
     if ocp_mx_scheme is not None:
         raise NotImplementedError(
             f"Using ocp_mx_scheme={ocp_mx_scheme} in functional fused_experts call is "
             "deprecated. Please use OCP_MXQuantizationEmulationTritonExperts."
         )
+
+    if per_out_ch_quant is None:
+        # Legacy callers assumed per-channel weight scales when the activations
+        # were per-channel; keep that unless the weight layout is stated.
+        per_out_ch_quant = per_channel_quant
 
     # Convert string activation to enum for internal use
     activation_enum = MoEActivation.from_str(activation)
@@ -1782,6 +1942,7 @@ def fused_experts_impl(
         use_int4_w4a16=use_int4_w4a16,
         block_shape=block_shape,
         ignore_invalid_experts=True,
+        weights_host_resident=_weights_host_resident(w1, w2),
     )
 
     dispatch_fused_moe_kernel(
@@ -1806,6 +1967,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w1_bias,
+        per_out_ch_quant=per_out_ch_quant,
     )
 
     apply_moe_activation(
@@ -1845,6 +2007,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w2_bias,
+        per_out_ch_quant=per_out_ch_quant,
     )
 
     ops.moe_sum(

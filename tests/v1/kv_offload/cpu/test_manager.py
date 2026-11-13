@@ -15,16 +15,14 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
+    StoreTrigger,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    CPULoadStoreSpec,
-    CPUOffloadingMetrics,
-)
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
+from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
 
 def make_req_context(
@@ -79,6 +77,14 @@ def to_key(int_hash: int) -> OffloadKey:
 
 def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
     return [to_key(i) for i in int_hashes]
+
+
+def reuse_keys(manager: CPUOffloadingManager, keys: list[OffloadKey]) -> None:
+    """Load ready keys in one finished request, recording a single access."""
+    ctx = make_req_context("reuse")
+    manager.prepare_load(keys, ctx)
+    manager.complete_load(keys, ctx)
+    manager.on_request_finished(ctx)
 
 
 def verify_store_output(
@@ -146,16 +152,39 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
+def test_cpu_stored_event_carries_request_context():
+    manager = CPUOffloadingManager(
+        num_chunks=1,
+        enable_events=True,
+    )
+    req_context = make_req_context("writer")
+    keys = to_keys([1])
+    assert (
+        manager.prepare_store(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(keys, req_context, trigger=StoreTrigger.ON_COMPUTE)
+
+    [event] = manager.take_events()
+    assert event.req_context is req_context
+
+
 def test_cpu_eviction_removed_precedes_stored():
     """An eviction is announced before the store that reuses its capacity."""
     manager = make_cpu_manager(num_chunks=2, enable_events=True)
 
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     list(manager.take_events())
 
-    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
-    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+    manager.complete_store(
+        to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     events = list(manager.take_events())
     removed_idx = [i for i, event in enumerate(events) if event.removed]
@@ -173,7 +202,7 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
 
     Scenario:
         - Store chunks [1, 2] and complete.
-        - touch([1]) makes chunk 2 the LRU candidate.
+        - Reusing [1] makes chunk 2 the LRU candidate.
         - prepare_store([2, 3, 4, 5]):
             * chunk 2 is filtered out as "already stored"
             * but without the fix, chunk 2 would be evicted as the LRU
@@ -187,17 +216,23 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
     )
 
     # store [1, 2] and complete
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
-    # touch [1] to make chunk 2 the LRU candidate
-    manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+    # reuse [1] to make chunk 2 the LRU candidate
+    reuse_keys(manager, to_keys([1]))
 
     # prepare_store([2, 3, 4, 5]):
     #   - chunk 2 is already stored -> filtered out of keys_to_store
     #   - chunk 2 must NOT be evicted even though it is the LRU candidate
     #   - chunk 1 (ID 0) is evicted instead; new chunks [3,4,5] get IDs 2,3,0
-    prepare_store_output = manager.prepare_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
+    prepare_store_output = manager.prepare_store(
+        to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
@@ -208,7 +243,9 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
     )
 
     # complete_store must not silently drop chunk 2
-    manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
+    manager.complete_store(
+        to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     # chunk 2 must still be present in the cache
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
@@ -221,7 +258,9 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
         store_threshold=2,
     )
 
-    prepare_store_output = manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    prepare_store_output = manager.prepare_store(
+        to_keys([1, 2, 3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     verify_store_output(
         prepare_store_output,
@@ -239,13 +278,16 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
 
 
-def test_cpu_manager_fills_the_config_info_keys_of_the_spec():
-    """A name the declaration misses becomes a dropped label at runtime."""
+def test_cpu_manager_reports_no_config_info_without_info():
+    """A caller that passes no info keeps the empty default.
+
+    The scheduler still sends an info payload, so the metric appears with the
+    engine labels alone. Tests in tests/v1/kv_offload/test_factory.py cover the
+    published labels, because a real spec supplies the info.
+    """
     manager = make_cpu_manager(num_chunks=4)
 
-    (info,) = manager.config_info()
-    assert tuple(info) == CPUOffloadingSpec.config_info_keys({})
-    assert info["cpu_num_chunks"] == 4
+    assert manager.config_info() == [{}]
 
 
 def test_cpu_manager_reports_cache_usage_gauge():
@@ -265,30 +307,44 @@ def test_cpu_manager_reports_cache_usage_gauge():
     check_usage_stats(manager, 0.0)
 
     # After allocating 2 of 4 chunks: usage = 0.5
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     check_usage_stats(manager, 0.5)
 
     # After filling all 4 chunks: usage = 1.0
-    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     check_usage_stats(manager, 1.0)
 
     # After completing store, the chunks become evictable as not actively used
     # and usage drops.
-    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     check_usage_stats(manager, 0.5)
 
     # After completing store, the chunks become evictable as not actively used
     # and usage drops.
-    manager.complete_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    manager.complete_store(
+        to_keys([3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     check_usage_stats(manager, 0.0)
 
 
 def test_cpu_manager_reports_allocation_size_histogram():
     manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
 
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    manager.prepare_store(
+        to_keys([1, 2, 3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     stats = manager.get_stats()
 
@@ -315,7 +371,9 @@ def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
     monkeypatch.setattr(manager, "_allocate_chunks", fail_allocate_chunks)
 
     with pytest.raises(RuntimeError, match="allocation failed"):
-        manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+        manager.prepare_store(
+            to_keys([1, 2, 3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
     stats = manager.get_stats()
 
@@ -328,10 +386,15 @@ def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
 def test_cpu_manager_reports_allocation_size_on_eviction_failure():
     manager = make_cpu_manager(num_chunks=1, cache_policy="lru")
 
-    manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
+    manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
     manager.get_stats()
 
-    assert manager.prepare_store(to_keys([2]), _EMPTY_REQ_CTX) is None
+    assert (
+        manager.prepare_store(
+            to_keys([2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is None
+    )
 
     stats = manager.get_stats()
 
@@ -345,10 +408,14 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
     manager = make_cpu_manager(num_chunks=4)
 
     # Store path: pins write usage until complete_store.
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
 
-    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
     # Load path: pins read usage until complete_load.
@@ -360,7 +427,9 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
     check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
     # Concurrent write + read pins are both reflected and additive.
-    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     manager.prepare_load(to_keys([2]), _EMPTY_REQ_CTX)
     check_split_usage_stats(manager, write=0.5, read=0.25, total=0.75)
 
@@ -368,10 +437,14 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
 def test_cpu_manager_clears_write_usage_after_failed_store():
     manager = make_cpu_manager(num_chunks=4)
 
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
 
-    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE, success=False
+    )
     check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
 
@@ -381,7 +454,9 @@ def test_cpu_manager():
     cpu_manager = make_cpu_manager(num_chunks=4, cache_policy="lru", enable_events=True)
 
     # prepare store [1, 2]
-    prepare_store_output = cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    prepare_store_output = cpu_manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
@@ -399,7 +474,9 @@ def test_cpu_manager():
     assert list(cpu_manager.take_events()) == []
 
     # complete store [1, 2]
-    cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    cpu_manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
     # lookup [1, 2]
@@ -409,7 +486,7 @@ def test_cpu_manager():
 
     # prepare store [2, 3, 4, 5] -> evicts [1]
     prepare_store_output = cpu_manager.prepare_store(
-        to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX
+        to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
     )
     verify_store_output(
         prepare_store_output,
@@ -424,10 +501,17 @@ def test_cpu_manager():
     verify_events(cpu_manager.take_events(), expected_evictions=({1},))
 
     # prepare store with no space
-    assert cpu_manager.prepare_store(to_keys([1, 6]), _EMPTY_REQ_CTX) is None
+    assert (
+        cpu_manager.prepare_store(
+            to_keys([1, 6]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is None
+    )
 
     # complete store [2, 3, 4, 5]
-    cpu_manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
+    cpu_manager.complete_store(
+        to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     # lookup (now that we have [2, 3, 4, 5])
     assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
@@ -443,7 +527,12 @@ def test_cpu_manager():
     verify_load_output(prepare_load_output, [1, 2])
 
     # prepare store with no space ([2, 3] is being loaded)
-    assert cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX) is None
+    assert (
+        cpu_manager.prepare_store(
+            to_keys([6, 7, 8]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is None
+    )
 
     # complete load [2, 3]. Load changes the eviction list, making 2, 3 recent.
     cpu_manager.complete_load(to_keys([2, 3]), load_ctx)
@@ -451,7 +540,9 @@ def test_cpu_manager():
 
     # prepare store [6, 7, 8] -> evicts [4, 5, 3] (oldest). Within
     # the accessed prefix [2, 3], the tail is less valuable than the head.
-    prepare_store_output = cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
+    prepare_store_output = cpu_manager.prepare_store(
+        to_keys([6, 7, 8]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
@@ -462,13 +553,17 @@ def test_cpu_manager():
     )
 
     # complete store [6, 7, 8]
-    cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
+    cpu_manager.complete_store(
+        to_keys([6, 7, 8]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
-    # touch [2, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([2, 6, 7]), _EMPTY_REQ_CTX)
+    # reuse [2, 6, 7] (move to end of LRU order)
+    reuse_keys(cpu_manager, to_keys([2, 6, 7]))
 
-    # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
-    prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
+    # prepare store [7, 9] -> evicts [8] (oldest following previous reuse)
+    prepare_store_output = cpu_manager.prepare_store(
+        to_keys([9]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
@@ -479,7 +574,9 @@ def test_cpu_manager():
     )
 
     # complete store [7, 9] with failure
-    cpu_manager.complete_store(to_keys([7, 9]), _EMPTY_REQ_CTX, success=False)
+    cpu_manager.complete_store(
+        to_keys([7, 9]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE, success=False
+    )
 
     # assert [7] is still stored, but [9] is not
     assert cpu_manager.lookup(to_key(7), _EMPTY_REQ_CTX) is LookupResult.HIT
@@ -499,14 +596,18 @@ def test_prepare_load_preserves_key_order():
     key_a, key_b, key_c = to_key(0), to_key(1), to_key(2)
 
     # Store all three keys and learn their chunk ID assignments
-    store_output = manager.prepare_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
+    store_output = manager.prepare_store(
+        [key_a, key_b, key_c], _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert store_output is not None
     assert isinstance(store_output.store_spec, CPULoadStoreSpec)
     key_to_chunk_id = {
         k: int(cid)
         for k, cid in zip(store_output.keys_to_store, store_output.store_spec.chunk_ids)
     }
-    manager.complete_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
+    manager.complete_store(
+        [key_a, key_b, key_c], _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     # Forward order: [a, b, c]
     spec_fwd = manager.prepare_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)
@@ -534,8 +635,11 @@ def test_lru_batch_eviction_failure_is_atomic():
     policy = manager._policy
     assert isinstance(policy, LRUCachePolicy)
     keys = to_keys([1, 2, 3, 4])
-    assert manager.prepare_store(keys, _EMPTY_REQ_CTX) is not None
-    manager.complete_store(keys, _EMPTY_REQ_CTX)
+    assert (
+        manager.prepare_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
 
     protected = set(keys[1:])
     assert policy.evict(2, protected) is None
@@ -551,8 +655,11 @@ def test_lru_repeated_pin_cycles_compact_lazy_heap_entries():
     policy = manager._policy
     assert isinstance(policy, LRUCachePolicy)
     key = to_key(1)
-    assert manager.prepare_store([key], _EMPTY_REQ_CTX) is not None
-    manager.complete_store([key], _EMPTY_REQ_CTX)
+    assert (
+        manager.prepare_store([key], _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([key], _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
 
     for _ in range(128):
         manager.prepare_load([key], _EMPTY_REQ_CTX)
@@ -571,13 +678,19 @@ def test_reset_discards_stale_request_access_classification():
     key = to_key(1)
     resumed_ctx = make_req_context("resumed")
 
-    assert manager.prepare_store([key], resumed_ctx) is not None
-    manager.complete_store([key], resumed_ctx)
+    assert (
+        manager.prepare_store([key], resumed_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([key], resumed_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.reset_cache()
 
     replacement_ctx = make_req_context("replacement")
-    assert manager.prepare_store([key], replacement_ctx) is not None
-    manager.complete_store([key], replacement_ctx)
+    assert (
+        manager.prepare_store([key], replacement_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([key], replacement_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(replacement_ctx)
     assert key in policy.t1
 
@@ -611,7 +724,7 @@ class TestARCPolicy:
 
         # prepare store [1, 2]
         prepare_store_output = cpu_manager.prepare_store(
-            to_keys([1, 2]), _EMPTY_REQ_CTX
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
         )
         verify_store_output(
             prepare_store_output,
@@ -630,7 +743,9 @@ class TestARCPolicy:
         assert list(cpu_manager.take_events()) == []
 
         # complete store [1, 2]
-        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
         verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
         # lookup [1, 2]
@@ -649,15 +764,19 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager(enable_events=False)
 
         # store and complete chunk 1
-        cpu_manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        cpu_manager.complete_store(
+            to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # chunk 1 starts in T1 (recent)
         assert to_keys([1])[0] in arc_policy.t1
         assert to_keys([1])[0] not in arc_policy.t2
 
-        # touch chunk 1 (simulate second access)
-        cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+        # reuse chunk 1 (second access)
+        reuse_keys(cpu_manager, to_keys([1]))
 
         # chunk 1 should now be in T2 (frequent)
         assert to_keys([1])[0] not in arc_policy.t1
@@ -671,7 +790,7 @@ class TestARCPolicy:
 
         # prepare and complete store [1, 2, 3, 4]
         prepare_store_output = cpu_manager.prepare_store(
-            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX
+            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
         )
         verify_store_output(
             prepare_store_output,
@@ -681,7 +800,9 @@ class TestARCPolicy:
                 evicted_keys=[],
             ),
         )
-        cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(
+            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # prepare load [2, 3] (increases ref_cnt)
         prepare_load_output = cpu_manager.prepare_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
@@ -689,7 +810,12 @@ class TestARCPolicy:
 
         # prepare store [5, 6, 7] with [2, 3] being loaded
         # should fail because [2, 3] have ref_cnt > 0
-        assert cpu_manager.prepare_store(to_keys([5, 6, 7]), _EMPTY_REQ_CTX) is None
+        assert (
+            cpu_manager.prepare_store(
+                to_keys([5, 6, 7]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+            )
+            is None
+        )
 
         # complete load [2, 3]
         cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
@@ -697,7 +823,7 @@ class TestARCPolicy:
         # now prepare store [5, 6, 7] should succeed
         # ARC will evict chunks one at a time from T1 as needed
         prepare_store_output = cpu_manager.prepare_store(
-            to_keys([5, 6, 7]), _EMPTY_REQ_CTX
+            to_keys([5, 6, 7]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
         )
         assert prepare_store_output is not None
         # Should successfully evict enough chunks to make room (at least 1)
@@ -711,21 +837,31 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager(num_chunks=2, enable_events=False)
 
         # store chunks 1, 2 (fills cache)
-        cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        cpu_manager.complete_store(
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         initial_target = arc_policy.target_t1_size
 
         # store chunk 3, evicting chunk 1 (moves to B1 ghost list)
-        cpu_manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        cpu_manager.complete_store(
+            to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # chunk 1 should be in B1 (ghost list)
         assert to_keys([1])[0] in arc_policy.b1
 
-        # touch chunk 1 (cache miss, but in B1)
+        # store chunk 1 again (cache miss, but in B1)
         # this should increase target_t1_size (favor recency)
-        cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([1]), make_req_context("ghost-hit"), trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # target should have increased
         assert arc_policy.target_t1_size > initial_target
@@ -737,11 +873,15 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager(enable_events=False)
 
         # store chunks 1, 2, 3, 4
-        cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        cpu_manager.complete_store(
+            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
-        # promote chunks 3, 4 to T2 by touching them
-        cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
+        # promote chunks 3, 4 to T2 by reusing them
+        reuse_keys(cpu_manager, to_keys([3, 4]))
 
         # now: T1 = {1, 2}, T2 = {3, 4}
         assert len(arc_policy.t1) == 2
@@ -752,11 +892,15 @@ class TestARCPolicy:
         arc_policy.target_t1_size = 1
 
         # store chunk 5, should evict from T1 (chunk 1, LRU in T1)
-        output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
+        output = cpu_manager.prepare_store(
+            to_keys([5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert output is not None
         assert to_keys([1]) == output.evicted_keys
 
-        cpu_manager.complete_store(to_keys([5]), _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(
+            to_keys([5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # chunk 1 should be in B1 (ghost list)
         assert to_keys([1])[0] in arc_policy.b1
@@ -769,10 +913,12 @@ class TestARCPolicy:
             num_chunks=256, enable_events=False
         )
         keys = to_keys(list(range(256)))
-        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+        cpu_manager.complete_store(
+            keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
-        cpu_manager.touch(keys[128:], _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, keys[128:])
         arc_policy.target_t1_size = 64
 
         protected = {keys[0], keys[2], keys[255]}
@@ -813,10 +959,12 @@ class TestARCPolicy:
         """An exhausted T1 scan must keep falling back to T2."""
         cpu_manager, arc_policy = self._make_manager(num_chunks=8, enable_events=False)
         keys = to_keys(list(range(8)))
-        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+        cpu_manager.complete_store(
+            keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
-        cpu_manager.touch(keys[6:], _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, keys[6:])
         arc_policy.target_t1_size = 4
 
         t1_order = list(arc_policy.t1)
@@ -864,13 +1012,20 @@ class TestARCPolicy:
         """A preference for T2 must not reject stores that can reclaim T1."""
         manager, policy = self._make_manager(enable_events=False)
         for keys in ([1, 2, 3, 4], [5, 6]):
-            assert manager.prepare_store(to_keys(keys), _EMPTY_REQ_CTX) is not None
-            manager.complete_store(to_keys(keys), _EMPTY_REQ_CTX)
+            assert (
+                manager.prepare_store(
+                    to_keys(keys), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+                )
+                is not None
+            )
+            manager.complete_store(
+                to_keys(keys), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+            )
 
         # Ghost hits raise the target to 3; promotion leaves only 2 entries in T1.
-        manager.touch(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
-        manager.touch(to_keys([5, 6]), _EMPTY_REQ_CTX)
+        policy.on_store_miss(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        policy.on_store_miss(to_keys([1]), _EMPTY_REQ_CTX)
+        reuse_keys(manager, to_keys([5, 6]))
         assert policy.target_t1_size == 3
         assert list(policy.t1) == to_keys([3, 4])
         assert list(policy.t2) == to_keys([6, 5])
@@ -882,7 +1037,11 @@ class TestARCPolicy:
         policy.t2 = counting_t2
         before = [list(q.items()) for q in (policy.t1, policy.t2, policy.b1, policy.b2)]
         counting_t1.items_yielded = counting_t2.items_yielded = 0
-        output = manager.prepare_store(to_keys(protected + new_keys), _EMPTY_REQ_CTX)
+        output = manager.prepare_store(
+            to_keys(protected + new_keys),
+            _EMPTY_REQ_CTX,
+            trigger=StoreTrigger.ON_COMPUTE,
+        )
         assert counting_t1.items_yielded <= len(before[0])
         assert counting_t2.items_yielded <= len(before[1])
 
@@ -895,7 +1054,9 @@ class TestARCPolicy:
             assert output is not None
             assert output.keys_to_store == to_keys(new_keys)
             assert output.evicted_keys == to_keys(expected_evicted)
-            manager.complete_store(to_keys(new_keys), _EMPTY_REQ_CTX)
+            manager.complete_store(
+                to_keys(new_keys), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+            )
             for key in new_keys:
                 assert manager.lookup(to_key(key), _EMPTY_REQ_CTX) is LookupResult.HIT
         for key in pinned + protected:
@@ -906,8 +1067,10 @@ class TestARCPolicy:
         """Finding only some candidates must not partially evict the cache."""
         cpu_manager, arc_policy = self._make_manager(num_chunks=4, enable_events=False)
         keys = to_keys(list(range(4)))
-        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+        cpu_manager.complete_store(
+            keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         before_t1 = list(arc_policy.t1.items())
         protected = set(keys[1:])
@@ -925,41 +1088,55 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager(num_chunks=2, enable_events=False)
 
         # fill cache with chunks 1, 2
-        cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        cpu_manager.complete_store(
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # store many chunks to fill ghost lists
         for i in range(3, 20):
-            cpu_manager.prepare_store(to_keys([i]), _EMPTY_REQ_CTX)
-            cpu_manager.complete_store(to_keys([i]), _EMPTY_REQ_CTX)
+            cpu_manager.prepare_store(
+                to_keys([i]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+            )
+            cpu_manager.complete_store(
+                to_keys([i]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+            )
 
         # ghost lists should not exceed cache_capacity
         assert len(arc_policy.b1) <= arc_policy.cache_capacity
         assert len(arc_policy.b2) <= arc_policy.cache_capacity
 
-    def test_touch_ordering(self):
-        """Tests that touch() correctly updates access patterns.
+    def test_reuse_ordering(self):
+        """Tests that request reuse correctly updates access patterns.
         Similar to LRU test but verifies T1/T2 ordering.
         """
         cpu_manager, arc_policy = self._make_manager()
 
         # store chunks 1, 2, 3, 4
-        cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        cpu_manager.complete_store(
+            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # promote 3, 4 to T2
-        cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, to_keys([3, 4]))
 
         # T1 = {1, 2}, T2 = {3, 4}
-        # touch [1, 3, 4] - should promote 1 to T2, and move 3,4 to end of T2
-        cpu_manager.touch(to_keys([1, 3, 4]), _EMPTY_REQ_CTX)
+        # reuse [1, 3, 4] - should promote 1 to T2, and move 3,4 to end of T2
+        reuse_keys(cpu_manager, to_keys([1, 3, 4]))
 
         # T1 = {2}, T2 = {1, 3, 4} (in that order, with 4 most recent)
         assert len(arc_policy.t1) == 1
         assert len(arc_policy.t2) == 3
 
         # store chunk 5, should evict from T1 (chunk 2, only one in T1)
-        prepare_store_output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
+        prepare_store_output = cpu_manager.prepare_store(
+            to_keys([5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
         verify_store_output(
             prepare_store_output,
             ExpectedPrepareStoreOutput(
@@ -976,16 +1153,24 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager()
 
         # store chunks 1, 2, 3, 4
-        cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        cpu_manager.complete_store(
+            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # prepare store chunk 5 (will evict chunk 1)
-        prepare_store_output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
+        prepare_store_output = cpu_manager.prepare_store(
+            to_keys([5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert prepare_store_output is not None
         assert len(prepare_store_output.evicted_keys) == 1
 
         # complete store with failure
-        cpu_manager.complete_store(to_keys([5]), _EMPTY_REQ_CTX, success=False)
+        cpu_manager.complete_store(
+            to_keys([5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE, success=False
+        )
 
         # chunk 5 should not be in cache
         assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is LookupResult.MISS
@@ -1004,28 +1189,38 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager()
 
         # store [1, 2]
-        cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        cpu_manager.complete_store(
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # store [3, 4, 5] -> evicts [1]
         prepare_store_output = cpu_manager.prepare_store(
-            to_keys([3, 4, 5]), _EMPTY_REQ_CTX
+            to_keys([3, 4, 5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
         )
         assert prepare_store_output is not None
         assert len(prepare_store_output.evicted_keys) == 1
-        cpu_manager.complete_store(to_keys([3, 4, 5]), _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(
+            to_keys([3, 4, 5]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # promote some chunks to T2
-        cpu_manager.touch(to_keys([2, 3]), _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, to_keys([2, 3]))
 
         # T1 has {4, 5}, T2 has {2, 3}
         assert len(arc_policy.t1) == 2
         assert len(arc_policy.t2) == 2
 
         # store [6] -> should evict from T1 (4 is oldest in T1)
-        prepare_store_output = cpu_manager.prepare_store(to_keys([6]), _EMPTY_REQ_CTX)
+        prepare_store_output = cpu_manager.prepare_store(
+            to_keys([6]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert prepare_store_output is not None
-        cpu_manager.complete_store(to_keys([6]), _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(
+            to_keys([6]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
 
         # verify chunks 2, 3 (in T2) are still present
         assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
@@ -1041,12 +1236,31 @@ def test_take_events_prunes_retried_cleanup_and_drains_once():
     partially consumed drain must not replay it."""
     manager = make_cpu_manager(num_chunks=4, cache_policy="lru", enable_events=True)
 
-    assert manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX) is not None
-    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    assert (
+        manager.prepare_store(
+            to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is not None
+    )
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE, success=False
+    )
     # A retry re-allocates key 1 before the cleanup is drained.
-    assert manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX) is not None
-    assert manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX) is not None
-    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+    assert (
+        manager.prepare_store(
+            to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is not None
+    )
+    assert (
+        manager.prepare_store(
+            to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is not None
+    )
+    manager.complete_store(
+        to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     drain = iter(manager.take_events())
     cleanup = next(drain)
@@ -1075,20 +1289,29 @@ def test_filter_reused_manager():
     assert not manager.counts
 
     # 1st offer of [1, 2] -> tracked at count 1, not eligible yet
-    prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    prepare_store_output = manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
     assert manager.counts[to_keys([1])[0]] == 1
     assert manager.counts[to_keys([2])[0]] == 1
 
-    # 2nd offer -> the whole repeated prefix becomes eligible at once
-    prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    # 2nd offer, by another request -> the whole repeated prefix becomes
+    # eligible at once
+    prepare_store_output = manager.prepare_store(
+        to_keys([1, 2]), make_req_context("second"), trigger=StoreTrigger.ON_COMPUTE
+    )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == to_keys([1, 2])
-    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
 
     # Offer [3, 4] -> 1st time, evicting the tracker's LRU entry [1]
-    prepare_store_output = manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    prepare_store_output = manager.prepare_store(
+        to_keys([3, 4]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
     assert to_keys([1])[0] not in manager.counts
@@ -1096,7 +1319,9 @@ def test_filter_reused_manager():
     assert manager.counts[to_keys([4])[0]] == 1
 
     # [1] re-enters the tracker at count 1, so it is filtered again
-    prepare_store_output = manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
+    prepare_store_output = manager.prepare_store(
+        to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
     assert manager.counts.get(to_keys([1])[0]) == 1
@@ -1113,12 +1338,18 @@ def test_filter_reused_manager_oversized_offer_makes_progress():
     keys = to_keys([1, 2, 3, 4])
     stored_keys: set[OffloadKey] = set()
 
-    for _ in range(4):
+    for i in range(4):
         remaining_keys = [key for key in keys if key not in stored_keys]
-        output = manager.prepare_store(remaining_keys, _EMPTY_REQ_CTX)
+        output = manager.prepare_store(
+            remaining_keys,
+            make_req_context(f"req-{i}"),
+            trigger=StoreTrigger.ON_COMPUTE,
+        )
         assert output is not None
         if output.keys_to_store:
-            manager.complete_store(output.keys_to_store, _EMPTY_REQ_CTX)
+            manager.complete_store(
+                output.keys_to_store, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+            )
             stored_keys.update(output.keys_to_store)
 
     assert stored_keys == set(keys)
@@ -1133,37 +1364,136 @@ def test_store_threshold_does_not_hide_ready_reuse():
     )
     head, tail, noise_1, noise_2, replacement = to_keys(list(range(5)))
 
-    seed_ctx = make_req_context("seed")
-    output = manager.prepare_store([head, tail], seed_ctx)
+    output = manager.prepare_store(
+        [head, tail], make_req_context("seed-first"), trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert not output.keys_to_store
-    output = manager.prepare_store([head, tail], seed_ctx)
+    seed_ctx = make_req_context("seed")
+    output = manager.prepare_store(
+        [head, tail], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert output.keys_to_store == [head, tail]
-    manager.complete_store([head, tail], seed_ctx)
+    manager.complete_store([head, tail], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(seed_ctx)
 
     # Age both resident keys out of the admission tracker without storing the
     # noise keys. Reusing the tail recreates its counter at one, below the
     # threshold, but must still refresh its cache recency.
-    output = manager.prepare_store([noise_1, noise_2], make_req_context("noise"))
+    output = manager.prepare_store(
+        [noise_1, noise_2], make_req_context("noise"), trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert not output.keys_to_store
     reuse_ctx = make_req_context("reuse")
     skipped_before_reuse = manager.stores_skipped_in_current_batch
-    output = manager.prepare_store([tail], reuse_ctx)
+    output = manager.prepare_store([tail], reuse_ctx, trigger=StoreTrigger.ON_COMPUTE)
     assert output is not None
     assert not output.keys_to_store
     assert manager.stores_skipped_in_current_batch == skipped_before_reuse
     manager.on_request_finished(reuse_ctx)
 
-    replacement_ctx = make_req_context("replacement")
-    output = manager.prepare_store([replacement], replacement_ctx)
+    output = manager.prepare_store(
+        [replacement],
+        make_req_context("replacement-first"),
+        trigger=StoreTrigger.ON_COMPUTE,
+    )
     assert output is not None
     assert not output.keys_to_store
-    output = manager.prepare_store([replacement], replacement_ctx)
+    replacement_ctx = make_req_context("replacement")
+    output = manager.prepare_store(
+        [replacement], replacement_ctx, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert output.evicted_keys == [head]
+
+
+@pytest.mark.parametrize("store_threshold", [2, 3])
+def test_store_threshold_does_not_count_retries_of_a_failed_offer(
+    store_threshold: int,
+):
+    """After prepare_store() returns None, the scheduler offers the same keys
+    again. A retry must not admit a key that only one request offered, nor
+    count that key's skip again."""
+    manager = make_cpu_manager(num_chunks=2, store_threshold=store_threshold)
+    pinned = to_keys([100, 101])
+    warm, cold = to_keys([1, 2])
+
+    # Other requests offer `pinned` and `warm`, so one more offer admits them.
+    for i in range(store_threshold - 1):
+        manager.prepare_store(
+            [*pinned, warm],
+            make_req_context(f"warmup-{i}"),
+            trigger=StoreTrigger.ON_COMPUTE,
+        )
+    # Fill both chunks with stores that stay in flight.
+    pin_ctx = make_req_context("pin")
+    output = manager.prepare_store(pinned, pin_ctx, trigger=StoreTrigger.ON_COMPUTE)
+    assert output is not None
+    assert output.keys_to_store == pinned
+    manager.get_stats()  # drop the warm-up skips
+
+    ctx = make_req_context("req")
+    assert (
+        manager.prepare_store([warm, cold], ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is None
+    )
+    assert (
+        manager.prepare_store([warm, cold], ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is None
+    )
+    # The stores complete, so both chunks become evictable.
+    manager.complete_store(pinned, pin_ctx, trigger=StoreTrigger.ON_COMPUTE)
+    output = manager.prepare_store([warm, cold], ctx, trigger=StoreTrigger.ON_COMPUTE)
+    assert output is not None
+    assert output.keys_to_store == [warm]
+    assert manager.counts is not None
+    assert manager.counts[cold] == 1
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 1
+
+
+@pytest.mark.parametrize("store_threshold", [2, 3])
+def test_store_threshold_counts_a_key_once_per_request(store_threshold: int):
+    """A preempted request restarts its stores from chunk 0 and offers its keys
+    again through the same context. Each key counts once per request, so the
+    re-offers must not admit a key that only this request offered, nor count
+    its skip again. Another request's offer still counts."""
+    manager = make_cpu_manager(num_chunks=4, store_threshold=store_threshold)
+    warm, cold = to_keys([1, 2])
+
+    # Other requests offer `warm`, so one more offer admits it.
+    for i in range(store_threshold - 1):
+        manager.prepare_store(
+            [warm], make_req_context(f"warmup-{i}"), trigger=StoreTrigger.ON_COMPUTE
+        )
+    manager.get_stats()  # drop the warm-up skips
+
+    ctx = make_req_context("req")
+    output = manager.prepare_store([warm, cold], ctx, trigger=StoreTrigger.ON_COMPUTE)
+    assert output is not None
+    assert output.keys_to_store == [warm]
+    manager.complete_store([warm], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+    # Preempted and rescheduled, as often as it takes to reach the threshold.
+    for _ in range(store_threshold - 1):
+        output = manager.prepare_store(
+            [warm, cold], ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
+        assert output is not None
+        assert output.keys_to_store == []
+    assert manager.counts is not None
+    assert manager.counts[cold] == 1
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 1
+
+    manager.prepare_store(
+        [cold], make_req_context("other"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert manager.counts[cold] == 2
 
 
 def test_evictable_cache_chunk_count(monkeypatch):
@@ -1179,12 +1509,16 @@ def test_evictable_cache_chunk_count(monkeypatch):
     # Initial cache state [x, x, x, x]
 
     # We get 3 chunks from the cache.
-    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([1, 2, 3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     # cache state [1', 2', 3', x] <- 1', 2', 3' are actively being used.
     assert manager._num_evictable_cache_chunks == 0
 
     # Completing stores makes them idle.
-    manager.complete_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    manager.complete_store(
+        to_keys([1, 2, 3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     # cache state [1, 2, 3, x] <- 1, 2, 3 chunks are idle.
     assert manager._num_evictable_cache_chunks == 3
 
@@ -1208,12 +1542,19 @@ def test_evictable_cache_chunk_count(monkeypatch):
 
     # Eviction decrements idle count.
     # Cache has 3 stored chunks and 1 free slot. Storing 3 new keys needs 2 eviction.
-    manager.prepare_store(to_keys([4, 5, 6]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([4, 5, 6]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     # cache state [1, 4', 5', 6'] <- chunk 1 is idle
     assert manager._num_evictable_cache_chunks == 1
 
     # Failed store does not increment idle count (chunk discarded from cache).
-    manager.complete_store(to_keys([4, 5, 6]), _EMPTY_REQ_CTX, success=False)
+    manager.complete_store(
+        to_keys([4, 5, 6]),
+        _EMPTY_REQ_CTX,
+        trigger=StoreTrigger.ON_COMPUTE,
+        success=False,
+    )
     # cache state [1, x, x, x] <- chunk 1 is idle. Other returned to cache.
     assert manager._num_evictable_cache_chunks == 1
 
@@ -1223,8 +1564,12 @@ def test_evictable_cache_chunk_count(monkeypatch):
     assert manager._num_evictable_cache_chunks == 0
 
     # setup 3 chunks with loads so idle count drops to 0.
-    manager.prepare_store(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
-    manager.complete_store(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
+    manager.prepare_store(
+        to_keys([10, 11, 12]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    manager.complete_store(
+        to_keys([10, 11, 12]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     manager.prepare_load(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
     # cache state [10', 11', 12', x]
     assert manager._num_evictable_cache_chunks == 0
@@ -1241,7 +1586,12 @@ def test_evictable_cache_chunk_count(monkeypatch):
 
     monkeypatch.setattr(manager._policy, "evict", spy_evict)
     # cache state [10', 11', 12', x] <- cannot evict anything
-    assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is None
+    assert (
+        manager.prepare_store(
+            to_keys([14, 15]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is None
+    )
     assert not evict_called, (
         "_num_evictable_cache_chunks==0 should short-circuit before evict()"
     )
@@ -1250,35 +1600,19 @@ def test_evictable_cache_chunk_count(monkeypatch):
     manager.complete_load(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
     # cache state [10, 11, 12, x] <- 10, 11, 12 are idle
     assert manager._num_evictable_cache_chunks == 3
-    assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is not None
+    assert (
+        manager.prepare_store(
+            to_keys([14, 15]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is not None
+    )
     # cache state [10, 11, 14', 15'] <- 10, 11 are idle
     assert manager._num_evictable_cache_chunks == 2
-    manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
+    manager.complete_store(
+        to_keys([14, 15]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
     # cache state [10, 11, 14, 15] <- all chunks idle
     assert manager._num_evictable_cache_chunks == 4
-
-
-def test_touch_forwards_req_context_to_policy(monkeypatch):
-    """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
-    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
-    received = []
-
-    def spy_touch(keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        received.append((list(keys), req_context))
-
-    monkeypatch.setattr(manager._policy, "touch", spy_touch)
-
-    keys = to_keys([1, 2])
-    ctx = make_req_context(
-        req_id="test-req",
-        kv_transfer_params={"test_param": "test_value"},
-    )
-
-    manager.touch(keys, ctx)
-
-    assert len(received) == 1
-    assert received[0][0] == keys
-    assert received[0][1] is ctx
 
 
 @pytest.mark.parametrize("finish_before_completion", [False, True])
@@ -1290,15 +1624,17 @@ def test_request_finish_orders_lru_prefix_independent_of_store_completion(
     prefix = to_keys([1, 2, 3, 4])
     ctx = make_req_context("prefix")
 
-    output = manager.prepare_store(prefix, ctx)
+    output = manager.prepare_store(prefix, ctx, trigger=StoreTrigger.ON_COMPUTE)
     assert output is not None
     if finish_before_completion:
         manager.on_request_finished(ctx)
-    manager.complete_store(set(prefix), ctx)
+    manager.complete_store(set(prefix), ctx, trigger=StoreTrigger.ON_COMPUTE)
     if not finish_before_completion:
         manager.on_request_finished(ctx)
 
-    output = manager.prepare_store(to_keys([5]), make_req_context("evict"))
+    output = manager.prepare_store(
+        to_keys([5]), make_req_context("evict"), trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert output.evicted_keys == to_keys([4])
 
@@ -1311,9 +1647,9 @@ def test_request_finish_orders_lru_prefix_independent_of_load_completion(
     prefix = to_keys([1, 2, 3, 4])
 
     seed_ctx = make_req_context("seed")
-    output = manager.prepare_store(prefix, seed_ctx)
+    output = manager.prepare_store(prefix, seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
     assert output is not None
-    manager.complete_store(prefix, seed_ctx)
+    manager.complete_store(prefix, seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
 
     reuse_ctx = make_req_context("reuse")
     manager.prepare_load(prefix, reuse_ctx)
@@ -1323,7 +1659,9 @@ def test_request_finish_orders_lru_prefix_independent_of_load_completion(
     if not finish_before_completion:
         manager.on_request_finished(reuse_ctx)
 
-    output = manager.prepare_store(to_keys([5]), make_req_context("evict"))
+    output = manager.prepare_store(
+        to_keys([5]), make_req_context("evict"), trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert output.evicted_keys == to_keys([4])
 
@@ -1334,18 +1672,26 @@ def test_late_old_completion_does_not_override_newer_request_recency():
     new_keys = to_keys([3, 4])
 
     old_ctx = make_req_context("old")
-    assert manager.prepare_store(old_keys, old_ctx) is not None
+    assert (
+        manager.prepare_store(old_keys, old_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
     manager.on_request_finished(old_ctx)
 
     new_ctx = make_req_context("new")
-    assert manager.prepare_store(new_keys, new_ctx) is not None
-    manager.complete_store(new_keys, new_ctx)
+    assert (
+        manager.prepare_store(new_keys, new_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(new_keys, new_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(new_ctx)
 
     # Physical completion is late, but the logical access is still older.
-    manager.complete_store(old_keys, old_ctx)
+    manager.complete_store(old_keys, old_ctx, trigger=StoreTrigger.ON_COMPUTE)
 
-    output = manager.prepare_store(to_keys([5]), make_req_context("evict"))
+    output = manager.prepare_store(
+        to_keys([5]), make_req_context("evict"), trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert output.evicted_keys == [old_keys[-1]]
 
@@ -1357,10 +1703,16 @@ def test_arc_counts_reuse_once_and_keeps_insertions_in_t1():
     prefix = to_keys([1, 2, 3, 4])
 
     seed_ctx = make_req_context("seed")
-    assert manager.prepare_store(prefix, seed_ctx) is not None
-    manager.complete_store(prefix, seed_ctx)
+    assert (
+        manager.prepare_store(prefix, seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(prefix, seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
     # Repeated store offers from the same request must not become ARC hits.
-    assert manager.prepare_store(prefix, seed_ctx) is not None
+    assert (
+        manager.prepare_store(prefix, seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
     # Nor should an internal read used to cascade the new chunks to a tier.
     manager.prepare_load(prefix, seed_ctx)
     manager.complete_load(prefix, seed_ctx)
@@ -1388,8 +1740,11 @@ def test_arc_reuse_wins_if_same_request_later_reinserts_key():
     key_1, key_2 = to_keys([1, 2])
 
     seed_ctx = make_req_context("seed")
-    assert manager.prepare_store([key_1], seed_ctx) is not None
-    manager.complete_store([key_1], seed_ctx)
+    assert (
+        manager.prepare_store([key_1], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([key_1], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(seed_ctx)
 
     reuse_ctx = make_req_context("reuse-and-reinsert")
@@ -1397,12 +1752,18 @@ def test_arc_reuse_wins_if_same_request_later_reinserts_key():
     manager.complete_load([key_1], reuse_ctx)
 
     other_ctx = make_req_context("evict-reused-key")
-    assert manager.prepare_store([key_2], other_ctx) is not None
-    manager.complete_store([key_2], other_ctx)
+    assert (
+        manager.prepare_store([key_2], other_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([key_2], other_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(other_ctx)
 
-    assert manager.prepare_store([key_1], reuse_ctx) is not None
-    manager.complete_store([key_1], reuse_ctx)
+    assert (
+        manager.prepare_store([key_1], reuse_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([key_1], reuse_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(reuse_ctx)
 
     assert key_1 not in policy.t1
@@ -1417,16 +1778,25 @@ def test_request_finish_forwards_grouped_deduplicated_accesses(monkeypatch):
     group_1_tail = make_offload_key(b"group-1-tail", 1)
 
     seed_ctx = make_req_context("seed")
-    assert manager.prepare_store([existing], seed_ctx) is not None
-    manager.complete_store([existing], seed_ctx)
+    assert (
+        manager.prepare_store([existing], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([existing], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
 
     ctx = make_req_context("grouped")
     # Group 1 is observed first, but policy finalization follows group index.
     offered = [group_1_head, existing, group_0_new]
-    assert manager.prepare_store(offered, ctx) is not None
+    assert (
+        manager.prepare_store(offered, ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    )
     # Later offers extend a group's prefix and may repeat earlier keys.
     assert (
-        manager.prepare_store([group_0_new, group_1_head, group_1_tail], ctx)
+        manager.prepare_store(
+            [group_0_new, group_1_head, group_1_tail],
+            ctx,
+            trigger=StoreTrigger.ON_COMPUTE,
+        )
         is not None
     )
 
@@ -1454,8 +1824,11 @@ def test_failed_store_records_access_once_and_uses_store_miss_hook(monkeypatch):
     resident, candidate = to_keys([1, 2])
 
     seed_ctx = make_req_context("seed")
-    assert manager.prepare_store([resident], seed_ctx) is not None
-    manager.complete_store([resident], seed_ctx)
+    assert (
+        manager.prepare_store([resident], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([resident], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
 
     pin_ctx = make_req_context("pin")
     manager.prepare_load([resident], pin_ctx)
@@ -1483,7 +1856,12 @@ def test_failed_store_records_access_once_and_uses_store_miss_hook(monkeypatch):
     monkeypatch.setattr(manager._policy, "on_request_finished", on_request_finished)
 
     ctx = make_req_context("failed-store")
-    assert manager.prepare_store([candidate, resident], ctx) is None
+    assert (
+        manager.prepare_store(
+            [candidate, resident], ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is None
+    )
     assert record_calls == 1
     assert store_miss_calls == [([candidate], ctx)]
 
@@ -1502,15 +1880,20 @@ def test_arc_ghost_hit_adapts_once_per_request_before_insertion():
     keys = to_keys([1, 2, 3])
 
     seed_ctx = make_req_context("seed")
-    assert manager.prepare_store(keys[:2], seed_ctx) is not None
-    manager.complete_store(keys[:2], seed_ctx)
+    assert (
+        manager.prepare_store(keys[:2], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(keys[:2], seed_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(seed_ctx)
 
     evict_ctx = make_req_context("create-ghost")
-    output = manager.prepare_store([keys[2]], evict_ctx)
+    output = manager.prepare_store(
+        [keys[2]], evict_ctx, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     [ghost_key] = output.evicted_keys
-    manager.complete_store([keys[2]], evict_ctx)
+    manager.complete_store([keys[2]], evict_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(evict_ctx)
     assert ghost_key in policy.b1
 
@@ -1520,17 +1903,25 @@ def test_arc_ghost_hit_adapts_once_per_request_before_insertion():
 
     ghost_ctx = make_req_context("ghost-hit")
     target_before = policy.target_t1_size
-    assert manager.prepare_store([ghost_key], ghost_ctx) is None
+    assert (
+        manager.prepare_store([ghost_key], ghost_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is None
+    )
     target_after_first_offer = policy.target_t1_size
     assert target_after_first_offer > target_before
-    assert manager.prepare_store([ghost_key], ghost_ctx) is None
+    assert (
+        manager.prepare_store([ghost_key], ghost_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is None
+    )
     assert policy.target_t1_size == target_after_first_offer
 
     manager.complete_load(resident_keys, pin_ctx)
-    output = manager.prepare_store([ghost_key], ghost_ctx)
+    output = manager.prepare_store(
+        [ghost_key], ghost_ctx, trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert policy.target_t1_size == target_after_first_offer
-    manager.complete_store([ghost_key], ghost_ctx)
+    manager.complete_store([ghost_key], ghost_ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(ghost_ctx)
     assert ghost_key in policy.t1
     assert ghost_key not in policy.t2
@@ -1543,10 +1934,13 @@ def test_arc_pending_chunk_is_not_a_frequency_hit():
     key = to_key(1)
 
     writer_ctx = make_req_context("writer")
-    assert manager.prepare_store([key], writer_ctx) is not None
+    assert (
+        manager.prepare_store([key], writer_ctx, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
 
     observer_ctx = make_req_context("pending-observer")
-    output = manager.prepare_store([key], observer_ctx)
+    output = manager.prepare_store([key], observer_ctx, trigger=StoreTrigger.ON_COMPUTE)
     assert output is not None and not output.keys_to_store
     manager.on_request_finished(observer_ctx)
 
@@ -1564,12 +1958,18 @@ def test_request_key_positions_override_store_observation_order():
     ctx.set_offload_key_position(tail, 32)
 
     # A backfill or partial-tail path may offer a later key first.
-    assert manager.prepare_store([tail], ctx) is not None
-    assert manager.prepare_store([head], ctx) is not None
+    assert (
+        manager.prepare_store([tail], ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    )
+    assert (
+        manager.prepare_store([head], ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    )
     manager.on_request_finished(ctx)
-    manager.complete_store({head, tail}, ctx)
+    manager.complete_store({head, tail}, ctx, trigger=StoreTrigger.ON_COMPUTE)
 
-    output = manager.prepare_store([to_key(3)], make_req_context("evict-tail"))
+    output = manager.prepare_store(
+        [to_key(3)], make_req_context("evict-tail"), trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert output.evicted_keys == [tail]
 
@@ -1587,10 +1987,417 @@ def test_request_key_positions_order_tails_across_kv_groups():
     for key in (group_0_tail, group_1_tail):
         ctx.set_offload_key_position(key, 32)
 
-    assert manager.prepare_store(keys, ctx) is not None
-    manager.complete_store(keys, ctx)
+    assert manager.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    manager.complete_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
     manager.on_request_finished(ctx)
 
-    output = manager.prepare_store(to_keys([10, 11]), make_req_context("evict"))
+    output = manager.prepare_store(
+        to_keys([10, 11]), make_req_context("evict"), trigger=StoreTrigger.ON_COMPUTE
+    )
     assert output is not None
     assert set(output.evicted_keys) == {group_0_tail, group_1_tail}
+
+
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
+@pytest.mark.parametrize("batch_size", [1, 2, 3])
+@pytest.mark.parametrize("reverse_completion", [False, True])
+def test_unfinished_prefix_survives_pressure_across_store_batches(
+    cache_policy, batch_size, reverse_completion
+):
+    """Keep a contiguous prefix while its owner is still generating."""
+    manager = make_cpu_manager(num_chunks=8, cache_policy=cache_policy)
+    ctx = make_req_context("unfinished")
+    groups = [
+        [make_offload_key(str(position).encode(), group) for position in range(3)]
+        for group in range(2)
+    ]
+    batches = []
+    for start in range(0, 3, batch_size):
+        batch = [key for group in groups for key in group[start : start + batch_size]]
+        for group in groups:
+            for position in range(start, min(start + batch_size, 3)):
+                ctx.set_offload_key_position(group[position], (position + 1) * 16)
+        assert (
+            manager.prepare_store(batch, ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        batches.append(batch)
+        if not reverse_completion:
+            manager.complete_store(batch, ctx, trigger=StoreTrigger.ON_COMPUTE)
+    if reverse_completion:
+        for batch in reversed(batches):
+            manager.complete_store(batch, ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        to_keys([10, 11, 12, 13]),
+        make_req_context("B"),
+        trigger=StoreTrigger.ON_COMPUTE,
+    )
+    assert output is not None
+    assert set(output.evicted_keys) == {group[-1] for group in groups}
+    for group in groups:
+        assert all(manager.lookup(key, ctx) is LookupResult.HIT for key in group[:-1])
+
+
+@pytest.mark.parametrize("reuse_method", ["load", "store"])
+def test_unfinished_lru_reused_prefix_outlives_new_tail(reuse_method):
+    manager = make_cpu_manager(num_chunks=4)
+    head, middle, tail = to_keys([1, 2, 3])
+    seed = make_req_context("seed")
+    assert (
+        manager.prepare_store([head, middle], seed, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([head, middle], seed, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(seed)
+
+    ctx = make_req_context("reuse")
+    for position, key in enumerate([head, middle, tail], 1):
+        ctx.set_offload_key_position(key, position * 16)
+    if reuse_method == "load":
+        manager.prepare_load([head, middle], ctx)
+        manager.complete_load([middle, head], ctx)
+    else:
+        assert (
+            manager.prepare_store([head, middle], ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+    assert (
+        manager.prepare_store([tail], ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    )
+    manager.complete_store([tail], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        to_keys([10, 11, 12]), make_req_context("B"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert set(output.evicted_keys) == {middle, tail}
+    assert manager.lookup(head, ctx) is LookupResult.HIT
+
+
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
+def test_unfinished_backfill_orders_by_token_position(cache_policy):
+    manager = make_cpu_manager(num_chunks=3, cache_policy=cache_policy)
+    ctx = make_req_context("backfill")
+    head, middle, tail = to_keys([1, 2, 3])
+    for position, key in enumerate([head, middle, tail], 1):
+        ctx.set_offload_key_position(key, position * 16)
+    for key in [head, tail, middle]:
+        assert (
+            manager.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        [to_key(4)], make_req_context("B"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [tail]
+
+
+def test_arc_running_request_ages_as_its_oldest_t1_chunk():
+    """Tail-first applies within a running request; requests stay in T1 order."""
+    manager = make_cpu_manager(num_chunks=5, cache_policy="arc")
+    old = make_req_context("old")
+    old_key = to_key(1)
+    old.set_offload_key_position(old_key, 16)
+    assert (
+        manager.prepare_store([old_key], old, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([old_key], old, trigger=StoreTrigger.ON_COMPUTE)
+
+    running = make_req_context("running")
+    head, middle, tail = to_keys([2, 3, 4])
+    for position, key in enumerate([head, middle, tail], 1):
+        running.set_offload_key_position(key, position * 16)
+    for batch in ([head], [middle, tail]):
+        assert (
+            manager.prepare_store(batch, running, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store(batch, running, trigger=StoreTrigger.ON_COMPUTE)
+
+    newer = make_req_context("newer")
+    newer_key = to_key(5)
+    newer.set_offload_key_position(newer_key, 16)
+    assert (
+        manager.prepare_store([newer_key], newer, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([newer_key], newer, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        to_keys([10, 11, 12]), make_req_context("B"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [old_key, tail, middle]
+    assert manager.lookup(head, running) is LookupResult.HIT
+    assert manager.lookup(newer_key, newer) is LookupResult.HIT
+
+
+def test_arc_running_request_can_be_evicted_entirely():
+    manager = make_cpu_manager(num_chunks=2, cache_policy="arc")
+    running = make_req_context("running")
+    head, tail = to_keys([1, 2])
+    running.set_offload_key_position(head, 16)
+    running.set_offload_key_position(tail, 32)
+    assert (
+        manager.prepare_store([head, tail], running, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([head, tail], running, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        to_keys([10, 11]), make_req_context("B"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [tail, head]
+
+
+@pytest.mark.parametrize("pin_tail", [False, True])
+def test_arc_repeated_pressure_does_not_rescan_evicted_chunks(pin_tail):
+    class CountingList(list):
+        reads = 0
+
+        def __getitem__(self, index):
+            CountingList.reads += 1
+            return super().__getitem__(index)
+
+    num_keys = 128
+    manager = make_cpu_manager(num_chunks=num_keys, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    running = make_req_context("running")
+    keys = to_keys(list(range(num_keys)))
+    for position, key in enumerate(keys, 1):
+        running.set_offload_key_position(key, position * 16)
+    manager.prepare_store(keys[:1], running, trigger=StoreTrigger.ON_COMPUTE)
+    state, _ = next(iter(policy._running.values()))
+    state.entries = CountingList(state.entries)
+    assert (
+        manager.prepare_store(keys[1:], running, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store(keys, running, trigger=StoreTrigger.ON_COMPUTE)
+    evictable = keys
+    if pin_tail:
+        manager.prepare_load(keys[-1:], make_req_context("pin"))
+        evictable = keys[:-1]
+
+    for i in range(len(evictable) - 1):
+        output = manager.prepare_store(
+            [to_key(1000 + i)],
+            make_req_context(f"{i}"),
+            trigger=StoreTrigger.ON_COMPUTE,
+        )
+        assert output is not None
+        assert output.evicted_keys == [evictable[-1 - i]]
+    assert CountingList.reads <= 16 * num_keys
+
+
+def test_arc_running_request_chunk_promoted_to_t2_leaves_its_t1_order():
+    manager = make_cpu_manager(num_chunks=3, cache_policy="arc")
+    policy = manager._policy
+    assert isinstance(policy, ARCCachePolicy)
+    running = make_req_context("running")
+    head, middle, tail = to_keys([1, 2, 3])
+    for position, key in enumerate([head, middle, tail], 1):
+        running.set_offload_key_position(key, position * 16)
+    assert (
+        manager.prepare_store(
+            [head, middle, tail], running, trigger=StoreTrigger.ON_COMPUTE
+        )
+        is not None
+    )
+    manager.complete_store(
+        [head, middle, tail], running, trigger=StoreTrigger.ON_COMPUTE
+    )
+
+    reader = make_req_context("reader")
+    manager.prepare_load([middle], reader)
+    manager.complete_load([middle], reader)
+    manager.on_request_finished(reader)
+    assert middle in policy.t2
+    pin = make_req_context("pin")
+    manager.prepare_load([tail], pin)
+
+    output = manager.prepare_store(
+        [to_key(10)], make_req_context("B"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [head]
+    manager.complete_load([tail], pin)
+
+
+def test_arc_request_finishing_after_reset_ignores_pre_reset_chunks():
+    manager = make_cpu_manager(num_chunks=1, cache_policy="arc")
+    running = make_req_context("running")
+    head, tail = to_keys([1, 2])
+    running.set_offload_key_position(head, 16)
+    running.set_offload_key_position(tail, 32)
+    assert (
+        manager.prepare_store([head], running, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([head], running, trigger=StoreTrigger.ON_COMPUTE)
+    manager.reset_cache()
+
+    other = make_req_context("other")
+    other_key = to_key(9)
+    assert (
+        manager.prepare_store([other_key], other, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([other_key], other, trigger=StoreTrigger.ON_COMPUTE)
+    manager.prepare_load([other_key], other)
+    assert (
+        manager.prepare_store([tail], running, trigger=StoreTrigger.ON_COMPUTE) is None
+    )
+    manager.on_request_finished(running)
+    manager.complete_load([other_key], other)
+    assert manager.lookup(other_key, other) is LookupResult.HIT
+
+
+def test_lru_failed_store_retry_preserves_prefix_order():
+    manager = make_cpu_manager(num_chunks=2)
+    ctx = make_req_context("retry")
+    head, tail = to_keys([1, 2])
+    ctx.set_offload_key_position(head, 16)
+    ctx.set_offload_key_position(tail, 32)
+    assert (
+        manager.prepare_store([head], ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    )
+    manager.complete_store([head], ctx, trigger=StoreTrigger.ON_COMPUTE, success=False)
+    for key in [head, tail]:
+        assert (
+            manager.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        [to_key(3)], make_req_context("B"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [tail]
+
+
+def test_lru_reset_discards_unfinished_request_recency():
+    manager = make_cpu_manager(num_chunks=2)
+    ctx = make_req_context("resumed")
+    head = to_key(1)
+    ctx.set_offload_key_position(head, 16)
+    assert (
+        manager.prepare_store([head], ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    )
+    manager.complete_store([head], ctx, trigger=StoreTrigger.ON_COMPUTE)
+    manager.reset_cache()
+
+    other = make_req_context("other")
+    other_key = to_key(9)
+    other.set_offload_key_position(other_key, 16)
+    assert (
+        manager.prepare_store([other_key], other, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([other_key], other, trigger=StoreTrigger.ON_COMPUTE)
+    assert (
+        manager.prepare_store([head], ctx, trigger=StoreTrigger.ON_COMPUTE) is not None
+    )
+    manager.complete_store([head], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        [to_key(10)], make_req_context("B"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [other_key]
+
+
+def test_older_lru_request_does_not_demote_a_newer_shared_access():
+    manager = make_cpu_manager(num_chunks=3)
+    old = make_req_context("old")
+    pinned, cold, shared = to_keys([1, 2, 3])
+    for context, key, position in [
+        (old, pinned, 16),
+        (make_req_context("cold"), cold, 16),
+        (make_req_context("newer"), shared, 32),
+    ]:
+        context.set_offload_key_position(key, position)
+        assert (
+            manager.prepare_store([key], context, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store([key], context, trigger=StoreTrigger.ON_COMPUTE)
+    manager.prepare_load([pinned], old)
+
+    old.set_offload_key_position(shared, 32)
+    manager.prepare_load([shared], old)
+    manager.complete_load([shared], old)
+    output = manager.prepare_store(
+        [to_key(4)], make_req_context("pressure"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [cold]
+    manager.complete_load([pinned], old)
+
+
+def test_lru_incremental_stores_do_not_rescan_the_prefix():
+    class CountingContext(ReqContext):
+        position_lookups = 0
+
+        def get_offload_key_position(self, key: OffloadKey) -> int | None:
+            self.position_lookups += 1
+            return super().get_offload_key_position(key)
+
+    keys = to_keys(list(range(64)))
+    manager = make_cpu_manager(num_chunks=len(keys))
+    ctx = CountingContext(req_id="incremental")
+    for position, key in enumerate(keys, 1):
+        ctx.set_offload_key_position(key, position * 16)
+        assert (
+            manager.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+    assert 0 < ctx.position_lookups <= 3 * len(keys)
+
+
+@pytest.mark.parametrize("ready_on_insert", [False, True])
+def test_lru_insert_orders_positioned_chunks_without_followup_access(ready_on_insert):
+    """Insertion alone orders new chunks, including out-of-order backfills."""
+    policy = LRUCachePolicy(cache_capacity=3)
+    ctx = make_req_context("insert")
+    head, middle, tail = to_keys([1, 2, 3])
+    for position, key in enumerate([head, middle, tail], 1):
+        ctx.set_offload_key_position(key, position * 16)
+    for chunk_id, key in enumerate([head, tail, middle]):
+        chunk = ChunkStatus(chunk_id)
+        if ready_on_insert:
+            chunk.ref_cnt = 0
+        policy.insert(key, chunk, ctx)
+        if not ready_on_insert:
+            chunk.ref_cnt = 0
+            policy.mark_evictable(key)
+
+    evicted = policy.evict(2, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [tail, middle]
+    assert policy.get(head) is not None
+
+
+def test_store_trigger_and_success_are_keyword_only():
+    manager = CPUOffloadingManager(num_chunks=4)
+    keys = to_keys([1])
+    with pytest.raises(TypeError):
+        manager.prepare_store(  # type: ignore[misc]
+            keys, _EMPTY_REQ_CTX, StoreTrigger.ON_COMPUTE
+        )
+    assert manager.prepare_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+    with pytest.raises(TypeError):
+        manager.complete_store(  # type: ignore[misc]
+            keys, _EMPTY_REQ_CTX, StoreTrigger.ON_COMPUTE
+        )
+    manager.complete_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)

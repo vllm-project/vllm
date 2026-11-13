@@ -12,7 +12,7 @@ use vllm_chat::{
     ChatRole, SamplingParams, load_model_backends,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_text::TextLlm;
 
 #[derive(Debug, Parser)]
@@ -62,7 +62,9 @@ async fn main() -> Result<()> {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address.clone(),
             advertised_host: args.host.clone(),
+            engine_start_index: 0,
             engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
@@ -84,7 +86,7 @@ async fn main() -> Result<()> {
     println!("output_address={}", client.output_address());
     println!("engine_identities={:x?}", client.engine_identities());
 
-    let llm = Llm::new(client);
+    let llm = EngineCoreLlm::new(client);
     let chat = ChatLlm::new(TextLlm::new(llm, text_backend), chat_backend);
 
     let request = ChatRequest {

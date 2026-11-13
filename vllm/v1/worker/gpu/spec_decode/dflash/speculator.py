@@ -6,16 +6,17 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -46,13 +47,14 @@ class DFlashSpeculator(DraftModelSpeculator):
         vllm_config.parallel_config = replace(
             parallel_config,
             prefill_context_parallel_size=1,
-            decode_context_parallel_size=(
-                parallel_config.decode_context_parallel_size
-                if speculative_config.draft_model_config.use_mla
-                else 1
-            ),
+            decode_context_parallel_size=speculative_config.draft_decode_context_parallel_size,
         )
         super().__init__(vllm_config, device)
+
+        # See SpeculativeConfig.prefill_context_kv_only.
+        self.context_kv_only = speculative_config.prefill_context_kv_only
+        if self.context_kv_only:
+            self.use_draft_logits = False
 
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
@@ -99,7 +101,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         self._num_rejected: torch.Tensor | None = None
         aux_layers = get_eagle3_aux_layers_from_config(speculative_config)
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if aux_layers and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+        if (
+            aux_layers
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and not self.context_kv_only
+        ):
             self._aux_staging = torch.zeros(
                 self._num_graph_context_tokens(self.max_num_reqs),
                 len(aux_layers) * vllm_config.model_config.get_hidden_size(),
@@ -133,15 +139,18 @@ class DFlashSpeculator(DraftModelSpeculator):
     @property
     def attn_vllm_config(self) -> VllmConfig:
         # The draft's attention differs from the target's in causality.
-        config = copy.copy(super().attn_vllm_config)
+        config = super().attn_vllm_config
         config.attention_config = replace(
-            self.vllm_config.attention_config,
+            config.attention_config,
             use_non_causal=self.requires_non_causal,
         )
         return config
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        wants_full = (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and not self.context_kv_only
+        )
         supports_full = (
             self.attn_cg_support.min_cg_support.value
             >= AttentionCGSupport.UNIFORM_BATCH.value
@@ -163,7 +172,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            decode_query_len=self.num_query_per_req,
+            decode_query_lens={self.num_query_per_req: self.max_num_reqs},
         )
 
     def capture(self) -> None:
@@ -243,6 +252,49 @@ class DFlashSpeculator(DraftModelSpeculator):
     ) -> nn.Module:
         return load_dflash_model(target_model, self.vllm_config)
 
+    def free_unused_weights(self, target_model: nn.Module) -> None:
+        """With context_kv_only, keep only the weights of the modules that store
+        the context K/V and those shared with the target. A draft model without
+        `context_kv_modules` keeps all of its weights."""
+        if not self.context_kv_only or not hasattr(self.model, "context_kv_modules"):
+            return
+        keep = {id(p) for m in self.model.context_kv_modules() for p in m.parameters()}
+        keep.update(id(p) for p in target_model.parameters())
+        freed_bytes = 0
+        for param in self.model.parameters():
+            if id(param) not in keep:
+                freed_bytes += param.nbytes
+                param.data = param.data.new_empty(0)
+        logger.info(
+            "%s drafter only stores its context K/V (prefill_context_kv_only); "
+            "freed %.2f GiB of its weights.",
+            self._speculator_name,
+            freed_bytes / (1 << 30),
+        )
+
+    def load_model(self, target_model: nn.Module) -> None:
+        super().load_model(target_model)
+        if self.dcp_size == 1:
+            return
+        # The default draft DCP is resolved from config; catch drafts whose built
+        # layers disagree instead of failing inside the attention kernel.
+        draft_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+            self.draft_attn_layer_names,
+        )
+        windowed = sorted(
+            name
+            for name, layer in draft_layers.items()
+            if getattr(layer, "sliding_window", None) is not None
+        )
+        if windowed:
+            raise ValueError(
+                f"{self._speculator_name} draft layers {windowed} use sliding-window "
+                f"attention, which cannot run at decode_context_parallel_size="
+                f"{self.dcp_size}. Set draft_decode_context_parallel_size=1."
+            )
+
     def set_attn(
         self,
         model_state: ModelState,
@@ -265,9 +317,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         for groups in self.attn_groups:
             for group in groups:
                 builder = group.get_metadata_builder()
-                if getattr(
-                    builder, "aot_schedule", False
-                ) and get_kv_cache_spec_sliding_window(builder.kv_cache_spec):
+                kv_group = kv_cache_config.kv_cache_groups[group.kv_cache_group_id]
+                if getattr(builder, "aot_schedule", False) and issubclass(
+                    kv_group.manager_cls, SlidingWindowManager
+                ):
                     # `aot_schedule` belongs to FlashAttention's builder, not
                     # to the base class this loop is typed against.
                     builder.aot_schedule = False  # type: ignore[attr-defined]
@@ -431,6 +484,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         """Publish context features required by a draft's candidate head. Runs
         inside the FULL graph, so it must not sync with the host."""
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
+
     @torch.inference_mode()
     def propose(
         self,
@@ -460,6 +517,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        if self.context_kv_only:
+            num_speculative_tokens = 0
         num_reqs = input_batch.num_reqs
         if dummy_run and dp_sync_state is not None:
             num_reqs = min(num_reqs, dp_sync_state.num_reqs)
@@ -488,6 +547,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.hidden_states[:num_target_tokens],
                 self.context_positions[:num_target_tokens],
             )
+            if num_speculative_tokens == 0:
+                return self.draft_tokens[:num_reqs]
             # DFlash processes all speculative tokens in one forward pass,
             # so the real token count is num_query_tokens.
             self._prepare_eplb_forward(num_query_tokens)
@@ -511,6 +572,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         assert self.draft_kv_cache_group_id >= 0
         # Support multiple draft KV cache groups by preparing inputs once for each
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
+            block_stride = self.block_tables.block_sizes[gid]
+            group = self.attn_groups[gid][0]
+            if group.kernel_block_stride:
+                assert group.kernel_block_size is not None
+                block_stride = group.kernel_block_stride * group.kernel_block_size
             prepare_dflash_inputs(
                 self.input_buffers,
                 self.block_tables.slot_mappings[gid],
@@ -530,6 +596,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 seeds,
                 self.block_tables.input_block_tables[gid],
                 self.block_tables.block_sizes[gid],
+                block_stride,
                 self.block_tables.cp_rank,
                 self.dcp_size,
                 self.block_tables.cp_interleave,
@@ -542,6 +609,15 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.sample_from_anchor,
                 num_reqs,
             )
+
+        if num_speculative_tokens == 0:
+            # No drafts are needed: store the context K/V to keep the drafter in
+            # sync, and skip the query pass.
+            self._store_hidden_states(
+                num_target_tokens, last_hidden_states, aux_hidden_states
+            )
+            self._precompute_context_kv(0, num_target_tokens, dummy_run)
+            return self.draft_tokens[:num_reqs]
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
@@ -562,6 +638,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=batch_sync,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_padded = batch_desc.num_tokens
         num_tokens_across_dp = (
@@ -600,6 +677,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
+        else:
+            self._map_kernel_block_tables()
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
@@ -625,7 +704,68 @@ class DFlashSpeculator(DraftModelSpeculator):
         return self.draft_tokens[:num_reqs]
 
 
+# Extra programs that pad the buffers past the batch (up to max_num_tokens).
+_NUM_PAD_PROGRAMS = 32
+
+
 @triton.jit
+def _pad_dflash_inputs(
+    out_input_ids_ptr,
+    out_query_positions_ptr,
+    out_is_padding_ptr,
+    out_query_start_loc_ptr,
+    out_seq_lens_ptr,
+    out_query_slot_mapping_ptr,
+    out_sample_indices_ptr,
+    out_sample_pos_ptr,
+    out_sample_idx_mapping_ptr,
+    pad_idx,
+    num_reqs,
+    num_query_per_req,
+    num_speculative_steps,
+    max_num_reqs,
+    max_num_tokens,
+    PAD_SLOT_ID: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_PAD_PROGRAMS: tl.constexpr,
+):
+    # Pad per-request buffers to max_num_reqs for CUDA graph safety, split
+    # over NUM_PAD_PROGRAMS programs.
+    start = pad_idx * BLOCK_SIZE
+    stride = NUM_PAD_PROGRAMS * BLOCK_SIZE
+    last_query_end = num_reqs * num_query_per_req
+    for i in range(num_reqs + start, max_num_reqs + 1, stride):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < max_num_reqs + 1
+        tl.store(out_query_start_loc_ptr + block, last_query_end, mask=mask)
+    for i in range(num_reqs + start, max_num_reqs, stride):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < max_num_reqs
+        tl.store(out_seq_lens_ptr + block, 0, mask=mask)
+    # Padded sample slots point at query index 0 (a valid row in
+    # last_hidden_states) so CG replay never reads OOB. Padded
+    # sample idx mappings point to -1, which is ignored during
+    # sampling to prevent writing stale values to draft logits.
+    pad_end = max_num_reqs * num_speculative_steps
+    for i in range(num_reqs * num_speculative_steps + start, pad_end, stride):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < pad_end
+        tl.store(out_sample_indices_ptr + block, 0, mask=mask)
+        tl.store(out_sample_pos_ptr + block, 0, mask=mask)
+        tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
+    # Pad query slot mappings past num_query_tokens with PAD so the
+    # captured CG sees PAD slots (no K/V write) for replay sizes
+    # larger than the current request count.
+    for i in range(last_query_end + start, max_num_tokens, stride):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < max_num_tokens
+        tl.store(out_input_ids_ptr + block, 0, mask=mask)
+        tl.store(out_query_positions_ptr + block, 0, mask=mask)
+        tl.store(out_is_padding_ptr + block, True, mask=mask)
+        tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
 def _prepare_dflash_inputs_kernel(
     # Outputs
     out_input_ids_ptr,
@@ -658,21 +798,46 @@ def _prepare_dflash_inputs_kernel(
     # Scalars
     parallel_drafting_token_id,
     block_size,
+    block_stride,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
     max_num_tokens,
     max_model_len,
     cp_rank,
+    num_reqs,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    NUM_PAD_PROGRAMS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
-    num_reqs = tl.num_programs(0)
+    if req_idx >= num_reqs:
+        if block_idx == 0:
+            _pad_dflash_inputs(
+                out_input_ids_ptr,
+                out_query_positions_ptr,
+                out_is_padding_ptr,
+                out_query_start_loc_ptr,
+                out_seq_lens_ptr,
+                out_query_slot_mapping_ptr,
+                out_sample_indices_ptr,
+                out_sample_pos_ptr,
+                out_sample_idx_mapping_ptr,
+                req_idx - num_reqs,
+                num_reqs,
+                num_query_per_req,
+                num_speculative_steps,
+                max_num_reqs,
+                max_num_tokens,
+                PAD_SLOT_ID,
+                BLOCK_SIZE,
+                NUM_PAD_PROGRAMS,
+            )
+        return
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
 
     ctx_start = tl.load(target_query_start_loc_ptr + req_idx)
@@ -714,7 +879,14 @@ def _prepare_dflash_inputs_kernel(
     # Neither kind of row may write draft KV into physical block 0.
     ctx_resident = is_valid_ctx & (ctx_block_id != 0)
     local_ctx_slot = cp_local_slot(
-        ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
+        ctx_pos,
+        ctx_block_id,
+        block_size,
+        block_stride,
+        cp_rank,
+        CP_SIZE,
+        CP_INTERLEAVE,
+        PAD_SLOT_ID,
     )
     ctx_slot = tl.where(
         ctx_resident,
@@ -749,6 +921,7 @@ def _prepare_dflash_inputs_kernel(
         query_pos,
         q_block_id,
         block_size,
+        block_stride,
         cp_rank,
         CP_SIZE,
         CP_INTERLEAVE,
@@ -794,40 +967,6 @@ def _prepare_dflash_inputs_kernel(
             tl.load(temperature_ptr + req_state_idx),
         )
         tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
-        if req_idx == num_reqs - 1:
-            # Pad per-request buffers to max_num_reqs for CUDA graph safety.
-            last_query_end = num_reqs * num_query_per_req
-            for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_reqs + 1
-                tl.store(out_query_start_loc_ptr + block, last_query_end, mask=mask)
-            for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_reqs
-                tl.store(out_seq_lens_ptr + block, 0, mask=mask)
-            # Padded sample slots point at query index 0 (a valid row in
-            # last_hidden_states) so CG replay never reads OOB. Padded
-            # sample idx mappings point to -1, which is ignored during
-            # sampling to prevent writing stale values to draft logits.
-            pad_start = num_reqs * num_speculative_steps
-            pad_end = max_num_reqs * num_speculative_steps
-            for i in range(pad_start, pad_end, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < pad_end
-                tl.store(out_sample_indices_ptr + block, 0, mask=mask)
-                tl.store(out_sample_pos_ptr + block, 0, mask=mask)
-                tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
-            # Pad query slot mappings past num_query_tokens with PAD so the
-            # captured CG sees PAD slots (no K/V write) for replay sizes
-            # larger than the current request count.
-            q_pad_start = num_reqs * num_query_per_req
-            for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
-                block = i + tl.arange(0, BLOCK_SIZE)
-                mask = block < max_num_tokens
-                tl.store(out_input_ids_ptr + block, 0, mask=mask)
-                tl.store(out_query_positions_ptr + block, 0, mask=mask)
-                tl.store(out_is_padding_ptr + block, True, mask=mask)
-                tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
 
 
 def prepare_dflash_inputs(
@@ -856,6 +995,7 @@ def prepare_dflash_inputs(
     # [max_num_reqs, max_num_blocks]
     block_table: torch.Tensor,
     block_size: int,
+    block_stride: int,
     cp_rank: int,
     cp_size: int,
     cp_interleave: int,
@@ -875,9 +1015,9 @@ def prepare_dflash_inputs(
     # per-request query length, not the total token count across the batch.
     max_target_query_len = int(input_batch.num_scheduled_tokens[:num_reqs].max())
     max_tokens_per_req = max_target_query_len + num_query_per_req
-    BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
+    BLOCK_SIZE = 128
     num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
-    _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
+    _prepare_dflash_inputs_kernel[(num_reqs + _NUM_PAD_PROGRAMS, num_blocks)](
         input_buffers.input_ids,
         input_buffers.positions,
         input_buffers.is_padding,
@@ -904,15 +1044,18 @@ def prepare_dflash_inputs(
         block_table.stride(0),
         parallel_drafting_token_id,
         block_size,
+        block_stride,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,
         max_num_tokens,
         max_model_len,
         cp_rank,
+        num_reqs,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         CP_SIZE=cp_size,
         CP_INTERLEAVE=cp_interleave,
         BLOCK_SIZE=BLOCK_SIZE,
+        NUM_PAD_PROGRAMS=_NUM_PAD_PROGRAMS,
     )

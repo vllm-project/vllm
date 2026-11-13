@@ -12,6 +12,8 @@ With shared host storage, DP replicas instead map the same TP slice and
 prefetch only their own tokens without DP gathers.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -50,13 +52,16 @@ from vllm.models.deepseek_v41.common.engram import (
     Engram,
     EngramBatch,
     EngramLayout,
+    EngramPeerGroup,
     ParallelEngramEmbedding,
     engram_head_shard_rank,
     gather_engram_hashes,
 )
+from vllm.models.qwen4_exp.common import ngram_embedding as ple_ops
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.vmm_driver import imex_channel_available
 
 WORLD_SIZE = 4
 DIM, BLOCK = 64, 32
@@ -69,10 +74,16 @@ def _token_counts(dp_size: int) -> tuple[tuple[int, ...], ...]:
     return ((8,) * dp_size, (7, 0, 5, 1)[:dp_size], (7,) * dp_size)
 
 
-def _full_table(rows: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _full_table(
+    rows: int, packed_fp4: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
     """The unsharded table, identical on every rank."""
     torch.manual_seed(0)
-    weight = (torch.randn(rows, DIM) * 4).to(torch.float8_e4m3fn)
+    weight = (
+        torch.randint(0, 256, (rows, DIM // 2), dtype=torch.uint8)
+        if packed_fp4
+        else (torch.randn(rows, DIM) * 4).to(torch.float8_e4m3fn)
+    )
     scale_inv = torch.randint(120, 134, (rows, DIM // BLOCK), dtype=torch.uint8)
     return weight, scale_inv
 
@@ -92,7 +103,14 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
     """Dequantized lookup against the whole table."""
     valid = ids >= 0
     safe_ids = ids.clamp_min(0).long()
-    values = torch.nn.functional.embedding(safe_ids, weight).float()
+    values = torch.nn.functional.embedding(safe_ids, weight)
+    if weight.dtype == torch.uint8:
+        nibbles = torch.stack((values & 0xF, values >> 4), dim=-1).flatten(-2).long()
+        lut = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=weight.device
+        )
+        values = torch.where(nibbles & 8 != 0, -1.0, 1.0) * lut[nibbles & 7]
+    values = values.float()
     scales = torch.nn.functional.embedding(safe_ids, scale_inv)
     scales = (scales.to(torch.int32) << 23).view(torch.float32)
     values = values.unflatten(-1, (-1, BLOCK)) * scales.unsqueeze(-1)
@@ -100,27 +118,47 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
 
 
 @pytest.mark.parametrize(
-    "architecture,options,edp_ranks,etp_ranks",
+    "architecture,options,tp_size,edp_ranks,etp_ranks",
     [
-        ("DeepseekV41ForCausalLM", {}, [0, 2], [0, 1]),
-        ("Qwen4ExpForCausalLM", {}, None, [0, 1]),
+        ("DeepseekV41ForCausalLM", {}, 2, [0, 2], [0, 1]),
+        # GPU tables span every DP rank only with embedding_across_dp.
+        ("DeepseekV41ForCausalLM", {"cpu_offload": False}, 1, [0, 1], [0]),
+        (
+            "DeepseekV41ForCausalLM",
+            {"cpu_offload": False, "embedding_across_dp": True},
+            1,
+            [0, 1, 2, 3],
+            [0, 1, 2, 3],
+        ),
+        ("Qwen4ExpForCausalLM", {}, 2, None, [0, 1]),
+        # The offloaded Qwen4Exp PLE table is only shared over the group, so it
+        # exists with dp_shared_memory unless the table is spread over DP.
+        ("Qwen4ExpForCausalLM", {"dp_shared_memory": True}, 2, [0, 2], [0, 1]),
         (
             "Qwen4ExpForCausalLM",
-            {"embedding_across_dp": True},
+            {"dp_shared_memory": True, "embedding_across_dp": True},
+            2,
             None,
             [0, 1, 2, 3],
         ),
-        ("Qwen4ExpForConditionalGeneration", {}, None, [0, 1]),
+        (
+            "Qwen4ExpForCausalLM",
+            {"embedding_across_dp": True},
+            2,
+            None,
+            [0, 1, 2, 3],
+        ),
+        ("Qwen4ExpForConditionalGeneration", {}, 2, None, [0, 1]),
     ],
 )
 def test_engram_group_creation_honors_model_and_options(
-    monkeypatch, architecture, options, edp_ranks, etp_ranks
+    monkeypatch, architecture, options, tp_size, edp_ranks, etp_ranks
 ):
     config = SimpleNamespace(
         model_config=SimpleNamespace(architecture=architecture, is_moe=False),
         parallel_config=ParallelConfig(
-            tensor_parallel_size=2,
-            data_parallel_size=2,
+            tensor_parallel_size=tp_size,
+            data_parallel_size=4 // tp_size,
             distributed_executor_backend="mp",
         ),
         engram_config=EngramConfig(**options),
@@ -141,7 +179,8 @@ def test_engram_group_creation_honors_model_and_options(
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
-    monkeypatch.setattr(parallel_state, "get_node_count", lambda: 1)
+    # Two ranks per node.
+    monkeypatch.setattr(parallel_state, "_engram_dp_shard_size", lambda *args: 2)
 
     def make_group(group_ranks, *args, **kwargs):
         ranks = next(ranks for ranks in group_ranks if 0 in ranks)
@@ -149,13 +188,16 @@ def test_engram_group_creation_honors_model_and_options(
 
     monkeypatch.setattr(parallel_state, "init_model_parallel_group", make_group)
     with set_current_vllm_config(config):
-        initialize_model_parallel(tensor_model_parallel_size=2, backend="nccl")
+        initialize_model_parallel(tensor_model_parallel_size=tp_size, backend="nccl")
     group = get_engram_dp_group()
     assert (group.ranks if group is not None else None) == edp_ranks
     assert parallel_state.get_etp_group().ranks == etp_ranks
+    # A group with the DP group's ranks reuses its communicators.
+    full_dp = edp_ranks is not None and len(edp_ranks) == 4 // tp_size
+    assert (group is parallel_state._DP) == full_dp
 
 
-def _worker(rank: int, tp_size: int, port: int) -> None:
+def _worker(rank: int, tp_size: int, port: int, store_dir: str) -> None:
     torch.accelerator.set_device_index(rank)
     update_environment_variables(
         {
@@ -200,12 +242,29 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
 
         for failure in ("create", "open", "mmap", "register", "pinned", None):
             _check_shared_storage_lifetime_and_failures(failure)
+        for failure, packed_fp4 in product((None, "create", "import"), (False, True)):
+            _check_cumem_host_table(failure, packed_fp4)
+        for shm_fits in (True, False):
+            _check_ple_shared_table(shm_fits)
+        if tp_size == 1:
+            _check_peer_group_table(str(Path(store_dir) / "peers"))
 
+        # GPU peer reads need NVLink P2P, which CI's L4s lack.
+        p2p = current_platform.is_fully_connected(
+            [
+                current_platform.visible_device_id_to_physical_device_id(i)
+                for i in range(WORLD_SIZE)
+            ]
+        )
         # Reuse the processes and communication groups across storage modes.
-        for (cpu_offload, dp_shared_memory), n_heads, sequence_parallel in product(
+        for (
+            cpu_offload,
+            dp_shared_memory,
+        ), n_heads, sequence_parallel, packed_fp4 in product(
             [(False, False), (True, False), (True, True)],
             [8, 7],
             [False, True] if tp_size > 1 else [False],
+            [False, True],
         ):
             _check_table(
                 vllm_config,
@@ -213,11 +272,90 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
                 dp_shared_memory,
                 n_heads,
                 sequence_parallel,
+                p2p,
+                packed_fp4,
             )
+        if tp_size == 1 and p2p:
+            # Without NVLink P2P, GPU tables keep the DP collectives.
+            for packed_fp4 in (False, True):
+                _check_table(
+                    vllm_config,
+                    False,
+                    False,
+                    8,
+                    False,
+                    p2p=False,
+                    packed_fp4=packed_fp4,
+                )
         if tp_size == 1:
             _check_fp8_batch(vllm_config)
     finally:
         cleanup_dist_env_and_memory()
+
+
+def _check_peer_group_table(store_path: str):
+    """GPUs of independent engines split one GPU table, publish their slices
+    through a file store and read each other's rows without collectives."""
+    if not imex_channel_available():
+        return
+    weight, scale = _full_table(sum(HEAD_SIZES))
+    group = EngramPeerGroup(WORLD_SIZE, store_path)
+    with torch.device("cuda"):
+        table = ParallelEngramEmbedding(
+            sum(HEAD_SIZES), DIM, HEAD_SIZES, peer_group=group
+        )
+    assert table.dp_size == 1
+    assert table.peer_rows == -(-sum(HEAD_SIZES) // WORLD_SIZE)
+    table.weight.weight_loader(table.weight, weight)
+    table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
+    table.process_weights_after_loading()
+    ids = _make_ids(HEAD_SIZES, 9, seed=500 + group.rank_in_group)
+    expected = _reference(weight.cuda(), scale.cuda(), ids)
+    torch.testing.assert_close(table(ids), expected, atol=0, rtol=0)
+    # A dropped table unmaps its slices; once every GPU has, its HBM is freed.
+    free, _ = torch.accelerator.get_memory_info()
+    del table
+    group.barrier()
+    assert torch.accelerator.get_memory_info()[0] > free
+
+
+def test_engram_peer_group_assigns_ranks_and_gathers(tmp_path):
+    """Engines share one config, so ranks must not collide however they race,
+    a per-job store directory need not exist, and a reused store is rejected
+    rather than joined."""
+    path = str(tmp_path / "job" / "peers")
+    with ThreadPoolExecutor(4) as pool:
+        groups = list(pool.map(lambda _: EngramPeerGroup(4, path), range(4)))
+        gathered = list(
+            pool.map(
+                lambda group: group.all_gather(b"%d" % group.rank_in_group),
+                groups,
+            )
+        )
+    assert sorted(group.rank_in_group for group in groups) == [0, 1, 2, 3]
+    assert gathered == [[b"0", b"1", b"2", b"3"]] * 4
+    with pytest.raises(RuntimeError, match="fresh store path"):
+        EngramPeerGroup(4, path)
+
+
+def test_engram_peer_group_names_missing_gpus(tmp_path, monkeypatch):
+    """A peer that never arrives fails startup with its rank, not a bare timeout."""
+    monkeypatch.setattr(EngramPeerGroup, "TIMEOUT", timedelta(milliseconds=200))
+    group = EngramPeerGroup(2, str(tmp_path / "peers"))
+    with pytest.raises(TimeoutError, match=r"GPUs \[1\] did not reach startup step 1"):
+        group.barrier()
+
+
+def test_engram_peer_group_table_rejects_reload(tmp_path, monkeypatch):
+    """Other engines read a table's rows at any time, so it cannot reload."""
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    table = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.peer_rows = 1
+    table._peer_group = EngramPeerGroup(1, str(tmp_path / "peers"))
+    table.process_weights_after_loading()
+    with pytest.raises(RuntimeError, match="cannot reload weights"):
+        table.process_weights_after_loading()
 
 
 def _check_fp8_batch(vllm_config):
@@ -332,6 +470,11 @@ def _check_shared_storage_lifetime_and_failures(failure):
         return result
 
     with pytest.MonkeyPatch.context() as patch:
+        if current_platform.is_cuda():
+            from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
+
+            # Exercise the /dev/shm path even where cuMem tables are used.
+            patch.setattr(engram_fabric_table, "share_host_table", lambda *args: None)
         patch.setattr(
             engram_ops,
             "tempfile",
@@ -380,8 +523,83 @@ def _check_shared_storage_lifetime_and_failures(failure):
         assert all(not path.exists() for path in paths)
 
 
+def _check_ple_shared_table(shm_fits):
+    """Qwen4Exp's PLE table is one /dev/shm mapping per EDP group, loaded by its
+    leader; without room in /dev/shm, every rank loads its own table."""
+    group = get_engram_dp_group()
+    with pytest.MonkeyPatch.context() as patch:
+        if not shm_fits:
+            patch.setattr(engram_ops, "_shm_shortfall", lambda num_bytes: "too small")
+        embedding = ple_ops.Qwen4ExpPLESharedHostEmbedding(
+            8,
+            DIM,
+            params_dtype=torch.bfloat16,
+            padding_size=1,
+            prefix="test.ple_embedding",
+            embedding_method=ple_ops.Qwen4ExpPLEUnquantizedEmbeddingMethod(),
+        )
+    # Every rank offers different rows; a shared table holds the leader's.
+    offered = torch.full((8, DIM), group.rank_in_group + 1.0, dtype=torch.bfloat16)
+    embedding.weight_loader(embedding.weight, offered)
+    expected = 1.0 if shm_fits else group.rank_in_group + 1.0
+    assert embedding.weight.is_pinned()
+    assert torch.all(embedding.weight == expected)
+    group.barrier()
+
+
+def _check_cumem_host_table(failure, packed_fp4):
+    """Chunked cuMem tables read back across ranks; a failed allocation or
+    import on any rank falls back to /dev/shm on all of them."""
+    if not current_platform.is_cuda():
+        return
+    from vllm.models.deepseek_v41.nvidia.ops import engram_fabric_table
+
+    if not engram_fabric_table.fabric_host_memory_supported():
+        return
+
+    group = get_engram_dp_group()
+    # Three 2 MiB chunks, the last one partial.
+    row_bytes = DIM // 2 if packed_fp4 else DIM
+    rows = 5 * (1 << 20) // row_bytes
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(engram_fabric_table, "CHUNK_BYTES", 2 << 20)
+        if failure == "create" and group.rank_in_group == 0:
+            patch.setattr(engram_fabric_table, "NUMA_RESERVE_FRACTION", 1.0)
+        if failure == "import" and group.rank_in_group == 1:
+            patch.setattr(
+                engram_fabric_table.cu,
+                "cuMemImportFromShareableHandle",
+                lambda *args: (
+                    engram_fabric_table.cu.CUresult.CUDA_ERROR_INVALID_VALUE,
+                    None,
+                ),
+            )
+        storage = engram_ops.DPSharedEngramStorage(
+            rows, DIM, BLOCK, group, packed_fp4=packed_fp4
+        )
+    assert storage.huge_pages == (failure is None)
+    table = (
+        torch.arange(rows * row_bytes)
+        .remainder(251)
+        .to(torch.uint8)
+        .view(rows, row_bytes)
+    )
+    if group.rank_in_group == 0:
+        storage.weight.view(torch.uint8).copy_(table)
+    group.barrier()
+    weight, _ = storage.get_views(storage.weight, storage.weight_scale_inv)
+    assert torch.equal(weight.view(torch.uint8).cpu(), table)
+    group.barrier()
+
+
 def _check_table(
-    vllm_config, cpu_offload, dp_shared_memory, n_heads, sequence_parallel
+    vllm_config,
+    cpu_offload,
+    dp_shared_memory,
+    n_heads,
+    sequence_parallel,
+    p2p,
+    packed_fp4,
 ):
     parallel = vllm_config.parallel_config
     dp_size, tp_size = parallel.data_parallel_size, parallel.tensor_parallel_size
@@ -417,10 +635,19 @@ def _check_table(
             engram_compressed_vocab_size=32,
             engram_pad_token_id=0,
             engram_vocab_size=HEAD_SIZES[0],
+            quantization_config={
+                "engram_embed_quant": "mxfp4" if packed_fp4 else "fp8"
+            },
         )
         with set_current_vllm_config(vllm_config):
-            weight, scale_inv = _full_table(rows)
+            weight, scale_inv = _full_table(rows, packed_fp4)
             layout = EngramLayout(config)
+            # A host budget between MXFP4 and FP8 sizes must admit only MXFP4.
+            with m.context() as memory_patch:
+                memory_patch.setattr(
+                    engram_ops, "get_available_memory", lambda: rows * DIM
+                )
+                assert engram_ops.can_share_engram_tables(layout) == packed_fp4
             # Stub configuration inputs, not Engram's initialization or execution.
             component_config = SimpleNamespace(
                 engram_config=EngramConfig(
@@ -433,6 +660,9 @@ def _check_table(
             with m.context() as init_patch, torch.device("cuda"):
                 init_patch.setattr(
                     engram_ops, "get_current_vllm_config", lambda: component_config
+                )
+                init_patch.setattr(
+                    engram_ops.current_platform, "is_fully_connected", lambda _: p2p
                 )
                 engram = Engram(
                     config,
@@ -455,13 +685,19 @@ def _check_table(
                 layer.weight_scale_inv.weight_loader(
                     layer.weight_scale_inv, loader_scale
                 )
+            # As the model loader does: peers must not read rows still loading.
+            layer.process_weights_after_loading()
+            # Shared host tables and GPU peer reads look up only local tokens.
+            local = layer.dp_size == 1
+            assert (layer.peer_rows > 0) == (not cpu_offload and tp_size == 1 and p2p)
             if dp_shared_memory:
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
                 assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+            if local:
 
                 def unexpected_collective(*args, **kwargs):
-                    raise AssertionError("shared lookup must not use DP collectives")
+                    raise AssertionError("local lookups must not use DP collectives")
 
                 m.setattr(get_engram_dp_group(), "all_gather", unexpected_collective)
 
@@ -481,12 +717,8 @@ def _check_table(
                 num_tokens=num_tokens,
                 num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
             ):
-                gathered = gather_engram_hashes(
-                    ids, dp_shared_memory=layer.dp_shared_memory
-                )
-                expected_tokens = (
-                    num_tokens if dp_shared_memory else max(counts) * dp_size
-                )
+                gathered = gather_engram_hashes(ids, dp_shared_memory=local)
+                expected_tokens = num_tokens if local else max(counts) * dp_size
                 assert gathered.shape[0] == expected_tokens
                 engram.prepare_embeddings(gathered)
                 looked_up = engram.embed(ids)
@@ -524,16 +756,18 @@ def _check_table(
                 and not dp_shared_memory
                 and sequence_parallel == (tp_size > 1)
             )
+            or layer.peer_rows > 0
         )
         if replay:
-            captures = ("full", "breakable")
+            # Peer reads have no eager breaks to count.
+            captures = ("full",) if layer.peer_rows else ("full", "breakable")
             for capture in captures:
                 _check_prefetch_replay(
                     engram,
                     head_sizes,
                     weight,
                     scale_inv,
-                    dp_shared_memory,
+                    local,
                     capture,
                 )
         if dp_shared_memory and n_heads == 7 and sequence_parallel == (tp_size > 1):
@@ -546,9 +780,14 @@ def _check_table(
 def _check_dummy_hash_model_forward(
     vllm_config, engram, head_sizes, weight, scales, dp_shared_memory
 ):
-    """A metadata-less replica joins DP sharding but skips a shared lookup."""
+    """A metadata-less replica looks up dead rows, so it joins DP sharding and
+    the memory profile sees the Engram activations."""
     from vllm.models.deepseek_v41.common.engram import NgramHashState
-    from vllm.models.deepseek_v41.nvidia import model as model_ops
+
+    if current_platform.is_rocm():
+        from vllm.models.deepseek_v41.amd import model as model_ops
+    else:
+        from vllm.models.deepseek_v41.nvidia import model as model_ops
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
     if dp_shared_memory and dp_rank != 1:
@@ -569,24 +808,22 @@ def _check_dummy_hash_model_forward(
         # **kwargs absorbs the decoder's keyword-only flags.
         def __call__(self, hidden, positions, input_ids, *args, **kwargs):
             hashes, keep = args[-2:]
-            if dp_shared_memory and dp_rank == 1:
-                assert hashes is None and keep is None
-                output = hidden.new_zeros(
-                    tokens, len(head_sizes), DIM, dtype=torch.bfloat16
-                )
-            else:
-                assert hashes is not None and keep is not None
-                assert bool(keep.all()) == (dp_rank != 1)
-                if dp_rank == 1:
-                    assert torch.all(hashes == engram_ops.DEAD_ID)
-                output = engram.embed(hashes[:, 0])
-            # Trailing None is previous_aux; this stub captures no aux states.
-            return output, hidden, hidden, hidden, hidden, None
+            assert hashes is not None and keep is not None
+            assert bool(keep.all()) == (dp_rank != 1)
+            if dp_rank == 1:
+                assert torch.all(hashes == engram_ops.DEAD_ID)
+            output = engram.embed(hashes[:, 0])
+            # Trailing None is the NVIDIA layer's previous_aux; this stub
+            # captures no aux states.
+            outputs = (output, hidden, hidden, hidden, hidden, None)
+            return outputs[:5] if current_platform.is_rocm() else outputs
 
     model = model_ops.DeepseekV4Model.__new__(model_ops.DeepseekV4Model)
     torch.nn.Module.__init__(model)
     model.parallel_config = vllm_config.parallel_config
     model.use_native_mega_moe = False
+    model.use_mega_gate = False
+    model.use_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False
     model.engram_batch = None
@@ -599,6 +836,7 @@ def _check_dummy_hash_model_forward(
     model.decoder_replay_start = model.end_layer
     model.decoder_replay_layers = None
     model.aux_hidden_state_layers = ()
+    model.mhc_post = lambda hidden, *args: hidden
     metadata = (
         None
         if dp_rank == 1
@@ -617,7 +855,9 @@ def _check_dummy_hash_model_forward(
                 is_last_rank=False,
             ),
         )
-        patch.setattr(model_ops, "mhc_post_tilelang", lambda hidden, *args: hidden)
+        patch.setattr(
+            model_ops, "mhc_post_tilelang", lambda hidden, *args: hidden, raising=False
+        )
         with set_forward_context(
             metadata,
             vllm_config,
@@ -729,14 +969,16 @@ def _check_prefetch_replay(
         torch.accelerator.synchronize()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
+)
 @pytest.mark.parametrize("tp_size", [1, 2])
-def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch):
+def test_engram_table_shared_across_dp_replicas(tp_size, monkeypatch, tmp_path):
     """Check all storage modes with one process launch per TP/DP topology."""
     if torch.accelerator.device_count() < WORLD_SIZE:
         pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
-    mp.spawn(_worker, args=(tp_size, get_open_port()), nprocs=WORLD_SIZE)
+    mp.spawn(_worker, args=(tp_size, get_open_port(), str(tmp_path)), nprocs=WORLD_SIZE)
     cleanup_dist_env_and_memory()
 
 
@@ -783,7 +1025,7 @@ def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch, query_fails
     )
     if query_fails:
         monkeypatch.setattr(engram_ops, "check_shm_free_space", query)
-    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM)
+    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM, row_bytes=DIM)
     assert not engram_ops.can_share_engram_tables(layout)
     assert len(broadcasts) == 1 and broadcasts[0] is not None
 

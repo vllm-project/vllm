@@ -105,14 +105,13 @@ Every plugin has three parts:
     - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc., can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
-    - (optional) `get_routed_experts_local_rows`: If the platform's MoE preparation pads or shards the router input before expert selection, return this DP rank's routing rows for routed-expert capture. The default `None` keeps the generic DP/TP restoration.
 
 4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
 
     - `init_device`: This function is called to set up the device for the worker.
     - `initialize_cache`: This function is called to set cache config for the worker.
     - `load_model`: This function is called to load the model weights to device.
-    - `get_kv_cache_spec`: This function is called to generate the kv cache spec for the model.
+    - `get_kv_cache_layer_configs`: This function is called to collect each layer's KV cache manager, allocation policy, and cache layout.
     - `determine_available_memory`: This function is called to profiles the peak memory usage of the model to determine how much memory can be used for KV cache without OOMs.
     - `initialize_from_config`: This function is called to allocate device KV cache with the specified kv_cache_config
     - `execute_model`: This function is called every step to inference the model.
@@ -143,6 +142,12 @@ Every plugin has three parts:
 
     - triton ops
       Custom way doesn't work for triton ops now.
+
+    Fused MoE routers, routed experts, and runners use `PluggableLayer` for whole-class replacement. Register a compatible subclass with, for example, `FusedTopKRouter.register_oot(MyFusedTopKRouter)` before model construction.
+
+    Registration matches the concrete class name. A registration for `MoERunner` or `RoutedExperts` does not replace model-specific subclasses or `SubstitutedRoutedExperts`; register those classes separately when supported. Without a matching registration, the selected class is used unchanged. A router instance explicitly supplied to `FusedMoEFactory` is used directly.
+
+    Replacements must subclass the class they replace and preserve its constructor arguments, routing semantics, model-specific weight loading, and EPLB state. Routers are PyTorch modules, so a shared correction-bias `Parameter` also appears under the router in `state_dict()`. Preserve the shared parameter object and the model's canonical checkpoint names; models that load the bias through the gate should register the gate before constructing the MoE layer.
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 

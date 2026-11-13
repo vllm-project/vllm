@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use axum::Json;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::{AsReport as _, Construct, Macro};
@@ -21,8 +21,16 @@ pub enum ApiError {
     },
     /// The requested model name does not match the single configured model.
     ModelNotFound { model: String },
+    /// A resource other than the model, such as a LoRA adapter, does not exist.
+    NotFound { message: String },
     /// The request body could not be parsed as valid JSON.
     JsonParseError { message: String },
+    /// The query string could not be deserialized into the route's
+    /// parameters; `param` names the offending field as `query.<name>`.
+    InvalidQuery {
+        message: String,
+        param: Option<String>,
+    },
     /// The requested operation conflicts with current server state.
     Conflict { message: String },
     /// An unexpected internal failure happened before streaming started.
@@ -36,10 +44,10 @@ impl ApiError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
-            Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
+            Self::JsonParseError { .. } | Self::InvalidQuery { .. } => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -58,10 +66,15 @@ impl ApiError {
                 format!("The model `{model}` does not exist."),
                 Some("model".to_string()),
             ),
+            Self::NotFound { message } => ("NotFoundError", message.clone(), None),
             // Python reports a body that fails to parse into the request
             // model through FastAPI's validation handler, which names the
             // HTTP status instead of an error class.
             Self::JsonParseError { message } => ("Bad Request", message.clone(), None),
+            // A query value that fails validation takes the same handler.
+            Self::InvalidQuery { message, param } => {
+                ("Bad Request", message.clone(), param.clone())
+            }
             // Python has no error class for 409; like its `HTTPException`
             // handler, name the status.
             Self::Conflict { message } => ("Conflict", message.clone(), None),
@@ -88,9 +101,31 @@ impl From<JsonRejection> for ApiError {
     }
 }
 
+impl From<QueryRejection> for ApiError {
+    fn from(error: QueryRejection) -> Self {
+        // Axum deserializes through `serde_path_to_error`; name the failing
+        // field like FastAPI's `loc`, and leave `param` unset without one.
+        let param = std::iter::successors(
+            Some(&error as &(dyn std::error::Error + 'static)),
+            |error| error.source(),
+        )
+        .find_map(|error| {
+            error.downcast_ref::<serde_path_to_error::Error<serde::de::value::Error>>()
+        })
+        .map(|error| error.path().to_string())
+        .filter(|path| path != ".")
+        .map(|path| format!("query.{path}"));
+        Self::invalid_query(error.body_text(), param)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status_code(), Json(self.to_error_response())).into_response()
+        let body = self.to_error_response();
+        let mut response = (self.status_code(), Json(body.clone())).into_response();
+        // For `--log-error-stack`.
+        response.extensions_mut().insert(body);
+        response
     }
 }
 
@@ -99,7 +134,7 @@ impl IntoResponse for ApiError {
 /// Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
     if error.is_request_validation_error() {
-        return invalid_request!(param = error.param(), "{error}");
+        return invalid_request!(param = error.param(), "{}", error.as_report());
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
@@ -108,15 +143,18 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 /// errors.
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
     if error.is_request_validation_error() {
-        return invalid_request!(param = error.param(), "{error}");
+        return invalid_request!(param = error.param(), "{}", error.as_report());
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
 
-/// Classify an engine-reported request failure: a retryable error (e.g. a
-/// paused engine's rejection) maps to HTTP 503, anything else to a 500.
+/// Classify an engine-reported request failure: a validation error (e.g. a
+/// constraint the structured-output backend cannot compile) maps to HTTP 400,
+/// a retryable error (e.g. a paused engine's rejection) to 503, anything else
+/// to a 500.
 pub fn engine_error(error: Option<&RequestError>) -> ApiError {
     match error {
+        Some(error) if error.is_validation_error() => invalid_request!("{}", error.message),
         Some(error) if error.retryable => ApiError::ServiceUnavailable {
             message: error.message.clone(),
         },
@@ -138,6 +176,7 @@ mod tests {
         let errors = [
             ApiError::invalid_request("top_p must be in (0, 1].", Some("top_p")),
             ApiError::model_not_found("missing"),
+            ApiError::not_found("No adapter found for /not/an/adapter"),
             ApiError::json_parse_error("expected value at line 1 column 1"),
             ApiError::conflict("A profiling session is already active."),
             ApiError::server_error("Internal server error"),
@@ -150,6 +189,7 @@ mod tests {
         expect![[r#"
             {"error":{"message":"top_p must be in (0, 1].","type":"BadRequestError","param":"top_p","code":400}}
             {"error":{"message":"The model `missing` does not exist.","type":"NotFoundError","param":"model","code":404}}
+            {"error":{"message":"No adapter found for /not/an/adapter","type":"NotFoundError","param":null,"code":404}}
             {"error":{"message":"expected value at line 1 column 1","type":"Bad Request","param":null,"code":400}}
             {"error":{"message":"A profiling session is already active.","type":"Conflict","param":null,"code":409}}
             {"error":{"message":"Internal server error","type":"InternalServerError","param":null,"code":500}}

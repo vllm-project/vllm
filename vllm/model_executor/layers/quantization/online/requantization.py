@@ -1,13 +1,63 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
+_requantization_source: ContextVar[bool] = ContextVar(
+    "requantization_source", default=False
+)
+
+
+@contextmanager
+def requantization_source_scope() -> Iterator[None]:
+    """Mark quantization methods created in this scope as requantization sources.
+
+    Their weights are only dequantized, so oracles can skip backend selection.
+    """
+    token = _requantization_source.set(True)
+    try:
+        yield
+    finally:
+        _requantization_source.reset(token)
+
+
+def is_requantization_source() -> bool:
+    return _requantization_source.get()
 
 
 class OnlineRequantizationMixin:
     """Shared lifecycle for converting serialized weights before quantization."""
+
+    # Only the MXFP4 online methods honor an activation override for now.
+    accepts_activation_override: bool = False
+
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        """Final activation key for a requested (or default) key."""
+        # TODO: this should be removed and handled by oracles once oracles are
+        # refactored.
+        if explicit and not cls.accepts_activation_override:
+            raise NotImplementedError(
+                f"activation override is not supported for online {cls.__name__}"
+            )
+        if activation_quant_key is not None and activation_quant_key.scale.static:
+            # Online quantization has no calibrated static activation scales.
+            raise NotImplementedError(
+                f"online {cls.__name__} cannot honour "
+                f"activation={activation_quant_key}: static activation scales are "
+                "not supported. Use a dynamic activation key, or 'activation: null'."
+            )
+
+        return activation_quant_key
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

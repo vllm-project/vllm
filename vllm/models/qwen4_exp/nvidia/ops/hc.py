@@ -26,7 +26,7 @@ def _grouped_gemma_rmsnorm_kernel(
 
     pid = tl.program_id(0)
     group_id = pid % NUM_GROUPS
-    row = pid // NUM_GROUPS
+    row = (pid // NUM_GROUPS).to(tl.int64)
 
     offs_g = tl.arange(0, BLOCK_SIZE)
     offsets = group_id * GROUP_DIM + offs_g
@@ -89,7 +89,7 @@ def _hc_silu_kernel(
 ) -> None:
     BLOCK_SIZE: tl.constexpr = triton.next_power_of_2(DIM)
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     offs = tl.arange(0, BLOCK_SIZE)
     mask = offs < DIM
 
@@ -136,7 +136,7 @@ def _hc_gate_mix_kernel(
 ) -> None:
     HC_DIM: tl.constexpr = DIM // HC
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     tile_id = tl.program_id(1)
     offs_inner = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs_inner < HC_DIM
@@ -184,6 +184,37 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
     return out
 
 
+# On B300 the fused kernel beats the GEMM + hc_gate_mix chain from M ~ 32.
+# Decode-sized batches keep the unfused path until they are benchmarked
+# end to end with the fused kernel.
+MIN_FUSED_UP_M = 512
+
+
+def hc_up_gate_mix_supported(w_up: torch.Tensor, hc_count: int) -> bool:
+    return (
+        hasattr(torch.ops._C, "qwen4_exp_hc_up_gate_mix")
+        and current_platform.is_device_capability_family(100)
+        and hc_count == 4
+        and w_up.dtype == torch.bfloat16
+        and tuple(w_up.shape) == (4 * 2560, 320)
+    )
+
+
+def hc_up_gate_mix(
+    lowrank: torch.Tensor, xn: torch.Tensor, w_up: torch.Tensor
+) -> torch.Tensor:
+    """`hc_gate_mix(xn, F.linear(lowrank, w_up), 4)` in one SM100 kernel.
+
+    The gate stays on chip in fp32 (the chain rounds it to bf16) and the
+    sigmoid uses `tanh.approx`; results are within one bf16 ULP of an fp32
+    reference.
+    Only hc_count 4, hidden size 2560 and rank 320 are supported.
+    """
+    out = xn.new_empty(xn.shape[0], xn.shape[1] // 4)
+    torch.ops._C.qwen4_exp_hc_up_gate_mix(out, lowrank, xn, w_up)
+    return out
+
+
 @triton.jit
 def _hc_combine_kernel(
     block_ptr,
@@ -201,7 +232,7 @@ def _hc_combine_kernel(
 ) -> None:
     HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
 
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     tile_id = tl.program_id(1)
 
     offs_inner = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -293,7 +324,7 @@ def _hc_combine_norm_kernel(
     NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
 
     pid = tl.program_id(0)
-    row = pid // HC
+    row = (pid // HC).to(tl.int64)
     stream = pid % HC
     offs_hc = tl.arange(0, HC_PAD)
     mask_hc = offs_hc < HC
