@@ -60,6 +60,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    get_dcp_replicated_group_ids,
     get_representative_spec_type,
     zmq_ctx,
 )
@@ -1066,6 +1067,11 @@ class NixlBaseConnectorWorker:
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.transfer_groups
         )
+        # MLA drafts running at DCP=1 under a DCP target: a DCP peer holds
+        # them in full on every rank.
+        self._dcp_replicated_groups = get_dcp_replicated_group_ids(
+            self.kv_cache_config.transfer_groups
+        )
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
@@ -1799,7 +1805,20 @@ class NixlBaseConnectorWorker:
                     ]
                 else:
                     segment_bytes = num_blocks * block_stride
-                    if cache.nbytes % segment_bytes != 0:
+                    # Include every dimension so head-major views retain one
+                    # region per head. Round up to the last block to preserve
+                    # padding past its payload (e.g. DSA latent + indexer rows).
+                    view_bytes = cache.nbytes
+                    if cache.ndim > 1:
+                        view_span = (
+                            sum(
+                                (size - 1) * stride
+                                for size, stride in zip(cache.shape, cache.stride())
+                            )
+                            + 1
+                        ) * cache.element_size()
+                        view_bytes = cdiv(view_span, block_stride) * block_stride
+                    if view_bytes % segment_bytes != 0:
                         raise AssertionError(
                             "KV cache view cannot be partitioned into NIXL regions: "
                             f"layer={layer_name}, cache_nbytes={cache.nbytes}, "
@@ -1808,7 +1827,7 @@ class NixlBaseConnectorWorker:
                             f"cache_shape={tuple(cache.shape)}, "
                             f"cache_stride={tuple(cache.stride())}"
                         )
-                    num_segments = cache.nbytes // segment_bytes
+                    num_segments = view_bytes // segment_bytes
                     region_block_len = (
                         block_stride if num_segments > 1 else physical_page_size
                     )
@@ -2758,6 +2777,15 @@ class NixlBaseConnectorWorker:
             raise RuntimeError(
                 "Hybrid MLA+Mamba NIXL transfers require matching DCP sizes, "
                 f"got local={self.dcp_size}, remote={remote_dcp_size}."
+            )
+        if self._dcp_replicated_groups and (
+            self.dcp_size > 1 or (remote_dcp_size > 1 and self._TRANSFER_MODE != "pull")
+        ):
+            raise NotImplementedError(
+                "NIXL with a DCP-replicated MLA draft cache only supports "
+                "pulling from a DCP prefill into a non-DCP decode: "
+                f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
+                f"transfer_mode={self._TRANSFER_MODE}."
             )
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
