@@ -4,8 +4,10 @@ import functools
 import importlib
 import inspect
 import math
+import os
 from collections.abc import Callable
 from importlib.util import find_spec
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +32,7 @@ if current_platform.is_rocm():
         _ON_GFX942,
         _ON_GFX950,
         _ON_GFX1151,
+        _ON_GFX1250,
         _ON_RDNA,
         get_cdna_version,
     )
@@ -37,6 +40,7 @@ else:
     _ON_GFX942 = False
     _ON_GFX950 = False
     _ON_GFX1151 = False
+    _ON_GFX1250 = False
     _ON_RDNA = False
 
     def get_cdna_version() -> int:
@@ -4344,6 +4348,900 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     return out
 
 
+class Dsv4AiterSparseMLAKernels(NamedTuple):
+    """aiter's readers and writers of DeepSeek V4's aligned 640 B KV record."""
+
+    sparse_mla_fwd: Callable
+    pack_q: Callable
+    qnorm_rope_kv_insert: Callable
+    compress: Callable
+    compress_two_stage: Callable
+
+
+@functools.cache
+def dsv4_aiter_sparse_mla_kernels() -> Dsv4AiterSparseMLAKernels | None:
+    """The aligned-record kernels on gfx1250, or None to keep the packed record.
+
+    The aligned record (448 NoPE | 14 duplicated UE8M0 | 50 pad | 128 RoPE)
+    is written and read only by these aiter kernels, so the KV layout, the
+    producer, the compressor and both attention paths switch together, and
+    only when this build of aiter carries all of them. An incumbent
+    packed-record kernel reading the aligned record does not crash, it
+    silently returns garbage, so every site asks this one function.
+    """
+    if not _ON_GFX1250:
+        return None
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        return None
+    try:
+        from aiter.ops.triton.attention.sparse_mla import sparse_mla_fwd
+        from aiter.ops.triton.quant.fused_mxfp8_quant import (
+            fused_deepseek_v4_compress_norm_rope_store,
+            fused_deepseek_v4_compress_norm_rope_store_two_stage,
+            fused_deepseek_v4_mxfp8_quant_q_pack,
+            fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+        )
+    except ImportError:
+        logger.info_once(
+            "This aiter build lacks the DeepSeek V4 packed-fp8 sparse MLA "
+            "kernels; gfx1250 keeps the packed KV record and the Triton "
+            "sparse attention."
+        )
+        return None
+    if "q_rope" not in inspect.signature(sparse_mla_fwd).parameters:
+        logger.info_once(
+            "This aiter build's sparse_mla_fwd lacks the 640 B DeepSeek V4 record "
+            "(fp8_dsv4_mla_640, q_rope); gfx1250 keeps the packed KV record and "
+            "the Triton sparse attention."
+        )
+        return None
+    return Dsv4AiterSparseMLAKernels(
+        sparse_mla_fwd=sparse_mla_fwd,
+        pack_q=fused_deepseek_v4_mxfp8_quant_q_pack,
+        qnorm_rope_kv_insert=fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+        compress=fused_deepseek_v4_compress_norm_rope_store,
+        compress_two_stage=fused_deepseek_v4_compress_norm_rope_store_two_stage,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Unified KV buffer: one index stream over one flat record grid
+# ---------------------------------------------------------------------------
+_DSV4_REC_BYTES = 640
+_DSV4_UNIFIED_KV_BUFFER_STATE: dict[str, object] = {}
+
+
+def _dsv4_record_grid(caches, why=None):
+    """The shared backing allocation as a flat 640-byte record grid.
+
+    Returns `(flat_uint8 [N, 640], [record_base per cache], [rows_per_block],
+    [page])` or None when the caches are not one allocation on a 640 grid.
+    `why` collects the reason, so the caller can report which check failed
+    and with what geometry rather than a bare "not a grid".
+    """
+
+    def no(reason):
+        if why is not None:
+            why.append(reason)
+        return None
+
+    if any(c is None for c in caches):
+        return no("a cache is None")
+    first = caches[0]
+    storage = first.untyped_storage()
+    bases, blk_rows, pages = [], [], []
+    for n, c in enumerate(caches):
+        tag = "main" if n == 0 else "extra"
+        if c.untyped_storage().data_ptr() != storage.data_ptr():
+            return no(
+                f"{tag} is a separate allocation "
+                f"(0x{c.untyped_storage().data_ptr():x} vs "
+                f"0x{storage.data_ptr():x}) -- no common index space"
+            )
+        if c.dim() != 3 or c.shape[-1] != _DSV4_REC_BYTES:
+            return no(
+                f"{tag} shape {tuple(c.shape)} is not [nb, page, {_DSV4_REC_BYTES}]"
+            )
+        es = c.element_size()
+        byte_off = c.storage_offset() * es
+        blk_stride = c.stride(0) * es
+        row_stride = c.stride(1) * es
+        if row_stride != _DSV4_REC_BYTES:
+            return no(
+                f"{tag} row stride {row_stride} B != {_DSV4_REC_BYTES} -- "
+                f"records are not adjacent inside a page "
+                f"(strides {tuple(c.stride())}, elem {es} B)"
+            )
+        if byte_off % _DSV4_REC_BYTES or blk_stride % _DSV4_REC_BYTES:
+            return no(
+                f"{tag} not on the record grid: storage offset {byte_off} B "
+                f"and block stride {blk_stride} B must both be multiples of "
+                f"{_DSV4_REC_BYTES} (remainders {byte_off % _DSV4_REC_BYTES}, "
+                f"{blk_stride % _DSV4_REC_BYTES})"
+            )
+        bases.append(byte_off // _DSV4_REC_BYTES)
+        blk_rows.append(blk_stride // _DSV4_REC_BYTES)
+        pages.append(c.shape[1])
+
+    nbytes = storage.nbytes()
+    # Whole records only. The allocation is rounded up to a 4 KiB page and
+    # 4096 is not a multiple of 640, so the tail is normally a partial record
+    # -- it holds no data and is simply not part of the grid.
+    n_rec = nbytes // _DSV4_REC_BYTES
+    for n, (b, br, pg, c) in enumerate(zip(bases, blk_rows, pages, caches)):
+        last = b + (c.shape[0] - 1) * br + (pg - 1)
+        if last >= n_rec:
+            return no(
+                f"{'main' if n == 0 else 'extra'}'s last record is row {last} "
+                f"but the allocation only holds {n_rec} whole records "
+                f"({nbytes} B)"
+            )
+    # The view aliases the allocation and never changes, so build it once.
+    key = (storage.data_ptr(), nbytes)
+    cached = _DSV4_UNIFIED_KV_BUFFER_STATE.get("grid")
+    if cached is None or cached[0] != key:
+        flat = torch.empty(0, dtype=torch.uint8, device=first.device)
+        flat.set_(storage, 0, (n_rec * _DSV4_REC_BYTES,), (1,))
+        cached = (key, flat.view(-1, _DSV4_REC_BYTES))
+        _DSV4_UNIFIED_KV_BUFFER_STATE["grid"] = cached
+    return cached[1], bases, blk_rows, pages
+
+
+# --- C4A decode: one index list per step, top-k rewritten per layer ----------
+#
+# A record's row in the shared allocation is
+#     base[layer, cache] + (slot // page) * rows_per_block + slot % page.
+# Every cache has the same rows_per_block, and a C4A layer's compressed cache
+# sits a fixed number of rows after its own SWA cache. So with the KV pointer
+# shifted to the layer's SWA base, the row a slot maps to no longer depends on
+# the layer:
+#     SWA entry    (slot // swa_page) * rows_per_block + slot % swa_page
+#     top-k entry  (slot // c4_page) * rows_per_block + slot % c4_page + gap
+# with gap = c4_base - swa_base for that layer. The SWA part (and the indptr)
+# is written once per step, by the first C4A layer of the forward; each C4A
+# layer then overwrites only the top-k part of the same buffer. That replaces
+# the per-layer lens + indptr + pack + merge launches with one pack.
+
+_DSV4_CSA_STATE: dict = {}
+# Debug: count top-k entries that disagree with the step's per-token length.
+_DSV4_CSA_CHECK = os.environ.get("VLLM_DSV4_CSA_CHECK", "0") == "1"
+
+
+@triton.jit
+def _dsv4_csa_topk_lens_kernel(
+    lens_ptr,
+    topk_ptr,
+    topk_stride,
+    is_valid_ptr,
+    topk,
+    BLOCK: tl.constexpr,
+):
+    """Valid (>= 0) top-k entries per token, 0 for padding tokens."""
+    t = tl.program_id(0)
+    count = 0
+    for i in range(0, topk, BLOCK):
+        off = i + tl.arange(0, BLOCK)
+        v = tl.load(topk_ptr + t * topk_stride + off, mask=off < topk, other=-1)
+        count += tl.sum((v >= 0).to(tl.int32), axis=0)
+    valid = tl.load(is_valid_ptr + t)
+    tl.store(lens_ptr + t, tl.where(valid, count, 0))
+
+
+@triton.jit
+def _dsv4_csa_step_kernel(
+    out_idx_ptr,
+    out_indptr_ptr,
+    swa_idx_ptr,
+    swa_indptr_ptr,
+    topk_lens_ptr,
+    num_tokens,
+    blk_rows,
+    SWA_PAGE: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK: tl.constexpr,
+    TOPK_INDPTR: tl.constexpr = False,
+):
+    """Once per step: each token's SWA rows (relative to the SWA base) at the
+    head of its segment, and the indptr of [SWA | top-k] segments.
+    TOPK_INDPTR: topk_lens_ptr holds the top-k indptr (prefill, too many
+    tokens to scan per program) instead of the per-token lengths (decode)."""
+    t = tl.program_id(0)
+    blk = tl.program_id(1)
+    if TOPK_INDPTR:
+        topk_before = tl.load(topk_lens_ptr + t)
+    else:
+        offs_t = tl.arange(0, BLOCK_T)
+        lens = tl.load(topk_lens_ptr + offs_t, mask=offs_t < t, other=0)
+        topk_before = tl.sum(lens, axis=0)
+    s_start = tl.load(swa_indptr_ptr + t)
+    s_end = tl.load(swa_indptr_ptr + t + 1)
+    out_start = s_start + topk_before
+    if blk == 0:
+        tl.store(out_indptr_ptr + t, out_start)
+        if t == num_tokens - 1:
+            if TOPK_INDPTR:
+                topk_total = tl.load(topk_lens_ptr + num_tokens)
+            else:
+                topk_total = topk_before + tl.load(topk_lens_ptr + t)
+            tl.store(out_indptr_ptr + num_tokens, s_end + topk_total)
+    off = blk * BLOCK + tl.arange(0, BLOCK)
+    m = off < s_end - s_start
+    slot = tl.load(swa_idx_ptr + s_start + off, mask=m, other=0)
+    row = (slot // SWA_PAGE) * blk_rows + slot % SWA_PAGE
+    tl.store(out_idx_ptr + out_start + off, row, mask=m)
+
+
+@triton.jit
+def _dsv4_csa_pack_topk_kernel(
+    out_idx_ptr,
+    out_indptr_ptr,
+    swa_indptr_ptr,
+    topk_ptr,
+    topk_stride,
+    token_to_req_ptr,
+    block_table_ptr,
+    block_table_stride,
+    is_valid_ptr,
+    err_ptr,
+    topk,
+    blk_rows,
+    gap,
+    PAGE: tl.constexpr,
+    CHECK: tl.constexpr,
+    BLOCK: tl.constexpr,
+    CHECK_TAIL: tl.constexpr = True,
+):
+    """Per C4A layer: local top-k positions -> rows (relative to the SWA base)
+    written into the top-k part of the token's segment. block_size == PAGE,
+    so the block-table entry is the page number itself. CHECK_TAIL=False
+    (prefill): entries past the token's length may hold stale indices, so the
+    check only looks inside it."""
+    t = tl.program_id(0)
+    blk = tl.program_id(1)
+    off = blk * BLOCK + tl.arange(0, BLOCK)
+    seg = tl.load(out_indptr_ptr + t)
+    s_len = tl.load(swa_indptr_ptr + t + 1) - tl.load(swa_indptr_ptr + t)
+    o_start = seg + s_len
+    n = tl.load(out_indptr_ptr + t + 1) - o_start
+    if CHECK:
+        # The step sized every token's top-k part from the first C4A layer's
+        # valid count; a layer whose count differs would leave stale or
+        # overflowing rows. Debug only.
+        cm = off < topk
+        v = tl.load(topk_ptr + t * topk_stride + off, mask=cm, other=-1)
+        valid_tok = tl.load(is_valid_ptr + t)
+        if CHECK_TAIL:
+            bad = cm & ((v >= 0) != (off < n)) & valid_tok
+        else:
+            bad = cm & (off < n) & (v < 0) & valid_tok
+        nbad = tl.sum(bad.to(tl.int32), axis=0)
+        if nbad > 0:
+            tl.atomic_add(err_ptr, nbad)
+    if blk * BLOCK >= n:
+        return
+    m = off < n
+    local = tl.load(topk_ptr + t * topk_stride + off, mask=m, other=0)
+    local = tl.maximum(local, 0)  # never index the block table with -1
+    req = tl.load(token_to_req_ptr + t)
+    page_no = tl.load(
+        block_table_ptr + req * block_table_stride + local // PAGE, mask=m, other=0
+    )
+    row = page_no * blk_rows + local % PAGE + gap
+    tl.store(out_idx_ptr + o_start + off, row, mask=m)
+
+
+def _dsv4_require_grid(caches, what, page=None, gap_nonneg=False):
+    """The caches as one 640 B record grid, or RuntimeError: gfx1250 has no
+    other reader of the aligned record than aiter's sparse MLA kernels.
+    `page`: the compressed cache's page must equal the block size;
+    `gap_nonneg`: rows relative to the first cache's base must not go
+    negative (the second cache starts at or after the first)."""
+    why: list[str] = []
+    grid = _dsv4_record_grid(caches, why)
+    if grid is None:
+        raise RuntimeError(
+            f"DSv4 {what}: the KV caches are not one 640 B record grid "
+            f"({why[0] if why else 'unknown'})"
+        )
+    _, bases, blk_rows, pages = grid
+    bad = []
+    if len(set(blk_rows)) != 1:
+        bad.append(f"rows_per_block differ {blk_rows}")
+    if any(p & (p - 1) for p in pages):
+        bad.append(f"page not a power of two {pages}")
+    if page is not None and pages[-1] != page:
+        bad.append(f"compressed page {pages[-1]} != block size {page}")
+    if gap_nonneg and bases[-1] < bases[0]:
+        bad.append(f"compressed base {bases[-1]} < SWA base {bases[0]}")
+    if bad:
+        raise RuntimeError(f"DSv4 {what}: unsupported record-grid geometry: {bad}")
+    return grid
+
+
+def _dsv4_same_step(prev, cur) -> bool:
+    """Same forward, same step-index tensors (by identity), same geometry."""
+    return (
+        prev is not None
+        and prev[0] is cur[0]
+        and all(a is b for a, b in zip(prev[1:-1], cur[1:-1]))
+        and prev[-1] == cur[-1]
+    )
+
+
+@triton.jit(do_not_specialize=["token_offset"])
+def _dsv4_prefill_topk_lens_kernel(
+    lens_ptr,
+    token_to_req_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    is_valid_ptr,
+    token_offset,
+    width,
+    RATIO: tl.constexpr,
+):
+    """Prefill top-k length per token: the (pos + 1) // ratio compressed
+    tokens that exist so far, capped at the row width; 0 for padding. The
+    same for every layer of a ratio (the per-layer rows differ, not their
+    lengths), so it is computed once per step."""
+    row = tl.program_id(0)
+    tok = row + token_offset
+    req = tl.load(token_to_req_ptr + tok)
+    q0 = tl.load(query_start_loc_ptr + req)
+    qlen = tl.load(query_start_loc_ptr + req + 1) - q0
+    pos = tl.load(seq_lens_ptr + req) - qlen + tok - q0
+    n = tl.minimum((pos + 1) // RATIO, width)
+    tl.store(lens_ptr + row, tl.where(tl.load(is_valid_ptr + tok), n, 0))
+
+
+@triton.jit
+def _dsv4_prefill_comp_slots_kernel(
+    out_ptr,
+    indptr_ptr,
+    local_ptr,
+    local_stride,
+    token_to_req_ptr,
+    block_table_ptr,
+    block_table_stride,
+    PAGE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Once per step (HCA prefill): each token's first indptr-length local
+    compressed positions -> compressed-cache slots, ragged. token_to_req_ptr
+    is already offset to the first prefill token."""
+    t = tl.program_id(0)
+    blk = tl.program_id(1)
+    off = blk * BLOCK + tl.arange(0, BLOCK)
+    o0 = tl.load(indptr_ptr + t)
+    n = tl.load(indptr_ptr + t + 1) - o0
+    if blk * BLOCK >= n:
+        return
+    m = off < n
+    local = tl.maximum(tl.load(local_ptr + t * local_stride + off, mask=m, other=0), 0)
+    req = tl.load(token_to_req_ptr + t)
+    page_no = tl.load(
+        block_table_ptr + req * block_table_stride + local // PAGE, mask=m, other=0
+    )
+    tl.store(out_ptr + o0 + off, page_no * PAGE + local % PAGE, mask=m)
+
+
+def _dsv4_prefill_topk_indptr(
+    key, num_tokens, width, ratio, token_to_req, qsl, seq_lens, is_valid, offset, dev
+):
+    """[num_tokens + 1] int32 indptr of the prefill top-k lengths."""
+    lens = _dsv4_csa_buffer(key + "_lens", num_tokens, dev)[:num_tokens]
+    indptr = _dsv4_csa_buffer(key + "_topk_indptr", num_tokens + 1, dev)[
+        : num_tokens + 1
+    ]
+    _dsv4_prefill_topk_lens_kernel[(num_tokens,)](
+        lens, token_to_req, qsl, seq_lens, is_valid, offset, width, RATIO=ratio
+    )
+    indptr[:1].zero_()
+    torch.cumsum(lens, 0, dtype=torch.int32, out=indptr[1:])
+    return indptr
+
+
+def dsv4_aiter_grid_prefill(q, flat, base, indices, indptr, attn_sink, scale, out):
+    """Sparse prefill over the record grid, rows relative to row `base`: aiter's
+    sparse_mla_fwd on the 640 B record, the same kernel as the decode.
+
+    kv_splits=1: prefill fills the GPU through its rows, so it runs the single
+    pass, as pa_prefill_sparse always did. Left to the split-K heuristic, which
+    sizes splits for decode's few rows, a prefill batch of <= 256 rows (Pro TP4)
+    would be split, which costs the partials and the reduce and moves the
+    output by a bf16 ulp (8 of 1319 gsm8k 20-shot answers flipped, repeatably).
+    """
+    kernels = dsv4_aiter_sparse_mla_kernels()
+    assert kernels is not None
+    q_packed, q_rope = kernels.pack_q(q)
+    kernels.sparse_mla_fwd(
+        q_packed,
+        flat[base:],
+        indptr,
+        indices,
+        scale,
+        q_rope=q_rope,
+        attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+        has_invalid=False,
+        kv_splits=1,
+        out=out,
+    )
+
+
+def dsv4_aiter_csa_prefill(
+    q,
+    swa_cache,
+    swa_indices,
+    swa_indptr,
+    swa_width,
+    comp_cache,
+    topk_indices,
+    token_to_req_indices,
+    query_start_loc,
+    seq_lens,
+    is_valid_token,
+    block_table,
+    block_size,
+    token_offset,
+    attn_sink,
+    scale,
+    out,
+) -> None:
+    """C4A prefill with the per-step shared index list, like the decode: the
+    SWA rows and the indptr once per step (top-k lengths from the positions),
+    then this layer's top-k rows written in place. `topk_indices` holds the
+    prefill rows; the token-indexed tensors are batch-wide and the prefill
+    tokens start at `token_offset`. Raises on an unsupported cache layout."""
+    flat, bases, blk_rows, pages = _dsv4_require_grid(
+        [swa_cache, comp_cache], "C4A decode", page=block_size, gap_nonneg=True
+    )
+    num_tokens = topk_indices.shape[0]
+    if num_tokens == 0:
+        return
+    topk_indices = topk_indices.reshape(num_tokens, -1)
+    topk = topk_indices.shape[1]
+    dev = q.device
+    st = _DSV4_CSA_STATE
+    idx_buf = _dsv4_csa_buffer("pre_buf", swa_indices.numel() + num_tokens * topk, dev)
+    indptr = _dsv4_csa_buffer("pre_indptr", num_tokens + 1, dev)[: num_tokens + 1]
+    err = st.get("err")
+    if err is None or err.device != dev:
+        err = st["err"] = torch.zeros(1, dtype=torch.int32, device=dev)
+    step = (
+        get_forward_context(),
+        swa_indices,
+        (blk_rows[0], pages[0], num_tokens, swa_width, topk, idx_buf.data_ptr()),
+    )
+    if not _dsv4_same_step(st.get("csa_pre_step"), step):
+        topk_indptr = _dsv4_prefill_topk_indptr(
+            "csa_pre",
+            num_tokens,
+            topk,
+            4,
+            token_to_req_indices,
+            query_start_loc,
+            seq_lens,
+            is_valid_token,
+            token_offset,
+            dev,
+        )
+        block = 128
+        _dsv4_csa_step_kernel[(num_tokens, triton.cdiv(max(swa_width, 1), block))](
+            idx_buf,
+            indptr,
+            swa_indices,
+            swa_indptr,
+            topk_indptr,
+            num_tokens,
+            blk_rows[0],
+            SWA_PAGE=pages[0],
+            BLOCK_T=16,
+            BLOCK=block,
+            TOPK_INDPTR=True,
+        )
+        st["csa_pre_step"] = step
+    block = 128
+    _dsv4_csa_pack_topk_kernel[(num_tokens, triton.cdiv(topk, block))](
+        idx_buf,
+        indptr,
+        swa_indptr,
+        topk_indices,
+        topk_indices.stride(0),
+        token_to_req_indices[token_offset:],
+        block_table,
+        block_table.stride(0),
+        is_valid_token[token_offset:],
+        err,
+        topk,
+        blk_rows[1],
+        bases[1] - bases[0],
+        PAGE=pages[1],
+        CHECK=_DSV4_CSA_CHECK,
+        BLOCK=block,
+        CHECK_TAIL=False,
+    )
+    dsv4_aiter_grid_prefill(q, flat, bases[0], idx_buf, indptr, attn_sink, scale, out)
+
+
+def dsv4_aiter_hca_prefill_prepare(
+    swa_cache,
+    swa_indices,
+    swa_indptr,
+    comp_cache,
+    local_topk,
+    token_to_req_indices,
+    query_start_loc,
+    seq_lens,
+    is_valid_token,
+    block_table,
+    block_size,
+    token_offset,
+):
+    """HCA (C128A) prefill: the compressed slots once per step (lengths from
+    the positions, slots through the block table), and the kwarg that makes
+    aiter's fused KV insert write this layer's [SWA | compressed] rows for the
+    prefill tokens (`hca_kv_indices_prefill`). Returns `(kwarg, handle)`
+    with `handle = (flat, 0, indices, indptr)` for dsv4_aiter_grid_prefill,
+    or raises on an unsupported cache layout."""
+    flat, bases, blk_rows, pages = _dsv4_require_grid(
+        [swa_cache, comp_cache], "C128A prefill", page=block_size
+    )
+    num_tokens = local_topk.shape[0]
+    if num_tokens == 0:
+        return None
+    local_topk = local_topk.reshape(num_tokens, -1)
+    width = local_topk.shape[1]
+    dev = swa_indices.device
+    st = _DSV4_CSA_STATE
+    comp = _dsv4_csa_buffer("hca_pre_comp", num_tokens * width, dev)
+    step = (get_forward_context(), local_topk, (num_tokens, width, comp.data_ptr()))
+    prev = st.get("hca_pre_step")
+    if not _dsv4_same_step(prev, step):
+        comp_indptr = _dsv4_prefill_topk_indptr(
+            "hca_pre",
+            num_tokens,
+            width,
+            128,
+            token_to_req_indices,
+            query_start_loc,
+            seq_lens,
+            is_valid_token,
+            token_offset,
+            dev,
+        )
+        block = 128
+        _dsv4_prefill_comp_slots_kernel[(num_tokens, triton.cdiv(width, block))](
+            comp,
+            comp_indptr,
+            local_topk,
+            local_topk.stride(0),
+            token_to_req_indices[token_offset:],
+            block_table,
+            block_table.stride(0),
+            PAGE=pages[1],
+            BLOCK=block,
+        )
+        st["hca_pre_step"] = step
+    comp_indptr = st["hca_pre_topk_indptr"][: num_tokens + 1]
+    dst = _dsv4_csa_buffer("hca_pre_buf", swa_indices.numel() + comp.numel(), dev)
+    dst_indptr = _dsv4_csa_buffer("hca_pre_indptr", num_tokens + 1, dev)[
+        : num_tokens + 1
+    ]
+    kwarg = dict(
+        swa_indices=swa_indices,
+        swa_indptr=swa_indptr,
+        comp_indices=comp,
+        comp_indptr=comp_indptr,
+        dst_indices=dst,
+        dst_indptr=dst_indptr,
+        num_tokens=num_tokens,
+        token_offset=token_offset,
+        block_rows=blk_rows[0],
+        swa_base=bases[0],
+        comp_base=bases[1],
+        swa_page=pages[0],
+        comp_page=pages[1],
+    )
+    return kwarg, (flat, 0, dst, dst_indptr)
+
+
+@triton.jit
+def _dsv4_swa_rows_kernel(
+    out_ptr,
+    idx_ptr,
+    indptr_ptr,
+    blk_rows,
+    PAGE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """SWA-only layers: ragged SWA slots -> record-grid rows relative to the
+    SWA base, at the same positions (the indptr is unchanged)."""
+    t = tl.program_id(0)
+    blk = tl.program_id(1)
+    s0 = tl.load(indptr_ptr + t)
+    n = tl.load(indptr_ptr + t + 1) - s0
+    off = blk * BLOCK + tl.arange(0, BLOCK)
+    if blk * BLOCK >= n:
+        return
+    m = off < n
+    slot = tl.load(idx_ptr + s0 + off, mask=m, other=0)
+    tl.store(out_ptr + s0 + off, (slot // PAGE) * blk_rows + slot % PAGE, mask=m)
+
+
+def dsv4_aiter_swa_rows(swa_cache, swa_indices, swa_indptr, swa_width, key):
+    """SWA-only layers (no compressed stream): the window's slots as rows of
+    the record grid relative to the SWA base, once per step for every SWA-only
+    layer reading this SWA block table. Returns `(flat, swa_base, rows,
+    indptr)` for dsv4_aiter_grid_decode / dsv4_aiter_grid_prefill.
+    `key` separates the decode ("dec") and prefill ("pre") lists."""
+    flat, bases, blk_rows, pages = _dsv4_require_grid([swa_cache], "SWA-only")
+    num_tokens = swa_indptr.numel() - 1
+    dev = swa_indices.device
+    st = _DSV4_CSA_STATE
+    rows = _dsv4_csa_buffer("swa_" + key, max(swa_indices.numel(), 1), dev)
+    step = (
+        get_forward_context(),
+        swa_indices,
+        (blk_rows[0], pages[0], num_tokens, swa_width, rows.data_ptr()),
+    )
+    if num_tokens > 0 and not _dsv4_same_step(st.get("swa_step_" + key), step):
+        block = 128
+        _dsv4_swa_rows_kernel[(num_tokens, triton.cdiv(max(swa_width, 1), block))](
+            rows,
+            swa_indices,
+            swa_indptr,
+            blk_rows[0],
+            PAGE=pages[0],
+            BLOCK=block,
+        )
+        st["swa_step_" + key] = step
+    return flat, bases[0], rows, swa_indptr
+
+
+def dsv4_q_pack_buffers(
+    rows: int, heads: int, dev: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Persistent outputs for the fused KV insert's Q pack (`pack_q=True`):
+    `[rows, heads, 512]` fp8 and `[rows, heads, 64]` bf16, shared by every
+    layer (each layer's decode consumes them before the next layer's insert).
+    Allocated on first use, which is the eager profile run, never inside a
+    CUDA-graph capture: the wrapper's own allocation would land in the graph
+    pool and race the allocator."""
+    st = _DSV4_CSA_STATE
+    key = ("qpack", rows, heads, dev)
+    bufs = st.get(key)
+    if bufs is None:
+        bufs = st[key] = (
+            torch.empty(rows, heads, 512, dtype=torch.float8_e4m3fn, device=dev),
+            torch.empty(rows, heads, 64, dtype=torch.bfloat16, device=dev),
+        )
+    return bufs
+
+
+def _dsv4_csa_buffer(key: str, need: int, dev: torch.device) -> torch.Tensor:
+    """Persistent int32 buffer, grown on demand. Grown-out buffers are kept
+    alive: a captured CUDA graph still points at them."""
+    st = _DSV4_CSA_STATE
+    t = st.get(key)
+    if t is not None and t.numel() >= need and t.device == dev:
+        return t
+    if t is not None:
+        st.setdefault("retired", []).append(t)
+    t = st[key] = torch.empty(max(need, 1), dtype=torch.int32, device=dev)
+    return t
+
+
+def dsv4_aiter_grid_decode(
+    q,
+    flat,
+    base,
+    indices,
+    indptr,
+    attn_sink,
+    scale,
+    out,
+    q_packed=None,
+    q_rope=None,
+):
+    """Sparse decode over the record grid, rows relative to row `base`:
+    aiter's sparse_mla_fwd on the 640 B record. `q_packed`/`q_rope`: the
+    pair the fused KV insert already packed; Q is packed here only without
+    them."""
+    kernels = dsv4_aiter_sparse_mla_kernels()
+    assert kernels is not None
+    if q_packed is None or q_rope is None:
+        q_packed, q_rope = kernels.pack_q(q)
+    kernels.sparse_mla_fwd(
+        q_packed,
+        flat[base:],
+        indptr,
+        indices,
+        scale,
+        q_rope=q_rope,
+        attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+        has_invalid=False,
+        # Decode runs split-K at small batch sizes: reuse the partial buffers
+        # instead of allocating them in every call (and every graph capture).
+        use_lru_cache_partials=True,
+        out=out,
+    )
+
+
+def dsv4_aiter_hca_prepare(
+    swa_cache,
+    swa_indices,
+    swa_indptr,
+    swa_width,
+    comp_cache,
+    comp_indices,
+    comp_indptr,
+    num_tokens,
+):
+    """HCA (C128A) decode index list, written by aiter's fused Q-norm/RoPE/KV
+    insert (COPY_HCA_KV_INDICES) instead of a launch of its own.
+
+    Returns `(hca_kv_indices, handle)`: the insert's kwarg, and
+    `(flat, 0, indices, indptr)` for dsv4_aiter_grid_decode. Rows are
+    absolute (an HCA layer's compressed page sits BEFORE its SWA page, so rows
+    relative to the SWA base would go negative). Raises on an unsupported
+    cache layout.
+    """
+    if num_tokens == 0:
+        return None
+    flat, bases, blk_rows, pages = _dsv4_require_grid(
+        [swa_cache, comp_cache], "C128A decode"
+    )
+    dev = swa_indices.device
+    idx = _dsv4_csa_buffer(
+        "hca_buf", num_tokens * swa_width + comp_indices.numel(), dev
+    )
+    indptr = _dsv4_csa_buffer("hca_indptr", num_tokens + 1, dev)[: num_tokens + 1]
+    st = _DSV4_CSA_STATE
+    if not st.get("hca_logged"):
+        st["hca_logged"] = True
+        logger.info(
+            "DSV4 C128A decode: index list written by the fused KV insert "
+            "(bases %s, rows_per_block %d)",
+            bases,
+            blk_rows[0],
+        )
+    hca_kv_indices = dict(
+        swa_indices=swa_indices,
+        swa_indptr=swa_indptr,
+        comp_indices=comp_indices,
+        comp_indptr=comp_indptr,
+        dst_indices=idx,
+        dst_indptr=indptr,
+        num_tokens=num_tokens,
+        block_rows=blk_rows[0],
+        swa_base=bases[0],
+        comp_base=bases[1],
+        swa_page=pages[0],
+        comp_page=pages[1],
+    )
+    return hca_kv_indices, (flat, 0, idx, indptr)
+
+
+def dsv4_aiter_csa_decode(
+    q,
+    swa_cache,
+    swa_indices,
+    swa_indptr,
+    swa_width,
+    comp_cache,
+    topk_indices,
+    token_to_req_indices,
+    block_table,
+    block_size,
+    is_valid_token,
+    attn_sink,
+    scale,
+    out,
+    q_packed=None,
+    q_rope=None,
+) -> None:
+    """C4A decode with the per-step shared index list. Raises if the caches
+    are not one 640 B record grid in the layout it relies on."""
+    flat, bases, blk_rows, pages = _dsv4_require_grid(
+        [swa_cache, comp_cache], "C4A prefill", page=block_size, gap_nonneg=True
+    )
+    num_tokens = topk_indices.shape[0]
+    topk_indices = topk_indices.reshape(num_tokens, -1)
+    topk = topk_indices.shape[1]
+    dev = q.device
+    st = _DSV4_CSA_STATE
+
+    idx_buf = _dsv4_csa_buffer("buf", num_tokens * (swa_width + topk), dev)
+    indptr = _dsv4_csa_buffer("indptr", num_tokens + 1, dev)[: num_tokens + 1]
+    lens = _dsv4_csa_buffer("lens", num_tokens, dev)[:num_tokens]
+    check = _DSV4_CSA_CHECK
+    err = st.get("err")
+    if err is None or err.device != dev:
+        err = st["err"] = torch.zeros(1, dtype=torch.int32, device=dev)
+    capturing = torch.cuda.is_current_stream_capturing()
+    if check and not capturing:
+        nbad = int(err.item())
+        if nbad and nbad != st.get("err_logged"):
+            st["err_logged"] = nbad
+            logger.warning(
+                "DSV4 CSA check: %d top-k entries disagree with "
+                "the step's per-token top-k length",
+                nbad,
+            )
+
+    # New forward (eager step, warm-up or graph capture) or another SWA block
+    # table: (re)write the SWA part and the indptr.
+    fwd = get_forward_context()
+    key = (blk_rows[0], pages[0], num_tokens, swa_width, topk)
+    if (
+        st.get("fwd") is not fwd
+        or st.get("swa_indices") is not swa_indices
+        or st.get("key") != key
+        or st.get("idx_ptr") != idx_buf.data_ptr()
+    ):
+        if num_tokens:
+            _dsv4_csa_topk_lens_kernel[(num_tokens,)](
+                lens,
+                topk_indices,
+                topk_indices.stride(0),
+                is_valid_token,
+                topk,
+                BLOCK=1024,
+            )
+            block = 128
+            _dsv4_csa_step_kernel[(num_tokens, triton.cdiv(swa_width, block))](
+                idx_buf,
+                indptr,
+                swa_indices,
+                swa_indptr,
+                lens,
+                num_tokens,
+                blk_rows[0],
+                SWA_PAGE=pages[0],
+                BLOCK_T=max(16, triton.next_power_of_2(num_tokens)),
+                BLOCK=block,
+            )
+        else:
+            indptr.zero_()
+        st.update(fwd=fwd, swa_indices=swa_indices, key=key, idx_ptr=idx_buf.data_ptr())
+
+    if num_tokens:
+        block = 128
+        _dsv4_csa_pack_topk_kernel[(num_tokens, triton.cdiv(topk, block))](
+            idx_buf,
+            indptr,
+            swa_indptr,
+            topk_indices,
+            topk_indices.stride(0),
+            token_to_req_indices,
+            block_table,
+            block_table.stride(0),
+            is_valid_token,
+            err,
+            topk,
+            blk_rows[1],
+            bases[1] - bases[0],
+            PAGE=pages[1],
+            CHECK=check,
+            BLOCK=block,
+        )
+
+    b = bases[0]
+    dsv4_aiter_grid_decode(
+        q, flat, b, idx_buf, indptr, attn_sink, scale, out, q_packed, q_rope
+    )
+    if not st.get("logged"):
+        st["logged"] = True
+        logger.info(
+            "DSV4 C4A decode: one index list per step (SWA rows rel. base %d, "
+            "top-k gap %d, rows_per_block %d)",
+            b,
+            bases[1] - b,
+            blk_rows[0],
+        )
+
+
 def _rocm_sparse_attn_decode_ragged_triton(
     q: torch.Tensor,
     main_cache: torch.Tensor,
@@ -4362,6 +5260,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
     inv_rope_positions: torch.Tensor | None = None,
     inv_rope_cos_sin_cache: torch.Tensor | None = None,
     out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+    q_packed: torch.Tensor | None = None,
+    q_rope: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Split-K sparse decode; returns the attention output.
 
@@ -4468,6 +5368,16 @@ def _rocm_sparse_attn_decode_ragged_triton(
     nope_block = triton.next_power_of_2(nope_head_dim)
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
+
+    # gfx1250: aiter's sparse-MLA decode (a8w8) on the aligned 640 B record.
+    # It is the only reader of that record, so it runs ahead of the fallback
+    # below, which reads the packed record.
+    if dsv4_aiter_sparse_mla_kernels() is not None:
+        raise RuntimeError(
+            "gfx1250 DeepSeek-V4 sparse decode runs on aiter's pa_decode_sparse "
+            "over the 640 B record (dsv4_aiter_*_decode); the Triton kernels "
+            "here read the packed 576 B record and cannot serve it"
+        )
 
     if not (_ON_GFX942 or _ON_GFX950):  # Fallback path for un-tuned architectures.
         block_k = 16 if head_dim >= 256 else 32
@@ -4701,6 +5611,8 @@ def _rocm_sparse_attn_decode_triton(
     inv_rope_positions: torch.Tensor | None = None,
     inv_rope_cos_sin_cache: torch.Tensor | None = None,
     out_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+    q_packed: torch.Tensor | None = None,
+    q_rope: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if main_ragged_indices is None or main_ragged_indptr is None:
         main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
@@ -4742,6 +5654,8 @@ def _rocm_sparse_attn_decode_triton(
         inv_rope_positions=inv_rope_positions,
         inv_rope_cos_sin_cache=inv_rope_cos_sin_cache,
         out_mxfp8=out_mxfp8,
+        q_packed=q_packed,
+        q_rope=q_rope,
     )
 
 
@@ -4944,6 +5858,8 @@ def rocm_sparse_attn_decode(
     inv_rope_positions: torch.Tensor | None = None,
     inv_rope_cos_sin_cache: torch.Tensor | None = None,
     output_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
+    q_packed: torch.Tensor | None = None,
+    q_rope: torch.Tensor | None = None,
 ) -> int:
     """Run sparse MLA decode into `output`.
 
@@ -4990,7 +5906,14 @@ def rocm_sparse_attn_decode(
         direct_out = None
     else:
         assert output is not None
-        direct_out = output if _ON_GFX950 and output.dtype == torch.bfloat16 else None
+        # The aiter decode (gfx1250) writes the caller's buffer directly, like
+        # the gfx950 reduce, which saves one D2D copy per layer.
+        direct_out = (
+            output
+            if (_ON_GFX950 or dsv4_aiter_sparse_mla_kernels() is not None)
+            and output.dtype == torch.bfloat16
+            else None
+        )
     attn_out = _rocm_sparse_attn_decode_triton(
         q=q,
         main_cache=swa_k_cache,
@@ -5003,6 +5926,8 @@ def rocm_sparse_attn_decode(
         extra_indices=extra_indices,
         main_lengths=swa_lens,
         extra_lengths=topk_lens,
+        q_packed=q_packed,
+        q_rope=q_rope,
         main_ragged_indices=swa_ragged_indices,
         main_ragged_indptr=swa_ragged_indptr,
         extra_ragged_indices=topk_ragged_indices,
