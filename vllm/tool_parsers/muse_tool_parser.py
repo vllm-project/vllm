@@ -96,9 +96,10 @@ _OPEN_TAIL_TO_RE = re.compile(r"[^\S\n]+to=[A-Za-z0-9_.\-]*$")
 
 # --- Tool-call extraction (unchanged from MUSE_GLIMMER_RESPONSE_SCHEMA) -------------
 _INVOKE_RE = re.compile(r"(<atem:invoke\b.*?</atem:invoke>)", re.DOTALL)
-_NAME_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"')
+# `[^<>]` stops each attribute scan at the next tag, keeping the match linear.
+_NAME_RE = re.compile(r'<atem:invoke\b[^<>]*?\bname="([^"]+)"')
 _PARAM_RE = re.compile(
-    r'<atem:parameter\b[^>]*?\bname="(?P<key>[^"]+)"[^>]*?>(?P<value>.*?)</atem:parameter>',
+    r'<atem:parameter\b[^<>]*?\bname="(?P<key>[^"]+)"[^<>]*?>(?P<value>.*?)</atem:parameter>',
     re.DOTALL,
 )
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
@@ -477,8 +478,16 @@ class MuseToolParser(ToolParser):
 
         try:
             registered = self._registered_names(request)
-            calls = self._parse_tool_calls(
-                current_text, registered, self._parameter_types(request)
+            # Only parse on the delta that completes an `</atem:invoke>` (the window
+            # also covers a closing tag split across deltas).
+            close = "</atem:invoke>"
+            tail = current_text[max(0, len(previous_text) - len(close) + 1) :]
+            calls = (
+                self._parse_tool_calls(
+                    current_text, registered, self._parameter_types(request)
+                )
+                if close in tail
+                else []
             )
             content, reasoning, content_open, reasoning_open = self._visible_channels(
                 current_text
@@ -514,7 +523,8 @@ class MuseToolParser(ToolParser):
 
             self._streamed_content_len = len(content)
             self._streamed_reasoning_len = len(reasoning)
-            self._emitted_tool_calls = len(calls)
+            # Never walk back, since `calls` is empty on non-parsing deltas.
+            self._emitted_tool_calls = max(self._emitted_tool_calls, len(calls))
 
             message = DeltaMessage()
             if content_delta:
