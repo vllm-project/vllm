@@ -202,6 +202,8 @@ not select it. For example:
 | ------------ | ------ | ----- |
 | `{"weight": "fp8_per_channel_static", "activation": null}` | fp8_e4m3 data, per-output-channel scale, BF16 activations | `"fp8_per_channel"` (W8A8) is also accepted; other FP8 schemes are not. CUDA and XPU only, use `"fp8_per_channel"` on ROCm. |
 | `{"weight": "int4_per_group_32_asym"}` | uint4 data, one scale and zero point per 32 input channels, BF16 activations | lm_head only. Runs on the platform's mixed-precision (W4A16) linear kernel, e.g. `RDNAHybridW4A16LinearKernel` on gfx11/gfx12. |
+| `{"weight": "int8_per_channel_static"}` | int8 data, per-output-channel scale, BF16 activations | lm_head only. Twice the bytes of `int4_per_group_32_asym`, with logits much closer to the BF16 lm_head. Runs on the platform's mixed-precision (W8A16) linear kernel, e.g. `RDNAW8A16LinearKernel` on gfx11/gfx12. |
+| `{"weight": "int8_per_group_32"}` | int8 data, one scale per 32 input channels, BF16 activations | lm_head only. Closer to the BF16 lm_head than `int8_per_channel_static`, for 1/16 more bytes. Same kernels. |
 
 ```bash
 # Quark int4 checkpoint whose lm_head is left in bf16
@@ -223,7 +225,8 @@ vllm serve amd/Qwen3.6-35B-A3B-Quark-UINT4-G128 \
 
 !!! warning
     A lm_head tied to the input embeddings (e.g. small Qwen3 and Gemma models)
-    keeps the embeddings' fp16/bf16 weight and adds the `int4_per_group_32_asym`
+    keeps the embeddings' fp16/bf16 weight and adds the lm_head-only
+    (`int4_per_group_32_asym`, `int8_per_channel_static` or `int8_per_group_32`)
     copy next to it. It reduces the weight bytes read per decode step, but
     increases memory instead of saving it; the extra size is logged at load.
     The other online methods reject a tied lm_head.
@@ -333,12 +336,13 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
       weight-only FP8:
       `"re:.*lm_head$": {"weight": "fp8_per_channel_static", "activation": None}`.
       See [Quantizing the lm_head](#quantizing-the-lm_head).
-    - The lm_head supports per-channel FP8 and `int4_per_group_32_asym` only:
-      `fp8_per_channel` (W8A8), `fp8_per_channel_static` with
+    - The lm_head supports per-channel FP8 and the lm_head-only weight-only
+      formats only: `fp8_per_channel` (W8A8), `fp8_per_channel_static` with
       `"activation": None` (weight-only; CUDA and XPU only, use
-      `fp8_per_channel` on ROCm), or `int4_per_group_32_asym` (weight-only).
+      `fp8_per_channel` on ROCm), `int4_per_group_32_asym`,
+      `int8_per_channel_static` or `int8_per_group_32`.
       Other schemes, and a lm_head the checkpoint already quantizes, raise an
-      error; so does a tied lm_head, except with `int4_per_group_32_asym`. It
+      error; so does a tied lm_head, except with the lm_head-only formats. It
       cannot be combined with `draft_lm_head_quantization` or with models that
       read `lm_head.weight` directly (Gemma4 MTP, DiffusionGemma, K2Horizon).
       Models converted to sequence classification raise an error.
