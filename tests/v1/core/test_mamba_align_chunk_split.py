@@ -15,11 +15,17 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_request
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    compute_mamba_prefill_checkpoints,
+)
+from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import init_none_hash
+from vllm.v1.core.kv_cache_utils import get_group_id, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -27,7 +33,9 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     is_mamba_prefill_checkpoint_valid,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
+from vllm.v1.structured_output import StructuredOutputManager
 
 from .utils import create_requests
 
@@ -219,6 +227,107 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
         )
         == MAMBA_BLOCK_SIZE - resume_at % MAMBA_BLOCK_SIZE
     )
+
+
+@pytest.mark.parametrize("internal", [False, True])
+def test_partial_checkpoint_resume_preserves_cached_state(internal: bool) -> None:
+    """A resumed prefill must not publish its old state under a later hash."""
+    block_size, hash_size, num_blocks = 64, 16, 128
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", max_model_len=1024),
+        cache_config=CacheConfig(
+            block_size=block_size,
+            enable_prefix_caching=True,
+            mamba_cache_mode="align",
+        ),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=1024,
+            max_num_batched_tokens=256,
+            max_num_seqs=1,
+            async_scheduling=False,
+            watermark=0.0,
+        ),
+    )
+    config.cache_config.num_gpu_blocks = num_blocks
+    cache = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["state"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_prefill_checkpoint_blocks=int(internal),
+                    prefill_checkpoint_alignment=16 if internal else None,
+                ),
+            ),
+        ],
+    )
+    register_all_kvcache_specs(config)
+    init_none_hash(sha256)
+    scheduler = Scheduler(
+        config, cache, StructuredOutputManager(config), block_size, hash_size
+    )
+    manager = scheduler.kv_cache_manager
+    state_at = torch.full((num_blocks,), -1, dtype=torch.int64)
+    copies = 0
+    for name, length in [("producer", 337), ("consumer", 512)]:
+        request = make_request(
+            name,
+            list(range(length)),
+            hash_size,
+            sha256,
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+        if name == "consumer":
+            assert manager.get_computed_blocks(request)[1] == 336
+        scheduler.add_request(request)
+        while not request.is_finished():
+            output = scheduler.schedule()
+            assert output.num_scheduled_tokens[request.request_id] > 0
+            for copy in output.kv_cache_block_copies or []:
+                state_at[copy.dst_block_id] = state_at[copy.src_block_id]
+                copies += 1
+            count = output.num_scheduled_tokens[request.request_id]
+            end = request.num_computed_tokens
+            start = end - count
+            ids = manager.get_block_ids(request.request_id)[MAMBA_GROUP_ID]
+            state_at[ids[cdiv(end, block_size) - 1]] = end
+            if internal:
+                offsets, columns = compute_mamba_prefill_checkpoints(
+                    [end], [count], hash_size, block_size, 16, False, hash_size
+                )
+                if offsets[0]:
+                    state_at[ids[columns[0]]] = start + offsets[0]
+            for block in manager.block_pool.blocks:
+                if (
+                    block.block_hash is not None
+                    and get_group_id(block.block_hash) == MAMBA_GROUP_ID
+                ):
+                    assert (
+                        state_at[block.block_id].item() == block.block_hash_num_tokens
+                    )
+            scheduler.update_from_output(
+                output,
+                ModelRunnerOutput(
+                    req_ids=[request.request_id],
+                    sampled_token_ids=[[0]] if end == length else [[]],
+                ),
+            )
+    assert copies > 0
 
 
 def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
