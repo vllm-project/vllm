@@ -93,6 +93,25 @@ def _constrain_sm12x_block_m(num_rows: int, num_experts: int) -> None:
     )
 
 
+# gfx942 has no FP4 instructions, so the mxfp4 matmul upcasts inside the kernel and
+# the default tiles are slow. Use a small tile for decode-sized batches and a
+# block_m=64 tile above that. Tiles and the 512-row switch were swept on MI325X
+# with gpt-oss-20b and -120b (M * top_k rows, i.e. 128 tokens at top-4).
+_GFX942_DECODE_MAX_ROWS = 512
+_GFX942_DECODE_TILES = {"block_m": 16, "block_n": 64, "block_k": 256, "num_warps": 4}
+_GFX942_BATCH_TILES = {"block_m": 64, "block_n": 256, "block_k": 128, "num_warps": 8}
+
+
+def _constrain_gfx942_tiles(num_rows: int) -> None:
+    """Pin the matmul tiles for the following calls on gfx942 (triton_kernels 3.8)."""
+    if on_gfx942():
+        update_opt_flags_constraints(
+            _GFX942_DECODE_TILES
+            if num_rows <= _GFX942_DECODE_MAX_ROWS
+            else _GFX942_BATCH_TILES
+        )
+
+
 def _patch_make_bitmatrix_metadata() -> None:
     """Monkey-patch make_bitmatrix_metadata to support non-power-of-2 top_k.
 
@@ -493,7 +512,7 @@ if triton_kernels_version is not None:
             )
             from triton_kernels.tensor import make_ragged_tensor_metadata
 
-            from vllm.platforms.rocm import on_gfx950, on_rdna
+            from vllm.platforms.rocm import on_gfx942, on_gfx950, on_rdna
 
             _TK38_SCATTER_COMBINE = current_platform.is_rocm() and on_rdna()
 
@@ -745,6 +764,7 @@ def triton_kernel_fused_experts(
         # an external combine.
         assert quant_config is not None
         M, K = hidden_states.shape[-2:]
+        _constrain_gfx942_tiles(M * topk)
         a_ragged = routing_data.ragged
         gather_tok = routing_data.gather_tok
         gammas = routing_data.gate_scal
@@ -1333,6 +1353,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             # no in-kernel scatter+reduce); combine via external index_add.
             act_out_dim = self.adjust_N_for_activation(w1.shape[2], activation)
             M, K = hidden_states.shape[-2:]
+            _constrain_gfx942_tiles(M * topk)
             a_ragged = routing_data.ragged
             gather_tok = routing_data.gather_tok
             gammas = routing_data.gate_scal
