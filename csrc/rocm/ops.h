@@ -116,4 +116,6 @@ std::optional<int64_t> hip_custom_communicator_all_reduce_add_attn_res_rms_norm(
     std::optional<int64_t> add_attn_res_rms_norm_tile_m,
     std::optional<int64_t> add_attn_res_rms_norm_tile_n,
     std::optional<int64_t> add_attn_res_rms_norm_tile_k,
-    std::optional<int64_t> add_attn_res_rms_norm_pack_bytes);
+    std::optional<int64_t> add_attn_res_rms_norm_pack_bytes,
+    const std::optional<torch::Tensor>& quant_output,
+    const std::optional<torch::Tensor>& quant_scale, bool write_output);

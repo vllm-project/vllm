@@ -30,7 +30,9 @@ DINLINE void add_attn_res_rms_norm_rows(
     int64_t prefix_output_stride_n, DTYPE* output_ptr, int64_t output_stride_m,
     int64_t output_stride_n, DTYPE* block_output_ptr,
     int64_t block_output_stride_m, int64_t block_output_stride_n,
-    int num_blocks, float eps, float output_eps) {
+    int num_blocks, float eps, float output_eps, uint8_t* quant_ptr,
+    int64_t quant_stride_m, float* quant_scale_ptr,
+    int64_t quant_scale_stride_m) {
   const float inv_hidden = 1.0f / static_cast<float>(input_size_n);
   attn_res<TILE_K, THREADS_PER_BLOCK, WAVE_SIZE, Layout::tile, false>(
       sum, prefix_ptr, prefix_stride_m, prefix_stride_n, blocks_ptr,
@@ -40,7 +42,8 @@ DINLINE void add_attn_res_rms_norm_rows(
       prefix_output_stride_m, prefix_output_stride_n, output_ptr,
       output_stride_m, output_stride_n, block_output_ptr, block_output_stride_m,
       block_output_stride_n, input_size_m, input_size_n, offs_m, 0, num_blocks,
-      eps, output_eps, inv_hidden);
+      eps, output_eps, inv_hidden, quant_ptr, quant_stride_m, quant_scale_ptr,
+      quant_scale_stride_m);
 }
 
 template <typename DTYPE, int TILE_M, int TILE_N, int TILE_K,
@@ -57,8 +60,9 @@ DINLINE void add_attn_res_rms_norm_rows(
     int64_t prefix_output_stride_m, int64_t prefix_output_stride_n,
     DTYPE* output_ptr, int64_t output_stride_m, int64_t output_stride_n,
     DTYPE* block_output_ptr, int64_t block_output_stride_m,
-    int64_t block_output_stride_n, int num_blocks, float eps,
-    float output_eps) {
+    int64_t block_output_stride_n, int num_blocks, float eps, float output_eps,
+    uint8_t* quant_ptr, int64_t quant_stride_m, float* quant_scale_ptr,
+    int64_t quant_scale_stride_m) {
   constexpr int kPackElems = traits<DTYPE, PACK_BYTES>::N;
   constexpr int kPacks = (TILE_N + kPackElems * THREADS_PER_BLOCK - 1) /
                          (kPackElems * THREADS_PER_BLOCK);
@@ -72,7 +76,8 @@ DINLINE void add_attn_res_rms_norm_rows(
       prefix_output_ptr, prefix_output_stride_m, prefix_output_stride_n,
       output_ptr, output_stride_m, output_stride_n, block_output_ptr,
       block_output_stride_m, block_output_stride_n, input_size_m, input_size_n,
-      offs_m, 0, num_blocks, eps, output_eps, inv_hidden);
+      offs_m, 0, num_blocks, eps, output_eps, inv_hidden, quant_ptr,
+      quant_stride_m, quant_scale_ptr, quant_scale_stride_m);
 }
 
 template <typename DTYPE, int TILE_M, int TILE_N, int TILE_K,
@@ -99,7 +104,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK, WAVES_PER_EU)
         int output_size_n, DTYPE* __restrict__ block_output_ptr,
         int64_t block_output_stride_m, int64_t block_output_stride_n,
         int block_output_size_m, int block_output_size_n, int num_blocks,
-        float eps, float output_eps) {
+        float eps, float output_eps, uint8_t* quant_ptr, int64_t quant_stride_m,
+        float* quant_scale_ptr, int64_t quant_scale_stride_m) {
   const int tiles = (input_size_m + TILE_M - 1) / TILE_M;
   for (int t = blockIdx.x; t < tiles; t += gridDim.x)
     add_attn_res_rms_norm_rows<DTYPE, TILE_M, TILE_N, TILE_K, THREADS_PER_BLOCK,
@@ -112,7 +118,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK, WAVES_PER_EU)
         prefix_output_stride_m, prefix_output_stride_n, output_ptr,
         output_stride_m, output_stride_n, block_output_ptr,
         block_output_stride_m, block_output_stride_n, num_blocks, eps,
-        output_eps);
+        output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+        quant_scale_stride_m);
 }
 
 template <bool QUANTIZE_INT4, typename DTYPE, int WORLD, int TILE_M, int TILE_N,
@@ -142,7 +149,9 @@ DINLINE void all_reduce_add_attn_res_rms_norm_one_shot_pull(
     int64_t signals_stride_writer, int signals_size_parity,
     int signals_size_block, int signals_size_writer, uint32_t* status_ptr,
     int64_t status_stride_field, int status_size_field, int rank,
-    uint64_t timeout_ticks, int num_blocks, float eps, float output_eps) {
+    uint64_t timeout_ticks, int num_blocks, float eps, float output_eps,
+    uint8_t* quant_ptr, int64_t quant_stride_m, float* quant_scale_ptr,
+    int64_t quant_scale_stride_m) {
   constexpr int kPackElems = traits<DTYPE, PACK_BYTES>::N;
   constexpr int kPacks = (TILE_N + kPackElems * THREADS_PER_BLOCK - 1) /
                          (kPackElems * THREADS_PER_BLOCK);
@@ -212,7 +221,8 @@ DINLINE void all_reduce_add_attn_res_rms_norm_one_shot_pull(
             prefix_output_stride_m, prefix_output_stride_n, output_ptr,
             output_stride_m, output_stride_n, block_output_ptr,
             block_output_stride_m, block_output_stride_n, num_blocks, eps,
-            output_eps);
+            output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+            quant_scale_stride_m);
     }
     if constexpr (CHUNKED)
       add_attn_res_rms_norm_rows<DTYPE, TILE_M, TILE_N, TILE_K,
@@ -226,7 +236,8 @@ DINLINE void all_reduce_add_attn_res_rms_norm_one_shot_pull(
           prefix_output_ptr, prefix_output_stride_m, prefix_output_stride_n,
           output_ptr, output_stride_m, output_stride_n, block_output_ptr,
           block_output_stride_m, block_output_stride_n, num_blocks, eps,
-          output_eps);
+          output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+          quant_scale_stride_m);
   }
 
   barrier<WORLD>(signals_ptr_array, signals_ptr_array_size,
@@ -263,7 +274,9 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_pull_rows(
     int64_t signals_stride_writer, int signals_size_parity,
     int signals_size_block, int signals_size_writer, uint32_t* status_ptr,
     int64_t status_stride_field, int status_size_field, int rank,
-    uint64_t timeout_ticks, int num_blocks, float eps, float output_eps) {
+    uint64_t timeout_ticks, int num_blocks, float eps, float output_eps,
+    uint8_t* quant_ptr, int64_t quant_stride_m, float* quant_scale_ptr,
+    int64_t quant_scale_stride_m) {
   constexpr int kPackElems = traits<DTYPE, PACK_BYTES>::N;
   constexpr int kPacks = (TILE_N + kPackElems * THREADS_PER_BLOCK - 1) /
                          (kPackElems * THREADS_PER_BLOCK);
@@ -309,7 +322,8 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_pull_rows(
             prefix_output_stride_m, prefix_output_stride_n, output_ptr,
             output_stride_m, output_stride_n, block_output_ptr,
             block_output_stride_m, block_output_stride_n, num_blocks, eps,
-            output_eps);
+            output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+            quant_scale_stride_m);
     }
     if constexpr (CHUNKED)
       add_attn_res_rms_norm_rows<DTYPE, TILE_M, TILE_N, TILE_K,
@@ -323,7 +337,8 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_pull_rows(
           prefix_output_ptr, prefix_output_stride_m, prefix_output_stride_n,
           output_ptr, output_stride_m, output_stride_n, block_output_ptr,
           block_output_stride_m, block_output_stride_n, num_blocks, eps,
-          output_eps);
+          output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+          quant_scale_stride_m);
   }
 }
 
@@ -354,7 +369,9 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_pull_columns(
     int64_t signals_stride_writer, int signals_size_parity,
     int signals_size_block, int signals_size_writer, uint32_t* status_ptr,
     int64_t status_stride_field, int status_size_field, int rank,
-    uint64_t timeout_ticks, int num_blocks, float eps, float output_eps) {
+    uint64_t timeout_ticks, int num_blocks, float eps, float output_eps,
+    uint8_t* quant_ptr, int64_t quant_stride_m, float* quant_scale_ptr,
+    int64_t quant_scale_stride_m) {
   constexpr int kPackElems = traits<DTYPE, PACK_BYTES>::N;
   constexpr int kPacks = (TILE_N + kPackElems * THREADS_PER_BLOCK - 1) /
                          (kPackElems * THREADS_PER_BLOCK);
@@ -400,7 +417,8 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_pull_columns(
             prefix_output_stride_m, prefix_output_stride_n, output_ptr,
             output_stride_m, output_stride_n, block_output_ptr,
             block_output_stride_m, block_output_stride_n, num_blocks, eps,
-            output_eps);
+            output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+            quant_scale_stride_m);
     }
     if constexpr (CHUNKED)
       add_attn_res_rms_norm_rows<DTYPE, TILE_M, TILE_N, TILE_K,
@@ -414,7 +432,8 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_pull_columns(
           prefix_output_ptr, prefix_output_stride_m, prefix_output_stride_n,
           output_ptr, output_stride_m, output_stride_n, block_output_ptr,
           block_output_stride_m, block_output_stride_n, num_blocks, eps,
-          output_eps);
+          output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+          quant_scale_stride_m);
   }
 }
 
@@ -445,7 +464,9 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_push(
     int64_t signals_stride_writer, int signals_size_parity,
     int signals_size_block, int signals_size_writer, uint32_t* status_ptr,
     int64_t status_stride_field, int status_size_field, int rank,
-    uint64_t timeout_ticks, int num_blocks, float eps, float output_eps) {
+    uint64_t timeout_ticks, int num_blocks, float eps, float output_eps,
+    uint8_t* quant_ptr, int64_t quant_stride_m, float* quant_scale_ptr,
+    int64_t quant_scale_stride_m) {
   constexpr int kPackElems = traits<DTYPE, PACK_BYTES>::N;
   constexpr int kPacks = (TILE_N + kPackElems * THREADS_PER_BLOCK - 1) /
                          (kPackElems * THREADS_PER_BLOCK);
@@ -489,7 +510,8 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_push(
             prefix_output_stride_m, prefix_output_stride_n, output_ptr,
             output_stride_m, output_stride_n, block_output_ptr,
             block_output_stride_m, block_output_stride_n, num_blocks, eps,
-            output_eps);
+            output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+            quant_scale_stride_m);
     }
     if constexpr (CHUNKED)
       add_attn_res_rms_norm_rows<DTYPE, TILE_M, TILE_N, TILE_K,
@@ -503,7 +525,8 @@ DINLINE void all_reduce_add_attn_res_rms_norm_two_shot_push(
           prefix_output_ptr, prefix_output_stride_m, prefix_output_stride_n,
           output_ptr, output_stride_m, output_stride_n, block_output_ptr,
           block_output_stride_m, block_output_stride_n, num_blocks, eps,
-          output_eps);
+          output_eps, quant_ptr, quant_stride_m, quant_scale_ptr,
+          quant_scale_stride_m);
   }
 }
 
@@ -544,7 +567,9 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK, WAVES_PER_EU)
         int signals_size_parity, int signals_size_block,
         int signals_size_writer, uint32_t* __restrict__ status_ptr,
         int64_t status_stride_field, int status_size_field, int rank,
-        uint64_t timeout_ticks, int num_blocks, float eps, float output_eps) {
+        uint64_t timeout_ticks, int num_blocks, float eps, float output_eps,
+        uint8_t* quant_ptr, int64_t quant_stride_m, float* quant_scale_ptr,
+        int64_t quant_scale_stride_m) {
   if constexpr (ALGORITHM == AllReduceAddAttnResRmsNormAlgorithm::one_shot_pull)
     all_reduce_add_attn_res_rms_norm_one_shot_pull<
         QUANTIZE_INT4, DTYPE, WORLD, TILE_M, TILE_N, TILE_K, THREADS_PER_BLOCK,
@@ -565,7 +590,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK, WAVES_PER_EU)
         signals_ptr_array_size, signals_stride_parity, signals_stride_block,
         signals_stride_writer, signals_size_parity, signals_size_block,
         signals_size_writer, status_ptr, status_stride_field, status_size_field,
-        rank, timeout_ticks, num_blocks, eps, output_eps);
+        rank, timeout_ticks, num_blocks, eps, output_eps, quant_ptr,
+        quant_stride_m, quant_scale_ptr, quant_scale_stride_m);
   else if constexpr (ALGORITHM ==
                      AllReduceAddAttnResRmsNormAlgorithm::two_shot_pull_rows)
     all_reduce_add_attn_res_rms_norm_two_shot_pull_rows<
@@ -587,7 +613,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK, WAVES_PER_EU)
         signals_ptr_array_size, signals_stride_parity, signals_stride_block,
         signals_stride_writer, signals_size_parity, signals_size_block,
         signals_size_writer, status_ptr, status_stride_field, status_size_field,
-        rank, timeout_ticks, num_blocks, eps, output_eps);
+        rank, timeout_ticks, num_blocks, eps, output_eps, quant_ptr,
+        quant_stride_m, quant_scale_ptr, quant_scale_stride_m);
   else if constexpr (ALGORITHM ==
                      AllReduceAddAttnResRmsNormAlgorithm::two_shot_pull_columns)
     all_reduce_add_attn_res_rms_norm_two_shot_pull_columns<
@@ -609,7 +636,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK, WAVES_PER_EU)
         signals_ptr_array_size, signals_stride_parity, signals_stride_block,
         signals_stride_writer, signals_size_parity, signals_size_block,
         signals_size_writer, status_ptr, status_stride_field, status_size_field,
-        rank, timeout_ticks, num_blocks, eps, output_eps);
+        rank, timeout_ticks, num_blocks, eps, output_eps, quant_ptr,
+        quant_stride_m, quant_scale_ptr, quant_scale_stride_m);
   else if constexpr (ALGORITHM ==
                      AllReduceAddAttnResRmsNormAlgorithm::two_shot_push)
     all_reduce_add_attn_res_rms_norm_two_shot_push<
@@ -631,7 +659,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK, WAVES_PER_EU)
         signals_ptr_array_size, signals_stride_parity, signals_stride_block,
         signals_stride_writer, signals_size_parity, signals_size_block,
         signals_size_writer, status_ptr, status_stride_field, status_size_field,
-        rank, timeout_ticks, num_blocks, eps, output_eps);
+        rank, timeout_ticks, num_blocks, eps, output_eps, quant_ptr,
+        quant_stride_m, quant_scale_ptr, quant_scale_stride_m);
 }
 
 }  // namespace hip_custom_communicator

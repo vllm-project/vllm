@@ -159,7 +159,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       " int? add_attn_res_rms_norm_tile_m=None,"
       " int? add_attn_res_rms_norm_tile_n=None,"
       " int? add_attn_res_rms_norm_tile_k=None,"
-      " int? add_attn_res_rms_norm_pack_bytes=None) -> int?");
+      " int? add_attn_res_rms_norm_pack_bytes=None,"
+      " Tensor!? quant_output=None, Tensor!? quant_scale=None,"
+      " bool write_output=True) -> int?");
   rocm_ops.impl("hip_custom_communicator_all_reduce_add_attn_res_rms_norm",
                 torch::kCUDA,
                 &hip_custom_communicator_all_reduce_add_attn_res_rms_norm);
