@@ -159,12 +159,6 @@ When batch invariance is enabled, vLLM:
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
 
-The SM120 BF16 matmul table, selected for compute capability 12.x, includes
-unquantized Gemma 4 E2B and E4B MLP shapes tuned on an 82-SM RTX PRO 4500 Blackwell
-with tensor parallel size 1. These settings apply only with batch invariance
-enabled and change tiles for up to 256 token rows per step; larger row counts
-retain the default configuration. Performance on other GPUs can differ.
-
 !!! warning
     Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.
 
