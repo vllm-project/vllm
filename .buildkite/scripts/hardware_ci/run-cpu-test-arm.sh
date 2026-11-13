@@ -38,21 +38,37 @@ print_packages() {
     pip list"
 }
 
-kernel_tests() {
+# Keep test_onednn.py whole (~19 min). Its tests are unseeded, so running a
+# subset changes later inputs and test_onednn_gemm can miss its bf16 tolerance.
+shard_0_kernel_tests_0() {
   set -e
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/kernels/test_onednn.py
+    pytest -x -v -s tests/kernels/test_onednn.py"
+}
+
+shard_1_kernel_tests_1() {
+  set -e
+  docker exec "$CONTAINER_NAME" bash -c "
+    set -e
     pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
     pytest -x -v -s tests/kernels/core/test_cpu_activation.py
     pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
-    pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
+    pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py"
+}
+
+shard_2_kernel_tests_2_and_model_tests_and_serving_tests() {
+  set -e
+  docker exec "$CONTAINER_NAME" bash -c "
+    set -e
     pytest -x -v -s tests/kernels/moe/test_cpu_int4_moe.py
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
     pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
     pytest -x -v -s tests/v1/worker/cpu"
+  model_tests
+  serving_tests
 }
 
 model_tests() {
@@ -113,11 +129,10 @@ serving_tests() {
 
 print_packages
 export CONTAINER_NAME
-export -f kernel_tests model_tests serving_tests
+export -f shard_0_kernel_tests_0 shard_1_kernel_tests_1 \
+  shard_2_kernel_tests_2_and_model_tests_and_serving_tests model_tests serving_tests
 case "$SHARD_ID" in
-  # The kernel shard contains several large parametrized suites and can exceed
-  # 30 minutes on otherwise healthy Arm runners.
-  0) timeout 60m bash -c kernel_tests ;;
-  1) timeout 30m bash -c model_tests ;;
-  2) timeout 30m bash -c serving_tests ;;
+  0) timeout 40m bash -c shard_0_kernel_tests_0 ;;
+  1) timeout 40m bash -c shard_1_kernel_tests_1 ;;
+  2) timeout 40m bash -c shard_2_kernel_tests_2_and_model_tests_and_serving_tests ;;
 esac
