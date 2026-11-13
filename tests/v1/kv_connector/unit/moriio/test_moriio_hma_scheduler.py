@@ -484,7 +484,7 @@ def test_read_blocks_routes_each_hybrid_layer_to_its_group():
         offsets[layer_name] = (local, remote)
         return [], [], []
 
-    def _mamba_reads(layer_name, sessions, regions, local, remote, *args):
+    def _mamba_reads(layer_name, sessions, regions, local, remote, *args, **kwargs):
         offsets[layer_name] = (local, remote)
         return []
 
