@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -15,12 +16,12 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -60,16 +61,10 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
         worker.vllm_config = deepcopy(config)
         worker.vllm_config.cache_config.kv_cache_layout = None
         workers.append(worker)
-        specs.append(
-            {
-                f"layer{i}": FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=64,
-                    dtype=torch.float16,
-                )
-            }
+        spec = AttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=64, dtype=torch.float16
         )
+        specs.append({f"layer{i}": FullAttentionManager.layer_config(spec)})
     parallel_configs = [config.parallel_config] + [
         worker.vllm_config.parallel_config for worker in workers
     ]
@@ -80,7 +75,7 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
     class LocalExecutor:
         set_kv_cache_layout = Executor.set_kv_cache_layout
 
-        def get_kv_cache_specs(self):
+        def get_kv_cache_layer_configs(self):
             return specs
 
         def get_supported_kv_cache_layouts(self):
@@ -118,14 +113,15 @@ def _make_engine_core_with_dcp_manager() -> EngineCore:
         block_size=BASE_BLOCK_SIZE,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     config = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla"], mla_spec),
-            KVCacheGroupSpec(["mamba"], mamba_spec),
+            new_kv_cache_group(["mla"], mla_spec),
+            new_kv_cache_group(
+                ["mamba"], mamba_spec, MambaManager.config(mamba_cache_mode="align")
+            ),
         ],
     )
     manager = KVCacheManager(
