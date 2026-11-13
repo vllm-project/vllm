@@ -119,7 +119,7 @@ def test_gemma_add_rms_norm_quant_matches_chain(
         torch.testing.assert_close(sf[same_row], ref_sf[same_row], atol=0, rtol=0)
         torch.testing.assert_close(sf, ref_sf, rtol=2**-7, atol=0)
         dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
-        assert dist[same_row].max().item() == 0
+        assert (dist[same_row] == 0).all()
     else:
         assert sf is scale
         dist = (_fp8_codes(q) - _fp8_codes(ref_q)).abs()
