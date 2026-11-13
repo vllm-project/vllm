@@ -201,12 +201,15 @@ def test_other_gpus_refused(gpu, capability):
 
 
 def test_switch_off_imports_no_hopper_code():
-    """decode_backend=auto builds nothing: importing the model and reading the
-    config loads no Hopper module."""
+    """On Hopper, decode_backend=auto keeps the stock decode: importing the
+    model and reading the config loads no Hopper module."""
     code = "\n".join(
         [
             "import sys",
             "from types import SimpleNamespace",
+            "from vllm.platforms import current_platform",
+            "current_platform.is_device_capability_family = (",
+            "    lambda c, device_id=0: c // 10 == 9)",
             "import vllm.models.glm5next.common.model",
             "import vllm.models.glm5next.common.mtp",
             "from vllm.models.glm5next.nvidia.specialized_decode.runtime import (",
