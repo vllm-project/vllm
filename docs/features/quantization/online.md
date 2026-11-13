@@ -1,9 +1,10 @@
 # Online Quantization
 
 Online quantization lets you take a BF16/FP16 model and quantize its Linear
-and MoE weights to lower precision (such as FP8) at load time, without needing
-a pre-quantized checkpoint or calibration data. Weights are converted during
-model loading and activations are dynamically scaled during each forward pass.
+and MoE weights, and optionally its lm_head, to lower precision (such as FP8)
+at load time, without needing a pre-quantized checkpoint or calibration data.
+Weights are converted during model loading and activations are dynamically
+scaled during each forward pass.
 
 ## Quick Start
 
@@ -184,6 +185,52 @@ adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where o
 !!! info
     `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.
 
+### Quantizing the lm_head
+
+The lm_head (`ParallelLMHead`) is neither a linear nor an MoE layer, but online
+quantization can quantize an fp16/bf16 lm_head at load time with the online
+linear methods. Decode reads the whole lm_head every step, so on
+bandwidth-bound GPUs a full-precision head can be one of the largest per-token
+costs, even when a checkpoint quantizes every other linear layer.
+
+Select the lm_head with a [`targets`](#fine-grained-per-layer-quantization-schemes)
+pattern that contains its module name, such as `"lm_head"` or
+`"re:.*lm_head$"`. Broad patterns such as `"re:.*"`, and the `linear` field, do
+not select it. For example:
+
+| Target value | Recipe | Notes |
+| ------------ | ------ | ----- |
+| `{"weight": "fp8_per_channel_static", "activation": null}` | fp8_e4m3 data, per-output-channel scale, BF16 activations | `"fp8_per_channel"` (W8A8) is also accepted; other FP8 schemes are not. CUDA and XPU only, use `"fp8_per_channel"` on ROCm. |
+| `{"weight": "int4_per_group_32_asym"}` | uint4 data, one scale and zero point per 32 input channels, BF16 activations | lm_head only. Runs on the platform's mixed-precision (W4A16) linear kernel, e.g. `RDNAHybridW4A16LinearKernel` on gfx11/gfx12. |
+| `{"weight": "int8_per_channel_static"}` | int8 data, per-output-channel scale, BF16 activations | lm_head only. Twice the bytes of `int4_per_group_32_asym`, with logits much closer to the BF16 lm_head. Runs on the platform's mixed-precision (W8A16) linear kernel, e.g. `RDNAW8A16LinearKernel` on gfx11/gfx12. |
+| `{"weight": "int8_per_group_32"}` | int8 data, one scale per 32 input channels, BF16 activations | lm_head only. Closer to the BF16 lm_head than `int8_per_channel_static`, for 1/16 more bytes. Same kernels. |
+
+```bash
+# Quark int4 checkpoint whose lm_head is left in bf16
+vllm serve amd/Qwen3.6-35B-A3B-Quark-UINT4-G128 \
+    --quantization-config '{"targets":{"lm_head":{"weight":"int4_per_group_32_asym"}}}'
+```
+
+- The checkpoint must leave the lm_head unquantized: online re-quantization of
+  a checkpoint-quantized lm_head raises `NotImplementedError`.
+- `targets` is mutually exclusive with `linear` and `moe`. To also quantize
+  the linear layers online, add patterns for them to `targets`.
+- This quantizes the model's own lm_head. It is unrelated to
+  `draft_lm_head_quantization` in `--speculative-config`, which gives a
+  speculative-decoding drafter a private quantized copy of the target's lm_head
+  and leaves the target unchanged. Both live in
+  `vllm/model_executor/layers/quantization/online/lm_head.py`, where
+  `OnlineLMHeadMethodBase` implements the weight-only methods above that are
+  specific to the lm_head.
+
+!!! warning
+    A lm_head tied to the input embeddings (e.g. small Qwen3 and Gemma models)
+    keeps the embeddings' fp16/bf16 weight and adds the lm_head-only
+    (`int4_per_group_32_asym`, `int8_per_channel_static` or `int8_per_group_32`)
+    copy next to it. It reduces the weight bytes read per decode step, but
+    increases memory instead of saving it; the extra size is logged at load.
+    The other online methods reject a tied lm_head.
+
 ### Separate Schemes for Dense and MoE Layers
 
 You can apply different quantization schemes to dense linear layers and MoE expert layers via the `linear` and `moe` fields. Each accepts either a full spec dict, or a bare string naming an online shorthand (e.g. `"fp8_per_block"`) or weight format (e.g. `"fp8_per_block_static"`); fields not set fall back to the shorthand defaults.
@@ -283,5 +330,23 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
     - A layer that matches no `targets` pattern is left unchanged from its checkpoint dtype.
     - A layer name may not match both `targets` and `ignore`, raising an error.
     - A layer may not match more than one `targets` pattern, raising an error.
+    - The lm_head (`ParallelLMHead`) is neither a linear nor an MoE layer. It is
+      quantized only when the text of a `targets` pattern contains its module name
+      (`lm_head`), so `"re:.*"` and `"*"` do not select it, for example
+      weight-only FP8:
+      `"re:.*lm_head$": {"weight": "fp8_per_channel_static", "activation": None}`.
+      See [Quantizing the lm_head](#quantizing-the-lm_head).
+    - The lm_head supports per-channel FP8 and the lm_head-only weight-only
+      formats only: `fp8_per_channel` (W8A8), `fp8_per_channel_static` with
+      `"activation": None` (weight-only; CUDA and XPU only, use
+      `fp8_per_channel` on ROCm), `int4_per_group_32_asym`,
+      `int8_per_channel_static` or `int8_per_group_32`.
+      Other schemes, and a lm_head the checkpoint already quantizes, raise an
+      error; so does a tied lm_head, except with the lm_head-only formats. It
+      cannot be combined with `draft_lm_head_quantization` or with models that
+      read `lm_head.weight` directly (Gemma4 MTP, DiffusionGemma, K2Horizon).
+      Models converted to sequence classification raise an error.
+    - `"activation": None` on `fp8_per_channel_static` is valid for any linear
+      layer; MoE experts reject it.
     - fnmatch-style patterns are supported only by online quantization; they are
       not applied to Quark or compressed-tensors configurations.

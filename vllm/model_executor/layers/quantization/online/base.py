@@ -44,8 +44,16 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineMoEMethod,
     OnlineLinearBase,
 )
+from vllm.model_executor.layers.quantization.online.int4 import (
+    Int4PerGroup32AsymLMHeadMethod,
+)
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
+    Int8PerChannelLMHeadMethod,
+    Int8PerGroup32LMHeadMethod,
+)
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    OnlineLMHeadMethodBase,
 )
 from vllm.model_executor.layers.quantization.online.lut_b import (
     LutBOnlineMoEMethod,
@@ -76,12 +84,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static32,
+    kInt4Static32Asym,
+    kInt8Static32Sym,
     kInt8StaticChannelSym,
     kLutBStatic,
     kMxfp4Static,
     kMxfp8Static,
     kNvfp4Static,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 logger = init_logger(__name__)
 
@@ -101,6 +112,10 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+    # lm_head only (`OnlineLMHeadMethodBase`).
+    kInt4Static32Asym: Int4PerGroup32AsymLMHeadMethod,
+    kInt8StaticChannelSym: Int8PerChannelLMHeadMethod,
+    kInt8Static32Sym: Int8PerGroup32LMHeadMethod,
 }
 
 # Online linear methods validated with `QuantSpec.hadamard_size`.
@@ -304,6 +319,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
+        if issubclass(cls, OnlineLMHeadMethodBase) and not issubclass(
+            layer_cls, ParallelLMHead
+        ):
+            raise ValueError(
+                f"weight={spec.weight} quantizes only the lm_head: select it "
+                "with a quantization_config.targets pattern naming the "
+                f"lm_head, not for {layer_cls.__name__} layers."
+            )
         # TODO: InputHadamardLinearMethod is format-agnostic; allow the
         # remaining linear methods and MoE once validated.
         if (
@@ -368,6 +391,17 @@ class OnlineQuantizationConfig(QuantizationConfig):
             return None
         assert quant_spec is not None
         assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
+        if issubclass(layer_cls, ParallelLMHead) and not getattr(
+            quant_method_cls, "supports_lm_head", False
+        ):
+            # Per-tensor reduces its amax across TP ranks and per-block assumes
+            # 128-aligned shards, neither validated on a padded, sharded vocab.
+            raise NotImplementedError(
+                f"{prefix}: {quant_method_cls.__name__} does not support the "
+                "lm_head, use `fp8_per_channel` (or `fp8_per_channel_static` "
+                "with `activation: null`), `int4_per_group_32_asym`, "
+                "`int8_per_channel_static` or `int8_per_group_32`."
+            )
         explicit = "activation" in quant_spec.fields_set
         quant_spec = QuantSpec(
             weight=quant_spec.weight,
@@ -411,6 +445,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         matches = _find_matching_targets(
             prefix, self.args.targets, fused_mapping=self.packed_modules_mapping
         )
+        if issubclass(layer_cls, ParallelLMHead):
+            # Broad patterns keep meaning linear and MoE layers: a target
+            # selects the lm_head only by naming it.
+            head_name = prefix.rsplit(".", 1)[-1]
+            matches = [pattern for pattern in matches if head_name in pattern]
         if ignored and matches:
             raise ValueError(
                 f"Layer {prefix} matches both quantization_config.ignore "
@@ -431,12 +470,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
             shorthand = _ONLINE_SHORTHANDS[target]
             quant_key_str = target
             quant_spec = (
-                shorthand.linear if issubclass(layer_cls, LinearBase) else shorthand.moe
+                shorthand.linear
+                if issubclass(layer_cls, (LinearBase, ParallelLMHead))
+                else shorthand.moe
             )
         else:
             quant_spec = target
             quant_key_str = str(quant_spec)
-        if issubclass(layer_cls, LinearBase):
+        if issubclass(layer_cls, (LinearBase, ParallelLMHead)):
             table = _ONLINE_LINEAR_METHODS
         elif issubclass(layer_cls, RoutedExperts):
             table = _ONLINE_MOE_METHODS

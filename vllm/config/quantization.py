@@ -28,7 +28,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static32,
+    kInt4Static32Asym,
     kInt8Dynamic32Sym,
+    kInt8Static32Sym,
     kInt8StaticChannelSym,
     kLutBStatic,
     kMxfp4Dynamic,
@@ -56,6 +58,8 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "int8_per_group_32": kInt8Dynamic32Sym,
     # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
     "int4_per_group_32": kInt4Static32,
+    # Asymmetric uint4 with a scale and zero point per 32 input channels.
+    "int4_per_group_32_asym": kInt4Static32Asym,
 }
 
 # Ambiguous format names select the dynamic behavior for activations and the
@@ -63,6 +67,7 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
 _WEIGHT_QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Static,
     "mxfp4": kMxfp4Static,
+    "int8_per_group_32": kInt8Static32Sym,
 }
 
 
