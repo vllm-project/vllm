@@ -715,8 +715,8 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
 
     torch.set_default_device("cuda")
     order = KVCacheLayout[layout].stride_order
-    # [L, B, 2H, N, 64 + 8] NVFP4 pages for two layers; layer 1 is written.
-    shape = (2, 6, 4, 16, 64 + 8)
+    # [L, B, H, N, 64 + 8] NVFP4 K and V pages for two layers; layer 1 is written.
+    shape = (4, 6, 2, 16, 64 + 8)
     layers = torch.zeros([shape[i] for i in order], dtype=torch.uint8)
     layers = layers.permute(*(order.index(i) for i in range(5)))
     one = torch.ones(())
@@ -724,9 +724,10 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
     layer._k_scale = layer._v_scale = one
     kv = torch.randn(2, 96, 2, 128, dtype=torch.bfloat16)
     impl = fi.FlashInferImpl(4, 128, 1.0, 2, None, None, "nvfp4")
-    impl.do_kv_cache_update(layer, kv[0], kv[1], layers[1], torch.arange(96))
+    kv_cache = {"k": layers[2], "v": layers[3]}
+    impl.do_kv_cache_update(layer, kv[0], kv[1], kv_cache, torch.arange(96))
 
-    data, scales, kv_layout = fi._nvfp4_kv_views(layers[1], 2)
+    data, scales, kv_layout = fi._nvfp4_kv_views(kv_cache)
     pages = torch.arange(6, dtype=torch.int32)[None]
     seq_lens = torch.tensor([96], dtype=torch.int32)
     deq = torch.empty_like(kv)[:, None]
@@ -734,4 +735,4 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
         data, scales, pages, seq_lens, one, one, *deq, kv_layout
     )
     assert ((deq[:, 0] - kv).norm() / kv.norm()) < 0.2
-    assert not layers[0].any()
+    assert not layers[:2].any()

@@ -78,7 +78,7 @@ def test_sliding_window_spec_unifies_without_padding(primary_block_size):
     # small kernel blocks (FlashInfer on sm_120).
     backend = SimpleNamespace(
         is_mla=lambda: False,
-        customize_spec=lambda spec: spec,
+        get_page_size_bytes=lambda spec: spec.page_size_bytes,
         get_supported_kernel_block_sizes=lambda kv_cache_spec=None: [16, 32, 64],
     )
     layer = SimpleNamespace(

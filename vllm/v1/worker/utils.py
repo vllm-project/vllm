@@ -163,56 +163,59 @@ class KVBlockZeroer:
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv = static_forward_context[layer_name].kv_cache
-                if not isinstance(kv, torch.Tensor):
-                    continue
-                if group.kernel_block_stride:
-                    # Bound views address kernel blocks; zero by manager block.
-                    kv = group.map_kv_cache_to_manager_blocks(kv, num_blocks)
-                if kv.device.type != self.device.type:
-                    continue
-                dp = kv.data_ptr()
+                kv_cache = static_forward_context[layer_name].kv_cache
+                for kv in (
+                    kv_cache.values() if isinstance(kv_cache, dict) else (kv_cache,)
+                ):
+                    if not isinstance(kv, torch.Tensor):
+                        continue
+                    if group.kernel_block_stride:
+                        # Bound views address kernel blocks; zero by manager block.
+                        kv = group.map_kv_cache_to_manager_blocks(kv, num_blocks)
+                    if kv.device.type != self.device.type:
+                        continue
+                    dp = kv.data_ptr()
 
-                assert kv.shape[0] % num_blocks == 0, (
-                    f"{layer_name}: {kv.shape[0]} kernel blocks is not a "
-                    f"multiple of {num_blocks} logical blocks"
-                )
-                ratio = kv.shape[0] // num_blocks
+                    assert kv.shape[0] % num_blocks == 0, (
+                        f"{layer_name}: {kv.shape[0]} kernel blocks is not a "
+                        f"multiple of {num_blocks} logical blocks"
+                    )
+                    ratio = kv.shape[0] // num_blocks
 
-                el = kv.element_size()
-                block_stride_bytes = kv.stride(0) * el
-                assert block_stride_bytes % 4 == 0
-                assert kv.shape[0] % ratio == 0
-                outer_dims = [
-                    d
-                    for d in range(1, kv.ndim)
-                    if kv.stride(d) * el > block_stride_bytes
-                ]
-                outer_strides = [kv.stride(d) * el for d in outer_dims]
-                inner_dims = [d for d in range(1, kv.ndim) if d not in outer_dims]
-                kernel_page_bytes = el + sum(
-                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
-                )
-                assert kernel_page_bytes % 4 == 0
-                logical_block_stride_bytes = block_stride_bytes * ratio
-                for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
-                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                    assert (dp + off_bytes) % 4 == 0
-                    for virtual_index in range(ratio):
-                        addr = dp + off_bytes + virtual_index * block_stride_bytes
-                        if (idx := seen_ptrs.get(addr)) is not None:
-                            assert (
-                                seg_block_strides[idx]
-                                == logical_block_stride_bytes // 4
-                            )
-                            seg_page_sizes[idx] = max(
-                                seg_page_sizes[idx], kernel_page_bytes // 4
-                            )
-                            continue
-                        seen_ptrs[addr] = len(seg_addrs)
-                        seg_addrs.append(addr)
-                        seg_block_strides.append(logical_block_stride_bytes // 4)
-                        seg_page_sizes.append(kernel_page_bytes // 4)
+                    el = kv.element_size()
+                    block_stride_bytes = kv.stride(0) * el
+                    assert block_stride_bytes % 4 == 0
+                    assert kv.shape[0] % ratio == 0
+                    outer_dims = [
+                        d
+                        for d in range(1, kv.ndim)
+                        if kv.stride(d) * el > block_stride_bytes
+                    ]
+                    outer_strides = [kv.stride(d) * el for d in outer_dims]
+                    inner_dims = [d for d in range(1, kv.ndim) if d not in outer_dims]
+                    kernel_page_bytes = el + sum(
+                        (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
+                    )
+                    assert kernel_page_bytes % 4 == 0
+                    logical_block_stride_bytes = block_stride_bytes * ratio
+                    for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
+                        off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                        assert (dp + off_bytes) % 4 == 0
+                        for virtual_index in range(ratio):
+                            addr = dp + off_bytes + virtual_index * block_stride_bytes
+                            if (idx := seen_ptrs.get(addr)) is not None:
+                                assert (
+                                    seg_block_strides[idx]
+                                    == logical_block_stride_bytes // 4
+                                )
+                                seg_page_sizes[idx] = max(
+                                    seg_page_sizes[idx], kernel_page_bytes // 4
+                                )
+                                continue
+                            seen_ptrs[addr] = len(seg_addrs)
+                            seg_addrs.append(addr)
+                            seg_block_strides.append(logical_block_stride_bytes // 4)
+                            seg_page_sizes.append(kernel_page_bytes // 4)
 
         if not seg_addrs:
             self._meta = None
@@ -468,35 +471,53 @@ def map_kv_caches_to_kernel_blocks(
     for group in attn_groups:
         if group.kernel_block_size is not None:
             mapped.update(
-                (name, group.map_kv_cache_to_kernel_blocks(kv_caches[name]))
-                for name in group.layer_names
-                if name in kv_caches
+                (name, group.map_kv_cache_to_kernel_blocks(kv_cache))
+                for name, kv_cache in kv_caches.items()
+                if name.partition(":")[0] in group.layer_names
             )
     return mapped
 
 
 def customize_attention_spec(
     backend: type[AttentionBackend], spec: AttentionSpec
-) -> AttentionSpec:
-    """The backend's spec. Blocks larger than every kernel block size a backend
-    takes are split into kernel blocks, which packed blocks must keep whole."""
-    spec = backend.customize_spec(spec)
+) -> dict[str, AttentionSpec]:
+    """The backend's specs by component name. Blocks larger than every kernel
+    block size a backend takes are split into kernel blocks, which packed
+    blocks must keep whole."""
+    specs = backend.customize_spec(spec)
+    if isinstance(specs, AttentionSpec):
+        specs = {"": specs}
     sizes = backend.get_supported_kernel_block_sizes(spec)
     fixed_sizes = [s for s in sizes if isinstance(s, int)]
-    if spec.block_stride_alignment is None and sizes and fixed_sizes == sizes:
-        spec = replace(spec, block_stride_alignment=MultipleOf(max(fixed_sizes)))
-    return spec
+    if sizes and fixed_sizes == sizes:
+        alignment = MultipleOf(max(fixed_sizes))
+        specs = {
+            name: replace(
+                spec, block_stride_alignment=spec.block_stride_alignment or alignment
+            )
+            for name, spec in specs.items()
+        }
+    return specs
 
 
 def customize_layer_config(
-    backend: type[AttentionBackend], layer_config: KVCacheLayerConfig
-) -> KVCacheLayerConfig:
-    """Apply `customize_attention_spec` to an attention layer's spec."""
+    backend: type[AttentionBackend], layer_name: str, layer_config: KVCacheLayerConfig
+) -> dict[str, KVCacheLayerConfig]:
+    """The layer's KV cache by name, with `customize_attention_spec` applied to
+    an attention layer's spec. A cache is named after its layer, and the
+    components of one kept as several `"<layer name>:<component>"`."""
+    if ":" in layer_name:
+        raise ValueError(f"':' names a layer's KV caches, got layer {layer_name!r}")
     if not isinstance(layer_config.spec, AttentionSpec):
-        return layer_config
-    return replace(
-        layer_config, spec=customize_attention_spec(backend, layer_config.spec)
-    )
+        return {layer_name: layer_config}
+    return {
+        f"{layer_name}:{component}" if component else layer_name: replace(
+            layer_config, spec=spec
+        )
+        for component, spec in customize_attention_spec(
+            backend, layer_config.spec
+        ).items()
+    }
 
 
 def _block_size_is_supported(
@@ -628,7 +649,7 @@ def layer_spec_for_tensor(
     group_id, group = next(
         (group_id, group)
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-        if layer_name in group.layer_names
+        if layer_name in group.kv_cache_specs
     )
     return group_id, group.kv_cache_specs[layer_name]
 
@@ -701,7 +722,7 @@ def prepare_kernel_block_sizes(
                 if any(
                     t.block_stride > t.layer_stride
                     for t in kv_cache_config.kv_cache_tensors
-                    if not set(t.layers).isdisjoint(kv_cache_group.layer_names)
+                    if not set(t.layers).isdisjoint(kv_cache_group.kv_cache_specs)
                 )
                 else select_common_block_size(
                     kv_manager_block_size, group_backends, group_specs
@@ -905,14 +926,26 @@ def bind_kv_cache(
 def bind_kv_cache_to_layers(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, Attention],
+    shared_layers: Mapping[str, str] | None = None,
 ) -> None:
-    """Bind layer cache views."""
+    """Bind layer cache views: a layer's cache, or its components by name when
+    it is kept as several. `shared_layers` maps a layer to the layer whose
+    cache it shares."""
+    layer_caches: defaultdict[str, dict[str, torch.Tensor]] = defaultdict(dict)
+    for name, kv_cache in kv_caches.items():
+        layer_name, _, component = name.partition(":")
+        layer_caches[layer_name][component] = kv_cache
+    for layer_name, target in (shared_layers or {}).items():
+        layer_caches[layer_name] = layer_caches[target]
     # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
     # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
     # splits conv/ssm), so the kv_caches dict can hold a single tensor per
     # layer for the KV connector to register.
-    for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].bind_kv_cache(kv_cache)
+    for layer_name, caches in layer_caches.items():
+        if layer_name in forward_context:
+            forward_context[layer_name].bind_kv_cache(
+                caches[""] if caches.keys() == {""} else caches
+            )
 
 
 def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
