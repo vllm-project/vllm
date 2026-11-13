@@ -56,6 +56,7 @@ target "_rocm" {
 target "_stack" {
   inherits   = ["_rocm"]
   target     = "final"
+  args       = { FA_ROCM_ARCH = CACHE == "" ? "" : CI_ARCH }   # release and local builds: every arch
   tags       = [TAG]
   cache-from = cfrom(["stack"])
   cache-to   = cto("stack")
