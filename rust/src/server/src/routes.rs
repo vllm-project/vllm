@@ -8,6 +8,7 @@ mod collective_rpc;
 mod health;
 mod inference;
 mod kv_event_sources;
+mod kv_identity;
 mod load;
 mod lora;
 mod metrics;
@@ -141,6 +142,7 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         .route("/load", get(load::load))
         .route("/version", get(version::version))
         .route("/kv_event_sources", get(kv_event_sources::kv_event_sources))
+        .route("/kv_identity", get(kv_identity::kv_identity))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
