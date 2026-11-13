@@ -8,7 +8,6 @@ from fnmatch import fnmatch
 from typing import Any, cast
 
 import torch
-from compressed_tensors.quantization import QuantizationArgs
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config_or_none
@@ -44,6 +43,14 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
+    WNA16WeightFormat,
+    convert_to_wna16_moe_kernel_format,
+    make_wna16_moe_kernel,
+    make_wna16_moe_quant_config,
+    select_wna16_moe_backend,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
@@ -68,9 +75,6 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
-    CompressedTensorsWNA16MoEMethod,
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -106,6 +110,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kFp8StaticTokenSym,
     kInt8Static,
+    kInt8StaticGroupScale,
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
@@ -137,6 +142,7 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
@@ -1749,7 +1755,7 @@ class ModelOptInt8Config(ModelOptQuantConfigBase):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         if isinstance(layer, RoutedExperts) and not self.is_layer_excluded(prefix):
-            return Int8PbWoMoEMethod(self.group_size, layer.moe_config)
+            return ModelOptInt8PbWoMoEMethod(self.group_size, layer.moe_config)
         return super().get_quant_method(layer, prefix)
 
 
@@ -1897,49 +1903,150 @@ class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
         return (values * scale.unsqueeze(-1)).flatten(-2).to(layer.output_dtype)
 
 
-# Not named ModelOpt*: RoutedExperts.weight_loader special-cases those names,
-# while these group scales load the way compressed-tensors' do.
-class Int8PbWoMoEMethod(CompressedTensorsWNA16MoEMethod):
-    """INT8_PB_WO routed experts on the WNA16 MoE kernels.
+class ModelOptInt8PbWoMoEMethod(FusedMoEMethodBase):
+    """INT8_PB_WO routed experts on the shared WNA16 MoE oracle.
 
-    INT8_PB_WO is compressed-tensors' symmetric 8-bit group format with int8
-    instead of packed weights, so this loads ModelOpt's per-expert `weight` and
-    `weight_scale`, packs the weights on load, and leaves the backend choice and
-    the kernels to `CompressedTensorsWNA16MoEMethod`.
+    Each expert loads ModelOpt's int8 `weight` and its `weight_scale`; the
+    weights pack on load into the oracle's layout (uint8b128, four per int32
+    along K). The steps mirror a per-QuantKey MoE scheme (setup in `__init__`,
+    `create_weights`, `process_weights_after_loading`,
+    `get_fused_moe_quant_config`), so this maps onto one for `kInt8Static`.
     """
 
     def __init__(self, group_size: int, moe: FusedMoEConfig):
-        super().__init__(
-            QuantizationArgs(
-                num_bits=8,
-                type="int",
-                symmetric=True,
-                strategy="group",
-                group_size=group_size,
+        super().__init__(moe)
+        self.weight_format = WNA16WeightFormat(num_bits=8, group_size=group_size)
+        self.backend, self.experts_cls = select_wna16_moe_backend(
+            config=moe,
+            weight_key=QuantKey(
+                scalar_types.uint8b128, kInt8StaticGroupScale, symmetric=True
             ),
-            None,
-            moe,
+            quant_config=self.weight_format,
+            may_have_zp=False,
+            may_have_bias=False,
+            allow_tile_padding=True,
         )
 
-    def create_weights(self, layer: torch.nn.Module, *args, **kwargs) -> None:
-        super().create_weights(layer, *args, **kwargs)
-        load = kwargs["weight_loader"]
+    def create_weights(
+        self,
+        layer: RoutedExperts,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        if self.moe.has_bias:
+            raise NotImplementedError("ModelOpt INT8_PB_WO experts with biases")
+        group_size = self.weight_format.group_size
+        if hidden_size % group_size or intermediate_size_per_partition % group_size:
+            raise ValueError(
+                f"INT8_PB_WO experts need hidden_size ({hidden_size}) and the "
+                "intermediate size per partition "
+                f"({intermediate_size_per_partition}) divisible by group_size "
+                f"({group_size}); use another TP size or expert parallelism."
+            )
+        load = extra_weight_attrs["weight_loader"]
 
-        def weight_loader(param, loaded_weight, *args, **kwargs):
+        def load_packed(param, loaded_weight, *args, **kwargs):
             return load(param, _pack_int8_pb_wo(loaded_weight), *args, **kwargs)
 
-        for w in ("w13", "w2"):
-            # ModelOpt checkpoints name the weights `weight` and carry no shapes.
-            weight = layer._parameters.pop(f"{w}_weight_packed")
-            weight.weight_loader = weight_loader
-            layer.register_parameter(f"{w}_weight", weight)
-            delattr(layer, f"{w}_weight_shape")
+        # Group scales load like ModelOpt MXFP8's block scales, not per tensor.
+        scale = {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
+        packed = {"weight_loader": load_packed}
+        w13 = (2 if self.moe.is_act_and_mul else 1) * intermediate_size_per_partition
+        for name, shape, dtype, attrs in (
+            ("w13_weight", (w13, hidden_size // 4), torch.int32, packed),
+            (
+                "w2_weight",
+                (hidden_size, intermediate_size_per_partition // 4),
+                torch.int32,
+                packed,
+            ),
+            ("w13_weight_scale", (w13, hidden_size // group_size), params_dtype, scale),
+            (
+                "w2_weight_scale",
+                (hidden_size, intermediate_size_per_partition // group_size),
+                params_dtype,
+                scale,
+            ),
+        ):
+            param = torch.nn.Parameter(
+                torch.ones(num_experts, *shape, dtype=dtype), requires_grad=False
+            )
+            layer.register_parameter(name, param)
+            set_weight_attrs(param, extra_weight_attrs | attrs)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        for w in ("w13", "w2"):
-            weight = layer._parameters.pop(f"{w}_weight")
-            layer.register_parameter(f"{w}_weight_packed", weight)
-        super().process_weights_after_loading(layer)
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        converted = convert_to_wna16_moe_kernel_format(
+            backend=self.backend,
+            layer=layer,
+            quant_config=self.weight_format,
+            w13=layer.w13_weight,
+            w2=layer.w2_weight,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+        )
+        if converted is not None:
+            names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+            for name, value in zip(names, converted[:4]):
+                replace_parameter(layer, name, value)
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            backend=self.backend,
+            routing_tables=layer._expert_routing_tables(),
+        )
+
+    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+        swiglu = {
+            "gemm1_alpha": getattr(layer, "swiglu_alpha", None),
+            "gemm1_beta": getattr(layer, "swiglu_beta", None),
+            "gemm1_clamp_limit": getattr(layer, "swiglu_limit", None),
+        }
+        if self.backend == WNA16MoEBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming import (
+                get_humming_moe_quant_config,
+            )
+
+            return get_humming_moe_quant_config(layer, **swiglu)
+        return make_wna16_moe_quant_config(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            group_size=self.weight_format.group_size,
+            num_bits=self.weight_format.num_bits,
+            **swiglu,
+        )
+
+    def apply(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+        )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return self.backend == WNA16MoEBackend.TRITON
 
 
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
@@ -2340,7 +2447,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if isinstance(layer, RoutedExperts):
             group_size = self._int8_pb_wo_experts_group_size(prefix, quant_algo)
             if group_size is not None:
-                return Int8PbWoMoEMethod(group_size, layer.moe_config)
+                return ModelOptInt8PbWoMoEMethod(group_size, layer.moe_config)
             if quant_algo in _BLOCK_FP8_MOE_ALGOS:
                 return Fp8MoEMethod(self.fp8_block_config, layer)
             if quant_algo == "FP8":
