@@ -9,10 +9,21 @@ log = logging.getLogger(__name__)
 OUT_DIR = os.environ.get("EXACT_METRICS_DIR", "/metrics")
 
 
-def _default(obj):
+def _sanitize(obj):
+    if isinstance(obj, dict):
+        return {
+            (
+                k if isinstance(k, (str, int, float, bool, type(None))) else str(k)
+            ): _sanitize(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, (list, tuple, set)):
+        return [_sanitize(v) for v in obj]
     if hasattr(obj, "__dict__"):
-        return {k: v for k, v in vars(obj).items() if not k.startswith("_")}
-    return list(obj) if isinstance(obj, set) else str(obj)
+        return {k: _sanitize(v) for k, v in vars(obj).items() if not k.startswith("_")}
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    return str(obj)
 
 
 class ExactMetricsLogger(StatLoggerBase):
@@ -26,7 +37,7 @@ class ExactMetricsLogger(StatLoggerBase):
     def _write(self, **payload):
         try:
             record = {"ts": time.time(), "engine": self.engine_index, **payload}
-            self.f.write(json.dumps(record, default=_default) + "\n")
+            self.f.write(json.dumps(_sanitize(record)) + "\n")
         except Exception:
             log.exception("ExactMetricsLogger failed")
 
@@ -44,7 +55,7 @@ class ExactMetricsLogger(StatLoggerBase):
 
     def log_engine_initialized(self):
         cc = getattr(self.vllm_config, "cache_config", None)
-        info = cc.metrics_info() if hasattr(cc, "metrics_info") else cc # type: ignore
+        info = cc.metrics_info() if hasattr(cc, "metrics_info") else cc  # type: ignore
         self._write(event="engine_initialized", cache_config=info)
 
     def record_sleep_state(self, is_awake: int, level: int):
