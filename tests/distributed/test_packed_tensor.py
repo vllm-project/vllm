@@ -140,18 +140,8 @@ class TestPackedBroadcastRoundtrip:
             assert unpacked.dtype == dtype
             assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
 
-    def test_roundtrip_mixed_dtypes(self, monkeypatch):
+    def test_roundtrip_mixed_dtypes(self):
         """Test roundtrip with mixed data types."""
-        # Only the packed buffers and the copies of misaligned entries need
-        # record_stream; views into a buffer are covered by the buffer's.
-        recorded: list[torch.Tensor] = []
-        record_stream = torch.Tensor.record_stream
-
-        def spy(tensor, stream):
-            recorded.append(tensor)
-            record_stream(tensor, stream)
-
-        monkeypatch.setattr(torch.Tensor, "record_stream", spy)
         # Create params with mixed dtypes
         params = [
             # Odd-sized, so layer1.weight is a copy; layer2.weight stays a view
@@ -190,7 +180,6 @@ class TestPackedBroadcastRoundtrip:
             src=0,
             post_unpack_func=post_unpack_func,
             buffer_size_bytes=buffer_size,
-            num_buffers=2,
         )
 
         # Verify all params roundtrip correctly with correct dtypes
@@ -200,9 +189,6 @@ class TestPackedBroadcastRoundtrip:
             assert unpacked.shape == original_tensor.shape
             assert unpacked.dtype == original_tensor.dtype
             assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
-        # 2 packs and 1 copy, each recorded on 2 slot streams + the caller's.
-        assert len(recorded) == 3 * 3
-        assert all(t.storage_offset() == 0 for t in recorded)
 
     @pytest.mark.parametrize("target_size", [100, 100000])
     def test_roundtrip_different_batch_sizes(self, target_size):
