@@ -2213,6 +2213,7 @@ steps:
   - vllm/config/attention.py
   - vllm/model_executor/layers/attention
   - vllm/v1/attention
+  - vllm/models/glm5next/amd/ops/kpool_compress.py
   - tests/v1/attention
   - vllm/_aiter_ops.py
   - vllm/envs.py
@@ -2375,7 +2376,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI300) Distributed DP Extended" # TBD
   timeout_in_minutes: 75
@@ -2414,7 +2416,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy" # TBD
   timeout_in_minutes: 55
@@ -2430,7 +2433,8 @@ steps:
   - tests/v1/kv_connector/nixl_push_integration/
   - vllm/platforms/rocm.py
   commands:
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_push_integration/test_push_accuracy_sweep.py
 
 - label: ":amd: (MI300) DP EP Distributed NixlConnector PD accuracy" # TBD
   timeout_in_minutes: 30
@@ -2445,7 +2449,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy" # TBD
   timeout_in_minutes: 80
@@ -2460,7 +2465,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI300) Hybrid SSM NixlConnector PD prefix cache" # TBD
   timeout_in_minutes: 25
@@ -2966,7 +2972,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
   timeout_in_minutes: 60
@@ -3020,7 +3027,8 @@ steps:
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
-  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+  - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
   timeout_in_minutes: 105
@@ -5707,6 +5715,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
   - vllm/v1/kv_cache_interface.py
   - tests/v1/kv_connector/unit/test_umbp_
   - tests/v1/kv_connector/umbp_test_utils.py
@@ -5921,6 +5931,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
   - tests/v1/kv_connector/umbp_integration/
   - tests/v1/kv_connector/umbp_test_utils.py
   - tests/v1/kv_connector/conftest.py
@@ -5964,6 +5976,7 @@ steps:
   - vllm/config/attention.py
   - vllm/model_executor/layers/attention
   - vllm/v1/attention
+  - vllm/models/glm5next/amd/ops/kpool_compress.py
   - tests/v1/attention
   - vllm/_aiter_ops.py
   - vllm/envs.py
