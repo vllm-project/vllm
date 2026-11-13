@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kInt4Static32Asym,
     kInt8Dynamic32Sym,
+    kInt8Static32Sym,
     kInt8StaticChannelSym,
     kLutBStatic,
     kMxfp4Dynamic,
@@ -66,6 +67,7 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
 _WEIGHT_QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Static,
     "mxfp4": kMxfp4Static,
+    "int8_per_group_32": kInt8Static32Sym,
 }
 
 

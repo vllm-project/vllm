@@ -1623,7 +1623,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_llmm1.cu"
     "csrc/rocm/skinny_gemms_wvsplitk.cu"
     "csrc/rocm/skinny_gemms_wvsplitkrc.cu"
-    "csrc/rocm/skinny_gemms_wvsplitkq.cu")
+    "csrc/rocm/skinny_gemms_wvsplitkq.cu"
+    "csrc/rocm/skinny_gemms_int8.cu")
 
   # The int4 skinny GEMM is instantiated one unit per N_in (a template over
   # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
