@@ -44,6 +44,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.async_utils import make_async
 from vllm.utils.math_utils import round_up
 
 from . import knowline
@@ -1476,7 +1477,13 @@ class KnowLineStrategy(ReadStrategy):
 
     def __init__(self, context: ReadContext):
         super().__init__(context)
-        self.tokenizer = context.online_renderer.renderer.get_tokenizer()
+        renderer = context.online_renderer.renderer
+        self.tokenizer = renderer.get_tokenizer()
+        # Rendering encodes the full prompt once per question, seconds on a
+        # long state: run it on the renderer's pool, off the event loop.
+        self._render_prompts = make_async(
+            knowline.render_prompts, executor=renderer._executor
+        )
         try:
             self.labels, label_ids = knowline.discover_labels(
                 self.tokenizer, self._template_kwargs(None)
@@ -1582,12 +1589,13 @@ class KnowLineStrategy(ReadStrategy):
                         f"restart with --max-logprobs {len(q.options)} or "
                         "higher"
                     )
-        rendered = knowline.render_prompts(
+        rendered = await self._render_prompts(
             self.tokenizer,
             state,
             questions,
             template_kwargs=self._template_kwargs(chat_template_kwargs),
             twice_max_tokens=self.twice_max_tokens,
+            max_model_len=self.max_model_len,
         )
         engine_inputs: list[EngineInput] = []
         params: list[SamplingParams] = []
