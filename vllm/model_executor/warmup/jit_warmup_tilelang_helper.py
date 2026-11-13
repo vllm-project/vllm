@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from collections.abc import Callable, Iterator, Mapping, MutableMapping
+from collections.abc import Callable, Generator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
@@ -26,7 +26,7 @@ TileLangLaunchSpec: TypeAlias = (
 
 
 @contextmanager
-def _quiet_tilelang_warmup_logs() -> Iterator[None]:
+def _quiet_tilelang_warmup_logs() -> Generator[None]:
     loggers = [
         logging.getLogger("tilelang.cache.kernel_cache"),
         logging.getLogger("tilelang.jit.kernel"),
@@ -94,9 +94,9 @@ def _tilelang_call_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 def compile_tilelang(jit_impl: Any, *args: Any, **kwargs: Any) -> None:
     """Compile one TileLang specialization and populate its call cache.
 
-    TileLang's ``compile()`` materializes the kernel without launching it.
-    We also store the compiled kernel in ``_kernel_cache`` using the same
-    parsed key as ``__call__`` so runtime does not report a cache miss for an
+    TileLang's `compile()` materializes the kernel without launching it.
+    We also store the compiled kernel in `_kernel_cache` using the same
+    parsed key as `__call__` so runtime does not report a cache miss for an
     already materialized specialization.
     """
     with _quiet_tilelang_warmup_logs():

@@ -8,17 +8,19 @@ mod convert;
 mod health;
 mod inference;
 mod media;
+mod render;
 
 /// Generated protobuf/gRPC types for the `vllm` package.
 pub use vllm_proto as pb;
 
 pub(crate) use control::ControlGrpcService;
 pub use control::ControlServiceImpl;
-pub(crate) use health::monitor_health;
+pub(crate) use health::{EngineHealth, HealthMonitor};
 pub(crate) use inference::InferenceGrpcService;
 pub use inference::InferenceServiceImpl;
 pub use pb::control_server::ControlServer;
 pub use pb::inference_server::InferenceServer;
+pub(crate) use render::{RenderGrpcService, RenderServiceImpl};
 
 #[cfg(test)]
 mod tests;

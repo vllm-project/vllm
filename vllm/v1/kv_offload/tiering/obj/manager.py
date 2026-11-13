@@ -55,12 +55,39 @@ NIXL_DEV_ID: int = 0
 _PROBE_ADDR: int = 0
 _PROBE_LEN: int = 1
 _PROBE_DEV_ID: int = 0
+_CUOBJ_MAX_MEMORY_REG_SIZE_BYTES = 4 * 1024 * 1024 * 1024 - 64 * 1024
 
 
 class TransferEntry(NamedTuple):
     xfer_handle: "nixl_xfer_handle"
     files_desc: object
     obj_handle: "nixl_prepped_dlist_handle"
+
+
+def _build_primary_dram_descriptors(
+    base_addr: int,
+    num_blocks: int,
+    stride: int,
+    max_registration_bytes: int = _CUOBJ_MAX_MEMORY_REG_SIZE_BYTES,
+) -> list[tuple[int, int, int, str]]:
+    if stride > max_registration_bytes:
+        raise ValueError(
+            "Object store RDMA cannot register a primary-tier block larger "
+            f"than {max_registration_bytes} bytes: block size is {stride} bytes"
+        )
+    blocks_per_registration = max_registration_bytes // stride
+    descriptors = []
+    for start_block in range(0, num_blocks, blocks_per_registration):
+        block_count = min(blocks_per_registration, num_blocks - start_block)
+        descriptors.append(
+            (
+                base_addr + start_block * stride,
+                block_count * stride,
+                NIXL_DEV_ID,
+                "",
+            )
+        )
+    return descriptors
 
 
 class ObjAsyncLookupManager(AsyncLookupManager):
@@ -98,7 +125,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     """Secondary tier that offloads KV cache blocks to an S3-compatible store.
 
     Handles CPU DRAM <-> S3 transfers only. GPU <-> CPU is managed by the
-    primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
+    primary tier. Object keys are formed as `{prefix}/{hash_shard}/{hash}.bin`.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -149,8 +176,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
-        # Keys of in-flight store jobs, tracked only when events are enabled.
-        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Track in-flight store jobs for lookup invalidation and KV events.
+        self._store_jobs: dict[JobId, TransferJob] = {}
         # Keys of in-flight load (promotion) jobs, so a failed download can
         # mark its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
@@ -182,9 +209,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
         assert primary_kv_view.strides is not None
         stride = primary_kv_view.strides[0]
-        self._primary_reg = self._agent.register_memory(
-            [(base_addr, primary_kv_view.nbytes, NIXL_DEV_ID, "")], "DRAM"
+        dram_descriptors = _build_primary_dram_descriptors(
+            base_addr, len(primary_kv_view), stride
         )
+        self._primary_reg = self._agent.register_memory(dram_descriptors, "DRAM")
         self._block_size_bytes = stride
         all_blocks = [
             (base_addr + i * stride, stride, NIXL_DEV_ID)
@@ -294,8 +322,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT if result else LookupResult.MISS
 
     def submit_store(self, job_metadata: TransferJob) -> None:
-        if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+        self._store_jobs[job_metadata.job_id] = job_metadata
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
@@ -319,7 +346,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def _poll_active_transfers(self) -> None:
         """Poll all in-flight transfers once; move newly-completed (success or
-        failure) into ``_pending_results`` and release their NIXL handles."""
+        failure) into `_pending_results` and release their NIXL handles."""
         for job_id, entry in list(self._transfers.items()):
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
@@ -389,15 +416,17 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         results = self._pending_results
         self._pending_results = []
         for result in results:
-            if self.events is not None:
-                keys = self._store_job_keys.pop(result.job_id, None)
-                if result.success and keys:
+            job = self._store_jobs.pop(result.job_id, None)
+            if result.success and job is not None:
+                self._lookup_manager.mark_present(job.keys)
+                if self.events is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
-                            keys=keys,
+                            keys=list(job.keys),
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=job.req_context,
                         )
                     )
             # Mark only the keys that did not load as a miss; the request
@@ -421,10 +450,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def drain_jobs(self) -> None:
         """Block until every submitted transfer has completed or failed.
 
-        nixl exposes only ``check_xfer_state`` (poll-based), so this loops
-        until ``_transfers`` is empty. Results accumulate in
-        ``_pending_results`` and are surfaced by the next
-        ``get_finished_jobs()`` call.
+        nixl exposes only `check_xfer_state` (poll-based), so this loops
+        until `_transfers` is empty. Results accumulate in
+        `_pending_results` and are surfaced by the next
+        `get_finished_jobs()` call.
         """
         start = time.monotonic()
         warned = False

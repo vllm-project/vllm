@@ -12,7 +12,12 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from vllm.benchmarks.forward.capture import ForwardBench, _compare, write_input_ids
+from vllm.benchmarks.forward.capture import (
+    ForwardBench,
+    _compare,
+    check_sampled,
+    write_input_ids,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
@@ -27,7 +32,8 @@ class ForwardPipelineExecutor(ExecutorWithExternalLauncher):
     """Load one stage per torchrun process; PipelineBench drives execution.
 
     Serving's external launcher requires sampling broadcasts across PP stages.
-    The forward benchmark has no sampling or independent schedulers to sync.
+    The forward benchmark samples only on the last stage and has no independent
+    schedulers to sync.
     """
 
     supports_pp = True
@@ -194,6 +200,10 @@ class PipelineBench(ForwardBench):
         )
         if self.drafter is not None:
             self.result["drafter"] = self.drafter.check(self.draft_reference)
+        if self.sampled is not None:
+            self.result["sampler"] = check_sampled(
+                self.sampled, self.runner.model_config.get_vocab_size()
+            )
 
     def _stream(self, profile: bool = False):
         pp, world = get_pp_group(), get_world_group()
