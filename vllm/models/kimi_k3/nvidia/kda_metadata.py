@@ -127,7 +127,7 @@ def stage_spec_decode_metadata(
     num_spec_decodes: int,
 ) -> None:
     """Stage speculative-decode metadata into CUDA-graph buffers."""
-    assert state_indices.is_cuda
+    assert state_indices.device.type == current_platform.device_type
     assert state_indices.ndim == 2
     batch_size, num_state_slots = staged_state_indices.shape
     BLOCK_ROWS = 32
@@ -579,7 +579,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None
-            if self.kv_cache_spec.mamba_cache_mode == "align":
+            if self.vllm_config.cache_config.mamba_cache_mode == "align":
                 align = KDARecoverSSMAlignMetadata(
                     block_table=m.block_table_tensor,
                     num_computed_tokens=m.compute_num_computed_tokens(),
