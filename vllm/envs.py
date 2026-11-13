@@ -1764,6 +1764,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # attention-residual mixing runs on the local shard, and latent-MoE routing
     # runs once per shard instead of on every rank. Speeds up long prefills;
     # CUDA-graph decode is unaffected. 0 disables it; 1024 is a good value.
+    # With VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4, the residual stream's
+    # reduce-scatters and all-gathers run on AITER's INT4 collectives where
+    # AITER serves the payload size on the platform.
     "VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS", "0")
     ),
