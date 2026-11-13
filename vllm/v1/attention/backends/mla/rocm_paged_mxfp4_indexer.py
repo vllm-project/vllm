@@ -211,8 +211,8 @@ class RocmMxfp4IndexerMetadata(DeepseekV32IndexerMetadata):
     decode_native: RocmMxfp4NativeDecode | None = None
     """The same rows as next_n-row sequences, for the dense launches."""
     decode_varlen: RocmMxfp4VarlenDecode | None = None
-    """The same rows as varlen sequences, for the dense launches, where the
-    requests' row counts differ."""
+    """The same rows as varlen sequences, for the dense launches, on every
+    decode step under adaptive verification."""
     decode_schedule: torch.Tensor | None = None
     """The dense decode launches' work schedule, built once for the step."""
     decode_shard: DecodeRowShard | None = None
@@ -425,8 +425,9 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
             num_heads, head_dim, self.page_entries
         )
         # Ragged steps take a row per query token, as do the candidate
-        # consumers' gathers. Uniform steps also launch the dense layers on
-        # next_n-row sequences, see native_decode.
+        # consumers' gathers. Without adaptive verification, uniform steps also
+        # launch the dense layers on next_n-row sequences (native_decode); with
+        # it, every decode step launches them as varlen sequences.
         self.use_flattening = True
         # A two-level (candidate block) indexer's builder sets these.
         self.candidate_block_size = 0
@@ -512,7 +513,12 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
                 context_lens,
             )
             decode_shard = None
-            if not step_has_prefill(cm, self.decode_threshold):
+            # A shard is a contiguous range of whole next_n-row requests, which
+            # would cut apart a varlen step's requests of 1 to next_n rows, so
+            # those steps keep every row on every rank.
+            if self.varlen_next_n <= 1 and not step_has_prefill(
+                cm, self.decode_threshold
+            ):
                 decode_shard = DecodeRowShard.plan(
                     lengths.shape[0],
                     1 if native is None else native.next_n,

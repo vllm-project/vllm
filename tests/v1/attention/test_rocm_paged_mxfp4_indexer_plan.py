@@ -240,6 +240,27 @@ def test_decode_row_shard_skips_steps_with_prefill(
     monkeypatch, max_query_len, is_prefilling, sharded
 ):
     rows = 128
+    metadata = _build_decode_step(monkeypatch, rows, max_query_len, is_prefilling)
+    assert (metadata.decode_shard is not None) == sharded
+    assert metadata.decode_row_lens is not None
+    assert metadata.decode_row_lens.shape[0] == (rows // 4 if sharded else rows)
+
+
+def test_decode_row_shard_skips_varlen_steps(monkeypatch):
+    # Adaptive verification: every decode step launches its requests as varlen
+    # sequences, which a shard of whole next_n-row requests would cut apart.
+    rows = 128
+    metadata = _build_decode_step(monkeypatch, rows, 7, [False] * rows, varlen_next_n=7)
+    assert metadata.decode_shard is None
+    assert metadata.decode_row_lens is not None
+    assert metadata.decode_row_lens.shape[0] == rows
+    assert metadata.decode_varlen is not None
+    assert metadata.decode_varlen.query_start_loc.shape[0] == rows + 1
+
+
+def _build_decode_step(
+    monkeypatch, rows, max_query_len, is_prefilling, varlen_next_n=1
+):
     decode = DeepSeekV32IndexerDecodeMetadata(
         block_table=torch.zeros(rows, 4, dtype=torch.int32),
         seq_lens=torch.full((rows, 1), 64, dtype=torch.int32),
@@ -267,7 +288,7 @@ def test_decode_row_shard_skips_steps_with_prefill(
         context_lens_buffer=torch.zeros(rows, dtype=torch.int32),
         decode_threshold=7,
         native_next_n=1,
-        varlen_next_n=1,
+        varlen_next_n=varlen_next_n,
         decode_shard_world=4,
         decode_shard_rank=1,
         candidate_block_size=0,
@@ -284,10 +305,9 @@ def test_decode_row_shard_skips_steps_with_prefill(
         num_reqs=rows,
         seq_lens=torch.full((rows,), 256, dtype=torch.int32),
         query_start_loc_cpu=torch.arange(rows + 1, dtype=torch.int32),
+        query_start_loc=torch.arange(rows + 1, dtype=torch.int32),
+        block_table_tensor=torch.zeros(rows, 4, dtype=torch.int32),
         max_query_len=max_query_len,
         is_prefilling=None if is_prefilling is None else torch.tensor(is_prefilling),
     )
-    metadata = builder.build(0, cm)
-    assert (metadata.decode_shard is not None) == sharded
-    assert metadata.decode_row_lens is not None
-    assert metadata.decode_row_lens.shape[0] == (rows // 4 if sharded else rows)
+    return builder.build(0, cm)
