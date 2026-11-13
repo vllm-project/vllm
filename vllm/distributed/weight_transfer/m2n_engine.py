@@ -218,6 +218,8 @@ class M2NWeightTransferEngine(
     local shards without materializing a full tensor.
     """
 
+    rolls_back_failed_updates = True
+
     init_info_cls = M2NWeightTransferInitInfo
     update_info_cls = M2NWeightTransferUpdateInfo
     # The destination plan is resolved against the model this engine was built
@@ -460,6 +462,15 @@ class M2NWeightTransferEngine(
         from vllm.model_executor.model_loader.reload import finish_reload
 
         finish_reload(self.model, self.model_config, self.device)
+
+    def abort_weight_update(self) -> None:
+        """Undo reloading after a failed update when the plan uses fallback
+        entries. Directly-resharded parameters are not restored."""
+        if not self._uses_load_weights:
+            return
+        from vllm.model_executor.model_loader.reload import abort_reload
+
+        abort_reload(self.model)
 
     def receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
         """Receive each requested parameter using its initialization-time plan."""

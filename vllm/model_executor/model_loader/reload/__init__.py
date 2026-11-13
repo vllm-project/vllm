@@ -21,6 +21,8 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "abort_layerwise_reload",
+    "abort_reload",
     "finish_reload",
     "LoadPlan",
     "check_plannable",
@@ -33,12 +35,13 @@ __all__ = [
 ]
 
 from .layerwise import (
+    abort_layerwise_reload,
     finalize_layerwise_processing,
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
-from .lifecycle import finish_reload, start_reload, weight_update_active
+from .lifecycle import abort_reload, finish_reload, start_reload, weight_update_active
 from .plan import LoadPlan, check_plannable, load_planned, plan_loads
 from .torchao_decorator import (
     set_torchao_reload_attrs,
