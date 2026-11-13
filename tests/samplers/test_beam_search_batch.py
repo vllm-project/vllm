@@ -56,7 +56,9 @@ def beam_batch_llm(tmp_path_factory, vllm_runner):
 @pytest.mark.parametrize("concurrency_limit", [None, 1, 8])
 @pytest.mark.parametrize("use_tqdm", [False, True])
 @pytest.mark.parametrize("structured", [False, True])
-def test_beam_batch_empty_is_rejected(beam_batch_llm, concurrency_limit, use_tqdm, structured):
+def test_beam_batch_empty_is_rejected(
+    beam_batch_llm, concurrency_limit, use_tqdm, structured
+):
     params = BeamSearchParams(
         beam_width=2,
         max_tokens=3,
