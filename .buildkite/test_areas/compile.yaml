@@ -2,6 +2,24 @@ group: Compile
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (H200 MIG 18GB) INT8 Norm Quant Fusion"
+  key: int8-norm-quant-fusion-tests
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers/layernorm.py
+  - csrc/quantization/fused_kernels/
+  - tests/compile/passes/test_fusion.py
+  - tests/compile/backend.py
+  - tests/quantization/test_compressed_tensors.py
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -v -s tests/compile/passes/test_fusion.py -k dynamic_int8_rms_fusion
+  - pytest -v -s tests/quantization/test_compressed_tensors.py -k w8a8_norm_quant_fusion
+
 - label: ":nvidia: (H100) Distributed Compile"
   key: distributed-compile-unit-tests-2xh100
   automatic_shard: true

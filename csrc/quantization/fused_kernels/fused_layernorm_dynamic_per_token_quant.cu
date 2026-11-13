@@ -31,7 +31,6 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
-    token_scale = 1.0f / token_scale;
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true,
                                      has_residual>(out, input, weight, rms,
                                                    &token_scale, hidden_size,
@@ -133,13 +132,18 @@ __global__ void __launch_bounds__(REG_KERNEL_MAX_THREADS)
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
     float scale = scale_ub ? min(absmax, *scale_ub) : absmax;
-    scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-    s_token_scale = scale;
-    scales[blockIdx.x] = scale;
+    if constexpr (is_int8) {
+      scales[blockIdx.x] = scale / qmax;
+      s_token_scale = scale == 0.0f ? 0.0f : qmax / scale;
+    } else {
+      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+      s_token_scale = scale;
+      scales[blockIdx.x] = scale;
+    }
   }
   __syncthreads();
   // int8 multiplies by the inverse scale; fp8 divides for FBGemm parity.
-  float const scale_val = is_int8 ? 1.0f / s_token_scale : s_token_scale;
+  float const scale_val = s_token_scale;
 
 #pragma unroll
   for (int k = 0; k < max_vecs_per_thread; ++k) {
@@ -198,7 +202,6 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
-    token_scale = 1.0f / token_scale;
     vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
         out, input, weight, rms, &token_scale, hidden_size, input_stride,
         residual);

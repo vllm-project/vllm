@@ -18,7 +18,14 @@ from compressed_tensors.quantization import (
 
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    PassConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
@@ -239,6 +246,63 @@ def test_compressed_tensors_w8a8_logprobs(
 
     if current_platform.is_rocm():
         torch.accelerator.synchronize()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA INT8 fusion")
+@pytest.mark.parametrize(
+    "model_path", ["nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2"]
+)
+def test_compressed_tensors_w8a8_norm_quant_fusion(
+    vllm_runner, example_prompts, model_path, record_property
+):
+    """The compiler replacement must preserve real W8A8 model logprobs."""
+    outputs = []
+    for fuse in (False, True):
+        compilation_config = CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_capture_sizes=[1, 4],
+            pass_config=PassConfig(fuse_norm_quant=fuse),
+        )
+        with vllm_runner(
+            model_path,
+            dtype="bfloat16",
+            enforce_eager=False,
+            load_format="auto",
+            trust_remote_code=False,
+            linear_backend="triton",
+            attention_config={"backend": "TRITON_ATTN"},
+            compilation_config=compilation_config,
+            kernel_config={
+                "enable_jit_warmup": False,
+                "ir_op_priority": {
+                    "rms_norm": ["native"],
+                    "fused_add_rms_norm": ["native"],
+                },
+            },
+            enable_prefix_caching=False,
+            max_num_seqs=4,
+            gpu_memory_utilization=0.6,
+        ) as model:
+
+            def check_dynamic_int8_backend(module):
+                scheme = module.model.layers[0].self_attn.qkv_proj.scheme
+                assert isinstance(scheme, CompressedTensorsW8A8Int8)
+                assert not scheme.is_static_input_scheme
+                assert scheme.input_symmetric
+                return type(scheme.kernel).__name__
+
+            assert model.apply_model(check_dynamic_int8_backend) == [
+                "TritonInt8ScaledMMLinearKernel"
+            ]
+            outputs.append(model.generate_greedy_logprobs(example_prompts[:4], 4, 5))
+            record_property(f"fuse_norm_quant_{fuse}", outputs[-1])
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="unfused",
+        name_1="fused",
+    )
 
 
 def test_compressed_tensors_no_enforce_eager(vllm_runner):
