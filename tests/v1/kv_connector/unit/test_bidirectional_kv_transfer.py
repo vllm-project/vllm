@@ -983,10 +983,11 @@ def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
         kv_transfer_params=params,
     )
     _do_load_kv(connector, meta)
-    assert worker.xfer_stats.data["num_kv_expired_reqs"] == (
+    assert worker.xfer_stats.data["num_declined_expired_reads"] == (
         [1] if expect_declined else []
     )
-    # KV expiry must not pollute the transport failure counters.
+    # A declined read is neither a transport failure nor a P-side expiry.
+    assert worker.xfer_stats.data["num_kv_expired_reqs"] == []
     assert worker.xfer_stats.data["num_failed_transfers"] == []
     assert worker.xfer_stats.data["num_failed_handshakes"] == []
     _, done_recving = connector.get_finished(finished_req_ids=set())
@@ -1022,7 +1023,7 @@ def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
     )
     # Must not raise, and the gate must not fire for a no-read prefix hit.
     _do_load_kv(connector, meta)
-    assert worker.xfer_stats.data["num_kv_expired_reqs"] == []
+    assert worker.xfer_stats.data["num_declined_expired_reads"] == []
     assert worker.xfer_stats.data["num_failed_transfers"] == []
 
 
@@ -1049,6 +1050,8 @@ def test_d_node_request_finished_exports_blocks_expiry_time():
     assert kv["do_remote_decode"] is True
     assert isinstance(kv["remote_blocks_expiry_time"], float)
     assert kv["remote_blocks_expiry_time"] > time.perf_counter()
+    # Fixed TTL on D: heartbeats do not renew it, so no extension is exported.
+    assert kv["remote_lease_extension"] is None
 
 
 def test_handshake_listener_appends_perf_counter_frame():
