@@ -51,7 +51,10 @@ repos:
         -c, requirements/cuda.txt,
         -o, requirements/test/cuda.txt,
         --index-strategy, unsafe-best-match,
-        --torch-backend, cu130,
+        # Emit the cu132 index into the lock so installs resolve torch, torchvision,
+        # torchaudio and torchcodec to their +cu132 builds.
+        --extra-index-url, "https://download.pytorch.org/whl/cu132",
+        --emit-index-url,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
@@ -71,7 +74,7 @@ repos:
         # The image pins NCCL itself (NCCL_VERSION + UV_OVERRIDE).
         --no-emit-package, nvidia-nccl-cu13,
         --index-strategy, unsafe-best-match,
-        --torch-backend, cu130,
+        --torch-backend, cu132,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
@@ -286,9 +289,9 @@ repos:
     language: system
     pass_filenames: false
     files: ^docker/entrypoints/(vllm-nonroot-entrypoint|test_vllm_nonroot_entrypoint)\.sh$
-  - id: check-forbidden-imports
-    name: Check for forbidden imports
-    entry: python tools/pre_commit/check_forbidden_imports.py
+  - id: check-forbidden-strings
+    name: Check for forbidden strings
+    entry: python tools/pre_commit/check_forbidden_strings.py
     language: python
     types: [python]
     additional_dependencies: [regex]

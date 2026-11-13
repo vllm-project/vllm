@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Graph pool routing for CUDA graph capture under sleep mode."""
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, cast
@@ -19,7 +19,7 @@ _outside_cumem: ContextVar[bool] = ContextVar("capture_outside_cumem", default=F
 
 
 @contextmanager
-def capture_outside_cumem_pool() -> Iterator[None]:
+def capture_outside_cumem_pool() -> Generator[None]:
     """CUDA graphs captured here stay out of cuMem, so that memory profiling can
     free its throwaway graphs normally."""
     token = _outside_cumem.set(True)
@@ -32,7 +32,7 @@ def capture_outside_cumem_pool() -> Iterator[None]:
 @contextmanager
 def capture_pool(
     pool: tuple[int, int] | None, vllm_config: VllmConfig
-) -> Iterator[tuple[int, int] | None]:
+) -> Generator[tuple[int, int] | None]:
     """Yield the pool to capture into, the cuMem graph pool when sleep offloads
     graph memory, and point NCCL's graph allocator at it."""
     if vllm_config.use_cumem_cudagraph_pool and not _outside_cumem.get():
