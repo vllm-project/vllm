@@ -16,13 +16,12 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    CrossAttentionSpec,
-    KVCacheSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    CrossAttentionManager,
+    MambaManager,
 )
+from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
@@ -31,38 +30,38 @@ if TYPE_CHECKING:
 
 def _reserved_block_count(
     num_tokens: int,
-    kvcache_spec: KVCacheSpec,
+    group: KVCacheGroup,
     *,
     num_lookahead_tokens: int,
     max_model_len: int,
     max_encoder_len: int,
 ) -> int:
-    if isinstance(kvcache_spec, UniformTypeKVCacheSpecs):
-        kvcache_spec = kvcache_spec.first_spec
-    if isinstance(kvcache_spec, CircularBufferSpec):
+    block_size = group.block_size
+    config = group.manager_config
+    if issubclass(config.manager_cls, CircularBufferManager):
         return 1
-    if isinstance(kvcache_spec, CrossAttentionSpec):
-        return cdiv(max_encoder_len, kvcache_spec.block_size)
+    if issubclass(config.manager_cls, CrossAttentionManager):
+        return cdiv(max_encoder_len, block_size)
     num_speculative_blocks = 0
-    if isinstance(kvcache_spec, MambaSpec):
-        num_speculative_blocks = kvcache_spec.num_speculative_blocks
-        if kvcache_spec.mamba_cache_mode == "align":
-            return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
+    if isinstance(config.params, MambaManager.Params):
+        num_speculative_blocks = config.params.num_speculative_blocks
+        if config.params.mamba_cache_mode == "align":
+            return cdiv(num_tokens, block_size) + num_speculative_blocks
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
-    return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
+    return cdiv(num_tokens, block_size) + num_speculative_blocks
 
 
 def _warmup_block_counter(
     model_runner: "StandaloneCPUModelRunner",
-) -> Callable[[int, KVCacheSpec], int]:
+) -> Callable[[int, KVCacheGroup], int]:
     num_lookahead_tokens = model_runner.vllm_config.num_lookahead_tokens
     max_model_len = model_runner.max_model_len
     max_encoder_len = getattr(model_runner.model_state, "max_encoder_len", 0)
 
-    def block_count(num_tokens: int, kvcache_spec: KVCacheSpec) -> int:
+    def block_count(num_tokens: int, group: KVCacheGroup) -> int:
         return _reserved_block_count(
             num_tokens,
-            kvcache_spec,
+            group,
             num_lookahead_tokens=num_lookahead_tokens,
             max_model_len=max_model_len,
             max_encoder_len=max_encoder_len,
@@ -100,9 +99,8 @@ def warmup_kernels(
         ]
 
     block_count = _warmup_block_counter(model_runner)
-    kv_cache_specs = [group.kv_cache_spec for group in kv_cache_groups]
-    prefill_block_counts = [block_count(prompt_len, spec) for spec in kv_cache_specs]
-    decode_block_counts = [block_count(decode_len, spec) for spec in kv_cache_specs]
+    prefill_block_counts = [block_count(prompt_len, g) for g in kv_cache_groups]
+    decode_block_counts = [block_count(decode_len, g) for g in kv_cache_groups]
     max_blocks_per_req = sum(decode_block_counts)
 
     num_reqs = min(
@@ -191,8 +189,8 @@ def warmup_kernels(
                 for i in indices:
                     after = req_computed[i] + 1
                     deltas = [
-                        block_count(after, spec) - held
-                        for spec, held in zip(kv_cache_specs, req_blocks[i])
+                        block_count(after, group) - held
+                        for group, held in zip(kv_cache_groups, req_blocks[i])
                     ]
                     cached_req_data.new_block_ids.append(
                         tuple(_alloc_blocks(n) for n in deltas) if any(deltas) else None

@@ -800,6 +800,19 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             configure_dense_draft(vllm_config.speculative_config, hf_text_config)
 
 
+class HrmTextForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # The prompt attends bidirectionally during prefill, so its KV is not a
+        # causal function of the prefix.
+        if vllm_config.scheduler_config.enable_chunked_prefill:
+            logger.info("HRM-Text: disabling chunked prefill (non-causal prefill).")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+        if vllm_config.cache_config.enable_prefix_caching:
+            logger.info("HRM-Text: disabling prefix caching (non-causal prefill).")
+            vllm_config.cache_config.enable_prefix_caching = False
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1545,6 +1558,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
+    "HrmTextForCausalLM": HrmTextForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
