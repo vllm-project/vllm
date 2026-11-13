@@ -101,8 +101,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -115,8 +113,6 @@ variants:
           - "auto"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.95"
           - "--enforce-eager"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -129,8 +125,6 @@ variants:
           - "aiter"
           - "--block-size"
           - "128"
-          - "--gpu-memory-utilization"
-          - "0.90"
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "1"

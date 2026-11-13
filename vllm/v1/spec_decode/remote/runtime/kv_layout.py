@@ -10,35 +10,45 @@ from collections.abc import Mapping
 
 import torch
 
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    KVCacheSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheTensor,
     KVQuantMode,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     SparseCacheRole,
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
-def select_standalone_kv_spec(specs: Mapping[str, KVCacheSpec]) -> AttentionSpec:
+def select_standalone_kv_layer_config(
+    layer_configs: Mapping[str, KVCacheLayerConfig],
+) -> KVCacheLayerConfig:
     """Validate the homogeneous dense cache consumed by the own-KV planner."""
-    if not specs:
+    if not layer_configs:
         raise ValueError("standalone drafter has no attention KV layers")
-    first = next(iter(specs.values()))
+    first_layer = next(iter(layer_configs.values()))
+    first = first_layer.spec
     # Subclasses include sparse/compressed caches and target-owned state with
     # different position or allocation contracts; accepting their base is unsafe.
-    if type(first) not in (FullAttentionSpec, MLAAttentionSpec, SlidingWindowSpec):
+    if type(first) not in (AttentionSpec, MLAAttentionSpec):
         raise ValueError(
             "standalone runtime requires full-attention, dense MLA, or "
             "sliding-window KV; " + type(first).__name__ + " is unsupported"
         )
-    if any(type(spec) is not type(first) or spec != first for spec in specs.values()):
+    if any(
+        type(layer.spec) is not type(first)
+        or layer.spec != first
+        or layer.manager_config != first_layer.manager_config
+        for layer in layer_configs.values()
+    ):
         raise ValueError("standalone runtime requires one uniform KV group")
     assert isinstance(first, AttentionSpec)
     if (
@@ -50,25 +60,29 @@ def select_standalone_kv_spec(specs: Mapping[str, KVCacheSpec]) -> AttentionSpec
         or first.page_size_padded is not None
     ):
         raise ValueError("standalone runtime requires dense unquantized KV pages")
-    if isinstance(first, FullAttentionSpec) and (
-        first.non_causal or first.attention_chunk_size is not None
-    ):
-        raise ValueError("standalone runtime requires causal token-addressed KV")
     if isinstance(first, MLAAttentionSpec) and (
         first.num_kv_heads != 1
         or first.head_size_v != 0
         or first.model_version is not None
         or first.is_index_group_leader
         or first.cache_role != SparseCacheRole.SPARSE
-        or first.non_causal_multi_token_decode
-        or first.sliding_window is not None
+        or first.topk_buffer_width is not None
+        or first.alignment is not None
+        or first_layer.manager_cls is not FullAttentionManager
     ):
         raise ValueError("standalone runtime supports dense MLA without an indexer")
-    return first
+    if first_layer.manager_cls not in (FullAttentionManager, SlidingWindowManager):
+        raise ValueError("standalone runtime requires causal token-addressed KV")
+    if first_layer.manager_cls is SlidingWindowManager:
+        params = first_layer.manager_config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        if params.bounded_replay:
+            raise ValueError("standalone runtime requires causal token-addressed KV")
+    return first_layer
 
 
 def make_standalone_kv_config(
-    spec: AttentionSpec,
+    layer_config: KVCacheLayerConfig,
     layer_names: list[str],
     kv_cache_bytes: int,
     layout: KVCacheLayout,
@@ -76,7 +90,9 @@ def make_standalone_kv_config(
     """Describe disjoint layer ranges for the shared KV allocator."""
     if not layer_names or len(set(layer_names)) != len(layer_names):
         raise ValueError("standalone KV layer names must be nonempty and unique")
-    select_standalone_kv_spec(dict.fromkeys(layer_names, spec))
+    layers = dict.fromkeys(layer_names, layer_config)
+    select_standalone_kv_layer_config(layers)
+    spec = layer_config.spec
     if not layout.is_layer_compact:
         raise ValueError("standalone runtime requires layer-compact KV layout")
     page_bytes = spec.page_size_bytes
@@ -99,8 +115,6 @@ def make_standalone_kv_config(
                 block_stride=block_stride,
             )
         ],
-        kv_cache_groups=[
-            KVCacheGroupSpec(list(layer_names), spec, is_eagle_group=True)
-        ],
+        kv_cache_groups=[KVCacheGroup.from_layers(layers, is_eagle_group=True)],
         kv_cache_layout=layout.name,
     )

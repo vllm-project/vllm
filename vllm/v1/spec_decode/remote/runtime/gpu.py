@@ -26,7 +26,7 @@ from vllm.v1.spec_decode.remote.runtime.kv_layout import (
     make_standalone_kv_config as _make_standalone_kv_config,
 )
 from vllm.v1.spec_decode.remote.runtime.kv_layout import (
-    select_standalone_kv_spec,
+    select_standalone_kv_layer_config,
 )
 from vllm.v1.spec_decode.remote.runtime.schema import create_runtime_contract
 from vllm.v1.spec_decode.remote.runtime.step import (
@@ -41,6 +41,7 @@ from vllm.v1.spec_decode.remote.runtime.weights import (
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.worker.gpu.block_table import BlockTables
     from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 logger = init_logger(__name__)
@@ -55,10 +56,10 @@ def initialize_standalone_kv_cache_config(
         get_supported_kv_cache_layouts,
         resolve_kv_cache_layout,
     )
-    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
+    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_layer_configs
 
-    specs = get_kv_cache_spec(vllm_config)
-    first = select_standalone_kv_spec(specs)
+    layer_configs = get_kv_cache_layer_configs(vllm_config)
+    first = select_standalone_kv_layer_config(layer_configs)
     layers = get_layers_from_vllm_config(
         vllm_config,
         AttentionLayerBase,  # type: ignore[type-abstract]
@@ -67,9 +68,11 @@ def initialize_standalone_kv_cache_config(
         layer.get_attn_backend() for layer in layers.values()
     )
     layout = resolve_kv_cache_layout(
-        vllm_config, [[layout.name for layout in layouts]], specs.values()
+        vllm_config, [[layout.name for layout in layouts]], layer_configs.values()
     )
-    kv_config = _make_standalone_kv_config(first, list(specs), kv_cache_bytes, layout)
+    kv_config = _make_standalone_kv_config(
+        first, list(layer_configs), kv_cache_bytes, layout
+    )
     vllm_config.cache_config.num_gpu_blocks = kv_config.num_blocks
     return kv_config
 
@@ -168,6 +171,33 @@ def make_input_batch(
     )
 
 
+def make_standalone_block_tables(
+    kv_config: "KVCacheConfig",
+    *,
+    max_model_len: int,
+    max_num_reqs: int,
+    max_num_tokens: int,
+    device: torch.device,
+) -> "BlockTables":
+    """Retain the planner's full context even for sliding-window attention."""
+    from vllm.v1.kv_cache_interface import get_block_table_width
+    from vllm.v1.worker.gpu.block_table import BlockTables
+
+    group = kv_config.kv_cache_groups[0]
+    width = get_block_table_width(
+        math.ceil(max_model_len / group.block_size),
+        group.block_size,
+        token_alignment=group.manager_cls.block_table_token_alignment,
+    )
+    return BlockTables(
+        block_sizes=[group.block_size],
+        max_num_reqs=max_num_reqs,
+        max_num_batched_tokens=max_num_tokens,
+        max_num_blocks_per_group=[width],
+        device=device,
+    )
+
+
 class GPUDraftStepExecutor(DraftStepExecutor):
     """Own only draft weights/cache; delegate every forward to the local runner."""
 
@@ -188,12 +218,10 @@ class GPUDraftStepExecutor(DraftStepExecutor):
             set_random_seed,
             set_torch_threads_for_runtime,
         )
-        from vllm.v1.kv_cache_interface import get_block_table_width
         from vllm.v1.worker.gpu.attn_utils import (
             init_attn_backend,
             init_kv_cache,
         )
-        from vllm.v1.worker.gpu.block_table import BlockTables
         from vllm.v1.worker.gpu.input_batch import InputBuffers
         from vllm.v1.worker.gpu.model_states.default import DefaultModelState
         from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
@@ -253,26 +281,18 @@ class GPUDraftStepExecutor(DraftStepExecutor):
             self.kv_config = initialize_standalone_kv_cache_config(
                 vllm_config, kv_cache_bytes
             )
-            first = self.kv_config.kv_cache_groups[0].kv_cache_spec
-            self.block_size = first.block_size
+            first_group = self.kv_config.kv_cache_groups[0]
+            self.block_size = first_group.block_size
             self.num_blocks = self.kv_config.num_blocks
             scheduler = vllm_config.scheduler_config
             self.input_buffers = InputBuffers(
                 scheduler.max_num_seqs, scheduler.max_num_batched_tokens, device
             )
-            self.block_tables = BlockTables(
-                block_sizes=[self.block_size],
+            self.block_tables = make_standalone_block_tables(
+                self.kv_config,
+                max_model_len=vllm_config.model_config.max_model_len,
                 max_num_reqs=scheduler.max_num_seqs,
-                max_num_batched_tokens=scheduler.max_num_batched_tokens,
-                max_num_blocks_per_group=[
-                    get_block_table_width(
-                        math.ceil(
-                            vllm_config.model_config.max_model_len / self.block_size
-                        ),
-                        self.block_size,
-                        token_alignment=first.block_table_token_alignment,
-                    )
-                ],
+                max_num_tokens=scheduler.max_num_batched_tokens,
                 device=device,
             )
             self.attn_groups, _, kernel_sizes = init_attn_backend(

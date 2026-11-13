@@ -7,7 +7,7 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
-from vllm.config.speculative import RemoteDraftConfig
+from vllm.config.speculative import RemoteDraftConfig, SpeculativeConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
@@ -88,6 +88,22 @@ def test_remote_draft_accepts_greedy_sampling_at_admission(seed):
 @pytest.mark.parametrize("speculative", [None, SimpleNamespace(remote_draft=None)])
 def test_non_remote_requests_keep_probabilistic_sampling(speculative):
     SamplingParams(temperature=0.7).verify(MockModelConfig(), speculative, None, None)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"min_p": 0.1},
+        {"logit_bias": {0: 1.0}},
+        {"min_p": 0.05, "logit_bias": {1: -1.0}},
+    ],
+)
+def test_spec_decode_accepts_min_p_and_logit_bias(kwargs: dict):
+    """min_p and logit_bias are applied to target logits before rejection
+    sampling, so a speculative config must not reject the request."""
+    params = SamplingParams(**kwargs)
+    spec = SpeculativeConfig(method="ngram", num_speculative_tokens=1)
+    params.verify(MockModelConfig(), spec, None, None)
 
 
 def test_verify_leaves_logits_processors_to_admission():

@@ -462,8 +462,9 @@ def test_standalone_capacity_reaches_flex_attention_metadata_builder(num_blocks)
             prefix="draft.layers.0.self_attn",
             attn_backend=FlexAttentionBackend,
         )
-        spec = attention.get_kv_cache_spec(config)
-        assert spec is not None
+        layer_config = attention.get_kv_cache_config(config)
+        assert layer_config is not None
+        spec = layer_config.spec
         budget = num_blocks * spec.page_size_bytes + spec.page_size_bytes // 2
         kv_config = initialize_standalone_kv_cache_config(config, budget)
         groups, _, _ = init_attn_backend(kv_config, config, torch.device("cpu"))
@@ -475,6 +476,47 @@ def test_standalone_capacity_reaches_flex_attention_metadata_builder(num_blocks)
     assert sum(t.size for t in kv_config.kv_cache_tensors) == (
         num_blocks * spec.page_size_bytes
     )
+
+
+def test_standalone_sliding_window_tables_retain_full_context_capacity(monkeypatch):
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+    from vllm.v1.kv_cache_interface import AttentionSpec
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+    from vllm.v1.spec_decode.remote.runtime.gpu import make_standalone_block_tables
+    from vllm.v1.spec_decode.remote.runtime.kv_layout import make_standalone_kv_config
+    from vllm.v1.worker.gpu import buffer_utils
+
+    monkeypatch.setattr(buffer_utils, "is_uva_available", lambda: False)
+    spec = AttentionSpec(
+        block_size=4, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+    )
+    layer = SlidingWindowManager.layer_config(spec, sliding_window=5)
+    kv_config = make_standalone_kv_config(
+        layer, ["draft"], 129 * spec.page_size_bytes, KVCacheLayout.LBNHC
+    )
+    tables = make_standalone_block_tables(
+        kv_config,
+        max_model_len=512,
+        max_num_reqs=1,
+        max_num_tokens=132,
+        device=torch.device("cpu"),
+    )
+    pool = DraftBlockPool(kv_config.num_blocks, spec.block_size)
+    planner = DraftStepPlanner(
+        pool, max_num_reqs=1, max_model_len=512, num_speculative_tokens=3
+    )
+    key = SequenceKey("full-context", 0, 0)
+    assert planner.open(key)
+    plan, failures = planner.plan([DraftStepRow(key, 132, 1)])
+    assert not failures
+    req_index = planner.req_index(key)
+    update = plan.block_table_updates[req_index]
+    tables.append_block_ids(req_index, (update.block_ids,), overwrite=True)
+    assert tables.block_tables[0].gpu.shape[1] >= 128
+    assert tables.num_blocks.np[0, req_index] == len(pool.blocks(req_index)) == 34
+    planner.commit(plan)
+    planner.close(key)
+    assert pool.num_free_blocks == kv_config.num_blocks - 1
 
 
 def test_input_batch_preserves_reordered_request_slots_and_rejected_tail():
