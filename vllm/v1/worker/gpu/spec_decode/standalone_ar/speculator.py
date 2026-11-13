@@ -26,7 +26,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 
@@ -127,9 +126,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             return get_model(
                 vllm_config=draft_vllm_config,
                 prefix="draft_model",
-                load_config=get_pp_safe_draft_load_config(
-                    get_draft_load_config(draft_vllm_config)
-                ),
+                load_config=get_draft_load_config(draft_vllm_config),
             )
 
     @torch.inference_mode()
