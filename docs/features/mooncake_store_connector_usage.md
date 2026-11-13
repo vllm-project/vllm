@@ -111,7 +111,10 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
                 },
                 {
                     "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_both"
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "reuse_pd_transfer_engine": true
+                    }
                 }
             ]
         }
@@ -136,12 +139,24 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
                 },
                 {
                     "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_consumer"
+                    "kv_role": "kv_consumer",
+                    "kv_connector_extra_config": {
+                        "reuse_pd_transfer_engine": true
+                    }
                 }
             ]
         }
     }'
 ```
+
+`reuse_pd_transfer_engine` makes the store share the TransferEngine that
+`MooncakeConnector` initialized in the same worker, so each worker runs one
+engine instead of two. `MooncakeConnector` must be listed first. The shared
+engine keeps the PD connector's settings; the store JSON's `metadata_server`,
+`protocol` and `device_name` are ignored, and the store registers no KV
+buffers. Sleep mode is governed by `MooncakeConnector`'s checks. Leave
+`MOONCAKE_GLOBAL_SEGMENT_SIZE` unset so only the store config mounts the CPU
+segment.
 
 To also offload newly completed decode KV blocks, add the following extra
 configuration to the decoder's `MooncakeStoreConnector` entry.
@@ -154,6 +169,7 @@ Store. It also covers prompt KV delivered directly by `MooncakeConnector`.
 ```json
 {
     "kv_connector_extra_config": {
+        "reuse_pd_transfer_engine": true,
         "save_decode_cache": true
     }
 }
@@ -216,8 +232,8 @@ Lookup reports a reusable prefix only when every required cache group is
 present. For each Attention page, this includes every Store chunk covering its
 reusable tokens, across all Store shards.
 
-Attention groups are planned from their per-layer cache specs, including specs
-wrapped by `UniformTypeKVCacheSpecs`. The Store TP and global head-slot count
+Attention groups are planned from their per-layer cache specs, including groups
+that pack layers with different layouts. The Store TP and global head-slot count
 must divide one another; MQA and replicated GQA use the smaller head-slot count
 as the physical Store shard count. `MambaSpec` state segments map in complete
 state units; a replicated local unit can serve multiple Store shards. All

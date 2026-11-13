@@ -102,8 +102,8 @@ class GatedResidual(nn.Module):
         if use_combine:
             self.input_mix_weight_down_block_inject = MergedColumnParallelLinear(
                 self.hyper_hidden_size,
-                [self.hc_lowrank, self.hc_count]
-                + ([self.pad_size] if self.pad_size else []),
+                [self.hc_lowrank, self.hc_count],
+                padding_size=self.pad_size,
                 bias=False,
                 params_dtype=config.params_dtype,
                 quant_config=None,
@@ -111,8 +111,6 @@ class GatedResidual(nn.Module):
                 return_bias=False,
                 disable_tp=True,
             )
-            # Checkpoints carry no padding rows, and their output is discarded.
-            self.input_mix_weight_down_block_inject.shard_ids = (0, 1)
             weight = self.input_mix_weight_down_block_inject.weight
             self._use_hc_down_silu = (
                 weight.shape[1] % 8 == 0
