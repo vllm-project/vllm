@@ -29,7 +29,10 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     FLOAT4_E2M1_MAX,
     ref_nvfp4_quant,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    weight_amax,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
@@ -63,6 +66,18 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
     """Required divisor of the vocab shard (output rows)."""
     k_align: ClassVar[int] = 1
     """Required divisor of the hidden size (input columns)."""
+
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        # Weight-only: an explicit `activation: null` restates the default.
+        if activation_quant_key is not None:
+            raise NotImplementedError(
+                f"online {cls.__name__} is weight-only, use `activation: null` "
+                f"or omit it, got activation={activation_quant_key}"
+            )
+        return None
 
     @abstractmethod
     def quantize(

@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.online.int4 import (
     quantize_int4_to_mp_layout,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
     kInt4Static32Asym,
     unpack_quantized_values_into_int32,
 )
@@ -101,6 +102,20 @@ def test_target_naming_the_head_selects_it():
     assert resolved[3].activation is None  # weight-only
     assert config.resolve_quant_method_cls(VocabParallelEmbedding, "embed") is None
     assert config.resolve_quant_method_cls(ReplicatedLinear, "proj") is None
+
+
+def test_activation_must_be_null_or_omitted():
+    def resolve(spec):
+        args = QuantizationConfigArgs(targets={"lm_head": spec})
+        return OnlineQuantizationConfig(args).resolve_quant_method_cls(
+            ParallelLMHead, "lm_head"
+        )
+
+    resolved = resolve(QuantSpec(weight=SCHEME, activation=None))
+    assert resolved is not None and resolved[-1] is Int4PerGroup32AsymLMHeadMethod
+    assert resolved[3].activation is None
+    with pytest.raises(NotImplementedError, match="weight-only"):
+        resolve(QuantSpec(weight=SCHEME, activation=kFp8DynamicTokenSym))
 
 
 def test_nested_head_needs_a_pattern():
