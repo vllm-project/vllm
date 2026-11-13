@@ -35,11 +35,19 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, StringOrA
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
-    /// Stop strings. Not supported yet: the route does not detokenize.
+    /// Stop strings, matched against the decoded output text. The output's
+    /// token IDs end with the token that completes the match.
     pub stop: Option<StringOrArray>,
-    /// Whether to include the matched stop string in the output. Only
-    /// meaningful with `stop`.
+    /// Whether the stop string belongs to the output text. With token IDs
+    /// only, it decides whether a terminal stop token's text is matched
+    /// against `stop`, as in Python.
     pub include_stop_str_in_output: Option<bool>,
+    /// Whether to decode the output, which `stop` requires. Only token IDs are
+    /// returned either way.
+    pub detokenize: Option<bool>,
+    /// Whether special tokens are left out of the text matched against
+    /// `stop`.
+    pub skip_special_tokens: Option<bool>,
     /// Decode token IDs to replay instead of sampling, gated by
     /// `--enable-trace-replay` in Python. Not supported.
     pub trace_decode_token_ids: Option<Vec<u32>>,
