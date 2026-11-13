@@ -269,9 +269,7 @@ def init_attn_backend(
         attn_groups.append([group_map[key] for key in group_order])
 
     # Phase 2: pick a kernel block size per kv cache group that is supported
-    # by all backends within that group. A caller that sees only some of a
-    # group's layers (the drafter) passes the sizes the KV cache was allocated
-    # with, since its backends alone may pick a different, incompatible size.
+    # by all backends within that group.
     if kernel_block_sizes is None:
         kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 

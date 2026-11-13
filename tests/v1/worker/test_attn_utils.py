@@ -53,6 +53,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_query_lens_mismatch_unsupported_backend,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
@@ -1076,3 +1077,63 @@ def test_pp_stage_without_group_layers_keeps_manager_block_size():
     group = new_kv_cache_group([], new_kv_cache_spec(block_size=64))
     config = KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[group])
     assert prepare_kernel_block_sizes(config, [[]]) == [64]
+
+
+def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
+    monkeypatch,
+):
+    """Draft layers sharing a KV cache group with the target read its cache in
+    the kernel blocks the target's backend needs, even when the draft's backend
+    alone accepts the larger manager block size."""
+    layers = {}
+    for name, sizes in [("target", [128]), ("draft", [128, 512])]:
+        backend = SimpleNamespace(
+            full_cls_name=lambda name=name: (__name__, name),
+            get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
+        )
+        layers[name] = SimpleNamespace(
+            get_attn_backend=lambda backend=backend: backend,
+            kv_sharing_target_layer_name=None,
+        )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda _config, _type, names=None: {n: layers[n] for n in names or layers},
+    )
+    monkeypatch.setattr(attn_utils, "get_attn_cg_support", lambda *_: None)
+    built: dict[str, int | None] = {}
+    monkeypatch.setattr(
+        AttentionGroup,
+        "create_metadata_builders",
+        lambda self, kernel_block_size=None, **_: built.update(
+            dict.fromkeys(self.layer_names, kernel_block_size)
+        ),
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        parallel_config=SimpleNamespace(use_ubatching=False),
+    )
+    spec = new_kv_cache_spec(block_size=512)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[new_kv_cache_group(["target", "draft"], spec)],
+    )
+    target_groups, _, kernel_block_sizes = attn_utils.init_attn_backend(
+        kv_cache_config, vllm_config, "cpu"
+    )
+    assert kernel_block_sizes == [128]
+    draft_group = next(g for g in target_groups[0] if g.layer_names == ["draft"])
+    assert prepare_kernel_block_sizes(kv_cache_config, [[draft_group]]) == [512]
+
+    built.clear()
+    drafter = SimpleNamespace(
+        attn_vllm_config=vllm_config,
+        device="cpu",
+        draft_attn_layer_names={"draft"},
+        _configure_decode_metadata_update=lambda: None,
+    )
+    DraftModelSpeculator.set_attn(
+        drafter, None, kv_cache_config, None, None, target_groups, kernel_block_sizes
+    )
+    assert built == {"draft": 128}
