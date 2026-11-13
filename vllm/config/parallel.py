@@ -105,13 +105,15 @@ def _prefers_one_sided_all2all(config: "ParallelConfig") -> bool:
     if _is_gb200_gb300_or_vr200():
         return True
     # HGX has no NVLink between hosts, so the whole deployment must sit on one
-    # physical node, placed by vLLM's own launcher. Parallelism layout (DP, TP,
-    # EP size) does not matter. An API-server-only process has no local ranks
-    # and must agree with engines that do.
+    # physical node, placed by vLLM's own launcher or by Ray. Parallelism layout
+    # (DP, TP, EP size) does not matter. An API-server-only process has no local
+    # ranks and must agree with engines that do. With Ray the placement is only
+    # known once the workers start, so the one-sided manager checks the node
+    # count then and fails with a clear error if the ranks span several hosts.
     return (
         config.nnodes == 1
         and config.data_parallel_size_local in (0, config.data_parallel_size)
-        and config.distributed_executor_backend in ("mp", "uni")
+        and config.distributed_executor_backend in ("mp", "uni", "ray")
         and _is_hgx_b200_or_b300()
     )
 

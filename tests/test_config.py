@@ -1655,6 +1655,53 @@ def test_one_sided_all2all_default_on_hgx_needs_ranks_placed_by_vllm(
     assert config.all2all_backend == "allgather_reducescatter"
 
 
+def test_one_sided_all2all_default_on_hgx_accepts_ray(hgx_host):
+    """Ray may serve a single node too. Its placement is unknown at config time,
+    so the one-sided manager checks the node count once the workers start."""
+    config = _parallel_config(
+        enable_expert_parallel=True,
+        data_parallel_size=8,
+        data_parallel_size_local=8,
+        distributed_executor_backend="ray",
+    )
+    assert config.all2all_backend == "flashinfer_nvlink_one_sided"
+
+
+@pytest.mark.parametrize(
+    ("gb_host", "node_count", "fails"),
+    [
+        # HGX has no NVLink between hosts: more than one node must fail.
+        (False, 1, False),
+        (False, 2, True),
+        # GB200/GB300/VR200 span hosts over MNNVL.
+        (True, 2, False),
+        # Node count not available outside vLLM's distributed environment.
+        (False, None, False),
+    ],
+)
+def test_one_sided_manager_needs_one_node_without_mnnvl(
+    monkeypatch, gb_host, node_count, fails
+):
+    """Off MNNVL hardware the one-sided manager refuses a multi-node world and
+    tells the user to switch to allgather_reducescatter."""
+    from vllm.distributed.device_communicators import all2all
+
+    monkeypatch.setattr(
+        "vllm.config.parallel._is_gb200_gb300_or_vr200", lambda: gb_host
+    )
+
+    def _node_count() -> int:
+        assert node_count is not None, "distributed environment is not initialized"
+        return node_count
+
+    monkeypatch.setattr("vllm.distributed.parallel_state.get_node_count", _node_count)
+    if fails:
+        with pytest.raises(RuntimeError, match="--all2all-backend allgather_reduce"):
+            all2all._require_single_node_without_mnnvl()
+    else:
+        all2all._require_single_node_without_mnnvl()
+
+
 @pytest.mark.parametrize("cpu_arch", [CpuArchEnum.ARM, CpuArchEnum.X86])
 def test_one_sided_all2all_default_skips_elastic_ep(monkeypatch, cpu_arch):
     """The one-sided manager is not wired for elastic EP's stateless groups,
