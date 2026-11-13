@@ -232,6 +232,8 @@ def check_deep_gemm_mega_moe_supported(
             )
     elif not current_platform.is_device_capability_family(100, device_id=device_id):
         raise NotImplementedError("DeepGEMM MegaMoE requires SM90 or SM100 GPUs.")
+    elif weight_format.sm90:
+        raise NotImplementedError(f"{weight_format.name} requires SM90 GPUs.")
     if hidden_size % 128 != 0 or intermediate_size % 128 != 0:
         raise ValueError(
             "DeepGEMM MegaMoE requires hidden and intermediate sizes "
@@ -891,11 +893,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
             assert t.shape[0] == self.num_local_experts
             if t.is_contiguous():
                 return t.view(self.num_local_experts, -1)
-            elif t.dim() == 3 and t.stride(1) == 1 and t.stride(2) == t.shape[1]:
-                # scales have shape (E, M, N) with memory layout (E, N, M)
-                back = torch.transpose(t, 1, 2)
-                assert back.is_contiguous()
-                return back.view(self.num_local_experts, -1)
+            elif (
+                t.dim() == 3
+                and t.stride(1) == 1
+                and t.stride(2) >= t.shape[1]
+                and t.stride(0) == t.shape[2] * t.stride(2)
+            ):
+                # Scales of shape (E, M, N) laid out as (E, N, M'), M' >= M
+                # (SM90 FP32 block scales pad M to a multiple of 4).
+                return t.as_strided((t.shape[0], t.stride(0)), (t.stride(0), 1))
 
             raise AssertionError(
                 f"MegaMoE EPLB {name}: non-contiguous expert tensor with "
