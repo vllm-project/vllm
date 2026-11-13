@@ -743,6 +743,7 @@ def test_producer_start_load_kv_posts_no_read():
             pass
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.mode = MoRIIOMode.READ
     worker.is_producer = True
     worker._reads_issued_this_step = []
     worker._consumer_notification_counts = {}

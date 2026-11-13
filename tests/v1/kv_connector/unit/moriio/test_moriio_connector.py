@@ -150,6 +150,8 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler.tp_size = tp_size
     scheduler._has_mamba = False
     scheduler._reqs_need_recv = {}
+    scheduler.transfer_id_to_request_id = {}
+    scheduler._write_recvs_in_flight = {}
     scheduler.unmap_request_id = MagicMock()  # type: ignore[method-assign]
     return scheduler
 
@@ -169,6 +171,7 @@ def _write_producer_scheduler(block_size: int = 1) -> Any:
     scheduler._group_block_sizes = [block_size]
     scheduler.transfer_id_to_request_id = {}
     scheduler._reqs_need_recv = {}
+    scheduler._reqs_need_abort = {}
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_pending_save = {}
     scheduler._req_kv_params = {}
