@@ -29,6 +29,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import store_params_in_triton
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.arrival import OnlineArrivalMixin
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -50,6 +51,7 @@ from vllm.model_executor.model_loader.reload.direct import (
     abort_direct_reload,
     begin_direct_reload,
     finish_direct_reload,
+    record_checkpoint_layout,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
     get_layerwise_info,
@@ -67,6 +69,37 @@ _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
 )
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def test_output_padding_reload_keeps_unpadded_parameters_and_addresses(dist_init):
+    model = torch.nn.ModuleDict(
+        {
+            "padded": MergedColumnParallelLinear(4, [4, 4], padding_size=3),
+            "plain": MergedColumnParallelLinear(4, [4, 4]),
+        }
+    )
+    record_checkpoint_layout(model)
+    addresses = {name: param.data_ptr() for name, param in model.named_parameters()}
+    with torch.no_grad():
+        for param in model.parameters():
+            param.fill_(1.0)
+
+    begin_direct_reload(model)
+
+    for param in model["plain"].parameters():
+        assert (param == 1).all()
+    for param in model["padded"].parameters():
+        assert not param.any()
+    weight = torch.full((8, 4), 2.0)
+    bias = torch.full((8,), 3.0)
+    set(model["padded"].load_weights([("weight", weight), ("bias", bias)]))
+    torch.testing.assert_close(model["padded"].weight[:8], weight, rtol=0, atol=0)
+    torch.testing.assert_close(model["padded"].bias[:8], bias, rtol=0, atol=0)
+    assert not model["padded"].weight[8:].any()
+    assert not model["padded"].bias[8:].any()
+    assert addresses == {
+        name: param.data_ptr() for name, param in model.named_parameters()
+    }
 
 
 class _Method(QuantizeMethodBase):

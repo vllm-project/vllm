@@ -191,6 +191,7 @@ def test_zen_int8_dispatch_contract(
         w1_bias=w13_bias,
         w2_bias=w2_bias,
         per_act_token_quant=True,
+        per_out_ch_quant=True,
     )
 
     input = torch.randn((BATCH_SIZE, HIDDEN_SIZE), dtype=torch.bfloat16) / (
