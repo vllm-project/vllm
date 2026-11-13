@@ -69,7 +69,10 @@ class TrtLlmBf16ExpertsBase:
         )
 
     @staticmethod
-    def _supports_bias() -> bool:
+    def _supports_bias(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
         return False
 
     def supports_routing_replay_capture(self) -> bool:
