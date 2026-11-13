@@ -66,6 +66,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] EP Weight Filter with EPLB"
   key: ep-weight-filter-eplb-2xb200
+  automatic_shard: true
   optional: true
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
@@ -81,6 +82,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) EP Weight Filter with EPLB"
+      automatic_shard: true
       optional: false
       dind: false
       device: mi355_2
