@@ -114,6 +114,22 @@ def test_prefix_cache_stats_record_hits_by_source():
     assert sum(stats.hits_by_source.values()) == 48 - 16
 
 
+def test_prefix_cache_stats_frontier_hits_serialization():
+    stats = PrefixCacheStats()
+    stats.record(num_tokens=200, num_hits=159, preempted=False, frontier_hits=31)
+    # Preempted re-admissions never contribute to hits or frontier hits.
+    stats.record(num_tokens=200, num_hits=159, preempted=True, frontier_hits=31)
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(prefix_cache_stats=stats)
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.prefix_cache_stats.frontier_hits == 31
+
+
 def test_prefix_cache_stats_hits_by_source_serialization():
     connector_stats = PrefixCacheStats()
     connector_stats.record(

@@ -12,7 +12,7 @@ from enum import IntEnum, StrEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
-from typing import TYPE_CHECKING, Self, TypeVar
+from typing import TYPE_CHECKING, Literal, Self, TypeVar
 
 import torch
 
@@ -998,6 +998,22 @@ class CircularBufferSpec(AttentionSpec):
     drafts included, before acceptance is known, while the next step still
     reads the open group's committed keys from the ring.
     """
+
+    resume_catchup: Literal["decode", "prefill"] | None = None
+    """How a request restored from a copy of this ring at a frontier
+    checkpoint inside an open group continues: "decode" when only the decode
+    path reads the ring (the scheduler feeds one token per step until the
+    group closes), "prefill" when the prefill path reads it too. None: the
+    ring cannot be restored mid-group."""
+
+    compression_ratio: int | None = None
+    """Tokens per compressed group, when the ring holds more than one group
+    (speculative lookahead). None: one group of `block_size` tokens."""
+
+    @property
+    def group_size(self) -> int:
+        """Tokens per compressed group."""
+        return self.compression_ratio or self.block_size
 
     @property
     def block_table_token_alignment(self) -> int | None:

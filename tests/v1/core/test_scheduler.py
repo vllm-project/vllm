@@ -5173,6 +5173,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.defer_block_free = False
     scheduler.num_spec_tokens = 0
     scheduler.has_mamba_layers = False
+    scheduler.mamba_checkpoints = None
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 

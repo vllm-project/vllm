@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
@@ -27,6 +27,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from vllm.v1.core.hybrid_checkpoint.manager import HybridCheckpointManager
 
 logger = init_logger(__name__)
 
@@ -203,6 +206,8 @@ class KVCacheManager:
             if manager.retains_longer_hit
         )
         self.kv_cache_config = kv_cache_config
+        # Set by the scheduler when Mamba frontier checkpoints are on.
+        self.checkpoints: HybridCheckpointManager | None = None
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -283,6 +288,11 @@ class KVCacheManager:
             num_tokens=request.num_tokens,
             num_hits=num_hits,
             preempted=request.num_preemptions > 0,
+            frontier_hits=(
+                self.checkpoints.frontier_hit_tokens(request, num_hits)
+                if self.checkpoints is not None
+                else 0
+            ),
         )
 
     def get_computed_blocks(
@@ -327,6 +337,11 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+        aligned_hit = num_new_computed_tokens
+        if self.checkpoints is not None:
+            computed_blocks, num_new_computed_tokens = self.checkpoints.extend_hit(
+                request, computed_blocks, num_new_computed_tokens, max_cache_hit_length
+            )
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
@@ -339,11 +354,13 @@ class KVCacheManager:
             self.coordinator.emit_cached_block_events(request, computed_blocks)
 
         # The junction to pin is where the lagging sparse-retention group stops
-        # (``num_new_computed_tokens``) plus the uncached shared prefix -- i.e.
+        # (``aligned_hit``) plus the uncached shared prefix -- i.e.
         # the longest single-group hit. Sub-block gaps are left to the mask,
-        # which floors to the alignment boundary (a no-op there).
+        # which floors to the alignment boundary (a no-op there). A frontier
+        # checkpoint may resume past it, leaving no junction ahead.
+        junction = aligned_hit + num_uncached
         shared_prefix_boundary = (
-            num_new_computed_tokens + num_uncached if num_uncached else 0
+            junction if num_uncached and junction > num_new_computed_tokens else 0
         )
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
@@ -729,7 +746,8 @@ class KVCacheManager:
         for event in events:
             if not isinstance(event, BlockStored):
                 continue
-            if event.group_idx is None:
+            # A kind the block pool set itself (a frontier key's) stays.
+            if event.group_idx is None or event.kv_cache_spec_kind is not None:
                 continue
             if event.group_idx < 0 or event.group_idx >= len(
                 self.kv_cache_event_metadata
@@ -840,10 +858,12 @@ class KVCacheManager:
         ):
             if not group.kv_cache_spec.prefix_cacheable:
                 # Scratch groups (e.g. the CSA compressor ring) hold a fixed
-                # block covering no token range, so a lookup result never
-                # carries computed blocks for them and their block size does
-                # not divide the endpoint.
-                assert not group_blocks
+                # block covering no token range and their block size does not
+                # divide the endpoint. Only a Mamba frontier checkpoint's hit
+                # carries one, the ring of an open indexer group; the
+                # truncated hit ends on the block grid, where every such group
+                # is closed, so the request claims a fresh ring.
+                assert not group_blocks or self.checkpoints is not None
                 truncated.append([])
                 continue
             assert num_computed_tokens % manager.block_size == 0
@@ -945,3 +965,5 @@ class KVCacheManager:
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
         self.coordinator.new_step_starts()
+        if self.checkpoints is not None:
+            self.checkpoints.begin_step()

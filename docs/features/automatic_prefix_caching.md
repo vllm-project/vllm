@@ -67,6 +67,28 @@ With `--mamba-backend triton` (for example on ROCm), ReplaySSM also supports spe
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
 
+### Resuming past the block grid
+
+In multi-turn and agentic workloads, each turn's prompt extends the previous turn's prompt and output. With prefix caching alone, the next turn resumes at the last block boundary the previous prompt reached. It recomputes the rest of that prompt and everything the previous turn generated. Two options, both off by default, cut this work:
+
+- `--mamba-frontier-checkpoint` caches a finished request's state at its exact end and at the last block boundary its output crossed. The next turn resumes where the previous one stopped.
+- `--prefix-cache-eviction gds` evicts cached states by the prefill time they save per block, instead of least recently used first. It needs `--prefill-cost-coefficients D E`, the model's prefill cost: `D` seconds per token plus `E` seconds per token per 100,000 tokens of context. Only the ratio `E / D` changes the order.
+
+```bash
+vllm serve <hybrid-model> \
+    --mamba-frontier-checkpoint \
+    --prefix-cache-eviction gds \
+    --prefill-cost-coefficients <D> <E>
+```
+
+To fit `D` and `E` for a model and GPU, time the prefill of `n` tokens after `c` tokens of context for a few pairs. For example, use chunks of 8,192 tokens at contexts from 0 to the longest prompts served. Then fit `t = D * n + E * n * (2 * c + n) / 200000` by least squares.
+
+With `--prefix-cache-leaf-last`, GreedyDual-Size also evicts every state that has a deeper cached state on its path before any session's latest state, where its next turn resumes. Such a state is an earlier turn's state or the block-boundary state under a frontier. `--prefix-cache-leaf-idle-seconds S` lets a latest state unused for `S` seconds go with the earlier ones.
+
+The options need `--prefix-cache-retention-interval 0`, so they cannot be combined with `--enable-mamba-shared-prefix-checkpoint`. A `--prefix-match-unit` smaller than the block size is supported. Frontier checkpoints are not supported with speculative decoding or context parallelism, and need `--kv-events-config '{"enable_kv_cache_events": true, "recovery_unit_events": true}'` for KV cache events. A KV connector, such as the CPU offloading of `--kv-offloading-size`, must use `kv_role` `"kv_both"` and `kv_load_failure_policy` `"recompute"`. vLLM checks every requirement at startup and names the one that is missing. The full list is in [Hybrid State Checkpoints](../design/hybrid_state_checkpoints.md#requirements).
+
+The `vllm:prefix_cache_frontier_hits` counter reports the prefix-cache hit tokens that frontier checkpoints served past the block-aligned hit. How the options work is described in [Hybrid State Checkpoints](../design/hybrid_state_checkpoints.md).
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
