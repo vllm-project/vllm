@@ -75,6 +75,7 @@ class Layer:
     group: str  # transfer group the layer's blocks come from
     # KV heads of this layer when they differ from the model-wide count.
     heads: int | None = None
+    draft: bool = False
 
 
 MODELS = {
@@ -96,6 +97,26 @@ MODELS = {
             Layer("model.layers.1.self_attn.attn", "full", "full"),
         ],
     ),
+    # Draft layers with their own KV cache: EAGLE-style drafters number them
+    # after the target's layers, Gemma4's DSpark drafter from 0.
+    "mixed_heads_draft": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+            Layer("model.layers.2.self_attn.attn", "full", "full", heads=4, draft=True),
+        ],
+    ),
+    "draft_from_zero": (
+        8,
+        [
+            Layer("model.layers.0.self_attn.attn", "swa", "swa", heads=4),
+            Layer("model.layers.1.self_attn.attn", "full", "full"),
+            Layer(
+                "draft_model.model.layers.0.self_attn.attn", "full", "full", draft=True
+            ),
+        ],
+    ),
 }
 
 
@@ -107,9 +128,9 @@ class _ArchConfig:
     """Per-layer KV-head counts, as ModelArchitectureConfig exposes them."""
 
     def __init__(self, layers: list[Layer], heads: int):
-        counts = [_layer_heads(layer, heads) for layer in layers]
-        self.per_layer_overrides = (
-            None if len(set(counts)) == 1 else [{} for _ in layers]
+        counts = [_layer_heads(layer, heads) for layer in layers if not layer.draft]
+        self.per_layer_overrides: list[dict[str, Any]] | None = (
+            None if len(set(counts)) == 1 else [{} for _ in counts]
         )
         self._counts = counts
 

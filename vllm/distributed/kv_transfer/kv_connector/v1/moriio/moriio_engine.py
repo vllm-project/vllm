@@ -449,7 +449,7 @@ class MoRIIOWriter:
             remote_engine_id: Destination engine ID used to resolve remote offsets
             target: Consumer rank and head slice to write; None writes the
                 whole shard
-            tp_mapping: The layer's TP mapping, ``target`` included; defaults
+            tp_mapping: The layer's TP mapping, `target` included; defaults
                 to the request's
 
         Returns:

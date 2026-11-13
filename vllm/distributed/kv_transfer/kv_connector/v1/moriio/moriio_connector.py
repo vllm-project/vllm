@@ -110,6 +110,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
@@ -3564,13 +3565,25 @@ class MoRIIOConnectorWorker:
     def _layer_total_num_kv_heads(self, layer_name: str | None = None) -> int:
         """KV heads of a layer across all TP ranks.
 
-        Layers may differ (e.g. Gemma4 sliding vs full attention), and the
-        model-wide count is their maximum. Without a layer: the model-wide count.
+        Layers may differ from the model-wide count, which is their maximum:
+        Gemma4's sliding and full attention layers, or a draft model's layers.
+        Without a layer: the model-wide count.
         """
-        arch = getattr(self.model_config, "model_arch_config", None)
-        if layer_name is None or arch is None or arch.per_layer_overrides is None:
+        if layer_name is None:
             return self.model_config.get_total_num_kv_heads()
-        return arch[extract_layer_index(layer_name)].total_num_kv_heads
+        spec = cast(AttentionSpec, self.layer_to_spec[layer_name])
+        if spec.num_kv_heads > 1 or self.world_size == 1:
+            return spec.num_kv_heads * self.world_size
+        # With one head per rank, up to world_size ranks share each head, so the
+        # spec cannot tell the count. Draft layers may be numbered past the
+        # target's layers, which its per-layer config does not list.
+        arch = self.model_config.model_arch_config
+        total = self.model_config.get_total_num_kv_heads()
+        if arch.per_layer_overrides is not None:
+            layer_idx = extract_layer_index(layer_name)
+            if layer_idx < len(arch.per_layer_overrides):
+                total = arch[layer_idx].total_num_kv_heads
+        return min(total, self.world_size)
 
     def _write_tp_mapping(
         self, remote_tp_size: int | None, layer_name: str | None = None
