@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import numpy as np
 import torch
@@ -34,6 +34,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
 from vllm.v1.attention.backends.mla.sparse_utils import (
     align_blocks_to_rows,
     flat_kv_row_view,
+    triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
 from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
@@ -48,6 +49,189 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _pack_valid_rows(
+    source,
+    stride,
+    indptr,
+    dest,
+    Counts,
+    rows,
+    K: tl.constexpr,
+    B: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, B)
+    value = tl.load(source + row * stride + col, col < K, other=-1)
+    if ROWS == 0:
+        keep = value >= 0
+        start = tl.load(indptr + row)
+        slot = tl.cumsum(keep.to(tl.int32), 0) - 1
+    else:
+        # Counts is given, so build indptr here instead of with a prefix sum.
+        # Valid entries are then a prefix of the row, so the slot is col.
+        r = tl.arange(0, ROWS)
+        counts = tl.load(Counts + r, r < rows, other=0)
+        start = tl.sum(tl.where(r < row, counts, 0))
+        count = tl.sum(tl.where(r == row, counts, 0))
+        keep = col < count
+        slot = col
+        tl.store(indptr + row + 1, start + count)
+        if row == 0:
+            tl.store(indptr, 0)
+    tl.store(dest + start + slot, value, keep)
+
+
+def _compact_dcp_indices(
+    indices: torch.Tensor, counts: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Preserve each row's valid slot order while removing invalid KV entries.
+
+    Args:
+        indices: Per-row KV rows, where `-1` marks an invalid entry.
+        counts: Optional per-row count of valid entries, which must then be a
+            prefix of the row. Pass it to save the separate prefix sum.
+
+    Returns:
+        The CSR row pointer and the packed rows.
+
+    """
+    rows, topk = indices.shape
+    if counts is None:
+        indptr = torch.zeros(rows + 1, dtype=torch.int32, device=indices.device)
+        valid = (indices >= 0).sum(dim=1, dtype=torch.int32)
+        torch.cumsum(valid, dim=0, out=indptr[1:])
+    else:
+        # _pack_valid_rows fills indptr, but it does not run without rows.
+        alloc = torch.empty if rows else torch.zeros
+        indptr = alloc(rows + 1, dtype=torch.int32, device=indices.device)
+    packed = torch.empty(indices.numel(), dtype=indices.dtype, device=indices.device)
+    if rows:
+        _pack_valid_rows[(rows,)](
+            indices,
+            indices.stride(0),
+            indptr,
+            packed,
+            counts,
+            rows,
+            topk,
+            triton.next_power_of_2(topk),
+            0 if counts is None else max(16, triton.next_power_of_2(rows)),
+        )
+    return indptr, packed
+
+
+@triton.jit
+def _score_key(x):
+    # Order-preserving int32 of an FP32 score; NaN sorts below -inf.
+    bits = x.to(tl.int32, bitcast=True)
+    key = bits ^ ((bits >> 31) & 0x7FFFFFFF)
+    return tl.where((bits & 0x7FFFFFFF) > 0x7F800000, -2147483648, key)
+
+
+@triton.jit
+def _select_owned_slots(
+    Scores,
+    Top,
+    Local,
+    Pages,
+    Staging,
+    Counts,
+    rank,
+    SS: tl.constexpr,
+    TS: tl.constexpr,
+    LS: tl.constexpr,
+    PS: tl.constexpr,
+    K: tl.constexpr,
+    Page: tl.constexpr,
+    Stride: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, K)
+    # The k-th best score; candidates tied with it fill the remaining room in
+    # rank-major position order.
+    top = _score_key(tl.load(Top + row * TS + col))
+    threshold = tl.min(top)
+    room = K - tl.sum((top > threshold).to(tl.int32))
+    score = _score_key(tl.load(Scores + row * SS + rank * K + col))
+    local = tl.load(Local + row * LS + col)
+    live = local >= 0
+    tied = (live & (score == threshold)).to(tl.int32)
+    if tl.sum(tied) > 0:
+        for plane in range(0, rank):
+            other = _score_key(tl.load(Scores + row * SS + plane * K + col))
+            room -= tl.sum((other == threshold).to(tl.int32))
+    keep = (live & (score > threshold)) | (
+        (tl.cumsum(tied, 0) - tied < room) & (tied != 0)
+    )
+    keep_i = keep.to(tl.int32)
+    dst = tl.cumsum(keep_i, 0) - keep_i
+    local = tl.where(keep, local, 0)
+    page = tl.load(Pages + row * PS + local // Page, keep, other=0)
+    tl.store(Staging + row * K + dst, page * Stride + local % Page, keep)
+    tl.store(Counts + row, tl.sum(keep_i))
+
+
+_score_widths: dict[tuple[torch.device, int], torch.Tensor] = {}
+
+
+def merge_dcp_scores(
+    scores: torch.Tensor,
+    local_indices: torch.Tensor,
+    token_block_table: torch.Tensor,
+    rank: int,
+    world_size: int,
+    page_size: int,
+    block_stride_rows: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge rank-major score candidates into this rank's physical CSR slots.
+
+    Same selection as aiter `flydsl_dcp_topk_merge`: the global top-k by
+    score, ties at the k-th score taken in rank-major position order.
+    """
+    rows, k = local_indices.shape
+    width = scores.shape[1]
+    assert width == world_size * k and scores.stride(1) == 1
+    ends = _score_widths.get((scores.device, width))
+    if ends is None or ends.numel() < rows:
+        ends = torch.full(
+            (max(rows, 1024),), width, dtype=torch.int32, device=scores.device
+        )
+        _score_widths[(scores.device, width)] = ends
+    # Only the k-th score is used: any tie order is fine here.
+    top = torch.empty(local_indices.shape, dtype=torch.float32, device=scores.device)
+    rocm_aiter_ops.indexer_top_k_decode(
+        scores,
+        1,
+        ends,
+        torch.empty_like(local_indices),
+        k,
+        values=top,
+    )
+    staging = torch.empty_like(local_indices)
+    counts = torch.empty(rows, dtype=torch.int32, device=scores.device)
+    _select_owned_slots[(rows,)](
+        scores,
+        top,
+        local_indices,
+        token_block_table,
+        staging,
+        counts,
+        rank,
+        scores.stride(0),
+        top.stride(0),
+        local_indices.stride(0),
+        token_block_table.stride(0),
+        k,
+        page_size,
+        block_stride_rows,
+        num_warps=8,
+    )
+    indptr, slots = _compact_dcp_indices(staging, counts)
+    return slots, indptr
 
 
 def _use_rocm_sparse_triton(
@@ -442,6 +626,9 @@ class ROCMAiterMLASparseMetadata(SparseMLACommonMetadata):
     paged_kv_indptr: torch.Tensor | None = None
     attn_out_dtype: torch.dtype | None = None
 
+    # Per-token page ids, cached on first use by the DCP score-only path.
+    _dcp_token_pages: torch.Tensor | None = None
+
     # Source buffer and index_epoch of paged_kv_indices; -1 before any remap.
     remapped_buf: object = None
     remapped_epoch: int = -1
@@ -476,7 +663,9 @@ class ROCMAiterMLASparseMetadataBuilder(
         parallel_config = vllm_config.parallel_config
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        self._init_reorder_batch_threshold(
+            1, supports_spec_as_decode=True, supports_dcp_with_varlen=True
+        )
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         attention_context = vllm_config.compilation_config.static_forward_context
@@ -642,7 +831,9 @@ class ROCMAiterMLASparseMetadataBuilder(
             self.req_id_per_token_buffer[new_req_extent : self._prev_req_extent].fill_(
                 0
             )
-        if self._prev_indices_extent > new_indices_extent:
+        # DCP attention builds its own CSR indices: skip the paged ones.
+        dcp = self.vllm_config.parallel_config.decode_context_parallel_size > 1
+        if not dcp and self._prev_indices_extent > new_indices_extent:
             self.paged_kv_indices[new_indices_extent : self._prev_indices_extent].fill_(
                 0
             )
@@ -651,20 +842,23 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.req_id_per_token_buffer[:new_req_extent].copy_(
             np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
-        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        sparse_seqlen = generate_sparse_seqlen_triton(
-            seq_lens,
-            query_start_loc,
-            self.topk_tokens,
-            num_tokens,
-            common_attn_metadata.max_query_len,
-        )
+        if not dcp:
+            query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            sparse_seqlen = generate_sparse_seqlen_triton(
+                seq_lens,
+                query_start_loc,
+                self.topk_tokens,
+                num_tokens,
+                common_attn_metadata.max_query_len,
+            )
 
-        torch.cumsum(sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1])
-        # fill_() with a value that aliases the destination clones it first.
-        indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
-        indptr_tail.copy_(self.paged_kv_indptr[num_tokens].expand_as(indptr_tail))
+            torch.cumsum(
+                sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1]
+            )
+            # fill_() with a value that aliases the destination clones it first.
+            indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
+            indptr_tail.copy_(self.paged_kv_indptr[num_tokens].expand_as(indptr_tail))
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
         qo_indptr = self.qo_indptr[: num_tokens + 1]
@@ -698,6 +892,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         reduce_partial_map = None
         if (
             self._use_persistent_metadata
+            and not dcp
             and not use_triton_sparse
             and not _use_triton_long_bf16_prefill(self._mla_kv_dtype, metadata)
             and num_tokens > 0
@@ -807,7 +1002,8 @@ def reference_mla_sparse_prefill(
 
 
 class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
-    supports_dcp = False
+    supports_dcp = True
+    can_return_lse_for_decode = True
     use_aiter_sparse_mla = False
 
     def __init__(
@@ -859,6 +1055,12 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             **mla_args,
         )
         self.softmax_scale = scale
+        if self.dcp_world_size > 1 and (
+            self.kv_cache_dtype != "fp8_ds_mla" or sinks is not None
+        ):
+            raise NotImplementedError(
+                "ROCm sparse DCP requires fp8_ds_mla without sinks"
+            )
         if self.kv_cache_dtype == "fp8_ds_mla":
             # The fp8_ds_mla branch of forward_mqa routes to aiter's Triton
             # sparse_mla_fwd, which is validated on gfx950 only.
@@ -879,6 +1081,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
 
         vllm_config = get_current_vllm_config()
         self.owns_indexer: bool = indexer is not None
+        self.dcp_scores = getattr(indexer, "dcp_scores", None)
         self.index_epoch: int = _index_epoch(
             self.topk_indices_buffer, self.owns_indexer
         )
@@ -1273,6 +1476,80 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
+
+        if self.dcp_world_size > 1:
+            assert self.topk_indices_buffer is not None
+            score_only = self.dcp_scores is not None and not attn_metadata.num_prefills
+            if score_only:
+                from vllm.distributed import get_dcp_group
+
+                assert self.dcp_scores is not None
+
+                scores = (
+                    get_dcp_group()
+                    .all_gather(
+                        self.dcp_scores[:num_actual_toks].view(torch.int32), dim=1
+                    )
+                    .view(torch.float32)
+                )
+                token_pages = attn_metadata._dcp_token_pages
+                if token_pages is None or token_pages.shape[0] != num_actual_toks:
+                    token_pages = attn_metadata.block_table[
+                        attn_metadata.req_id_per_token[:num_actual_toks]
+                    ]
+                    attn_metadata._dcp_token_pages = token_pages
+                packed, indptr = merge_dcp_scores(
+                    scores,
+                    self.topk_indices_buffer[:num_actual_toks],
+                    token_pages,
+                    self.dcp_rank,
+                    self.dcp_world_size,
+                    attn_metadata.block_size,
+                    block_stride_rows,
+                )
+                compact = True
+            else:
+                indices = triton_filter_and_convert_dcp_index(
+                    attn_metadata.req_id_per_token[:num_actual_toks],
+                    attn_metadata.block_table,
+                    self.topk_indices_buffer[:num_actual_toks],
+                    self.dcp_world_size,
+                    self.dcp_rank,
+                    attn_metadata.cp_kv_cache_interleave_size,
+                    BLOCK_SIZE=attn_metadata.block_size,
+                    BLOCK_STRIDE_ROWS=block_stride_rows,
+                    NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+                    compact_valid_to_front=False,
+                )
+                compact = attn_metadata.num_prefills == 0
+                if compact:
+                    indptr, packed = _compact_dcp_indices(indices)
+                else:
+                    indptr = (
+                        torch.arange(
+                            num_actual_toks + 1, dtype=torch.int32, device=q.device
+                        )
+                        * attn_metadata.topk_tokens
+                    )
+                    packed = cast(torch.Tensor, indices).flatten()
+            output = torch.empty(
+                (q.shape[0], q.shape[1], self.kv_lora_rank),
+                dtype=attn_metadata.attn_out_dtype,
+                device=q.device,
+            )
+            lse = rocm_aiter_ops.triton_sparse_mla_fwd(
+                q,
+                kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
+                output,
+                self.scale,
+                indptr,
+                packed,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                has_invalid=not compact,
+                return_lse=True,
+            )
+            return output, lse
 
         # Indexer layers may rewrite their buffer, so always remap. Non-indexer
         # layers have their own KV cache group: remap once per indexer write.
