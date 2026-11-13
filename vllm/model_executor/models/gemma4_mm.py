@@ -2224,13 +2224,13 @@ class Gemma4ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
         **kwargs: Any,
     ) -> torch.Tensor:
-        pixel_values = inputs["pixel_values"]
-        pixel_position_ids = inputs["pixel_position_ids"]
-        gather_indices = inputs["gather_indices"]
+        pixel_values = values["pixel_values"]
+        pixel_position_ids = values["pixel_position_ids"]
+        gather_indices = values["gather_indices"]
 
         pad_tensor = (pixel_position_ids == -1).all(dim=-1)
 

@@ -13,7 +13,7 @@ import torch.nn as nn
 
 from vllm.compilation.backends import set_model_tag
 from vllm.config import VllmConfig, replace
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import in_single_pp_stage
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
@@ -180,7 +180,7 @@ class Gemma4Speculator(TargetDependentARSpeculator):
             if hasattr(target_model, "get_language_model")
             else target_model
         )
-        if get_pp_group().world_size == 1:
+        if not in_single_pp_stage():
             target_embed = getattr(target_language_model.model, "embed_tokens", None)
             if target_embed is not None:
                 del draft_model.model.embed_tokens
