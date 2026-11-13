@@ -18,6 +18,7 @@ _V2_LIMIT_PATH = "/sys/fs/cgroup/memory.max"
 _V2_USAGE_PATH = "/sys/fs/cgroup/memory.current"
 _V1_LIMIT_PATH = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 _V1_USAGE_PATH = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+_NODE7_MEMINFO_PATH = "/sys/devices/system/node/node7/meminfo"
 
 
 @pytest.fixture(autouse=True)
@@ -141,6 +142,55 @@ def test_cgroup_usage_is_read_without_cache(monkeypatch):
     assert cru.get_cgroup_memory_usage() == 512 << 20
     files[_V2_USAGE_PATH] = f"{768 << 20}\n"
     assert cru.get_cgroup_memory_usage() == 768 << 20
+
+
+def test_node_available_bytes_reads_sysfs(monkeypatch):
+    """Per-node availability includes reclaimable file and slab memory."""
+    _stub_files(
+        monkeypatch,
+        {
+            _NODE7_MEMINFO_PATH: (
+                "Node 7 MemTotal:       1048576 kB\n"
+                "Node 7 MemFree:         262144 kB\n"
+                "Node 7 FilePages:       524288 kB\n"
+                "Node 7 Shmem:            65536 kB\n"
+                "Node 7 SReclaimable:     32768 kB\n"
+            )
+        },
+    )
+
+    assert cru._node_available_bytes([7]) == 753664 * 1024
+
+
+def test_node_available_bytes_missing_fields(monkeypatch):
+    """An unexpected sysfs layout disables NUMA accounting."""
+    _stub_files(
+        monkeypatch,
+        {_NODE7_MEMINFO_PATH: "Node 7 MemFree:         262144 kB\n"},
+    )
+
+    assert cru._node_available_bytes([7]) is None
+
+
+@pytest.mark.parametrize(
+    ("numa_memory", "cgroup_limit", "cgroup_usage", "expected"),
+    [
+        (None, None, None, 40 * GiB_bytes),
+        (([7], 30 * GiB_bytes), None, None, 30 * GiB_bytes),
+        (([7], 30 * GiB_bytes), 20 * GiB_bytes, 5 * GiB_bytes, 15 * GiB_bytes),
+    ],
+)
+def test_available_memory_honors_numa_and_cgroup_limits(
+    monkeypatch, numa_memory, cgroup_limit, cgroup_usage, expected
+):
+    monkeypatch.setattr(
+        cru.psutil, "virtual_memory", lambda: mock.Mock(available=40 * GiB_bytes)
+    )
+    monkeypatch.setattr(cru, "get_numa_available_memory", lambda: numa_memory)
+    monkeypatch.setattr(cru, "get_cgroup_memory_limit", lambda: cgroup_limit)
+    monkeypatch.setattr(cru, "get_cgroup_memory_usage", lambda: cgroup_usage)
+
+    assert cru.get_available_memory() == expected
 
 
 def test_check_cgroup_memory_available_warns_on_low_headroom(monkeypatch):
