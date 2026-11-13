@@ -6,15 +6,12 @@ import inspect
 import time
 import warnings
 from contextlib import contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any, assert_never
+from typing import Any, assert_never
 
 import torch
 from torch import nn
 
 import vllm.envs as envs
-
-if TYPE_CHECKING:
-    from vllm.config.load import LoadConfig
 from vllm.config import (
     LoadConfig,
     ModelConfig,
