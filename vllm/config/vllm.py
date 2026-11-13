@@ -20,6 +20,7 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
+import vllm.plugins as vllm_plugins
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
@@ -545,6 +546,8 @@ class VllmConfig:
             factors["additional"] = self.additional_config.compile_factors()
         elif self.additional_config:
             factors["additional"] = self.additional_config
+        if plugins := vllm_plugins.loaded_general_plugins:
+            factors["general_plugins"] = list(plugins)
         return factors
 
     @property
