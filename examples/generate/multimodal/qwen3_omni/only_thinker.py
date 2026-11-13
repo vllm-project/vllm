@@ -204,8 +204,8 @@ def parse_args():
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.9,
-        help="GPU memory utilization (0.0 to 1.0).",
+        default=None,
+        help="GPU memory utilization (0.0 to 1.0; default: vLLM's default).",
     )
     parser.add_argument(
         "--max-model-len",
