@@ -15,6 +15,7 @@ forward ...`, one process per GPU.
 """
 
 import argparse
+import gc
 import json
 import os
 import socket
@@ -140,8 +141,9 @@ def _make_engine_args(args: argparse.Namespace, cases: list[BenchCase]):
         engine_args.max_num_batched_tokens = max(
             8192,
             *(
-                c.num_tokens + 1024 * sum(r.prefix_hit for r in c.requests)
+                sum(r.query_len + 1024 * r.prefix_hit for r in batch)
                 for c in cases
+                for batch in c.rank_batches
             ),
         )
     return engine_args
@@ -182,6 +184,7 @@ def run_case(
     args: argparse.Namespace,
     sampling_params: SamplingParams,
 ) -> dict[str, Any]:
+    case = case.for_dp_rank(runner.dp_rank, runner.dp_size)
     required_drafts = max((r.num_draft_tokens for r in case.requests), default=0)
     if required_drafts > runner.num_speculative_steps:
         raise ValueError(
@@ -262,6 +265,7 @@ def run_case(
         result = bench.run()
         if fixture is not None:
             fixture.check_applied()
+            result["routing_check"] = fixture.stats()
     finally:
         runner.execute_model(batch.finish())
         if fixture is not None:
@@ -309,6 +313,9 @@ def main(args: argparse.Namespace) -> None:
     with torch.inference_mode(), set_current_vllm_config(runner.vllm_config):
         for case in cases:
             result = run_case(runner, case, args, sampling_params)
+            # Each case's graph pool and captured state go with it.
+            gc.collect()
+            torch.accelerator.empty_cache()
             gathered: list[Any] = [None] * world.world_size
             torch.distributed.all_gather_object(gathered, result, group=world.cpu_group)
             if world.rank != 0:
@@ -319,11 +326,22 @@ def main(args: argparse.Namespace) -> None:
                 {
                     "case": case.name,
                     "requests": [asdict(r) for r in case.requests],
+                    **(
+                        {
+                            "dp_requests": [
+                                [asdict(r) for r in batch] for batch in case.dp_requests
+                            ]
+                        }
+                        if case.dp_requests
+                        else {}
+                    ),
                     "median_us": latency["median"],
                     "sampling_params": sampling,
                     "ranks": gathered,
                 }
             )
+            # Every case: a later failure keeps the finished ones.
+            _write_results(world, args, results)
             print(
                 f"[forward] {case.name}: {len(case.requests)} reqs, "
                 f"{rank0['num_tokens']} tokens, median {latency['median']:.1f} us, "
@@ -345,6 +363,10 @@ def main(args: argparse.Namespace) -> None:
                     case.name,
                     latency["sample_spread_pct"],
                 )
+    _write_results(world, args, results)
+
+
+def _write_results(world, args: argparse.Namespace, results: list[dict]) -> None:
     if world.rank == 0 and args.output_json:
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=2)

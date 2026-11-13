@@ -19,12 +19,13 @@ take `topk_ids`.
 
 import inspect
 import zlib
+from typing import Any
 
 import numpy as np
 import torch
 
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 
@@ -130,6 +131,10 @@ class RoutingFixture:
         self._biases: list[tuple[torch.Tensor, torch.Tensor]] = []
         self._fired = [0] * len(layers)
         self._layers = layers
+        # Per layer, from the last eager pass: (real rows whose expert ids equal
+        # the fixture's, real rows, real rows per EP rank). Observed on the
+        # experts' input, so a gate that overrides the fixture shows up.
+        self._observed: list[tuple[int, int, list[int]] | None] = [None] * len(layers)
         self._dp_rank, self._dp_size, self._ep_size = dp_rank, dp_size, ep_size
         self._device, self._mode = device, mode
         # Per layer: (num_experts, top_k, rng seed).
@@ -161,9 +166,16 @@ class RoutingFixture:
             if isinstance(experts, torch.nn.Module):
                 params = list(inspect.signature(experts.forward).parameters)
                 if "topk_ids" in params:
+                    index = params.index("topk_ids")
                     self._hooks.append(
                         experts.register_forward_pre_hook(
-                            self._substitute_ids(params.index("topk_ids"), layer),
+                            self._substitute_ids(index, layer), with_kwargs=True
+                        )
+                    )
+                    # Registered second: sees the ids the experts receive.
+                    self._hooks.append(
+                        experts.register_forward_pre_hook(
+                            self._observe_ids(index, layer, gate.weight.shape[0]),
                             with_kwargs=True,
                         )
                     )
@@ -223,6 +235,50 @@ class RoutingFixture:
             return (*args[:index], replaced, *args[index + 1 :]), kwargs
 
         return hook
+
+    def _observe_ids(self, index: int, layer: int, num_experts: int):
+        def hook(module, args, kwargs):
+            # Once per case, at its first (eager) pass: ops that run eagerly between
+            # graph segments replay their hooks in the timed loop, and this one
+            # syncs with the host.
+            if (
+                self._observed[layer] is not None
+                or torch.cuda.is_current_stream_capturing()
+            ):
+                return None
+            ids = kwargs["topk_ids"] if "topk_ids" in kwargs else args[index]
+            real = torch.ones(ids.shape[0], dtype=torch.bool, device=ids.device)
+            if is_forward_context_available():
+                is_padding = get_forward_context().is_padding
+                if is_padding is not None:
+                    real &= ~is_padding[: ids.shape[0]]
+            fixture = self._rows_for(layer, "ids", ids.shape[0], ids.dtype)
+            # Compare sets: a router may order a token's experts differently.
+            same = ids.sort(dim=1).values == fixture.sort(dim=1).values
+            matched = same.all(dim=1) & real
+            ep_rank = ids[real].clamp(min=0) // (num_experts // self._ep_size)
+            per_rank = torch.bincount(ep_rank.flatten(), minlength=self._ep_size)
+            self._observed[layer] = (
+                int(matched.sum()),
+                int(real.sum()),
+                per_rank.tolist(),
+            )
+            return None
+
+        return hook
+
+    def stats(self) -> dict[str, Any] | None:
+        """Routing the experts received in the last eager pass (real rows)."""
+        observed = [o for o in self._observed if o is not None]
+        if not observed:
+            return None
+        return {
+            "layers": len(observed),
+            "matched": sum(o[0] for o in observed)
+            / max(1, sum(o[1] for o in observed)),
+            # Per layer: this rank's routed slots per EP rank.
+            "ep_slots": [o[2] for o in observed],
+        }
 
     def check_applied(self) -> None:
         """Fail if a layer bypassed both the gate and the experts hooks."""

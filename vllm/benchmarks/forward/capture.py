@@ -14,23 +14,89 @@ compressor state) is the same on every replay.
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import numpy as np
 import torch
 
 import vllm.envs as envs
 from vllm.benchmarks.forward.batch import BenchBatch
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphCapture,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_world_group, graph_capture
-from vllm.forward_context import get_forward_context, override_forward_context
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+    override_forward_context,
+)
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 if TYPE_CHECKING:
     from vllm.benchmarks.forward.speculator import DraftBench
+
+
+class _BreakableCapture(BreakableCUDAGraphCapture):
+    """Replays each eager segment in the forward context it was captured in.
+
+    Serving replays a step's segments inside that step's forward context; the bench
+    replays outside any, and one captured step spans several contexts (target,
+    drafter), so eager ops reading attention metadata need theirs restored.
+    """
+
+    def add_eager(self, fn: Callable[[], Any]) -> Any:
+        if not is_forward_context_available():
+            return super().add_eager(fn)
+        context = get_forward_context()
+
+        def in_context() -> Any:
+            with override_forward_context(context):
+                return fn()
+
+        return super().add_eager(in_context)
+
+
+class _EagerReplay:
+    """Serving's eager (NONE) steps run uncaptured: each "replay" reruns the step
+    eagerly, launch overhead included, and copies the output into the first run's
+    tensor so callers holding it see the latest result."""
+
+    def __init__(self, step: Callable[[], Any]):
+        self.step = step
+        self.output = step()
+
+    def replay(self) -> None:
+        _first_tensor(self.output).copy_(_first_tensor(self.step()))
+
+
+_Capture: TypeAlias = torch.cuda.CUDAGraph | BreakableCUDAGraphCapture
+_Graph: TypeAlias = _Capture | _EagerReplay
+
+
+def _new_capture(vllm_config: Any, mode: str) -> _Capture:
+    """The target's FULL steps capture whole, as serving's FULL graphs (drafter
+    included); other modes break where serving's breakable graphs do."""
+    if mode != CUDAGraphMode.FULL.name and is_breakable_cudagraph_enabled(
+        vllm_config.compilation_config
+    ):
+        return _BreakableCapture(pool=torch.cuda.graph_pool_handle())
+    return torch.cuda.CUDAGraph()
+
+
+@contextmanager
+def _capturing(graph: _Capture, stream: torch.cuda.Stream) -> Iterator[None]:
+    if isinstance(graph, torch.cuda.CUDAGraph):
+        with torch.cuda.graph(graph, stream=stream):
+            yield
+    else:
+        with torch.cuda.stream(stream), graph:
+            yield
 
 
 def _first_tensor(output: Any) -> torch.Tensor:
@@ -78,12 +144,25 @@ def as_dispatched(runner: Any) -> tuple[Callable[[], CUDAGraphMode], Callable]:
         consumers.append((runner.fast_prefill, "prepare", 4, lambda d: d))
     pending: set[str] = set()
     dispatch = manager.dispatch
+    import vllm.v1.worker.gpu.model_runner as runner_module
+
+    sync_dispatch = runner_module.dispatch_cg_and_sync_dp
 
     def eager_dispatch(*args, **kwargs):
-        desc = dispatch(*args, **kwargs)
+        # Other dispatchers (drafters) run eagerly, unpadded.
+        return replace(dispatch(*args, **kwargs), cg_mode=CUDAGraphMode.NONE)
+
+    def eager_sync_dispatch(*args, **kwargs):
+        # The target's descriptor as serving agrees on it across DP ranks (the
+        # lowest mode any rank needs, a common padded size), run eagerly.
+        manager.dispatch = dispatch
+        try:
+            desc, dp_sync_state = sync_dispatch(*args, **kwargs)
+        finally:
+            manager.dispatch = eager_dispatch
         dispatched[0] = desc
         pending.update(name for _, name, _, _ in consumers)
-        return replace(desc, cg_mode=CUDAGraphMode.NONE)
+        return replace(desc, cg_mode=CUDAGraphMode.NONE), dp_sync_state
 
     def substitute(fn: Callable, name: str, index: int, value: Callable):
         def wrapper(*args, **kwargs):
@@ -96,11 +175,13 @@ def as_dispatched(runner: Any) -> tuple[Callable[[], CUDAGraphMode], Callable]:
         return wrapper
 
     manager.dispatch = eager_dispatch
+    runner_module.dispatch_cg_and_sync_dp = eager_sync_dispatch
     for obj, name, index, value in consumers:
         setattr(obj, name, substitute(getattr(obj, name), name, index, value))
 
     def undo() -> None:
         del manager.dispatch
+        runner_module.dispatch_cg_and_sync_dp = sync_dispatch
         for obj, name, _, _ in consumers:
             delattr(obj, name)
 
@@ -342,15 +423,33 @@ class ForwardBench:
             reference = self._real_rows(_first_tensor(self._run_model())).clone()
             draft_reference = self.drafter.tokens.clone() if self.drafter else None
             stream.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=stream):
+            # As the runner captures: with breakable graphs on, ops marked as
+            # eager breaks (e.g. attention in PIECEWISE steps) run eagerly
+            # between graph segments at replay.
+
+            def step() -> Any:
                 restore()
                 if world.world_size > 1:
                     torch.distributed.all_reduce(flag, group=world.device_group)
                 self._events[0].record()
                 output = self._run_model()
                 self._events[1].record()
+                return output
+
+            graph: _Graph
+            if self.result["cudagraph_mode"] == CUDAGraphMode.NONE.name:
+                graph = _EagerReplay(step)
+                output = graph.output
+            else:
+                capture = _new_capture(
+                    self.runner.vllm_config, self.result["cudagraph_mode"]
+                )
+                with _capturing(capture, stream):
+                    output = step()
+                graph = capture
         hidden = self._real_rows(_first_tensor(output))
+        if isinstance(graph, BreakableCUDAGraphCapture):
+            self.result["eager_breaks"] = graph.num_eager_breaks
 
         sampled = self.sampled
         graph.replay()
@@ -395,7 +494,7 @@ class ForwardBench:
         del graph
         return output
 
-    def _time(self, graph: torch.cuda.CUDAGraph) -> dict[str, Any]:
+    def _time(self, graph: _Graph) -> dict[str, Any]:
         """Per-replay forward time between in-graph events, MAX across ranks."""
         world = get_world_group()
         start, end = self._events
@@ -428,7 +527,7 @@ class ForwardBench:
             "samples_us": [round(float(t), 2) for t in arr],
         }
 
-    def _warmup(self, graph: torch.cuda.CUDAGraph, seconds: float = 1.0) -> None:
+    def _warmup(self, graph: _Graph, seconds: float = 1.0) -> None:
         """Replay until clocks and caches reach a steady state."""
         world = get_world_group()
         graph.replay()

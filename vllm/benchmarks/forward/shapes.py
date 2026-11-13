@@ -55,11 +55,39 @@ class BenchRequest:
 @dataclass(frozen=True)
 class BenchCase:
     name: str
+    # Every request of the step; on each DP rank unless `dp_requests` is set.
     requests: tuple[BenchRequest, ...]
+    # One batch per DP rank when the ranks' batches differ (DP imbalance).
+    dp_requests: tuple[tuple[BenchRequest, ...], ...] | None = None
 
     @property
     def num_tokens(self) -> int:
         return sum(r.query_len for r in self.requests)
+
+    @property
+    def rank_batches(self) -> tuple[tuple[BenchRequest, ...], ...]:
+        """Each DP rank's requests (one entry when every rank runs the same)."""
+        return self.dp_requests or (self.requests,)
+
+    def for_dp_rank(self, dp_rank: int, dp_size: int) -> "BenchCase":
+        """The case as one DP rank runs it."""
+        if self.dp_requests is None:
+            return self
+        if len(self.dp_requests) != dp_size:
+            raise ValueError(
+                f"{self.name}: {len(self.dp_requests)} DP batches for DP size "
+                f"{dp_size}."
+            )
+        return BenchCase(self.name, self.dp_requests[dp_rank])
+
+
+def _per_rank_case(name: str, batches: list[tuple[BenchRequest, ...]]) -> BenchCase:
+    if any(not batch for batch in batches):
+        raise ValueError(f"{name}: every DP rank needs at least one request.")
+    if len(batches) == 1:
+        return BenchCase(name, batches[0])
+    flat = tuple(r for batch in batches for r in batch)
+    return BenchCase(name, flat, tuple(batches))
 
 
 def jitter_kv_lens(
@@ -72,16 +100,19 @@ def jitter_kv_lens(
     depends only on the seed and the case's name, not on the other cases.
     """
     rng = np.random.default_rng([seed, zlib.crc32(case.name.encode())])
-    requests = []
-    for req in case.requests:
-        if req.kv_len > max_kv_len:
-            raise ValueError(f"{case.name}: KV length {req.kv_len} > {max_kv_len}")
-        prefix = req.prefix_len
-        if prefix and jitter:
-            prefix = max(1, round(prefix * rng.uniform(1 - jitter, 1 + jitter)))
-        kv_len = min(req.query_len + prefix, max_kv_len)
-        requests.append(replace(req, kv_len=kv_len))
-    return replace(case, requests=tuple(requests))
+    batches = []
+    for batch in case.rank_batches:
+        requests = []
+        for req in batch:
+            if req.kv_len > max_kv_len:
+                raise ValueError(f"{case.name}: KV length {req.kv_len} > {max_kv_len}")
+            prefix = req.prefix_len
+            if prefix and jitter:
+                prefix = max(1, round(prefix * rng.uniform(1 - jitter, 1 + jitter)))
+            kv_len = min(req.query_len + prefix, max_kv_len)
+            requests.append(replace(req, kv_len=kv_len))
+        batches.append(tuple(requests))
+    return _per_rank_case(case.name, batches)
 
 
 _REQ_RE = re.compile(r"^(?:(\d+)\*)?(\d+)(?:@(\d+))?(c)?(?::(\d+))?$")
@@ -89,6 +120,8 @@ _REQ_RE = re.compile(r"^(?:(\d+)\*)?(\d+)(?:@(\d+))?(c)?(?::(\d+))?$")
 
 def parse_case(text: str) -> BenchCase:
     """Parse `NAME=REQS`, where REQS is a comma list of `[N*]Q[@K][c][:D]`.
+
+    `NAME=REQS|REQS|...` gives each DP rank its own batch, in rank order.
 
     Q is the query length, K the KV length including the query (default Q, a
     fresh prefill), D the number of draft tokens (verify) and N the number of
@@ -100,24 +133,29 @@ def parse_case(text: str) -> BenchCase:
     name, sep, body = text.partition("=")
     if not sep:
         name, body = text, text
-    requests: list[BenchRequest] = []
-    for item in body.split(","):
-        match = _REQ_RE.match(item.strip())
-        if match is None:
-            raise ValueError(f"Invalid request {item!r} in case {text!r}")
-        count, query, kv, chunked, drafts = match.groups()
-        request = BenchRequest(
-            int(query), int(kv or query), int(drafts or 0), chunked=bool(chunked)
-        )
-        requests.extend([request] * int(count or 1))
-    return BenchCase(name, tuple(requests))
+    batches = []
+    for group in body.split("|"):
+        requests: list[BenchRequest] = []
+        for item in group.split(","):
+            match = _REQ_RE.match(item.strip())
+            if match is None:
+                raise ValueError(f"Invalid request {item!r} in case {text!r}")
+            count, query, kv, chunked, drafts = match.groups()
+            request = BenchRequest(
+                int(query), int(kv or query), int(drafts or 0), chunked=bool(chunked)
+            )
+            requests.extend([request] * int(count or 1))
+        batches.append(tuple(requests))
+    return _per_rank_case(name, batches)
 
 
 def load_cases(path: str) -> list[BenchCase]:
     """Load cases from a JSON or YAML file.
 
     Format: `{"cases": [{"name": ..., "requests": [{"query_len": ...,
-    "kv_len": ..., "num_draft_tokens": ..., "chunked": ..., "count": ...}]}]}`.
+    "kv_len": ..., "num_draft_tokens": ..., "chunked": ..., "count": ...}]}]}`;
+    `"dp_requests": [[...], ...]` in place of `"requests"` gives each DP rank
+    its own batch.
     """
     text = Path(path).read_text()
     if path.endswith((".yaml", ".yml")):
@@ -128,10 +166,13 @@ def load_cases(path: str) -> list[BenchCase]:
         data = json.loads(text)
     cases = []
     for case in data["cases"]:
-        requests: list[BenchRequest] = []
-        for req in case["requests"]:
-            req = dict(req)
-            count = req.pop("count", 1)
-            requests.extend([BenchRequest(**req)] * count)
-        cases.append(BenchCase(case["name"], tuple(requests)))
+        batches = []
+        for batch in case.get("dp_requests") or [case["requests"]]:
+            requests: list[BenchRequest] = []
+            for req in batch:
+                req = dict(req)
+                count = req.pop("count", 1)
+                requests.extend([BenchRequest(**req)] * count)
+            batches.append(tuple(requests))
+        cases.append(_per_rank_case(case["name"], batches))
     return cases
