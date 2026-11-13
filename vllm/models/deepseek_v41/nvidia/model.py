@@ -746,12 +746,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
         pp_size = self.parallel_config.pipeline_parallel_size
-        boundaries = get_pipeline_boundaries(
-            config,
-            [
-                get_pp_indices(config.num_hidden_layers, rank, pp_size)
-                for rank in range(pp_size)
-            ],
+        boundaries = (
+            get_pipeline_boundaries(
+                config,
+                [
+                    get_pp_indices(config.num_hidden_layers, rank, pp_size)
+                    for rank in range(pp_size)
+                ],
+            )
+            if pp_size > 1
+            else ()
         )
         needs_relay = any(boundary.needs_relay for boundary in boundaries)
         if needs_relay and (
@@ -768,7 +772,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 "caches and PCP=DCP=1, without microbatching, "
                 "speculative decoding or KV transfer."
             )
-        pp_rank = get_pp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group if needs_relay else 0
         self.pipeline_relay = (
             PipelineRelay(
                 vllm_config,
