@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
+)
 
 
 def apply_split_decodes_and_prefills(
@@ -162,3 +166,28 @@ def test_split_decodes_and_prefills_uniform_padded_batch_all_same():
     assert num_prefills == 0
     assert num_decode_tokens == padded_num_tokens
     assert num_prefill_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "query_lens, seq_lens, expected",
+    [
+        # Extends before prefills.
+        ([1, 3, 40, 5], [100, 19, 200, 5], (1, 2, 1, 1, 43, 5)),
+        # Model runner v2 sorts non-decodes by token count: a prefill can sit
+        # before an extend. It joins the extends (zero context) so the
+        # trailing range holds only prefills.
+        ([1, 3, 5, 40], [100, 19, 5, 200], (1, 3, 0, 1, 48, 0)),
+        ([1, 5, 40, 64], [100, 5, 200, 64], (1, 2, 1, 1, 45, 64)),
+        ([5, 64], [5, 64], (0, 0, 2, 0, 0, 69)),
+    ],
+    ids=["extends-first", "prefill-before-extend", "prefill-between", "prefill-only"],
+)
+def test_split_decodes_prefills_and_extends_any_non_decode_order(
+    query_lens, seq_lens, expected
+):
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    assert split_decodes_prefills_and_extends(common, 1) == expected
