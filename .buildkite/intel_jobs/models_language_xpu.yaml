@@ -58,7 +58,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s models/language -m 'core_model and slow_test' --deselect="tests/models/language/generation/test_common.py::test_models[True-False-5-32-bigscience/bloom-560m]" --deselect="tests/models/language/generation/test_common.py::test_models[False-False-5-32-bigscience/bloom-560m]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
-- label: ':nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N'
+- label: ':nvidia: (H200 MIG 35GB) Language Models (Hybrid)'
   key: language-models-tests-hybrid
   device: intel_gpu
   timeout_in_minutes: 65
@@ -74,6 +74,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
   - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
@@ -82,6 +83,9 @@ steps:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
   - tests/models/language/generation
+  - .buildkite/scripts/check-hybrid-test-deps.py
+  - tools/build_hybrid_test_wheels.sh
+  - requirements/build/hybrid-test-deps.txt
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -103,14 +107,17 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
-  - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - python3 ../.buildkite/scripts/check-hybrid-test-deps.py
   - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
   - tests/models/language/generation
+  - .buildkite/scripts/check-hybrid-test-deps.py
+  - tools/build_hybrid_test_wheels.sh
+  - requirements/build/hybrid-test-deps.txt
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -132,6 +139,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
   - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
@@ -140,6 +148,9 @@ steps:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
   - tests/models/language/generation
+  - .buildkite/scripts/check-hybrid-test-deps.py
+  - tools/build_hybrid_test_wheels.sh
+  - requirements/build/hybrid-test-deps.txt
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh

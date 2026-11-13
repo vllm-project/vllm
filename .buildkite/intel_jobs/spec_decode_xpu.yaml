@@ -296,12 +296,10 @@ steps:
   automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
-  - python3 spec_decode/test_custom_proposer.py
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - tests/v1/e2e/spec_decode/
-  - tests/spec_decode/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -419,11 +417,12 @@ steps:
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
   source_file_dependencies:
-  - vllm/v1/spec_decode/llm_base_proposer.py
-  - vllm/v1/spec_decode/eagle.py
   - vllm/v1/worker/gpu/spec_decode/eagle/
+  - vllm/distributed/parallel_state.py
+  - vllm/v1/worker/gpu/model_runner.py
   - vllm/model_executor/models/deepseek_mtp.py
   - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/qwen3_next_mtp.py
   - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
   commands:
   - >-

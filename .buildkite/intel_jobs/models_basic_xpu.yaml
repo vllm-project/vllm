@@ -155,9 +155,10 @@ steps:
     mem: 24+
   automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py kernels/attention/test_kimi_k3_mla_fused_epilogue.py
+  - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py --ignore=models/kimi_k3/amd_specialized_decode kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   source_file_dependencies:
   - vllm/models/kimi_k3/
+  - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
   - csrc/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
@@ -165,7 +166,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py kernels/attention/test_kimi_k3_mla_fused_epilogue.py || true'
+    pytest --continue-on-collection-errors -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py --ignore=models/kimi_k3/amd_specialized_decode kernels/attention/test_kimi_k3_mla_fused_epilogue.py || true'
 - label: ':nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache'
   key: kimi-k3-prefix-cache-4xb200
   device: intel_gpu
@@ -191,7 +192,7 @@ steps:
   - vllm/v1/core/
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
-  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
+  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake_store/
   - vllm/distributed/mooncake_store.py
   - vllm/v1/simple_kv_offload/
   - vllm/v1/spec_decode/
@@ -289,8 +290,8 @@ steps:
     'cd tests &&
     pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py || true &&
     pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_ple.py || true'
-- label: ':nvidia: (B200) Qwen4 Exp HC Kernels'
-  key: qwen4-exp-hc-kernels-b200
+- label: ':nvidia: (B200) Qwen4 Exp Kernels'
+  key: qwen4-exp-kernels-b200
   device: intel_gpu
   timeout_in_minutes: 20
   optional: true
@@ -307,21 +308,30 @@ steps:
   automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/qwen4_exp/test_hc_ops.py
+  - pytest -v -s models/qwen4_exp/test_mega_moe.py
+  - pytest -v -s models/qwen4_exp/test_qsa_reference.py
   source_file_dependencies:
   - csrc/qwen4_exp/
   - vllm/models/qwen4_exp/nvidia/hyperconnection.py
+  - vllm/models/qwen4_exp/nvidia/mega_moe.py
   - vllm/models/qwen4_exp/nvidia/ops/hc.py
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
   - tests/models/qwen4_exp/test_hc_ops.py
+  - tests/models/qwen4_exp/test_mega_moe.py
+  - tests/models/qwen4_exp/test_qsa_reference.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_hc_ops.py || true'
-- label: ":nvidia: (B200) Qwen3.5"
+    pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_hc_ops.py || true &&
+    pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_mega_moe.py || true &&
+    pytest --continue-on-collection-errors -v -s models/qwen4_exp/test_qsa_reference.py || true'
+- label: ':nvidia: (B200) Qwen3.5'
   key: qwen3-5-unit-tests-b200
   device: intel_gpu
   timeout_in_minutes: 20
-  automatic_shard: true
   num_devices: 2
   optional: true
   working_dir: .
@@ -334,6 +344,9 @@ steps:
     label: production
     gpu: 2+
     mem: 24+
+  automatic_shard: true
+  _raw_old_commands:
+  - pytest -v -s models/qwen3_5/
   source_file_dependencies:
   - vllm/model_executor/layers/linear.py
   - vllm/model_executor/layers/mamba/gdn
@@ -346,44 +359,6 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s models/qwen3_5/ || true'
-- label: ':nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode'
-  key: dsv41-nvidia-specialized-decode-4xb200
-  device: intel_gpu
-  timeout_in_minutes: 40
-  num_devices: 4
-  optional: true
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: production
-    gpu: 4+
-    mem: 24+
-  _raw_old_commands:
-  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
-  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
-  - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py
-  source_file_dependencies:
-  - vllm/models/deepseek_v41/nvidia/
-  - vllm/models/deepseek_v41/attention.py
-  - vllm/models/deepseek_v41/common/
-  - vllm/v1/worker/gpu/model_states/
-  - vllm/model_executor/layers/fused_moe/config.py
-  - tests/models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
-  - tests/models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
-  - tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py
-  - tests/distributed/test_custom_all_reduce.py
-  - tests/kernels/test_engram.py
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    pytest --continue-on-collection-errors -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py || true &&
-    pytest --continue-on-collection-errors -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py || true &&
-    pytest --continue-on-collection-errors -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py || true'
 - label: ':nvidia: (4xB200) DeepSeek-V4.1 NVIDIA Kernels'
   key: dsv41-nvidia-kernels-4xb200
   device: intel_gpu
@@ -440,3 +415,31 @@ steps:
     pytest --continue-on-collection-errors -v -s models/deepseek_v41/nvidia/specialized_decode/test_all_gather.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc || true &&
     pytest --continue-on-collection-errors -v -s kernels/test_engram.py || true'
+- label: ':nvidia: (4xB200) GLM-5.3-Flash Specialized Decode'
+  key: glm5next-nvidia-specialized-decode-4xb200
+  device: intel_gpu
+  timeout_in_minutes: 40
+  num_devices: 4
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 24+
+  automatic_shard: true
+  _raw_old_commands:
+  - pytest -v -s models/glm5next -k specialized_decode
+  source_file_dependencies:
+  - vllm/models/glm5next/nvidia/specialized_decode/
+  - vllm/models/common/ops/moe_tail_fusion/
+  - tests/models/glm5next/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s models/glm5next -k specialized_decode || true'
