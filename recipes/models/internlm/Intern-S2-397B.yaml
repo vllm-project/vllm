@@ -234,7 +234,7 @@ guide: |
   ## Troubleshooting
 
   - **OOM at full 262K context:** drop `--max-model-len` to 65536 or 131072,
-    or lower `--gpu-memory-utilization` headroom.
+    or lower `--max-num-seqs`.
   - **DeepGEMM warmup failures / slow startup:** this recipe already exports
     `VLLM_DEEP_GEMM_WARMUP=skip` and `VLLM_USE_DEEP_GEMM=0` per the deployment
     guide — if you launch outside the builder, set them yourself.

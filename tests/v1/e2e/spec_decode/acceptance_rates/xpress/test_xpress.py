@@ -20,7 +20,7 @@ QWEN3_XPRESS = ArgsTest(
     expected_gsm8k_accuracy=0.80,
     enforce_eager=False,
     max_model_len=4096,
-    gpu_memory_utilization=0.92,
+    gpu_memory_utilization=None,
     method="dflash",
     # XPress sizes a [max_num_seqs * block, vocab] scratch buffer, so it wants a
     # smaller batch than the 100 the draft-model path captures with.
