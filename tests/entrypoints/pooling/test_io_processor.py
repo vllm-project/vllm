@@ -64,7 +64,7 @@ def test_rejects_conflicting_pooling_task(processor: PoolingIOProcessor):
         tokenization_kwargs=None,
         lora_request=None,
         priorities=None,
-        prompts=[[1]],
+        inputs_seq=[[1]],
         pooling_params=PoolingParams(task="classify"),
     )
 
@@ -243,6 +243,7 @@ def _make_score_llm(monkeypatch) -> PoolingOfflineMixin:
     llm.pooling_task = "classify"  # SCORE_TYPE_MAP -> "cross-encoder"
     llm.model_config = SimpleNamespace(hf_config=SimpleNamespace(num_labels=1))
     llm.pooling_io_processors = {"cross-encoder": proc}
+    llm.chat_template_config = SimpleNamespace(chat_template_content_format="auto")
     monkeypatch.setattr(llm, "_run_tiling_engine", lambda *args, **kwargs: [])
     return llm
 

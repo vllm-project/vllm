@@ -27,19 +27,19 @@ def offline_processor_and_context():
     proc.renderer = SimpleNamespace(
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024)
     )
+    proc.chat_template = None
+    proc.chat_template_content_format = "auto"
+    proc.trust_request_chat_template = True
     ctx = OfflineScoringInputsContext(
         pooling_task="token_embed",
         scoring_data=ScoringData(
             data_1=["query alpha beta", "query gamma delta"],
             data_2=["document one two", "document three four"],
         ),
-        pooling_params=PoolingParams(
-            extra_kwargs={
-                "chat_template_kwargs": {"instruction": "Keep this instruction"}
-            }
-        ),
+        pooling_params=PoolingParams(extra_kwargs={}),
         tokenization_kwargs=None,
         chat_template=None,
+        chat_template_kwargs={"instruction": "Keep this instruction"},
         lora_request=None,
         priorities=None,
     )

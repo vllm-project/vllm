@@ -158,7 +158,7 @@ class OfflineInputsContext:
     add_special_tokens: bool | None = None
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
-    chat_template_content_format: ChatTemplateContentFormatOption
+    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
 
     # Mirror PoolingBasicRequestMixin.
