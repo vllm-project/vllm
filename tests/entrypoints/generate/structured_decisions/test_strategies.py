@@ -48,6 +48,7 @@ from vllm.entrypoints.openai.decisions.state import init_decisions_state
 from vllm.entrypoints.openai.decisions.strategies import (
     ClefFlashStrategy,
     D3Strategy,
+    DecisionLimits,
     DiffusionGemmaCanvasStrategy,
     JointSchemaStrategy,
     KnowLineStrategy,
@@ -1734,6 +1735,44 @@ def test_knowline_question_block_matches_the_checkpoint(
     # The labels are the first letters of the discovered set, one per option,
     # not the stock sets (yes/no, digits).
     assert q.labels == tuple(KNOWLINE_LABELS[: len(q.options)])
+
+
+@pytest.mark.parametrize(
+    "spec,head",
+    [
+        ({}, knowline.DEFAULT_QUESTION),
+        ({"instructions": None}, knowline.DEFAULT_QUESTION),
+        # An explicit empty value renders empty, as the reference server does.
+        ({"instructions": ""}, ""),
+        ({"instructions": []}, ""),
+        ({"instructions": {}}, ""),
+    ],
+)
+def test_knowline_default_question_only_without_instructions(spec, head):
+    request = StructuredDecisionRequest(
+        model="m", state="s", questions={"q": {"type": "noul", **spec}}
+    )
+    limits = DecisionLimits(max_questions=64, max_options=255)
+    (q,) = parse_questions(request, limits, KNOWLINE_TYPES)
+    assert knowline.question_block(q).startswith(f"Question: {head}\nOptions:\n")
+
+
+def test_knowline_state_text_parts_keep_only_the_text():
+    # A client that serializes content parts with null fields still sends
+    # the text: the template would read the image_url key as an image.
+    state = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "I was billed twice.", "image_url": None}
+            ],
+        }
+    ]
+    assert knowline.state_messages(state) == [
+        {"role": "user", "content": [{"type": "text", "text": "I was billed twice."}]}
+    ]
+    with pytest.raises(StructuredDecisionError, match="needs a string 'text'"):
+        knowline.state_messages([{"role": "user", "content": [{"type": "text"}]}])
 
 
 KNOWLINE_CHAT = [

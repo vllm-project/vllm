@@ -93,8 +93,10 @@ def state_messages(state: Any) -> list[Any]:
     ):
         out: list[Any] = []
         for m in msgs:
+            m = dict(m)
             content = m.get("content")
             if isinstance(content, list):
+                parts = []
                 for part in content:
                     if not isinstance(part, dict) or part.get("type") not in (
                         None,
@@ -104,7 +106,15 @@ def state_messages(state: Any) -> list[Any]:
                             "this model reads text-only states; a state "
                             "turn's parts must be text"
                         )
-            out.append(dict(m))
+                    if not isinstance(part.get("text"), str):
+                        raise StructuredDecisionError(
+                            "a text part of a state turn needs a string 'text'"
+                        )
+                    # Only the text: the template reads a part with an
+                    # image or video key, even a null one, as media.
+                    parts.append({"type": "text", "text": part["text"]})
+                m["content"] = parts
+            out.append(m)
         return out
     return [{"role": "user", "content": render_value(state)}]
 
@@ -119,9 +129,11 @@ def _confidence(p: list[float]) -> float:
 
 def question_block(question: Question) -> str:
     """The question as the model reads it: the head the instructions pick,
-    then one lettered line per option. Foreign question types (the OpenAI
-    decisions API builds its own) letter their options the same way."""
-    if question.raw_instructions:
+    then one lettered line per option. Only absent or null instructions get
+    the default head; an empty value renders empty. Foreign question types
+    (the OpenAI decisions API builds its own) letter their options the same
+    way."""
+    if question.raw_instructions is not None:
         head = render_value(question.raw_instructions)
     elif question.instructions:
         head = question.instructions
