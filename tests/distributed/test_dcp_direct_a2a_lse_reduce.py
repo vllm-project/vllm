@@ -12,7 +12,6 @@ import torch.distributed as dist
 
 import vllm.v1.attention.ops.cp_common as cp_common
 import vllm.v1.attention.ops.dcp as dcp
-from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -101,8 +100,6 @@ def _assert_q_gather_matches_reference(
 
 
 def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
-    if not current_platform.is_cuda():
-        pytest.skip("Direct DCP kernels use CUDA symmetric memory")
     port = str(get_open_port())
     processes: list[mp.Process] = []
     for rank in range(world_size):
