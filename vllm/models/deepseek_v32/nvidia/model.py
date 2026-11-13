@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_embed_norm import (
     make_input_embedding,
 )
 from vllm.model_executor.layers.fused_moe import (
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -104,7 +105,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.mlp",
-                apply_routed_scale_to_output=False,
+                routed_scale_mode=RoutedScaleMode.ROUTER,
             )
         else:
             self.mlp = DeepseekV2MLP(
