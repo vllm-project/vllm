@@ -13,7 +13,6 @@ from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
 from vllm.model_executor.kernels.linear import (
-    MarlinLinearKernel,
     MPLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
@@ -22,7 +21,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
     marlin_repeat_scales_on_all_ranks,
 )
 from vllm.model_executor.parameter import (
@@ -152,11 +150,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         if backend_name not in self._kernel_backends_being_used:
             logger.info("Using %s for CompressedTensorsWNA16", backend_name)
             self._kernel_backends_being_used.add(backend_name)
-
-        if kernel_type is MarlinLinearKernel:
-            input_dtype = get_marlin_input_dtype(self.layer_name)
-            if input_dtype is not None:
-                mp_linear_kernel_config.act_type = input_dtype
 
         # If group_size is -1, we are in channelwise case.
         group_size = self.group_size if self.group_size != -1 else input_size

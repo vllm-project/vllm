@@ -20,6 +20,8 @@ import torch
 
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     _expand_page_indices_kernel,
+    _flat_mla_index_steps,
+    _flat_mla_kv_view,
 )
 
 
@@ -40,7 +42,15 @@ def _reference(block_table, cu_num_tokens, kernel_block_size, out_len, device):
     return out
 
 
-def _run(block_table, cu_num_tokens, kernel_block_size, out_len, device):
+def _run(
+    block_table,
+    cu_num_tokens,
+    kernel_block_size,
+    out_len,
+    device,
+    page_stride=0,
+    row_stride=1,
+):
     out = torch.full((out_len,), -1, dtype=torch.int64, device=device)
     num_reqs = cu_num_tokens.numel() - 1
     max_tokens_per_req = block_table.shape[1] * kernel_block_size
@@ -53,6 +63,8 @@ def _run(block_table, cu_num_tokens, kernel_block_size, out_len, device):
         cu_num_tokens,
         cu_num_tokens[1:] - cu_num_tokens[:-1],
         KERNEL_BLOCK_SIZE=kernel_block_size,
+        PAGE_STRIDE=page_stride,
+        ROW_STRIDE=row_stride,
         BLOCK_SIZE=1024,
     )
     return out
@@ -160,3 +172,66 @@ def test_over_provisioned_chunks_do_not_change_result():
             BLOCK_SIZE=1024,
         )
         torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+def _packed_cache(num_blocks, kernel_block_size, row, device):
+    """A layer's pages inside a block row that also holds another layer's.
+
+    Row 0 of every token carries a non-zero mark, so a read can say which
+    token's row it landed on. The gap after this layer's page is what makes
+    the page stride something other than `kernel_block_size * row`.
+    """
+    packed_row = kernel_block_size * row + 96
+    storage = torch.zeros(num_blocks * packed_row, dtype=torch.uint8, device=device)
+    cache = storage.as_strided(
+        (num_blocks, kernel_block_size, row), (packed_row, row, 1)
+    )
+    marks = torch.arange(1, num_blocks * kernel_block_size + 1, device=device) % 251 + 1
+    cache[:, :, 0] = marks.view(num_blocks, kernel_block_size).to(torch.uint8)
+    return cache, marks.to(torch.uint8)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("kernel_block_size", [64, 2048])
+def test_packed_pages_index_the_rows_the_layer_owns(kernel_block_size):
+    """A layer whose pages sit in a wider block row must read its own rows.
+
+    A dense draft of a DSA target keeps its MLA pages inside the block row that
+    holds every layer's pages, so the page stride is not `block_size * row`.
+    `_flat_mla_kv_view` then steps by the common divisor of the two strides. An
+    index built for a contiguous cache points at bytes the layer does not own,
+    and the decode reads rows that were never written.
+    """
+    device = "cuda"
+    num_blocks, row = 6, 576
+    cache, marks = _packed_cache(num_blocks, kernel_block_size, row, device)
+    flat = _flat_mla_kv_view(cache)
+
+    seq_len = 2 * kernel_block_size
+    block_table = torch.tensor([[3, 1, 4, 5]], dtype=torch.int64, device=device)
+    cu = torch.tensor([0, seq_len], dtype=torch.int64, device=device)
+    want = torch.cat(
+        [
+            marks[int(b) * kernel_block_size : (int(b) + 1) * kernel_block_size]
+            for b in block_table[0, :2]
+        ]
+    )
+
+    page_stride, row_stride = _flat_mla_index_steps(cache)
+    got = _run(
+        block_table, cu, kernel_block_size, seq_len, device, page_stride, row_stride
+    )
+    torch.testing.assert_close(flat[got][:, 0], want, atol=0, rtol=0)
+
+    # The contiguous steps are what this layer must not use: they walk the
+    # flat view at the common divisor and land outside the layer's rows.
+    contiguous = _run(block_table, cu, kernel_block_size, seq_len, device, 0, 1)
+    assert not torch.equal(flat[contiguous][:, 0], want)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("kernel_block_size", [1, 64])
+def test_contiguous_pages_keep_the_token_index(kernel_block_size):
+    """A dense cache's page is `kernel_block_size` rows and its row is one."""
+    cache = torch.zeros(4, kernel_block_size, 576, dtype=torch.uint8, device="cuda")
+    assert _flat_mla_index_steps(cache) == (kernel_block_size, 1)

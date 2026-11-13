@@ -63,7 +63,7 @@ what may differ.
 
 <sup>2</sup> Cross-layer contiguity is achieved by using a `BLHNC` layout (set via `VLLM_KV_CACHE_LAYOUT=BLHNC`).
 
-<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported.
+<sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported with pull (`NixlPullConnector`); push (`NixlPushConnector`) requires identical P/D block sizes.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
@@ -97,6 +97,11 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Draft-model `attention_backend` (each instance auto-selects independently; the
   resulting KV block layout is validated at handshake time rather than via the
   compatibility hash)
+- `prefill_context_kv_only` in the speculative config, set on the prefill instance
+  only (DFlash-based drafters such as DSpark, Model Runner V2): its drafter only
+  writes the context K/V the decode instance reads, so it drafts nothing,
+  reserves no lookahead KV slots and, for draft models that support it, frees
+  the draft weights only drafting reads
 
 ### KV cache layout
 

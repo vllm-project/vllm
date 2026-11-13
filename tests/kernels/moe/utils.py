@@ -57,7 +57,7 @@ def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
 
 
 def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
-    """Reorder contiguous ``[gate; up]`` rows into gpt-oss interleaved order."""
+    """Reorder contiguous `[gate; up]` rows into gpt-oss interleaved order."""
     e, two_i = t.shape[0], t.shape[1]
     i, rest = two_i // 2, t.shape[2:]
     perm = (0, 2, 1, *range(3, 3 + len(rest)))
@@ -115,6 +115,7 @@ def triton_moe(
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -145,6 +146,7 @@ def batched_moe(
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -199,6 +201,7 @@ def naive_batched_moe(
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
@@ -487,6 +490,7 @@ def make_test_quant_config(
         FusedMoEQuantConfig.make(
             quant_dtype,
             per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_act_token_quant,
             block_shape=block_shape,
             w1_scale=w1_s,
             w2_scale=w2_s,
@@ -616,9 +620,9 @@ def check_deferred_moe_finalize(
 ) -> None:
     """Check a kernel that defers its finalize against the finalize it skips.
 
-    ``run`` calls the kernel on fixed inputs, first as built and then with
-    ``moe_config`` asking to defer, which ``should_defer_moe_finalize`` must
-    report truthfully. A deferred output reduced by ``moe_unpermute``, the
+    `run` calls the kernel on fixed inputs, first as built and then with
+    `moe_config` asking to defer, which `should_defer_moe_finalize` must
+    report truthfully. A deferred output reduced by `moe_unpermute`, the
     TRT-LLM finalize kernel, must give the kernel's own finalized output bit for
     bit, and modular experts hand the router's weights back as-is. A call the
     experts split across kernel launches finalizes instead.

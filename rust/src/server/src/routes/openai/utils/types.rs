@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use vllm_chat::ChatTool;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
@@ -124,7 +125,7 @@ pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationEr
 
 #[cfg(test)]
 mod tests {
-    use super::{StringOrArray, validate_stop};
+    use super::{ChatMessage, StringOrArray, validate_stop};
 
     #[test]
     fn validate_stop_accepts_four_stop_strings() {
@@ -151,6 +152,47 @@ mod tests {
             "stop strings must contain at most 4 items"
         );
     }
+
+    #[test]
+    fn assistant_reasoning_aliases_fold_into_reasoning() {
+        for (fields, expected) in [
+            (
+                r#""reasoning":"canonical","reasoning_content":"legacy","thinking":"thought""#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning_content":"legacy","reasoning":"canonical""#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning":null,"reasoning_content":"legacy""#,
+                Some("legacy"),
+            ),
+            (r#""reasoning":"","reasoning_content":"legacy""#, Some("")),
+            (
+                r#""reasoning":"canonical","reasoning_content":42"#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning_content":"legacy","thinking":"thought""#,
+                Some("legacy"),
+            ),
+            (
+                r#""reasoning_content":null,"thinking":"thought""#,
+                Some("thought"),
+            ),
+            (r#""reasoning_content":null"#, None),
+        ] {
+            let message = serde_json::from_str(&format!(
+                r#"{{"role":"assistant","content":"answer",{fields}}}"#
+            ))
+            .unwrap_or_else(|error| panic!("{fields}: {error}"));
+            let ChatMessage::Assistant { reasoning, .. } = message else {
+                panic!("{fields}: expected an assistant message, got {message:?}");
+            };
+            assert_eq!(reasoning.as_deref(), expected, "{fields}");
+        }
+    }
 }
 
 // ============================================================================
@@ -176,6 +218,10 @@ pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError
 pub enum ContentPart {
     #[serde(rename = "text")]
     Text { text: String },
+    /// A refusal the model gave earlier. Valid only in assistant messages,
+    /// where it is replayed as text.
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
     #[serde(rename = "image_url")]
     ImageUrl {
         image_url: ImageUrl,
@@ -200,6 +246,10 @@ pub enum ContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
+    /// A vLLM extension naming a tool, as tool search returns it in a tool
+    /// result (Anthropic's `tool_reference` block).
+    #[serde(rename = "tool_reference")]
+    ToolReference { name: String },
 }
 
 #[serde_with::skip_serializing_none]
@@ -296,7 +346,7 @@ fn default_function_tool_type() -> String {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
@@ -307,6 +357,25 @@ pub struct Function {
     /// Whether the schema is loaded on demand via tool search (vLLM extension,
     /// mirroring the OpenAI Responses and Anthropic Messages field).
     pub defer_loading: Option<bool>,
+}
+
+impl From<Function> for ChatTool {
+    fn from(function: Function) -> Self {
+        let Function {
+            name,
+            description,
+            parameters,
+            strict,
+            defer_loading,
+        } = function;
+        Self {
+            name,
+            description,
+            parameters,
+            strict,
+            defer_loading,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -342,7 +411,7 @@ pub struct FunctionCallDelta {
 }
 
 /// Tool choice value for simple string options.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolChoiceValue {
     Auto,
@@ -375,13 +444,13 @@ impl Default for ToolChoice {
 }
 
 /// Function choice specification for `ToolChoice::Function`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FunctionChoice {
     pub name: String,
 }
 
 /// Tool reference for `ToolChoice::AllowedTools`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ToolReference {
@@ -458,9 +527,8 @@ pub enum ChatMessage {
         content: Option<MessageContent>,
         name: Option<String>,
         tool_calls: Option<Vec<ToolCall>>,
-        /// Reasoning content for reasoning-capable models.
-        #[serde(alias = "reasoning_content")]
-        #[serde(alias = "thinking")]
+        /// Reasoning content for reasoning-capable models. Its aliases are
+        /// folded in by `normalize_reasoning_aliases`.
         reasoning: Option<String>,
     },
     #[serde(rename = "tool")]
@@ -516,14 +584,39 @@ impl Serialize for ChatMessage {
     }
 }
 
+/// Fold the `reasoning_content` and `thinking` aliases of a message into
+/// `reasoning`, so clients replaying history may send several spellings.
+///
+/// Mirrors the Python frontend's `_normalize_messages_before`: aliases are
+/// always removed, and the first non-null one fills `reasoning` only when it is
+/// absent or null. `thinking` is a Rust-only alias with the lowest precedence.
+fn normalize_reasoning_aliases(message: &mut Value) {
+    let Some(message) = message.as_object_mut() else {
+        return;
+    };
+    for alias in ["reasoning_content", "thinking"] {
+        let Some(alias_value) = message.remove(alias) else {
+            continue;
+        };
+        if alias_value.is_null() {
+            continue;
+        }
+        if message.get("reasoning").is_none_or(Value::is_null) {
+            message.insert("reasoning".to_string(), alias_value);
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ChatMessage {
-    /// Dispatch on the role tag: standard roles keep their derived errors,
-    /// and any other string role becomes [`ChatMessage::Custom`].
+    /// Normalize the reasoning aliases, then dispatch on the role tag: standard
+    /// roles keep their derived errors, and any other string role becomes
+    /// [`ChatMessage::Custom`].
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let value = Value::deserialize(deserializer)?;
+        let mut value = Value::deserialize(deserializer)?;
+        normalize_reasoning_aliases(&mut value);
         let is_custom = value
             .get("role")
             .and_then(Value::as_str)
@@ -552,13 +645,17 @@ pub enum MessageContent {
 
 /// Mirrors the Python vLLM `UsageInfo` class.
 ///
-/// Do not skip serializing `None` fields here: non-streaming response types
-/// should serialize `None` as explicit `null`.
+/// Do not skip serializing `None` fields here, except where Python omits them
+/// (`prompt_tokens_details`): non-streaming response types should serialize
+/// `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub total_tokens: usize,
     pub completion_tokens: Option<usize>,
+    /// Omitted rather than `null` when not reported, like Python: the OpenAI
+    /// spec types it as an object, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
     /// Reasoning-token breakdown. `None` when the frontend cannot count
     /// reasoning tokens: on chat without a reasoning parser, and always on
@@ -601,6 +698,24 @@ impl Usage {
                 .map(|reasoning_tokens| CompletionTokenUsageInfo { reasoning_tokens }),
         }
     }
+
+    /// Fold in the usage of another choice of the same request. Like Python
+    /// for `n > 1`, the prompt counts once, while completion and reasoning
+    /// tokens add up over the choices.
+    pub(crate) fn add_choice(&mut self, other: &Usage) {
+        if let (Some(completion_tokens), Some(other)) =
+            (&mut self.completion_tokens, other.completion_tokens)
+        {
+            *completion_tokens += other;
+        }
+        if let (Some(details), Some(other)) = (
+            &mut self.completion_tokens_details,
+            &other.completion_tokens_details,
+        ) {
+            details.reasoning_tokens += other.reasoning_tokens;
+        }
+        self.total_tokens = self.prompt_tokens + self.completion_tokens.unwrap_or_default();
+    }
 }
 
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
@@ -640,7 +755,8 @@ mod usage_tests {
 
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, Some(2));
-        assert!(usage.prompt_tokens_details.is_none());
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert!(json.get("prompt_tokens_details").is_none(), "{json}");
     }
 
     #[test]
@@ -782,33 +898,16 @@ pub struct ListModelsResponse {
 // Shared validation helpers
 // ============================================================================
 
-/// Validates a messages array is non-empty and has valid user-message content.
+/// Validates a messages array is non-empty.
 ///
 /// Used by both `POST /v1/chat/completions` and `POST /tokenize` (chat form)
-/// so validation behaviour stays in lockstep.
+/// so validation behaviour stays in lockstep. Message content may be empty,
+/// like in the Python frontend, which renders it as an empty turn.
 pub(crate) fn validate_messages(
     messages: &[ChatMessage],
 ) -> Result<(), validator::ValidationError> {
     if messages.is_empty() {
         return Err(validator::ValidationError::new("messages cannot be empty"));
-    }
-
-    for msg in messages {
-        if let ChatMessage::User { content, .. } = msg {
-            match content {
-                MessageContent::Text(text) if text.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content cannot be empty",
-                    ));
-                }
-                MessageContent::Parts(parts) if parts.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content parts cannot be empty",
-                    ));
-                }
-                _ => {}
-            }
-        }
     }
     Ok(())
 }

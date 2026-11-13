@@ -19,7 +19,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.network_utils import get_open_port
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 # GPU initialization might take take longer
 _SERVER_STARTUP_TIMEOUT = 120
@@ -65,6 +65,15 @@ async def _assert_children_cleaned_up(
         f"Child processes {still_alive} still alive after {timeout}s. "
         f"Process cleanup may not be working correctly."
     )
+
+
+def _wait_for_server_exit(proc: subprocess.Popen, timeout: float) -> None:
+    """Children such as multiprocessing's resource_tracker only exit after the
+    server process does, so wait for it before checking them."""
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"Server did not exit within {timeout}s")
 
 
 @dataclass
@@ -129,7 +138,7 @@ async def _concurrent_request_loop(
 
 
 def _num_running_requests(metrics_text: str) -> float:
-    """Sum ``vllm:num_requests_running`` across the server's label sets."""
+    """Sum `vllm:num_requests_running` across the server's label sets."""
     total = 0.0
     for family in text_string_to_metric_families(metrics_text):
         if family.name == "vllm:num_requests_running":
@@ -145,7 +154,7 @@ async def _wait_for_running_request(
 ) -> float:
     """Wait until the server reports a running request, returning the delay.
 
-    ``ShutdownState.inflight_requests`` is incremented before the HTTP call is
+    `ShutdownState.inflight_requests` is incremented before the HTTP call is
     awaited, so it only shows that a client coroutine started. Draining can
     only complete work the engine has already admitted, so synchronize on the
     server's own scheduler gauge instead.
@@ -249,6 +258,7 @@ async def test_shutdown_on_engine_failure(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_wait_timeout_completes_requests():
     """Verify wait timeout: new requests rejected, in-flight requests complete."""
+    shutdown_timeout = 30
     server_args = [
         "--dtype",
         "bfloat16",
@@ -260,7 +270,7 @@ async def test_wait_timeout_completes_requests():
         "--max-num-seqs",
         "4",
         "--shutdown-timeout",
-        "30",
+        str(shutdown_timeout),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
@@ -306,6 +316,7 @@ async def test_wait_timeout_completes_requests():
             f"completed: {state.requests_after_sigterm}, errors: {state.errors}"
         )
 
+        _wait_for_server_exit(proc, shutdown_timeout)
         await _assert_children_cleaned_up(child_pids)
 
 
@@ -502,6 +513,7 @@ async def test_abort_timeout_fails_inflight_requests():
 @pytest.mark.asyncio
 async def test_request_rejection_during_shutdown():
     """Verify new requests are rejected with error during shutdown."""
+    shutdown_timeout = 30
     server_args = [
         "--dtype",
         "bfloat16",
@@ -513,7 +525,7 @@ async def test_request_rejection_during_shutdown():
         "--max-num-seqs",
         "4",
         "--shutdown-timeout",
-        "30",
+        str(shutdown_timeout),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
@@ -545,6 +557,7 @@ async def test_request_rejection_during_shutdown():
             f"but {rejected_count} were rejected out of 10"
         )
 
+        _wait_for_server_exit(proc, shutdown_timeout)
         await _assert_children_cleaned_up(child_pids)
 
 

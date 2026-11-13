@@ -466,7 +466,7 @@ class TorchProfilerWrapper(WorkerProfiler):
 
 
 class ProtonProfilerWrapper(WorkerProfiler):
-    """Worker profiler backed by :mod:`triton.profiler` (Proton)."""
+    """Worker profiler backed by `triton.profiler` (Proton)."""
 
     def __init__(
         self,
@@ -815,7 +815,7 @@ def create_graph_capture_profiler(
     """Create a profiler to observe CUDA graph capture, if configured.
 
     Applies only to backends that attribute graph replay activity which
-    need a session around capture (Proton with ``proton_graph_attribution``).
+    need a session around capture (Proton with `proton_graph_attribution`).
     """
     if (
         profiler_config.profiler == "proton"

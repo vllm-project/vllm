@@ -78,6 +78,9 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         effective_attention_block_size: None,
         vllm_config: None,
         prefix_hash_config: None,
+        cache_config_info: None,
+        config_hash: None,
+        enable_expert_parallel: false,
     }
 }
 
