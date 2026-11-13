@@ -21,12 +21,19 @@ instead: rank r owns rows [r R, (r+1) R) of the batch padded to a multiple of
   The dense layer runs its MLP on all tokens between an all-gather and a
   reduce-scatter.
 
+Ownership is block-cyclic over _CHUNKS chunks of the padded batch (rank r
+owns rows [j C + r C/TP, j C + (r+1) C/TP) of chunk j, C = padded / _CHUNKS),
+so every chunk's collective spans all ranks and the o_proj -> reduce-scatter,
+shared-expert down -> reduce-scatter and all-gather -> KDA input projection
+pairs run as a two-stage pipeline.
+
 The bytes on the links stay about the same; what goes is the replicated
-per-token work, and two of the collectives run beside compute. Every sum is
+per-token work, and the collectives partly run beside compute. Every sum is
 fp32 over the TP partials in a fixed order (ops/sp_collectives.py), and the
 token-wise math is unchanged. Collectives run on a high-priority side stream.
 """
 
+import contextlib
 from typing import TYPE_CHECKING
 
 import torch
@@ -42,8 +49,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Rows are padded to TP x the collectives' 8-row tile.
-_ROW_ALIGN = 64
+# Pipeline chunks; rows are padded to chunks x TP x the collectives' 8-row tile.
+_CHUNKS = 2
+_ROW_ALIGN = _CHUNKS * 64
 # Workgroups of a collective on the critical path / beside compute.
 _CTAS = 128
 _CTAS_OVERLAP = 96
@@ -98,13 +106,67 @@ class _SPState:
         ev.record(self.side)
         return ev
 
+    def chunk(self, j: int, rows: int, limit: int | None = None) -> slice:
+        """Token rows of chunk j (clipped to the first `limit` rows)."""
+        C = rows // _CHUNKS
+        hi = (j + 1) * C if limit is None else min((j + 1) * C, limit)
+        return slice(min(j * C, hi), hi)
+
+    def own_rows(self, rows: int) -> list[slice]:
+        """This rank's token rows, chunk by chunk (its local row order)."""
+        Cr = rows // _CHUNKS // self.world
+        return [
+            slice(
+                j * Cr * self.world + self.rank * Cr,
+                j * Cr * self.world + (self.rank + 1) * Cr,
+            )
+            for j in range(_CHUNKS)
+        ]
+
     def rs_rows(self, x: torch.Tensor, rows: int) -> torch.Tensor:
-        out = torch.empty(
-            rows // self.world, x.shape[1], dtype=torch.bfloat16, device=self.dev
-        )
-        ev = self.on_side(lambda: self.comm.rs_rows(x, "p", _CTAS, rows, out))
-        torch.cuda.current_stream().wait_event(ev)
+        """[<= rows, N] partial (all rows ready) -> own rows [R, N] of the sum."""
+        R = rows // self.world
+        out = torch.empty(R, x.shape[1], dtype=torch.bfloat16, device=self.dev)
+
+        def fn():
+            for j in range(_CHUNKS):
+                part = x[self.chunk(j, rows, x.shape[0])]
+                self.comm.rs_chunk(part, "p", _CTAS, j, _CHUNKS, R, out)
+
+        torch.cuda.current_stream().wait_event(self.on_side(fn))
         return out
+
+    def rs_pipelined(self, rows: int, n: int, produce) -> torch.Tensor:
+        """Own rows [R, n] of the sum of produce(j) ([<= C, n] partial of chunk
+        j's rows), each chunk reduce-scattered while the next one is produced."""
+        R = rows // self.world
+        out = torch.empty(R, n, dtype=torch.bfloat16, device=self.dev)
+        parts = []
+        for j in range(_CHUNKS):
+            part = produce(j)
+            parts.append(part)  # read on the side stream until the wait below
+            ev = self.on_side(
+                lambda part=part, j=j: self.comm.rs_chunk(
+                    part, "p", _CTAS, j, _CHUNKS, R, out
+                )
+            )
+        torch.cuda.current_stream().wait_event(ev)
+        del parts
+        return out
+
+    def ag_async(self, x_own: torch.Tensor, name: str, ctas: int = _CTAS):
+        """All-gather of own rows into token order; one event per chunk."""
+        x_own = x_own.contiguous()
+        R = x_own.shape[0]
+        out = torch.empty(
+            R * self.world, x_own.shape[1], dtype=torch.bfloat16, device=self.dev
+        )
+        self.on_side(lambda: self.comm.ag_stage(x_own, name))
+        evs = [
+            self.on_side(lambda j=j: self.comm.ag_pull(name, out, j, _CHUNKS, R, ctas))
+            for j in range(_CHUNKS)
+        ]
+        return out, evs
 
     def ag(self, x_own, name: str = "x", ctas: int = _CTAS):
         """All-gather of own rows; x_own may be a QuantizedActivation."""
@@ -115,14 +177,9 @@ class _SPState:
             data = x_own.data.contiguous().view(torch.uint8).view(torch.bfloat16)
             sc = torch.zeros(R, 64, dtype=torch.bfloat16, device=self.dev)
             sc.view(torch.float32)[:, 0] = x_own.scale.reshape(R).float()
-            d_out = torch.empty(T, data.shape[1], dtype=torch.bfloat16, device=self.dev)
-            s_out = torch.empty(T, 64, dtype=torch.bfloat16, device=self.dev)
-
-            def fn():
-                self.comm.ag_rows(data, name, ctas, d_out)
-                self.comm.ag_rows(sc, "p", ctas, s_out)
-
-            main.wait_event(self.on_side(fn))
+            d_out, d_evs = self.ag_async(data, name, ctas)
+            s_out, s_evs = self.ag_async(sc, "p", ctas)
+            main.wait_event(s_evs[-1])
             scale = s_out.view(torch.float32)[:, 0]
             scale = scale.reshape(T, *x_own.scale.shape[1:]).to(x_own.scale.dtype)
             return QuantizedActivation(
@@ -132,19 +189,74 @@ class _SPState:
                 torch.Size((T, *x_own.orig_shape[1:])),
                 x_own.quant_key,
             )
-        out, ev = self.ag_async(x_own, name, ctas)
-        main.wait_event(ev)
+        out, evs = self.ag_async(x_own, name, ctas)
+        main.wait_event(evs[-1])
         return out
 
-    def ag_async(self, x_own: torch.Tensor, name: str, ctas: int):
-        x_own = x_own.contiguous()
-        out = torch.empty(
-            x_own.shape[0] * self.world,
-            x_own.shape[1],
-            dtype=torch.bfloat16,
-            device=self.dev,
+
+class _Override:
+    """Replace a module's forward for the block's duration."""
+
+    def __init__(self, module, forward):
+        self.module, self.forward = module, forward
+
+    def __enter__(self):
+        self.module.forward = self.forward
+
+    def __exit__(self, *exc):
+        del self.module.forward
+
+
+def _o_proj_rs(sp: _SPState, o_proj, rows: int, result: list):
+    """o_proj.forward computing its GEMM chunk by chunk, each chunk's partial
+    reduce-scattered beside the next one's GEMM. The attention module returns
+    o_proj's output, so it hands back own rows [R, H] of the reduced result."""
+
+    def forward(input_):
+        T = input_.shape[0]
+        out = sp.rs_pipelined(
+            rows,
+            o_proj.output_size_per_partition,
+            lambda j: o_proj.quant_method.apply(
+                o_proj, input_[sp.chunk(j, rows, T)], None
+            ),
         )
-        return out, self.on_side(lambda: self.comm.ag_rows(x_own, name, ctas, out))
+        result.append(out)
+        return (out, None) if o_proj.return_bias else out
+
+    return forward
+
+
+def _pipelined_input_proj(linear, evs, rows: int):
+    """Forward of the attention's first projection, consuming its all-gathered
+    input chunk by chunk as the chunks land (unquantized weights only)."""
+
+    def forward(x):
+        T = x.shape[0]
+        out = torch.empty(T, linear.weight.shape[0], dtype=x.dtype, device=x.device)
+        main = torch.cuda.current_stream()
+        C = rows // _CHUNKS
+        for j, ev in enumerate(evs):
+            main.wait_event(ev)
+            r = slice(min(j * C, T), min((j + 1) * C, T))
+            torch.mm(x[r], linear.weight.t(), out=out[r])
+        return (out, None) if linear.return_bias else out
+
+    return forward
+
+
+def _input_proj(attn):
+    """The KDA input projection when it can consume a chunked all-gather."""
+    linear = getattr(attn, "in_proj_qkvgfab", None)
+    if (
+        linear is None
+        or type(linear.quant_method).__name__ != "UnquantizedLinearMethod"
+        or getattr(linear, "bias", None) is not None
+        or linear.weight.dtype != torch.bfloat16
+        or envs.VLLM_BATCH_INVARIANT
+    ):
+        return None
+    return linear
 
 
 def _first_rows(x, n: int):
@@ -283,8 +395,9 @@ def _moe(sp: _SPState, moe, y: torch.Tensor, rows: int) -> torch.Tensor:
         sp.comm.allreduce_vec(ss_part, "v", out=ss)
 
     ev_lat = sp.on_side(latent_rs)
-    main.wait_event(ev_x)
-    shared = moe.shared_experts(x)  # [T, H] partial: reduce_results=False
+    main.wait_event(ev_x[-1])
+    mlp = moe.shared_experts
+    act = mlp.act_fn(mlp.gate_up_proj(x)[0])
     main.wait_event(ev_lat)
     lat_norm = torch.empty_like(lat_cols)
     norm = runner.routed_output_transform.norm
@@ -292,8 +405,15 @@ def _moe(sp: _SPState, moe, y: torch.Tensor, rows: int) -> torch.Tensor:
         lat_cols, ss, runner._k3_sp_norm_weight, lat_norm, T, cw, lat.shape[1],
         norm.variance_epsilon, BR=8, BN=triton.next_power_of_2(cw),
     )  # fmt: skip
-    shared.addmm_(lat_norm, up.t())
-    out = sp.rs_rows(shared, rows)
+
+    def shared_and_up(j):
+        # Chunk j of the shared experts' down projection (partial: no
+        # all-reduce) plus this rank's latent block times its up_proj slice.
+        r = sp.chunk(j, rows)
+        part = mlp.down_proj.quant_method.apply(mlp.down_proj, act[r], None)
+        return part.addmm_(lat_norm[r], up.t())
+
+    out = sp.rs_pipelined(rows, H, shared_and_up)
     # packed, gathered, x and lat were read on the side stream; the waits above
     # ordered those reads before any reuse of their memory.
     del packed, gathered, x, lat
@@ -329,9 +449,18 @@ def _layer(
     )
     if layer.is_block_write_layer:
         prefix_sum = None
-    with _NoReduce(layer.self_attn.o_proj):
-        partial = layer._run_self_attn(positions, _first_rows(sp.ag(x), T))
-    hidden = sp.rs_rows(partial, rows)
+    attn = layer.self_attn
+    in_proj = _input_proj(attn) if not isinstance(x, QuantizedActivation) else None
+    if in_proj is not None:
+        x_all, evs = sp.ag_async(x, "x")
+        override_in = _Override(in_proj, _pipelined_input_proj(in_proj, evs, rows))
+    else:
+        x_all, override_in = _first_rows(sp.ag(x), T), contextlib.nullcontext()
+    result: list[torch.Tensor] = []
+    with override_in, _Override(attn.o_proj, _o_proj_rs(sp, attn.o_proj, rows, result)):
+        layer._run_self_attn(positions, x_all[:T] if in_proj is not None else x_all)
+    (hidden,) = result
+    del x_all
     if prefix_sum is None:
         prefix_sum, prefix_delta = hidden, None
     else:
@@ -417,10 +546,11 @@ def forward(
     sp = _state
     assert rows <= sp.max_rows, (rows, sp.max_rows)
     R = rows // sp.world
-    lo = min(sp.rank * R, T)
-    hi = min(lo + R, T)
+    Cr = R // _CHUNKS
     h = torch.zeros(R, H, dtype=hidden.dtype, device=hidden.device)
-    h[: hi - lo].copy_(hidden[lo:hi])
+    for j, r in enumerate(sp.own_rows(rows)):
+        src = hidden[min(r.start, T) : min(r.stop, T)]
+        h[j * Cr : j * Cr + src.shape[0]].copy_(src)
     nblocks = cdiv(model.end_layer, model.config.attn_res_block_size)
     residual = h.new_empty(R, nblocks, H)
     prefix_delta = None

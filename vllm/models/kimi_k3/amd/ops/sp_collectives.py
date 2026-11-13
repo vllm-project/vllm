@@ -44,16 +44,17 @@ def _push_rs_rows(
     src_stride,
     src_rows,
     dst_ptrs,
-    rank,
+    dst_base,
     R,
     N,
     n_tiles,
+    rank,
     WORLD: tl.constexpr,
     BR: tl.constexpr,
     BC: tl.constexpr,
 ):
-    """dst[o] slot `rank` (rows rank*R ..) = src rows of owner o (rows past
-    src_rows read as 0); consecutive tiles go to different owners."""
+    """dst[o] rows dst_base .. = src rows of owner o (src rows o*R .., rows
+    past src_rows read as 0); consecutive tiles go to different owners."""
     pid = tl.program_id(0)
     nprog = tl.num_programs(0)
     n_ct = N // BC
@@ -72,7 +73,7 @@ def _push_rs_rows(
         )
         tl.store(
             _peer(dst_ptrs, o, tl.bfloat16)
-            + (rank * R + rr)[:, None].to(tl.int64) * N
+            + (dst_base + rr)[:, None].to(tl.int64) * N
             + c[None, :],
             v,
         )
@@ -151,14 +152,19 @@ def _pull_ag_rows(
     out_ptr,
     rank,
     R,
+    Cr,
+    src0,
+    dst0,
+    C,
     N,
     n_tiles,
     WORLD: tl.constexpr,
     BR: tl.constexpr,
     BC: tl.constexpr,
 ):
-    """Rows of owner o in out = o's buffer rows o*R .. (own rows read locally);
-    consecutive tiles read different owners."""
+    """Rows dst0 + o*C .. of out (C rows per owner o) = o's buffer rows
+    o*R + src0 ..; consecutive tiles read different owners. Whole tensor:
+    C = R, src0 = dst0 = 0."""
     pid = tl.program_id(0)
     nprog = tl.num_programs(0)
     n_ct = N // BC
@@ -167,10 +173,22 @@ def _pull_ag_rows(
         tt = t // WORLD
         rt = tt // n_ct
         ct = tt % n_ct
-        rr = o * R + rt * BR + tl.arange(0, BR)
+        rr = rt * BR + tl.arange(0, BR)
         c = ct * BC + tl.arange(0, BC)
-        off = rr[:, None].to(tl.int64) * N + c[None, :]
-        tl.store(out_ptr + off, tl.load(_peer(buf_ptrs, o, tl.bfloat16) + off))
+        src = (o * R + src0 + rr)[:, None].to(tl.int64) * N + c[None, :]
+        dst = (dst0 + o * C + rr)[:, None].to(tl.int64) * N + c[None, :]
+        tl.store(out_ptr + dst, tl.load(_peer(buf_ptrs, o, tl.bfloat16) + src))
+
+
+@triton.jit
+def _copy_rows(
+    src_ptr, src_stride, dst_ptr, rows, N, BR: tl.constexpr, BC: tl.constexpr
+):
+    r = tl.program_id(0) * BR + tl.arange(0, BR)
+    c = tl.program_id(1) * BC + tl.arange(0, BC)
+    m = (r < rows)[:, None] & (c < N)[None, :]
+    v = tl.load(src_ptr + r[:, None].to(tl.int64) * src_stride + c[None, :], mask=m)
+    tl.store(dst_ptr + r[:, None].to(tl.int64) * N + c[None, :], v, mask=m)
 
 
 @triton.jit
@@ -242,10 +260,11 @@ class SPCollectives:
             x.stride(0),
             x.shape[0],
             b.ptrs,
-            self.rank,
+            self.rank * R,
             R,
             N,
             (R // BR) * (N // bc) * self.world,
+            self.rank,
             WORLD=self.world,
             BR=BR,
             BC=bc,
@@ -318,7 +337,8 @@ class SPCollectives:
     def ag_rows(self, x_own, name, ctas, out=None):
         """-> out [T, N], every owner's rows: own rows are copied into the
         local symmetric buffer, then every rank pulls all owners' rows into
-        `out` (ordinary memory)."""
+        `out` (ordinary memory, which concurrent compute tolerates better than
+        pushes, and stores into the symmetric buffer are slow)."""
         R, N = x_own.shape
         assert R % BR == 0 and x_own.stride(1) == 1
         T = R * self.world
@@ -331,12 +351,16 @@ class SPCollectives:
             else out
         )
         self._barrier(b)  # every peer is done reading the previous contents
-        full[self.rank * R : (self.rank + 1) * R].copy_(x_own)
+        self._stage(x_own, full[self.rank * R : (self.rank + 1) * R])
         self._barrier(b)  # every owner's rows are in place
         _pull_ag_rows[(ctas,)](
             b.ptrs,
             out,
             self.rank,
+            R,
+            R,
+            0,
+            0,
             R,
             N,
             (R // BR) * (N // bc) * self.world,
@@ -346,6 +370,90 @@ class SPCollectives:
             num_warps=4,
         )
         return out
+
+    @staticmethod
+    def _stage(x, dst):
+        rows, N = x.shape
+        _copy_rows[(triton.cdiv(rows, 8), triton.cdiv(N, 512))](
+            x, x.stride(0), dst, rows, N, BR=8, BC=512, num_warps=4
+        )
+
+    # Block-cyclic chunks: the batch is k chunks of C = T / k rows; rank r owns
+    # rows [j C + r Cr, j C + (r+1) Cr) of chunk j (Cr = C / world), stored
+    # locally as rows [j Cr, (j+1) Cr) of an [R, N] tensor.
+
+    def rs_chunk(self, x, name, ctas, j, k, R, out):
+        """x: chunk j's [<= C, N] partial in token order -> out[j Cr:(j+1) Cr]
+        (own rows of the sum). Chunk 0 also waits until every peer is done with
+        the buffer's previous contents."""
+        N = x.shape[1]
+        Cr = R // k
+        assert x.stride(1) == 1 and Cr % BR == 0
+        b = self._buf(name, R * self.world * N)
+        bc = _bc(N)
+        if j == 0:
+            self._barrier(b)
+        _push_rs_rows[(ctas,)](
+            x,
+            x.stride(0),
+            x.shape[0],
+            b.ptrs,
+            self.rank * R + j * Cr,
+            Cr,
+            N,
+            (Cr // BR) * (N // bc) * self.world,
+            self.rank,
+            WORLD=self.world,
+            BR=BR,
+            BC=bc,
+            num_warps=4,
+        )
+        self._barrier(b)
+        _sum_slots[(Cr // BR, triton.cdiv(N, 512))](
+            b.t[j * Cr * N :],
+            out[j * Cr : (j + 1) * Cr],
+            out,
+            Cr,
+            N,
+            R * N,
+            WORLD=self.world,
+            BR=BR,
+            BN=512,
+            SUMSQ=False,
+            num_warps=4,
+        )
+
+    def ag_stage(self, x_own, name):
+        """Own rows [R, N] into the local buffer for ag_pull (one barrier each side)."""
+        R, N = x_own.shape
+        b = self._buf(name, R * self.world * N)
+        self._barrier(b)
+        self._stage(x_own, b.t[self.rank * R * N : (self.rank + 1) * R * N].view(R, N))
+        self._barrier(b)
+
+    def ag_pull(self, name, out, j, k, R, ctas):
+        """out[j C:(j+1) C] (token order) = every owner's local rows
+        [j Cr, (j+1) Cr) staged by ag_stage."""
+        N = out.shape[1]
+        Cr, C = R // k, R // k * self.world
+        b = self._buf(name, R * self.world * N)
+        bc = _bc(N)
+        _pull_ag_rows[(ctas,)](
+            b.ptrs,
+            out,
+            self.rank,
+            R,
+            Cr,
+            j * Cr,
+            j * C,
+            Cr,
+            N,
+            (Cr // BR) * (N // bc) * self.world,
+            WORLD=self.world,
+            BR=BR,
+            BC=bc,
+            num_warps=4,
+        )
 
     def allreduce_vec(self, v, name, out=None):
         T = v.numel()

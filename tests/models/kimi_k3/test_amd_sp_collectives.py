@@ -4,8 +4,8 @@
 
 Each rank holds a different bf16 partial; the reduce-scatters must equal the
 fp32 sum rounded to bf16 (up to the summation order), and the all-gather must
-be exact. Shapes are the Kimi-K3 TP8 ones (hidden 7168, latent 3584), with a
-row count that is not a multiple of the padded row count for rs_rows.
+be exact, also for the block-cyclic chunked variants. Shapes are the Kimi-K3
+TP8 ones (hidden 7168, latent 3584), with fewer valid rows than padded ones.
 """
 
 import os
@@ -72,6 +72,23 @@ def _worker(rank: int, world: int, port: int) -> None:
         want = torch.empty(ROWS, 7168, device=dev, dtype=torch.bfloat16)
         dist.all_gather_into_tensor(want, mine)
         assert torch.equal(comm.ag_rows(mine, "x", 64), want)
+    # Block-cyclic chunks (k = 2): rank r owns rows [j C + r Cr, j C + (r+1) Cr).
+    k, C = 2, ROWS // 2
+    Cr = C // world
+    mine = [slice(j * C + rank * Cr, j * C + (rank + 1) * Cr) for j in range(k)]
+    out = torch.empty(R, 7168, device=dev, dtype=torch.bfloat16)
+    for j in range(k):
+        comm.rs_chunk(x[j * C : min((j + 1) * C, VALID)], "p", 64, j, k, R, out)
+    _close(out, torch.cat([full[m] for m in mine]))
+    local = torch.randn(R, 7168, device=dev, generator=gen).bfloat16()
+    want = torch.empty(world, R, 7168, device=dev, dtype=torch.bfloat16)
+    dist.all_gather_into_tensor(want, local)
+    want = want.view(world, k, Cr, 7168).transpose(0, 1).reshape(ROWS, 7168)
+    got = torch.empty(ROWS, 7168, device=dev, dtype=torch.bfloat16)
+    comm.ag_stage(local, "x")
+    for j in range(k):
+        comm.ag_pull("x", got, j, k, R, 64)
+    assert torch.equal(got, want)
     torch.cuda.synchronize()
     dist.destroy_process_group()
 
