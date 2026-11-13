@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright 2026, The FlagOS Contributors.
 """Triton iHC pre/post kernels for HY V4.
 
 Adapted from the SGLang HY V4 implementation:
