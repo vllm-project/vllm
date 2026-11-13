@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
-use super::streaming::StreamedResponseHandler;
+use super::streaming::{StreamedResponseHandler, sse_data};
 use super::{
     CompletionChunk, NO_VALID_CHUNK_ERROR, RequestFuncInput, RequestFuncOutput, build_headers,
     update_server_metrics,
@@ -104,9 +104,7 @@ impl OpenAICompletionsBackend {
                             // Take the data: line of each event, which may carry other
                             // fields (Dynamo sends "event: message\ndata: {...}").
                             // Comments and other events without data are skipped.
-                            let Some(chunk) =
-                                message.lines().find_map(|l| l.strip_prefix("data: "))
-                            else {
+                            let Some(chunk) = sse_data(message) else {
                                 continue;
                             };
 
