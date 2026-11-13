@@ -13,8 +13,8 @@ Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
 of every parameter flagged `fill_on_reload`. `begin` zero-fills each such
 tensor this model owns whole, as its checkpoint-layout view (padding the
-loaders skip); a tensor shared with another model (draft and target) is
-zeroed only by its owner's `begin`.
+loaders skip or fill, and a load plan skips loader fills); a tensor shared
+with another model (draft and target) is zeroed only by its owner's `begin`.
 """
 
 from collections.abc import Iterator
@@ -221,7 +221,8 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
         if getattr(t, "fill_on_reload", False):
-            # Reset padding the loaders skip; erases the checkpoint region too.
+            # Reset padding: loaders skip it or fill it, and a load plan skips
+            # loader fills. Erases the checkpoint region too.
             t.data.zero_()
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)

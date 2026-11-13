@@ -815,7 +815,8 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
                 set_weight_attrs(
                     param, {"weight_loader_numel": param[:-padding_size].numel()}
                 )
-                # direct reload zero-fills it at begin: loaders skip the padding
+                # The loader zeroes the padding too, but a load plan skips loader
+                # fills: direct reload zero-fills it at begin instead.
                 param.fill_on_reload = True
 
     def _zero_output_padding(self, param: torch.Tensor) -> None:
