@@ -1321,6 +1321,7 @@ def test_drafter_uses_the_kernel_block_size_the_cache_was_allocated_with(
         attn_vllm_config=vllm_config,
         device="cpu",
         draft_attn_layer_names={"draft"},
+        speculative_config=SimpleNamespace(prefill_context_kv_only=False),
         _configure_decode_metadata_update=lambda: None,
     )
     DraftModelSpeculator.set_attn(
