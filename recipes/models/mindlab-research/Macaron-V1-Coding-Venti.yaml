@@ -240,7 +240,6 @@ guide: |
 
   - **`--max-model-len`** — raise toward the 1M window when KV-cache headroom allows; lower on OOM.
   - **`--max-num-seqs 32`** — the main knob for fitting long context under concurrency.
-  - **`--gpu-memory-utilization 0.80`** — leaves ROCm runtime headroom for MTP graph capture.
 
   On a **B300** node, on-the-fly FP8 trades a negligible accuracy drop for a large KV-cache
   headroom gain:

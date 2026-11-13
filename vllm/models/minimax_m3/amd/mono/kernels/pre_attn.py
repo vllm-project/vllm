@@ -23,12 +23,11 @@ layer. The numerical contracts (reduction orders, where values round to bf16)
 follow the aiter kernels the original path uses; see each stage.
 """
 
-import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import Int32, Int64, T
+from flydsl.expr.typing import T
 
 from vllm.models.minimax_m3.amd.mono import config as mono_config
 from vllm.models.minimax_m3.amd.mono.config import (
@@ -38,7 +37,6 @@ from vllm.models.minimax_m3.amd.mono.config import (
     LOCAL_Q_HEADS,
     MAX_QKV_ROWS,
     MAX_TOKENS,
-    ONE_INDEX_HEAD,
     PAGE16,
     ROTARY_DIM,
     THREADS,
@@ -58,8 +56,6 @@ from vllm.models.minimax_m3.amd.mono.kernels.common import (
     div_rn,
     fp8_pack4,
     hw_rsq,
-    kernel_symbol,
-    memrealtime,
     rsrc,
     traced,
     uniform,
@@ -67,7 +63,6 @@ from vllm.models.minimax_m3.amd.mono.kernels.common import (
 )
 from vllm.models.minimax_m3.amd.mono.kernels.index_score import (
     emit_index_scores,
-    index_scale_log2e,
     step_rows,
 )
 
@@ -716,187 +711,3 @@ def emit_k1(
 
 
 TL_POINTS = 8  # timeline stamps per CTA
-
-
-def build_pre_attn_kernel(
-    eps: float,
-    sm_scale: float,
-    init_blocks: int,
-    local_blocks: int,
-    tokens: int = 1,
-    timeline: bool = False,
-    heads: IndexHeads = ONE_INDEX_HEAD,
-):
-    """`@flyc.jit` launcher of K1 for this model's RMSNorm epsilon, attention
-    scale and sparse pinned blocks, a decode batch of `tokens` (<= MAX_TOKENS)
-    rows and the fused projection's index q `heads`."""
-    assert 1 <= tokens <= MAX_TOKENS
-    index_scale = index_scale_log2e(sm_scale)
-
-    @fx.struct
-    class Smem:
-        # FP8 activations, natural k order, one row per token
-        x8: fx.Array[fx.Int32, tokens * HIDDEN // 4, 16]
-        red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        tls: fx.Array[fx.Int64, TL_POINTS if timeline else 1, 16]  # timeline stamps
-        # every token's index q for the scorers, bf16 pairs
-        qs: fx.Array[fx.Float32, HEAD_DIM // 2 * tokens * heads.count, 16]
-
-    kernel_name = kernel_symbol(
-        "minimax_m3_pre_attn",
-        s=tokens,
-        ib=init_blocks,
-        lb=local_blocks,
-        ih=heads.count,
-        io=heads.own,
-        tl=timeline,
-        kps=mono_config.KV_PAGE_STRIDE,
-        sks=mono_config.STATIC_KV_SCALE,
-    )
-
-    # the JIT cache key holds the kernel's scalar closure values, not objects: the
-    # index heads go in as ints (a shared cache otherwise serves one rank's build
-    # to every rank)
-    ih_count, ih_own = heads.count, heads.own
-
-    @flyc.kernel(name=kernel_name, known_block_size=[THREADS, 1, 1])
-    def pre_attn_kernel(
-        ar: Int64,
-        res: Int64,
-        h_out: Int64,
-        g_in: Int64,
-        w_qkv: Int64,
-        s_qkv: Int64,
-        g_q: Int64,
-        g_k: Int64,
-        g_iq: Int64,
-        g_ik: Int64,
-        cos_sin: Int64,
-        positions: Int64,
-        slot_mapping: Int64,
-        k_cache: Int64,
-        v_cache: Int64,
-        k_scale: Int64,
-        v_scale: Int64,
-        index_cache: Int64,
-        q_out: Int64,
-        iq_out: Int64,
-        block_table: Int64,
-        seq_lens: Int64,
-        bt_width: Int32,
-        q_len: Int32,
-        iscore: Int64,
-        scratch: Int64,
-        step: Int64,
-        layer: Int32,
-        tl: Int64,
-    ):
-        tid = fx.thread_idx.x
-        bid = fx.block_idx.x
-        lane = tid % 64
-        wave = tid // 64
-        lds = fx.SharedAllocator().allocate(Smem).peek()
-        x8 = lds.x8.ptr
-        red = lds.red.ptr
-        tls = lds.tls.ptr
-        qs = lds.qs.ptr
-
-        def stamp(k):
-            """`timeline`: s_memrealtime (100 MHz) of this CTA passing point k, kept
-            in LDS until the kernel ends."""
-            # The compile-time and traced conditions cannot share one ``and``.
-            if const_expr(timeline):  # noqa: SIM102
-                if tid == 0:
-                    fx.ptr_store(memrealtime(), tls + k)
-
-        if const_expr(timeline):  # noqa: SIM102
-            if tid < TL_POINTS:  # same wave as the stamping thread: ordered
-                fx.ptr_store(fx.Int64(0), tls + tid)
-        stamp(0)
-        emit_k1(
-            tid, bid, lane, wave, x8, red, qs, stamp, step, layer, eps, index_scale,
-            tokens, q_len, init_blocks, local_blocks, IndexHeads(ih_count, ih_own),
-            (
-                ar, res, h_out, g_in, w_qkv, s_qkv, g_q, g_k, g_iq, g_ik,
-                cos_sin, positions, slot_mapping, k_cache, v_cache, k_scale,
-                v_scale, index_cache, q_out,
-                iq_out, block_table, seq_lens, iscore, scratch,
-            ),
-            bt_width,
-        )  # fmt: skip
-        if const_expr(timeline):  # noqa: SIM102
-            if tid < TL_POINTS:
-                fx.generic_store(
-                    fx.inttoptr(
-                        fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
-                        tl + fx.Int64((bid * TL_POINTS + tid) * 8),
-                    ),
-                    fx.ptr_load(tls + tid),
-                )
-
-    @flyc.jit
-    def launch_pre_attn(
-        ar: Int64,
-        res: Int64,
-        h_out: Int64,
-        g_in: Int64,
-        w_qkv: Int64,
-        s_qkv: Int64,
-        g_q: Int64,
-        g_k: Int64,
-        g_iq: Int64,
-        g_ik: Int64,
-        cos_sin: Int64,
-        positions: Int64,
-        slot_mapping: Int64,
-        k_cache: Int64,
-        v_cache: Int64,
-        k_scale: Int64,
-        v_scale: Int64,
-        index_cache: Int64,
-        q_out: Int64,
-        iq_out: Int64,
-        block_table: Int64,
-        seq_lens: Int64,
-        bt_width: Int32,
-        q_len: Int32,
-        iscore: Int64,
-        scratch: Int64,
-        step: Int64,
-        layer: Int32,
-        tl: Int64,
-        stream: fx.Stream = _CURRENT_STREAM,
-    ):
-        pre_attn_kernel(
-            ar,
-            res,
-            h_out,
-            g_in,
-            w_qkv,
-            s_qkv,
-            g_q,
-            g_k,
-            g_iq,
-            g_ik,
-            cos_sin,
-            positions,
-            slot_mapping,
-            k_cache,
-            v_cache,
-            k_scale,
-            v_scale,
-            index_cache,
-            q_out,
-            iq_out,
-            block_table,
-            seq_lens,
-            bt_width,
-            q_len,
-            iscore,
-            scratch,
-            step,
-            layer,
-            tl,
-        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
-
-    return launch_pre_attn
