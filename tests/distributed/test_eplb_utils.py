@@ -199,6 +199,9 @@ def test_async_rearrangement_interval_starts_after_last_layer_commit(dist_init):
     )
     model_state.model.num_moe_layers = num_layers
     model_state.model.num_logical_experts = num_experts
+    model_state.model.num_physical_experts = num_experts
+    model_state.model.num_expert_groups = 1
+    model_state.model.expert_weights = [[] for _ in range(num_layers)]
     model_state.rebalanced = False
     model_state.pending_result = None
     model_state.expert_load_pass = torch.zeros(
@@ -239,6 +242,8 @@ def test_async_rearrangement_interval_starts_after_last_layer_commit(dist_init):
             )
             next_layer = (next_layer + 1) % num_layers
         state.step()
+        if step == last_commit_step:
+            assert model_state.num_committed_layers == num_layers
         if model_state.rebalanced and state.expert_rearrangement_step == 0:
             rearrange_steps.append(step)
 
