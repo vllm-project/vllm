@@ -2,11 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import ipaddress
+import json
 import os
 import socket
 import sys
 import tempfile
+import threading
+import time
 import warnings
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
 from collections.abc import (
     Generator,
     Sequence,
@@ -230,38 +238,131 @@ def get_open_ports_list(count: int = 5) -> list[int]:
     return list(ports_set)
 
 
+_PORT_ALLOC_LOCK = threading.RLock()
+_PORT_RESERVATION_TTL_S = 15.0
+_PORT_MIN_EPHEMERAL_WRAP = 1024
+
+
+@contextlib.contextmanager
+def _port_reservation_state() -> Generator[set[int], None, None]:
+    """Coordinate short-lived port reservations across threads and processes.
+
+    Without shared reservation state, concurrent vLLM startups test-bind and
+    immediately close the same port before initializing TCPStore/ZMQ, causing
+    [Errno 98] Address already in use races (#43206).
+    """
+    with _PORT_ALLOC_LOCK:
+        if fcntl is None:
+            yield set()
+            return
+
+        rpc_dir = envs.VLLM_RPC_BASE_PATH
+        lock_path = os.path.join(rpc_dir, "vllm_port_reservations.lock")
+        fd = -1
+        locked = False
+        try:
+            os.makedirs(rpc_dir, exist_ok=True)
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(lock_path, flags, 0o600)
+            if hasattr(os, "getuid") and os.fstat(fd).st_uid != os.getuid():
+                raise PermissionError(
+                    f"Refusing port lock file {lock_path!r} not owned by current user"
+                )
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+
+            now = time.monotonic()
+            # Keep wall-clock timestamp so expired entries clear across processes.
+            wall_now = time.time()
+            raw = os.pread(fd, 1 << 16, 0)
+            data: dict[str, float] = {}
+            if raw:
+                try:
+                    loaded = json.loads(raw.decode("utf-8"))
+                    if isinstance(loaded, dict):
+                        data = {
+                            str(k): float(v)
+                            for k, v in loaded.items()
+                            if isinstance(v, (int, float)) and float(v) > wall_now
+                        }
+                except (ValueError, UnicodeDecodeError):
+                    data = {}
+
+            reserved = {int(k) for k in data if k.isdigit()}
+            before = set(reserved)
+            yield reserved
+
+            added = reserved - before
+            if added or len(data) != len(before):
+                expiry = wall_now + _PORT_RESERVATION_TTL_S
+                for p in added:
+                    data[str(p)] = expiry
+                encoded = json.dumps(data).encode("utf-8")
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.ftruncate(fd, 0)
+                os.write(fd, encoded)
+            _ = now
+        except OSError as exc:
+            logger.debug(
+                "Falling back to uncoordinated port scan (%s): %s", lock_path, exc
+            )
+            yield set()
+        finally:
+            if fd >= 0:
+                if locked:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+
+
 def _get_open_port(
     start_port: int | None = None,
     max_attempts: int | None = None,
 ) -> int:
     start_port = start_port if start_port is not None else envs.VLLM_PORT
-    port = start_port
-    if port is not None:
-        attempts = 0
-        while True:
+    with _port_reservation_state() as reserved:
+        if start_port is not None:
+            port = start_port
+            attempts = 0
+            limit = max_attempts if max_attempts is not None else 65536
+            while attempts < limit:
+                if port > 65535:
+                    port = _PORT_MIN_EPHEMERAL_WRAP
+                if port not in reserved:
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.bind(("", port))
+                            reserved.add(port)
+                            return port
+                    except OSError:
+                        logger.info(
+                            "Port %d is already in use, trying port %d",
+                            port,
+                            port + 1,
+                        )
+                port += 1
+                attempts += 1
+            raise RuntimeError(
+                f"Could not find open port after {limit} "
+                f"attempts starting from port {start_port}"
+            )
+
+        for _ in range(64):
+            # try ipv4
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("", port))
-                    return port
+                    s.bind(("", 0))
+                    port = s.getsockname()[1]
             except OSError:
-                port += 1  # Increment port number if already in use
-                logger.info("Port %d is already in use, trying port %d", port - 1, port)
-            attempts += 1
-            if max_attempts is not None and attempts >= max_attempts:
-                raise RuntimeError(
-                    f"Could not find open port after {max_attempts} "
-                    f"attempts starting from port {start_port}"
-                )
-    # try ipv4
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
-    except OSError:
-        # try ipv6
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
+                # try ipv6
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+                    s.bind(("", 0))
+                    port = s.getsockname()[1]
+            if port not in reserved:
+                reserved.add(port)
+                return port
+        return port
 
 
 def find_process_using_port(port: int) -> psutil.Process | None:
