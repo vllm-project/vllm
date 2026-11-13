@@ -139,7 +139,11 @@ class PPTransportSchema:
                 copy_rows = (
                     num_rows
                     if sharded or num_received_tokens is None
-                    else num_received_tokens
+                    else (
+                        binding.num_rows(num_received_tokens, self.tp_size)
+                        if binding is not None
+                        else num_received_tokens
+                    )
                 )
                 if sharded and source.shape[0] != num_rows:
                     raise ValueError(

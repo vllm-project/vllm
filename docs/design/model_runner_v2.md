@@ -272,6 +272,8 @@ integer tensor and its alignment parameter entirely in its own package:
 ```python
 from dataclasses import dataclass
 
+import torch
+
 from vllm.distributed.pp_transport.schema import PPTransportSchema, PPTransportTensor
 
 

@@ -303,3 +303,15 @@ def test_registration_is_model_local_and_sealed_before_execution():
     transport.make_empty_intermediate_tensors(8, torch.float32, torch.device("cpu"))
     with pytest.raises(RuntimeError, match="after buffer initialization"):
         transport.register_tensor("late_field", PPTransportTensor((3,)))
+
+
+def test_full_downstream_field_copies_descriptor_padding():
+    transport = PPTransportSchema({"custom": AlignedTensor((2,))})
+    buffers = transport.make_empty_intermediate_tensors(
+        8, torch.float32, torch.device("cpu")
+    )
+    source = torch.arange(8, dtype=torch.float32).view(4, 2)
+    inputs = transport.prepare_inputs(
+        buffers, 4, IntermediateTensors({"custom": source}), num_received_tokens=3
+    )
+    torch.testing.assert_close(inputs["custom"], source, rtol=0, atol=0)
