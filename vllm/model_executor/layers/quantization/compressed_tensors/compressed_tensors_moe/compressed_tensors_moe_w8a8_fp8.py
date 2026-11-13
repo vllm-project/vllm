@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 
 import torch
 from compressed_tensors.quantization import (
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    dequantize_block_fp8_moe_weights,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape_moe,
@@ -253,6 +255,21 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized block-FP8 experts, for online
+        requantization. Other FP8 weight strategies are not supported."""
+        return dequantize_block_fp8_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            num_w13_shards=self.moe.w13_num_shards,
+            weight_block_size=self.weight_block_size,
+            out_dtype=layer.orig_dtype,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Allow for accessing weights and scales in standard way.

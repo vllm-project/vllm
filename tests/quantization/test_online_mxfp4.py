@@ -269,163 +269,6 @@ def test_online_mxfp4_tp_weight_quant_matches_unsharded(tp_size: int):
         )
 
 
-def _select_moe_backend(moe_backend: MoEBackend, monkeypatch) -> None:
-    """Make the MoE oracle pick `moe_backend` on the current host."""
-    if moe_backend == "aiter":
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
-        rocm_aiter_ops.refresh_env_variables()
-
-        if current_platform.is_cuda():
-            pytest.skip(
-                "mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4 requires "
-                "rocm_aiter_ops in weight conversion, not compatible on cuda"
-            )
-    elif moe_backend == "emulation":
-        # `OCP_MXQuantizationEmulationTritonExperts.is_supported_config` gates
-        # on `has_quark()`, but its weight processing does not require it.
-        monkeypatch.setattr(
-            "vllm.model_executor.layers.fused_moe.experts."
-            "ocp_mx_emulation_moe.has_quark",
-            lambda: True,
-        )
-
-
-def _naive_block_fp8_dequant(
-    weight: torch.Tensor, scale_inv: torch.Tensor, block: list[int]
-) -> torch.Tensor:
-    """Reference `[E, N, K]` block-FP8 -> bf16, one block at a time."""
-    bn, bk = block
-    out = torch.empty(weight.shape, dtype=torch.float32, device=weight.device)
-    for e in range(weight.shape[0]):
-        for i in range(0, weight.shape[1], bn):
-            for j in range(0, weight.shape[2], bk):
-                out[e, i : i + bn, j : j + bk] = (
-                    weight[e, i : i + bn, j : j + bk].float()
-                    * scale_inv[e, i // bn, j // bk]
-                )
-    return out.to(torch.bfloat16)
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
-)
-# The emulation backend is not an FP8 MoE backend, so the FP8 source needs AITER.
-@pytest.mark.parametrize("moe_backend", ["aiter"])
-def test_online_mxfp4_moe_requantizes_block_fp8_checkpoint(
-    moe_backend: MoEBackend, default_vllm_config, dist_init, monkeypatch
-):
-    """A block-FP8 checkpoint requantized to MXFP4 by online quantization
-    (`--quantization-config '{"moe": "mxfp4"}'`, which replaced
-    `VLLM_FP8_MOE_REQUANT=mxfp4`) yields the same MXFP4 weights as online
-    quantization of the dequantized bf16 experts."""
-    from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
-
-    _select_moe_backend(moe_backend, monkeypatch)
-    default_vllm_config.model_config = ModelConfig()
-
-    num_experts, hidden_size, intermediate_size = 4, 256, 256
-    block = [128, 128]
-    device = current_platform.device_type
-
-    def make_layer(prefix: str) -> RoutedExperts:
-        runner = FusedMoEFactory(
-            num_experts=num_experts,
-            top_k=2,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            prefix=prefix,
-        )
-        layer = runner.routed_experts
-        layer.moe_config.moe_backend = moe_backend
-        return layer
-
-    torch.manual_seed(0)
-    with torch.device(device):
-        source_layer = make_layer("fp8_source_layer")
-        reference_layer = make_layer("bf16_layer")
-
-        # The FP8 checkpoint method only creates and loads the FP8 parameters.
-        fp8_method = Fp8MoEMethod(Fp8Config(weight_block_size=block), source_layer)
-        online_method = Mxfp4OnlineMoEMethod(moe=source_layer.moe_config)
-        online_method.set_requantization_source(fp8_method)
-        online_method.create_weights(
-            layer=source_layer,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            intermediate_size_per_partition=intermediate_size,
-            params_dtype=torch.bfloat16,
-        )
-        assert not online_method.uses_meta_device
-        assert source_layer.w13_weight.dtype == torch.float8_e4m3fn
-
-        w13_fp8 = (
-            torch.randn(
-                num_experts, 2 * intermediate_size, hidden_size, dtype=torch.bfloat16
-            )
-            .clamp(-4, 4)
-            .to(torch.float8_e4m3fn)
-        )
-        w2_fp8 = (
-            torch.randn(
-                num_experts, hidden_size, intermediate_size, dtype=torch.bfloat16
-            )
-            .clamp(-4, 4)
-            .to(torch.float8_e4m3fn)
-        )
-        # Distinct scales per expert and block expose block/shard mix-ups.
-        w13_scale = torch.exp2(
-            torch.randint(
-                -6, 3, source_layer.w13_weight_scale_inv.shape, dtype=torch.float32
-            )
-        ) * (1 + torch.rand(source_layer.w13_weight_scale_inv.shape))
-        w2_scale = torch.exp2(
-            torch.randint(
-                -6, 3, source_layer.w2_weight_scale_inv.shape, dtype=torch.float32
-            )
-        ) * (1 + torch.rand(source_layer.w2_weight_scale_inv.shape))
-        source_layer.w13_weight.data.copy_(w13_fp8)
-        source_layer.w2_weight.data.copy_(w2_fp8)
-        source_layer.w13_weight_scale_inv.data.copy_(w13_scale)
-        source_layer.w2_weight_scale_inv.data.copy_(w2_scale)
-        online_method.process_weights_after_loading(source_layer)
-
-        # The source parameters are released once requantized.
-        assert not hasattr(source_layer, "w13_weight_scale_inv")
-        assert not hasattr(source_layer, "w2_weight_scale_inv")
-
-        reference_method = Mxfp4OnlineMoEMethod(moe=reference_layer.moe_config)
-        reference_method.create_weights(
-            layer=reference_layer,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            intermediate_size_per_partition=intermediate_size,
-            params_dtype=torch.bfloat16,
-        )
-        replace_parameter(
-            reference_layer,
-            "w13_weight",
-            _naive_block_fp8_dequant(w13_fp8, w13_scale, block),
-        )
-        replace_parameter(
-            reference_layer,
-            "w2_weight",
-            _naive_block_fp8_dequant(w2_fp8, w2_scale, block),
-        )
-        reference_method.process_weights_after_loading(reference_layer)
-
-    assert online_method.mxfp4_backend == reference_method.mxfp4_backend
-    assert_quantized_weights_equal(
-        reference_layer,
-        source_layer,
-        keys=("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"),
-        packed_weight_keys=("w13_weight", "w2_weight"),
-    )
-
-
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
 )
@@ -458,7 +301,27 @@ def test_online_mxfp4_moe_matches_quark(
     for the two paths to agree, since Quark allocates its padding with
     `torch.zeros`.
     """
-    _select_moe_backend(moe_backend, monkeypatch)
+    if moe_backend == "aiter":
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
+        rocm_aiter_ops.refresh_env_variables()
+
+        if current_platform.is_cuda():
+            pytest.skip(
+                "mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4 requires "
+                "rocm_aiter_ops in weight conversion, not compatible on cuda"
+            )
+    elif moe_backend == "emulation":
+        # `OCP_MXQuantizationEmulationTritonExperts.is_supported_config` gates
+        # on `has_quark()`, but its weight processing does not require it.
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.fused_moe.experts."
+            "ocp_mx_emulation_moe.has_quark",
+            lambda: True,
+        )
 
     default_vllm_config.model_config = ModelConfig()
 

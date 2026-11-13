@@ -10,6 +10,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -43,6 +44,9 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
+)
+from vllm.model_executor.layers.quantization.online.legacy_env import (
+    muse_moe_online_quant_args,
 )
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineMoEMethod,
@@ -692,7 +696,14 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
         moe_config: FusedMoEConfig,
     ) -> FusedMoEMethodBase:
         if quant_config is None:
-            return MuseSparkUnquantizedFusedMoE(moe_config)
+            # Deprecated VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: same as the equivalent
+            # `--quantization-config`.
+            args = muse_moe_online_quant_args(
+                get_current_vllm_config().model_config.hf_text_config.num_hidden_layers
+            )
+            if args is None:
+                return MuseSparkUnquantizedFusedMoE(moe_config)
+            quant_config = OnlineQuantizationConfig(args)
         if isinstance(quant_config, OnlineQuantizationConfig):
             return self._get_online_quant_method(prefix, quant_config, moe_config)
         if not isinstance(quant_config, QuarkConfig):

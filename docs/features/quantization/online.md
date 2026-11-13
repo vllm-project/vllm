@@ -142,6 +142,7 @@ Currently supported combinations are:
 | Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized block-scaled FP8 MoE (`fp8`, compressed-tensors, Quark) | any online MoE method | Target-specific hardware requirements; per-tensor and per-channel FP8 MoE are not supported |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
@@ -158,6 +159,19 @@ for example compressed-tensors NVFP4 experts to online MXFP4:
 ```bash
 vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
   --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
+```
+
+Block-scaled FP8 MoE checkpoints can likewise be re-quantized, for example to MXFP4 experts with MXFP4 activations (W4A4), which halves the expert bytes:
+
+```bash
+vllm serve <block-fp8-model> --quantization-config '{"moe":"mxfp4"}'
+```
+
+For online MXFP4 MoE, `activation: null` lets the MoE backend pick its own activation handling instead of MXFP4 activations, for example on ROCm gfx950:
+
+```bash
+vllm serve <block-fp8-model> \
+  --quantization-config '{"moe":{"weight":"mxfp4","activation":null}}'
 ```
 
 !!! info

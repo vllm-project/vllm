@@ -132,7 +132,8 @@ variants:
       amd:
         extra_args:
           # FP8 → MXFP4 routed experts, re-quantized at load by online
-          # quantization. `activation: null` = a8w4 (FP8 activations);
+          # quantization. `activation: null` = the AITER backend's default,
+          # a8w4 (its FlyDSL kernels quantize activations to FP8 per token);
           # `{"moe": "mxfp4"}` (MXFP4 activations, a4w4) measured level with
           # it at TP4.
           - "--quantization-config"

@@ -1060,3 +1060,29 @@ def test_muse_online_quantization_rejects_other_formats() -> None:
         experts._get_online_quant_method(
             "model.layers.5.feed_forward.experts", online_config, _moe_config()
         )
+
+
+def test_muse_deprecated_online_quant_env_redirects_to_quantization_config(
+    monkeypatch, default_vllm_config
+) -> None:
+    default_vllm_config.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(num_hidden_layers=62)
+    )
+    _fake_online_mxfp4_init(monkeypatch, Mxfp4MoeBackend.AITER_MXFP4_MXFP4)
+    experts = object.__new__(MuseSparkRoutedExperts)
+    config = _moe_config(parallel_config=_parallel_config(tp_size=8))
+    prefix = "model.layers.{}.feed_forward.experts"
+
+    monkeypatch.delenv("VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", raising=False)
+    method = experts._get_quant_method(prefix.format(5), None, config)
+    assert type(method) is MuseSparkUnquantizedFusedMoE
+
+    monkeypatch.setenv("VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "mxfp4")
+    # The first and last decoder layers stay BF16.
+    for layer, expected in (
+        (0, MuseSparkUnquantizedFusedMoE),
+        (5, MuseSparkOnlineMXFP4FusedMoE),
+        (61, MuseSparkUnquantizedFusedMoE),
+    ):
+        method = experts._get_quant_method(prefix.format(layer), None, config)
+        assert type(method) is expected
