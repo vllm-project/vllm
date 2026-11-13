@@ -101,7 +101,7 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
         hidden_states = self.hidden_norm(hidden_states)
         return hidden_states, residual
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
         embeds: torch.Tensor,
@@ -159,7 +159,9 @@ class Qwen3Eagle3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
         # Get drafter's quantization config
@@ -210,6 +212,7 @@ class Qwen3Eagle3Model(nn.Module):
                 self.config, "target_hidden_size", self.config.hidden_size
             )
             self.fc_input_size = target_hidden_size * num_aux_features
+            self.input_norm: RMSNorm | None
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
                     self.fc_input_size,
@@ -282,7 +285,9 @@ class Qwen3Eagle3Model(nn.Module):
 class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         # Ensure draft_vocab_size is set
         # default to the base vocab size when absent
         if getattr(self.config, "draft_vocab_size", None) is None:
@@ -318,15 +323,6 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
         else:
             self.draft_id_to_target_id = None
 
-        self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
-
-        if self.use_parallel_drafting:
-            self.register_buffer(
-                "mask_hidden",
-                torch.zeros(1, self.model.fc_input_size),
-                persistent=False,
-            )
-
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -335,7 +331,7 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -394,7 +390,6 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
-        includes_mask_hidden = False
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
@@ -402,16 +397,11 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
             elif "mask_hidden" in name:
-                # Load mask_hidden directly into buffer
-                if not self.use_parallel_drafting:
-                    logger.warning(
-                        "mask_hidden found in weights but "
-                        "model is not configured for parallel drafting. "
-                        "Skipping loading mask_hidden."
-                    )
-                    continue
-                self.mask_hidden.copy_(loaded_weight.view(1, -1))
-                includes_mask_hidden = True
+                # P-EAGLE (parallel drafting) weight; not supported.
+                logger.warning(
+                    "mask_hidden found in weights but parallel drafting is "
+                    "not supported for EAGLE-3. Skipping loading mask_hidden."
+                )
                 continue
             elif "lm_head" not in name:
                 name = "model." + name
@@ -419,13 +409,6 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
-
-        if not includes_mask_hidden and self.use_parallel_drafting:
-            raise ValueError(
-                "mask_hidden not found in weights but "
-                "model is configured for parallel drafting. "
-                "Please provide mask_hidden in the weights."
-            )
 
         orig_to_new_substr = {"mask_hidden": None}
         if not includes_draft_id_mapping:

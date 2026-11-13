@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import regex as re
 
 import vllm.envs as envs
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -23,6 +22,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
@@ -39,21 +39,21 @@ logger = init_logger(__name__)
 
 
 class ToolSchema(TypedDict):
-    """A tool as seen by this parser (built by the wrapper from ``request.tools``)."""
+    """A tool as seen by this parser (built by the wrapper from `request.tools`)."""
 
     name: str
     parameters: dict[str, Any] | None  # JSON Schema, or None
 
 
 class ToolCallDict(TypedDict):
-    """One extracted tool call. ``arguments`` is a JSON-encoded string."""
+    """One extracted tool call. `arguments` is a JSON-encoded string."""
 
     name: str
     arguments: str
 
 
 class ExtractResult(TypedDict):
-    """Return of ``extract_tool_calls`` (non-streaming)."""
+    """Return of `extract_tool_calls` (non-streaming)."""
 
     tools_called: bool
     content: str | None
@@ -63,8 +63,8 @@ class ExtractResult(TypedDict):
 class StreamToolCall(TypedDict):
     """One streaming tool-call delta.
 
-    ``new`` is True only on the chunk that first emits this tool's name -- the
-    wrapper mints an id + sets type on that chunk only. ``arguments`` is the
+    `new` is True only on the chunk that first emits this tool's name -- the
+    wrapper mints an id + sets type on that chunk only. `arguments` is the
     incremental JSON diff (or None).
     """
 
@@ -75,10 +75,10 @@ class StreamToolCall(TypedDict):
 
 
 class StreamDelta(TypedDict):
-    """Return of ``extract_tool_calls_streaming``.
+    """Return of `extract_tool_calls_streaming`.
 
     A single engine delta can carry content plus every tool call that was
-    drained from the buffer (batched decode), so ``tool_calls`` is not limited
+    drained from the buffer (batched decode), so `tool_calls` is not limited
     to one entry.
     """
 
@@ -95,30 +95,27 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
         tokenizer: Tokenizer of the served checkpoint.
 
     Returns:
-        The suffix including its leading colon (e.g. ``":6124c78e"``), or ``""``
+        The suffix including its leading colon (e.g. `":6124c78e"`), or `""`
         when the checkpoint uses unsuffixed tokens.
 
     Raises:
         RuntimeError: The tokenizer declares the structural tokens through
-            ``model_specific_special_tokens``, which transformers 5 no longer
+            `model_specific_special_tokens`, which transformers 5 no longer
             round-trips.
 
     """
-    import transformers
-
-    if int(transformers.__version__.split(".")[0]) >= 5:
-        init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
-        think_begin_as_special = init_kwargs.get(
-            "model_specific_special_tokens", {}
-        ).get("think_begin_token", "")
-        if think_begin_as_special:
-            raise RuntimeError(
-                "This checkpoint declares HYV4 structural tokens (think_begin_token"
-                "/toolcalls_begin_token/argkey_begin_token) in "
-                "tokenizer_config.json, which transformers 5 no longer supports. "
-                "Remove those fields and keep the tokens in the tokenizer's own "
-                "token definitions so the suffix can be read from the vocab."
-            )
+    init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
+    think_begin_as_special = init_kwargs.get("model_specific_special_tokens", {}).get(
+        "think_begin_token", ""
+    )
+    if think_begin_as_special:
+        raise RuntimeError(
+            "This checkpoint declares HYV4 structural tokens (think_begin_token"
+            "/toolcalls_begin_token/argkey_begin_token) in "
+            "tokenizer_config.json, which transformers 5 no longer supports. "
+            "Remove those fields and keep the tokens in the tokenizer's own "
+            "token definitions so the suffix can be read from the vocab."
+        )
 
     structural_token_re = re.compile(
         r"<(?:think|tool_calls|tool_call|arg_key|arg_value)(:[^\s>]+)?>"
@@ -206,7 +203,7 @@ def _get_schema_options(arg_schema: dict[str, Any]) -> list[dict[str, Any]]:
     - oneOf  → return the oneOf list
     - fallback → [{"type": "string"}]
 
-    Note: single ``type`` has the highest priority.
+    Note: single `type` has the highest priority.
     """
     if "type" in arg_schema:
         type_val = arg_schema["type"]
@@ -355,9 +352,9 @@ class HYV4ToolExtractor:
     delegated to the module-level utilities above.
 
     Streaming has two entry paths sharing one incremental argument parser,
-    selected by the ``guided`` flag of :meth:`extract_tool_calls_streaming`:
+    selected by the `guided` flag of `extract_tool_calls_streaming`:
     normal / auto tool choice detects markers on atomic token ids so ordinary
-    ``<`` in content is never withheld, while structural-tag guided decoding
+    `<` in content is never withheld, while structural-tag guided decoding
     detects them on the string level because the grammar may split a marker
     across sub-word tokens.
     """
@@ -591,11 +588,11 @@ class HYV4ToolExtractor:
         """Consume one engine delta and emit content / tool-call deltas.
 
         Two entry paths share the same incremental argument parser:
-        - ``guided=False`` (normal / auto tool choice): the structural markers
+        - `guided=False` (normal / auto tool choice): the structural markers
           arrive as atomic tokenizer tokens, so detection is done on token ids
-          and ordinary ``<`` in model content is never withheld.
-        - ``guided=True`` (structural-tag constrained decoding): the grammar
-          only constrains strings, so ``<tool_calls...>`` may be split across
+          and ordinary `<` in model content is never withheld.
+        - `guided=True` (structural-tag constrained decoding): the grammar
+          only constrains strings, so `<tool_calls...>` may be split across
           sub-word tokens and must be detected on the string level.
 
         Args:
@@ -788,11 +785,11 @@ class HYV4ToolExtractor:
         Strategy:
         - Track completed args and emit each one as a JSON fragment.
         - For string-typed args, stream the value character-by-character.
-        - Withhold the closing ``}`` until ``</tool_call>`` is seen.
+        - Withhold the closing `}` until `</tool_call>` is seen.
 
         We build JSON manually via fragments rather than using json.dumps
         with a cursor, because json.dumps of partial-vs-full string values
-        produces incompatible prefixes (e.g. ``""}`` vs ``"Hello"}``).
+        produces incompatible prefixes (e.g. `""}` vs `"Hello"}`).
         """
         buf = self._buffer
         is_complete = self.tool_call_end_token in buf
@@ -808,7 +805,7 @@ class HYV4ToolExtractor:
         # --- scan all fully closed kv pairs ---
         arg_pairs = self.func_args_regex.findall(args_text)
         for key, value in arg_pairs:
-            key = key.strip()
+            # Property names are exact schema keys, including whitespace.
             if key not in self._completed_args:
                 self._completed_args[key] = _parse_value(
                     value, self._streaming_tool_name or "", key, tools
@@ -830,9 +827,7 @@ class HYV4ToolExtractor:
                 ak_start + len(self.arg_key_start_token),
             )
             if ak_end != -1:
-                partial_key = tail[
-                    ak_start + len(self.arg_key_start_token) : ak_end
-                ].strip()
+                partial_key = tail[ak_start + len(self.arg_key_start_token) : ak_end]
                 self._current_arg_key = partial_key
                 self._current_arg_is_string = _is_only_string_type(
                     self._streaming_tool_name or "",
@@ -963,11 +958,11 @@ def _tools_to_plain(tools) -> list[ToolSchema] | None:
 
 
 class HYV4ToolParser(ToolParser):
-    """vLLM adapter around :class:`HYV4ToolExtractor`.
+    """vLLM adapter around `HYV4ToolExtractor`.
 
     Converts the extractor's plain dicts to vLLM protocol objects, mints
-    tool-call ids, and mirrors ``prev_tool_call_arr`` /
-    ``streamed_args_for_tool`` so the serving layer sees live state.
+    tool-call ids, and mirrors `prev_tool_call_arr` /
+    `streamed_args_for_tool` so the serving layer sees live state.
     """
 
     # HYV4 emits its own <tool_calls>/<tool_call>/<arg_key>/<arg_value>
@@ -999,11 +994,11 @@ class HYV4ToolParser(ToolParser):
     ) -> StructuralTag | None:
         """Build a structural tag matching HYV4's tool tokens.
 
-        Overridden only to pass the per-checkpoint ``token_suffix`` through to
+        Overridden only to pass the per-checkpoint `token_suffix` through to
         the builder; everything else follows the base implementation.
 
         Named (forced) tool choice is constrained with the same structural tag:
-        because ``supports_required_and_named`` is False, required *and* named
+        because `supports_required_and_named` is False, required *and* named
         requests are parsed by the HYV4 extractor, which only recognizes the HYV4
         structural tokens -- the default JSON guided-decoding path would make
         the model emit JSON the extractor silently drops.
@@ -1011,7 +1006,7 @@ class HYV4ToolParser(ToolParser):
         Args:
             request: The request being adjusted.
             reasoning: Whether the grammar also covers the reasoning phase.
-            strict_level: Server-side floor from ``--tool-strict-level``.
+            strict_level: Server-side floor from `--tool-strict-level`.
 
         Returns:
             The structural tag, or None when structural tagging does not apply.
@@ -1065,9 +1060,9 @@ class HYV4ToolParser(ToolParser):
     def _is_guided(request: ChatCompletionRequest) -> bool:
         """Whether a structural tag constrains this request's decoding.
 
-        ``get_structural_tag`` only applies to required / named tool choice and
+        `get_structural_tag` only applies to required / named tool choice and
         the serving layer records the result on the request. A structural tag
-        constrains strings rather than token ids, so the ``<tool_calls>`` marker
+        constrains strings rather than token ids, so the `<tool_calls>` marker
         can arrive split across sub-word tokens and must be detected on the
         string level.
 

@@ -2,11 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import regex
+from transformers import Cosmos3OmniConfig
 
-from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
+from vllm.model_executor.models.qwen3_vl import (
+    Qwen3VLDummyInputsBuilder,
+    Qwen3VLForConditionalGeneration,
+    Qwen3VLMultiModalProcessor,
+    Qwen3VLProcessingInfo,
+)
 from vllm.model_executor.models.utils import WeightsMapper
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
+class Cosmos3ProcessingInfo(Qwen3VLProcessingInfo):
+    def get_hf_config(self) -> Cosmos3OmniConfig:
+        return self.ctx.get_hf_config(Cosmos3OmniConfig)
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen3VLMultiModalProcessor,
+    info=Cosmos3ProcessingInfo,
+    dummy_inputs=Qwen3VLDummyInputsBuilder,
+)
 class Cosmos3ForConditionalGeneration(Qwen3VLForConditionalGeneration):
     # Cosmos3 unified checkpoints store a Qwen3-VL understanding tower
     # alongside a generation tower in a flat key layout. This mapper drops

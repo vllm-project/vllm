@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash sequence-parallel MoE layout.
 
-With DP > 1, TP > 1 and expert parallelism, ``Glm5NextModel`` shards the token
+With DP > 1, TP > 1 and expert parallelism, `Glm5NextModel` shards the token
 dimension across the TP group once at the model entry and every layer runs its
 MLP on that shard. A module that still does tensor-parallel collectives there
 sums the partial results of *different* tokens held by different ranks, so the
-dense MLP of the first ``first_k_dense_replace`` layers must hold replicated
+dense MLP of the first `first_k_dense_replace` layers must hold replicated
 weights and run without any collective, like the shared experts already do.
 """
 
@@ -15,11 +15,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 
 from vllm.model_executor import parameter
 from vllm.model_executor.layers import linear
 from vllm.models.glm5next.common import model as glm_model
-from vllm.transformers_utils.configs.glm5_next import Glm5NextTextConfig
 
 HIDDEN, INTERMEDIATE, TP_SIZE = 8, 16, 2
 

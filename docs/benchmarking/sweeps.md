@@ -88,6 +88,17 @@ vllm bench sweep serve \
 
 By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
 
+You can optionally run an unmeasured warmup before each parameter combination by setting `--warmup-num-prompts`. The warmup result is saved as `warmup.json` for inspection, but is excluded from the measured summary.
+
+You can use `--continue-on-error` to record a failed warmup, benchmark run, or server configuration and continue processing the remaining sweep combinations. Failure details are saved in `.failure.json` files.
+
+Both options are also supported by `vllm bench sweep serve_workload`.
+
+When a sweep stops its server, it terminates workers in the same process group,
+even if the server process has already exited, and waits for the server process
+to be reaped. Workers that detach into a separate process group are outside this
+cleanup scope.
+
 !!! important
     If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
     You can use `--dry-run` to preview the commands to be run.
@@ -157,13 +168,13 @@ Example `--serve-params`:
         "_benchmark_name": "tp1",
         "model": "Qwen/Qwen3-0.6B",
         "tensor_parallel_size": 1,
-        "gpu_memory_utilization": 0.9
+        "max_num_seqs": 128
     },
     {
         "_benchmark_name": "tp2",
         "model": "Qwen/Qwen3-0.6B",
         "tensor_parallel_size": 2,
-        "gpu_memory_utilization": 0.9
+        "max_num_seqs": 128
     }
 ]
 ```

@@ -125,7 +125,7 @@ class VisualTokenizer(torch.nn.Module):
         prefix: str = "",
     ) -> nn.Module:
         model_type = config.backbone_config.model_type
-        if model_type == "aimv2":
+        if model_type == "aimv2_vision_model":
             # No post rms_norm in Ovis2's AIMv2 ViT.
             return AIMv2Model(
                 config=config.backbone_config,

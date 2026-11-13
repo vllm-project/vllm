@@ -71,6 +71,13 @@ def numpy2base64(array: np.ndarray) -> str:
         return pybase64.b64encode(buffer.getbuffer()).decode("ascii")
 
 
+def numpy2tensor(array: np.ndarray) -> torch.Tensor:
+    """Convert NumPy values to a tensor, accepting either byte order."""
+    if not array.dtype.isnative:
+        array = array.astype(array.dtype.newbyteorder("="))
+    return torch.from_numpy(array)
+
+
 def tensor2binary(
     tensor: torch.Tensor,
     embed_dtype: "EmbedDType | MmMetadataDType",

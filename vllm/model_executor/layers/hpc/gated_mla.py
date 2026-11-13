@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Enablement gate for the HPC fused gated-MLA GEMM.
 
-``hpc.gated_mla_gemm`` fuses the MLA output gating -- the gate projection, the
+`hpc.gated_mla_gemm` fuses the MLA output gating -- the gate projection, the
 sigmoid and the elementwise product -- into a single kernel launch, replacing
-the eager ``attn_out * sigmoid(hidden_states @ weight.T)`` sequence.
+the eager `attn_out * sigmoid(hidden_states @ weight.T)` sequence.
 
 Kernel constraints:
   - Requires VLLM_ENABLE_HPC_OPS=1
@@ -97,16 +97,16 @@ def hpc_gated_mla_gemm(
     weight: torch.Tensor,
     atten_output: torch.Tensor,
 ) -> torch.Tensor:
-    """Fused ``atten_output * sigmoid(x @ weight.T)``.
+    """Fused `atten_output * sigmoid(x @ weight.T)`.
 
     Args:
-        x: ``[m, k]`` bfloat16, contiguous.
-        weight: ``[n, k]`` bfloat16, contiguous and row-major (the kernel
-            transposes it). ``n`` must be a multiple of 256.
-        atten_output: ``[m, n]`` bfloat16, contiguous.
+        x: `[m, k]` bfloat16, contiguous.
+        weight: `[n, k]` bfloat16, contiguous and row-major (the kernel
+            transposes it). `n` must be a multiple of 256.
+        atten_output: `[m, n]` bfloat16, contiguous.
 
     Returns:
-        ``[m, n]`` bfloat16.
+        `[m, n]` bfloat16.
 
     """
     from hpc.gemm import gated_mla_gemm

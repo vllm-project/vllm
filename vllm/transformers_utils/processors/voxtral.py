@@ -58,30 +58,23 @@ class MistralCommonFeatureExtractor(SequenceFeatureExtractor):
         return ceil(audio_length / (self.sampling_rate // self.frame_rate))
 
     def fetch_audio(self, audio_url_or_urls, sampling_rate=None):
-        """HF-compatible duck-typed ``fetch_audio``.
+        """HF-compatible duck-typed `fetch_audio`.
 
-        Mirrors :meth:`transformers.SequenceFeatureExtractor.fetch_audio` so
-        :class:`transformers.ProcessorMixin.prepare_inputs_layout` (added in
-        transformers 5.10) works on this duck-typed feature extractor. Older
-        transformers versions never invoke this method, so the addition is a
-        no-op there.
+        Mirrors `transformers.SequenceFeatureExtractor.fetch_audio` so
+        `transformers.ProcessorMixin.prepare_inputs_layout` works on this
+        duck-typed feature extractor.
 
-        Accepts the same shapes as ``SequenceFeatureExtractor.fetch_audio``:
+        Accepts the same shapes as `SequenceFeatureExtractor.fetch_audio`:
 
-        * ``np.ndarray`` / ``torch.Tensor`` — returned as-is.
-        * ``list[float]`` — returned as-is (a single audio sample).
-        * ``str`` URL or path — delegated to
-          :func:`transformers.audio_utils.load_audio`.
-        * ``list`` of any of the above — recursed element-wise.
+        * `np.ndarray` / `torch.Tensor` — returned as-is.
+        * `list[float]` — returned as-is (a single audio sample).
+        * `str` URL or path — delegated to
+          `transformers.audio_utils.load_audio`.
+        * `list` of any of the above — recursed element-wise.
 
-        ``ProcessorMixin.prepare_inputs_layout`` always passes already-decoded
+        `ProcessorMixin.prepare_inputs_layout` always passes already-decoded
         audio (numpy array or torch tensor), so the str / list-of-str branches
         exist only to keep the contract identical to the upstream method.
-
-        The semantics of ``transformers.audio_utils.is_valid_audio`` differ
-        between transformers versions (5.9 only accepts ndarray/tensor; 5.10
-        also accepts ``list[float]``). We detect ``list[float]`` explicitly to
-        keep behavior identical across versions.
         """
         from transformers.audio_utils import is_valid_audio
 
@@ -89,9 +82,6 @@ class MistralCommonFeatureExtractor(SequenceFeatureExtractor):
         if is_valid_audio(audio_url_or_urls):
             return audio_url_or_urls
         if isinstance(audio_url_or_urls, (list, tuple)):
-            if audio_url_or_urls and isinstance(audio_url_or_urls[0], float):
-                # A single audio represented as ``list[float]``.
-                return audio_url_or_urls
             return [
                 self.fetch_audio(x, sampling_rate=sampling_rate)
                 for x in audio_url_or_urls

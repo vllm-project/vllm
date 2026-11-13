@@ -3,10 +3,10 @@
 """Tests for the engine-based Inkling parser.
 
 Inkling output is a sequence of typed content blocks delimited by dedicated
-special tokens; the tool-call payload is ``{"name":...,"args":{...}}``
-between ``<|content_invoke_tool_json|>`` and ``<|end_message|>``. The
+special tokens; the tool-call payload is `{"name":...,"args":{...}}`
+between `<|content_invoke_tool_json|>` and `<|end_message|>`. The
 cases mirror the Rust unified parser's tests
-(``rust/src/parser/src/unified/inkling.rs``) where applicable.
+(`rust/src/parser/src/unified/inkling.rs`) where applicable.
 """
 
 import json
@@ -23,8 +23,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.engine.registered_adapters import (
+    InklingParserReasoningAdapter,
+    InklingParserToolAdapter,
+)
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
 from vllm.parser.parser_manager import ParserManager
@@ -70,7 +75,7 @@ _MARKERS = sorted(_TML_VOCAB, key=len, reverse=True)
 def _tokenize(text: str) -> list[tuple[int, str]]:
     """Tokenize like the real stream: markers are atomic special tokens,
     plain text becomes one token per character (matching the mock
-    tokenizer's ``chr``-based decode)."""
+    tokenizer's `chr`-based decode)."""
     tokens: list[tuple[int, str]] = []
     i = 0
     while i < len(text):
@@ -86,7 +91,7 @@ def _tokenize(text: str) -> list[tuple[int, str]]:
 
 
 def _stream(parser, request, text: str, chunk_size: int):
-    """Stream production-shaped deltas: ``chunk_size`` tokens per delta,
+    """Stream production-shaped deltas: `chunk_size` tokens per delta,
     with delta_token_ids covering every token (specials and text)."""
     tokens = _tokenize(text)
     results = []
@@ -163,13 +168,19 @@ def _delegating(mock_tokenizer, tools=None):
         reasoning_parser_name="inkling",
         enable_auto_tools=True,
     )
+    assert parser_cls is not None
     return parser_cls(mock_tokenizer, tools or [])
 
 
+class _TwoPassInklingParser(DelegatingParser):
+    reasoning_parser_cls = InklingParserReasoningAdapter
+    tool_parser_cls = InklingParserToolAdapter
+
+
 def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
-    """Stream ``text`` through ``DelegatingParser.parse_delta``, ``chunk_size``
-    tokens per delta; return ``(content, reasoning, ordered tool names,
-    ordered tool arguments)``. Arguments arrive in fragments, so they are
+    """Stream `text` through `DelegatingParser.parse_delta`, `chunk_size`
+    tokens per delta; return `(content, reasoning, ordered tool names,
+    ordered tool arguments)`. Arguments arrive in fragments, so they are
     concatenated per tool index."""
     tokens = _tokenize(text)
     content, reasoning = "", ""
@@ -397,6 +408,7 @@ class TestStreaming:
             reasoning_parser_name="inkling",
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         parser = parser_cls(mock_tokenizer, [])
 
         first = parser.parse_delta(
@@ -433,8 +445,10 @@ class TestStreaming:
         )
         assert third is not None
         assert third.tool_calls
-        assert third.tool_calls[0].function.name == "get_weather"
-        assert third.tool_calls[0].function.arguments == '{"city":"Seattle"}'
+        function = third.tool_calls[0].function
+        assert function is not None
+        assert function.name == "get_weather"
+        assert function.arguments == '{"city":"Seattle"}'
         assert TOOL_JSON not in ((third.content or "") + (third.reasoning or ""))
 
     def test_streamed_args_are_object_only(self, parser, mock_request):
@@ -538,6 +552,7 @@ class TestToolCallFiltering:
         first.skip_tool_parsing = True
         reasoning, content = first.extract_reasoning(text, mock_request)
         assert reasoning == "plan"
+        assert content is not None
         assert content.count(TOOL_JSON) == 2
 
         second = InklingParser(mock_tokenizer)
@@ -582,6 +597,8 @@ class TestRegisteredAdapters:
 
         reasoning_cls = ReasoningParserManager.get_reasoning_parser("inkling")
         tool_cls = ToolParserManager.get_tool_parser("inkling")
+        assert issubclass(reasoning_cls, InklingParserReasoningAdapter)
+        assert issubclass(tool_cls, InklingParserToolAdapter)
         assert reasoning_cls._parser_engine_cls is InklingParser
         assert tool_cls._parser_engine_cls is InklingParser
         assert tool_cls.supports_required_and_named is False
@@ -598,16 +615,16 @@ class TestRegisteredAdapters:
 
 
 class TestDelegatingTwoPass:
-    """Served reasoning+tool ``DelegatingParser`` path (issue #51387).
+    """Served reasoning+tool `DelegatingParser` path (issue #51387).
 
-    Unlike ``TestStreaming`` above (single engine, ``skip_tool_parsing=False``),
+    Unlike `TestStreaming` above (single engine, `skip_tool_parsing=False`),
     these drive the real two-pass parser, where the reasoning pass runs with
-    ``skip_tool_parsing=True`` — the path where the trailing-marker leak lived.
+    `skip_tool_parsing=True` — the path where the trailing-marker leak lived.
 
     The bug is specific to the *tools-enabled* plain-text/reasoning path, so the
     content-only cases (which emit no tool call and would still pass in a
     no-tools mode) offer a real function tool on both the request and the
-    parser, keeping ``tool_choice="auto"``.
+    parser, keeping `tool_choice="auto"`.
     """
 
     GEN_PROMPT = [_TML_VOCAB[MSG_MODEL]]
@@ -759,6 +776,30 @@ class TestDelegatingTwoPass:
         assert TOOL_JSON not in content
         assert END_MESSAGE not in content
 
+    def test_function_name_not_in_content_after_reasoning(
+        self, mock_tokenizer, mock_request
+    ):
+        name = "search_documents_by_keyword"
+        tools = [_function_tool(name)]
+        mock_request.tools = tools
+        text = (
+            f"{THINK_START} context.{END_MESSAGE}{MSG_MODEL}"
+            f"{name}{_tool_block(name, '{}')}"
+        )
+
+        content, reasoning, names, args = _stream_delegating(
+            _TwoPassInklingParser(mock_tokenizer, tools),
+            mock_request,
+            text,
+            chunk_size=12,
+            prompt_token_ids=self.GEN_PROMPT,
+        )
+
+        assert reasoning == " context."
+        assert content == ""
+        assert names == [name]
+        assert json.loads(args[0]) == {}
+
     @pytest.mark.parametrize("opener", [TEXT_START, TOOL_TEXT, TOOL_ERROR])
     @pytest.mark.parametrize("chunk_size", [1, 3, 64])
     def test_visible_text_then_tool_streaming(
@@ -771,7 +812,7 @@ class TestDelegatingTwoPass:
         emitted one, so the tool pass never ran: the entire tool block came
         back as assistant content and no tool call was parsed. Every opener
         that starts a visible block has to confirm the boundary, which is why
-        ``TOOL_TEXT`` and ``TOOL_ERROR`` are covered alongside ``TEXT_START``.
+        `TOOL_TEXT` and `TOOL_ERROR` are covered alongside `TEXT_START`.
         """
         tools = [_function_tool()]
         mock_request.tools = tools
@@ -795,7 +836,7 @@ class TestDelegatingTwoPass:
     ):
         """A tool call with no block of any kind ahead of it.
 
-        The generation prompt ends in ``<|message_model|>``, so this fires
+        The generation prompt ends in `<|message_model|>`, so this fires
         TOOL_START straight from MESSAGE_HEADER. A tool block is the one
         opener that confirms no reasoning is open without rendering visible
         content, so it is the case the visible-block openers cannot cover.
@@ -818,7 +859,7 @@ class TestDelegatingTwoPass:
     def test_function_name_header_before_tool_start_streaming(
         self, mock_tokenizer, mock_request
     ):
-        """The optional function name between ``<|message_model|>`` and the
+        """The optional function name between `<|message_model|>` and the
         content-kind marker is metadata: the buffered header must be
         discarded on the way out, not flushed into content."""
         tools = [_function_tool()]
@@ -836,7 +877,7 @@ class TestDelegatingTwoPass:
 
     def test_content_state_tool_start_streaming(self, mock_tokenizer, mock_request):
         """Same opener reached from CONTENT rather than MESSAGE_HEADER: a
-        text block closed with no ``<|message_model|>`` before the tool
+        text block closed with no `<|message_model|>` before the tool
         block. Preceding text must reach content exactly once, unmarked."""
         tools = [_function_tool()]
         mock_request.tools = tools
@@ -872,8 +913,8 @@ def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
 
 
 def test_skip_reasoning_parsing_inert_for_shared_markers():
-    """``skip_reasoning_parsing`` may only bypass reasoning-exclusive
-    markers. Inkling has none — ``<|end_message|>`` is labelled THINK_END
+    """`skip_reasoning_parsing` may only bypass reasoning-exclusive
+    markers. Inkling has none — `<|end_message|>` is labelled THINK_END
     yet also closes text, header, and tool blocks — so the flag must be
     inert: a tool block still closes through its transition and following
     text returns to CONTENT instead of leaking into the argument stream."""
@@ -890,10 +931,10 @@ def test_skip_reasoning_parsing_inert_for_shared_markers():
 
 
 class TestToolParserWithoutReasoningParser:
-    """Inkling served with only the tool parser, no ``--reasoning-parser``.
+    """Inkling served with only the tool parser, no `--reasoning-parser`.
 
-    That configuration turns on ``skip_reasoning_parsing``, and Inkling
-    labels ``<|end_message|>`` as THINK_END; a bypass keyed on the label
+    That configuration turns on `skip_reasoning_parsing`, and Inkling
+    labels `<|end_message|>` as THINK_END; a bypass keyed on the label
     would neutralize the closer of every block kind, leaking markers into
     content and leaving tool calls unterminated. Structure must keep
     parsing exactly as with the reasoning parser attached."""
@@ -905,6 +946,7 @@ class TestToolParserWithoutReasoningParser:
             tool_parser_name="inkling",
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         return parser_cls(mock_tokenizer, tools or [])
 
     def test_plain_text_non_streaming(self, mock_tokenizer, mock_request):

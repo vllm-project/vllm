@@ -101,6 +101,15 @@ class TestCoerceToSchemaType:
             assert coerce_to_schema_type("5.0", "number") == 5
             assert isinstance(coerce_to_schema_type("5.0", "number"), int)
 
+        @pytest.mark.parametrize("value", [2**53 + 1, -(2**53 + 1), 2**63 - 1])
+        @pytest.mark.parametrize(
+            "schema_type", ["number", "double", ["number", "string"]]
+        )
+        def test_large_integer_preserved(self, value, schema_type):
+            result = coerce_to_schema_type(str(value), schema_type)
+            assert isinstance(result, int)
+            assert json.loads(json.dumps(result)) == value
+
         def test_invalid_number_fallback(self):
             assert coerce_to_schema_type("abc", "number") == "abc"
 
@@ -108,10 +117,10 @@ class TestCoerceToSchemaType:
         """Non-finite numeric strings must not crash and must coerce to a
         JSON-serializable value.
 
-        Regression: ``int(float("inf"))`` raised an uncaught ``OverflowError``
-        (only ``ValueError``/``TypeError`` were handled), and ``"1e999"``
-        round-tripped through ``json.loads`` to a float ``inf`` that
-        ``json.dumps`` renders as invalid JSON ``Infinity``.
+        Regression: `int(float("inf"))` raised an uncaught `OverflowError`
+        (only `ValueError`/`TypeError` were handled), and `"1e999"`
+        round-tripped through `json.loads` to a float `inf` that
+        `json.dumps` renders as invalid JSON `Infinity`.
         """
 
         @pytest.mark.parametrize(
@@ -137,10 +146,10 @@ class TestCoerceToSchemaType:
         """Non-finite floats nested in object/array values must not produce
         invalid JSON.
 
-        Regression: the ``object``/``array`` branch returned
-        ``json.loads(value)`` directly, so ``"[1e999]"`` became ``[inf]`` and
-        ``'{"x": Infinity}'`` became ``{"x": inf}`` -- values that
-        ``json.dumps`` later renders as invalid JSON (``Infinity``/``NaN``).
+        Regression: the `object`/`array` branch returned
+        `json.loads(value)` directly, so `"[1e999]"` became `[inf]` and
+        `'{"x": Infinity}'` became `{"x": inf}` -- values that
+        `json.dumps` later renders as invalid JSON (`Infinity`/`NaN`).
         """
 
         @pytest.mark.parametrize(
@@ -298,7 +307,7 @@ def _value_of(expr: str):
 
 
 def _first_call(text: str) -> ast.Call:
-    """Parse ``[foo(...)]`` and return the single ast.Call node."""
+    """Parse `[foo(...)]` and return the single ast.Call node."""
     statement = ast.parse(text).body[0]
     assert isinstance(statement, ast.Expr)
     assert isinstance(statement.value, ast.List)
@@ -308,7 +317,7 @@ def _first_call(text: str) -> ast.Call:
 
 
 def _bare_call(text: str) -> ast.Call:
-    """Parse ``foo(...)`` (no list wrapper) and return the ast.Call node."""
+    """Parse `foo(...)` (no list wrapper) and return the ast.Call node."""
     statement = ast.parse(text).body[0]
     assert isinstance(statement, ast.Expr)
     assert isinstance(statement.value, ast.Call)
@@ -316,7 +325,7 @@ def _bare_call(text: str) -> ast.Call:
 
 
 def _kwarg_constant(call: ast.Call, index: int = 0):
-    """Return the constant value of the call's ``index``-th keyword arg."""
+    """Return the constant value of the call's `index`-th keyword arg."""
     value = call.keywords[index].value
     assert isinstance(value, ast.Constant)
     return value.value

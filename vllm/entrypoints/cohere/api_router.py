@@ -4,29 +4,29 @@
 
 Exposes two routes:
 
-* ``POST /cohere/v2/chat`` - the chat endpoint itself.
-* ``POST /cohere/v2/chat/render`` - tokenize a request without running
-  generation, mirroring ``POST /v1/chat/completions/render``.
+* `POST /cohere/v2/chat` - the chat endpoint itself.
+* `POST /cohere/v2/chat/render` - tokenize a request without running
+  generation, mirroring `POST /v1/chat/completions/render`.
 
-The Cohere v2 protocol models are sourced from the official ``cohere``
-Python SDK (``pip install cohere``). To keep that an *optional*
+The Cohere v2 protocol models are sourced from the official `cohere`
+Python SDK (`pip install cohere`). To keep that an *optional*
 dependency for vLLM, the SDK-dependent imports - and the route handlers
 themselves - are gated on a one-shot probe at module load. If the SDK
-isn't installed, :func:`attach_router` becomes a no-op (with an info
+isn't installed, `attach_router` becomes a no-op (with an info
 log) and vLLM continues to boot normally.
 
-Even when the SDK is installed, :func:`attach_router` also requires
-``VLLM_ENABLE_COHERE_API=1`` in the environment before it will expose
+Even when the SDK is installed, `attach_router` also requires
+`VLLM_ENABLE_COHERE_API=1` in the environment before it will expose
 the chat route. The render route additionally requires scale-out
-endpoints to be enabled, i.e. ``--enable-scale-out`` or
-``--tokens-only``. These gates keep unrelated deployments from
+endpoints to be enabled, i.e. `--enable-scale-out` or
+`--tokens-only`. These gates keep unrelated deployments from
 accidentally exposing the APIs.
 
 Note: the handlers must live at module scope (not inside
-``attach_router``) so that FastAPI's ``typing.get_type_hints`` resolves
-the ``CohereChatV2Request`` body annotation against the module's
-globals. Defining them locally inside ``attach_router`` would hide the
-type from ``get_type_hints``, causing FastAPI to silently degrade the
+`attach_router`) so that FastAPI's `typing.get_type_hints` resolves
+the `CohereChatV2Request` body annotation against the module's
+globals. Defining them locally inside `attach_router` would hide the
+type from `get_type_hints`, causing FastAPI to silently degrade the
 body parameter into a query parameter and reject every request with
 422.
 """
@@ -40,6 +40,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 import vllm.envs as envs
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.exception_handling.error_response import (
+    create_error_response,
+)
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
@@ -84,9 +87,9 @@ if _SDK_AVAILABLE:
         """Best-effort lookup of the active request id.
 
         Prefers the id the underlying chat handler stamped onto
-        ``raw_request.state.request_metadata`` (if it got that far before
-        failing), falling back to the ``X-Request-Id`` HTTP header. May
-        return ``None`` if neither is available, in which case the field
+        `raw_request.state.request_metadata` (if it got that far before
+        failing), falling back to the `X-Request-Id` HTTP header. May
+        return `None` if neither is available, in which case the field
         is omitted from the response.
         """
         if raw_request is None:
@@ -138,15 +141,9 @@ if _SDK_AVAILABLE:
 
         try:
             result = await handler.create_chat_v2(request, raw_request)
-        except Exception as e:  # noqa: BLE001 - report as 500 for parity
+        except Exception as e:
             logger.exception("Error in /cohere/v2/chat: %s", e)
-            return JSONResponse(
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                content=CohereError(
-                    message=sanitize_message(str(e)),
-                    id=_request_id(raw_request),
-                ).model_dump(exclude_none=True),
-            )
+            return _error_response(create_error_response(e), raw_request)
 
         match result:
             case ErrorResponse():
@@ -171,10 +168,10 @@ if _SDK_AVAILABLE:
     async def chat_v2_render(request: CohereChatV2Request, raw_request: Request):
         """Tokenize a Cohere v2 chat request without running generation.
 
-        The Cohere counterpart to ``POST /v1/chat/completions/render``.
+        The Cohere counterpart to `POST /v1/chat/completions/render`.
         The v2 body goes through the same conversion
-        ``/cohere/v2/chat`` uses and is then handed to the shared
-        :class:`ServingRender`, so the returned ``GenerateRequest``
+        `/cohere/v2/chat` uses and is then handed to the shared
+        `ServingRender`, so the returned `GenerateRequest`
         carries the prompt tokens and sampling params the chat endpoint
         would have sent to the engine.
         """
@@ -193,36 +190,40 @@ if _SDK_AVAILABLE:
 
         try:
             chat_request = handler.to_chat_completion_request(request)
-            result = await render_handler.render_chat_request(chat_request)
-        except Exception as e:  # noqa: BLE001 - report as 500 for parity
-            logger.exception("Error in /cohere/v2/chat/render: %s", e)
-            return JSONResponse(
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                content=CohereError(
-                    message=sanitize_message(str(e)),
-                    id=_request_id(raw_request),
-                ).model_dump(exclude_none=True),
+            # Derender mode returns no citations: the position-to-source
+            # map can't go over JSON.
+            result = await render_handler.render_chat_request(
+                chat_request,
+                engine_chat_template_kwargs=handler._engine_chat_template_kwargs,
             )
+        except Exception as e:
+            logger.exception("Error in /cohere/v2/chat/render: %s", e)
+            return _error_response(create_error_response(e), raw_request)
 
         if isinstance(result, ErrorResponse):
             return _error_response(result, raw_request)
 
+        if (kwargs := result.reasoning_parser_kwargs) is not None:
+            kwargs.chat_template_kwargs = handler._engine_chat_template_kwargs(
+                kwargs.chat_template_kwargs
+            )
+
         return JSONResponse(content=result.model_dump())
 
     class CohereErrorEnvelopeMiddleware(BaseHTTPMiddleware):
-        """Rewrite vLLM error bodies into the Cohere ``{message, id}`` shape.
+        """Rewrite vLLM error bodies into the Cohere `{message, id}` shape.
 
-        The endpoint handler above already returns :class:`CohereError` for
+        The endpoint handler above already returns `CohereError` for
         errors it owns, but globally-registered exception handlers (e.g.
-        :func:`validation_exception_handler` for pydantic body errors,
-        :func:`http_exception_handler`, engine error handlers) fire *before*
+        `validation_exception_handler` for pydantic body errors,
+        `http_exception_handler`, engine error handlers) fire *before*
         the handler runs and produce vLLM's internal
-        ``ErrorResponse`` shape (``{"error": {"message": ...}}``). That
-        shape doesn't match the ``CohereError`` schema advertised on the
-        route's OpenAPI ``responses``, so clients (and schema-conformance
-        tests like ``test_openai_schema.py``) would see a mismatch on
+        `ErrorResponse` shape (`{"error": {"message": ...}}`). That
+        shape doesn't match the `CohereError` schema advertised on the
+        route's OpenAPI `responses`, so clients (and schema-conformance
+        tests like `test_openai_schema.py`) would see a mismatch on
         those paths. This middleware normalises any error body on
-        ``/cohere/*`` responses to :class:`CohereError`.
+        `/cohere/*` responses to `CohereError`.
         """
 
         async def dispatch(self, request: Request, call_next):
@@ -252,9 +253,9 @@ if _SDK_AVAILABLE:
             )
 
     def _translate_vllm_error_body(raw: bytes, request: Request) -> JSONResponse | None:
-        """Translate a vLLM ``ErrorResponse`` body to a ``CohereError`` body.
+        """Translate a vLLM `ErrorResponse` body to a `CohereError` body.
 
-        Returns ``None`` if ``raw`` does not match the vLLM error envelope
+        Returns `None` if `raw` does not match the vLLM error envelope
         (which signals the middleware to pass the body through unchanged).
         """
         try:
@@ -275,20 +276,20 @@ if _SDK_AVAILABLE:
 
 
 def attach_router(app: FastAPI) -> None:
-    """Register the enabled ``/cohere/v2/chat`` routes on ``app``.
+    """Register the enabled `/cohere/v2/chat` routes on `app`.
 
     No-op when either:
 
-    * the ``VLLM_ENABLE_COHERE_API`` env var isn't set to ``1``. The
+    * the `VLLM_ENABLE_COHERE_API` env var isn't set to `1`. The
       Cohere v2 endpoints are opt-in because they carry Cohere-specific
       request/response semantics (grounding citations, tool_plan,
       PLAN/THINKING_CONTENT blocks) that are only meaningful when
       serving a Cohere Command-family model.
-    * the optional ``cohere`` SDK isn't installed (the v2 protocol
+    * the optional `cohere` SDK isn't installed (the v2 protocol
       models live there)
 
     The two skip paths log at different levels: an operator who set
-    ``VLLM_ENABLE_COHERE_API=1`` but forgot to install ``cohere`` sees
+    `VLLM_ENABLE_COHERE_API=1` but forgot to install `cohere` sees
     a WARNING (they explicitly asked for the endpoints and they're
     silently absent), whereas the default-off skip logs at debug.
     """

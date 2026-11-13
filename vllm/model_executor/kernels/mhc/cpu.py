@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 
 
 def mhc_pre_cpu(
@@ -81,7 +81,7 @@ def hc_head_fused_cpu(
     hc_eps: float,
 ) -> torch.Tensor:
     """CPU-ported HC head reduction (see `test_hc_head_cpu` in
-    tests/kernels/test_mhc_kernels.py for the eager reference this is tested
+    tests/kernels/mhc/test_mhc_kernels.py for the eager reference this is tested
     against).
 
     The ported kernel's C++ signature takes `(hc_eps, norm_eps)` -- the

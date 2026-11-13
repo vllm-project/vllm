@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -40,6 +41,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 
+from ..common.dsa_cache import packed_dsa_block_size
 from ..common.mm_preprocess import (
     KimiK3DummyInputsBuilder,
     KimiK3MultiModalProcessor,
@@ -65,6 +67,7 @@ class KimiK3ForConditionalGeneration(
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -103,6 +106,7 @@ class KimiK3ForConditionalGeneration(
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             if self._maybe_ignore_quant_config(quant_config) is not None:
@@ -114,6 +118,7 @@ class KimiK3ForConditionalGeneration(
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
+                out_hidden_size=config.text_config.hidden_size,
                 use_data_parallel=self.use_data_parallel,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
@@ -163,8 +168,6 @@ class KimiK3ForConditionalGeneration(
                 pixel_values.shape[0] * pixel_values.shape[1], *pixel_values.shape[2:]
             )
 
-        target_dtype = next(self.vision_tower.parameters()).dtype
-        pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
             f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )
@@ -218,6 +221,9 @@ class KimiK3ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
 
+    def get_model_state_cls(self) -> type:
+        return self.language_model.get_model_state_cls()
+
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(
             input_buffers, **kwargs
@@ -243,6 +249,18 @@ class KimiK3ForConditionalGeneration(
     @classmethod
     def get_mamba_state_copy_func(cls):
         return KimiLinearForCausalLM.get_mamba_state_copy_func()
+
+    @classmethod
+    def get_packed_hybrid_block_size(
+        cls,
+        vllm_config: VllmConfig,
+        attn_page_size_1_token: int,
+        mamba_page_size: int,
+        alignment: int,
+    ) -> int | None:
+        return packed_dsa_block_size(
+            vllm_config, attn_page_size_1_token, mamba_page_size, alignment
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

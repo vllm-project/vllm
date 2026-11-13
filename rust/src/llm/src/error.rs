@@ -20,4 +20,18 @@ pub enum Error {
         token_count: usize,
         row_count: usize,
     },
+    #[error("invalid auxiliary output rows")]
+    AuxOutputRows(#[from] vllm_engine_core_client::protocol::tensor::ArrayRowsError),
+    /// The request uses a field this implementation does not carry out.
+    #[error("`{field}` is not supported")]
+    Unsupported { field: &'static str },
+    /// The request cannot be taken now; retrying later may succeed.
+    #[error("unavailable: {message}")]
+    Unavailable { message: String },
+    /// A remote implementation rejected the request as invalid.
+    #[error("{message}")]
+    RemoteInvalidRequest { message: String },
+    /// A remote implementation failed the request.
+    #[error("remote error: {message}")]
+    Remote { message: String },
 }

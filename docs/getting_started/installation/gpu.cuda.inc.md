@@ -23,25 +23,39 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 
 ```bash
 uv pip install vllm --torch-backend=auto
+vllm download-kernels
 ```
 
 ??? console "pip"
     ```bash
     # Install vLLM with CUDA 12.9.
     pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
+    vllm download-kernels
     ```
 
-We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu130`), set `--torch-backend=cu130` (or `UV_TORCH_BACKEND=cu130`). If this doesn't work, try running `uv self update` to update `uv` first.
+`vllm download-kernels` installs [FlashInfer](https://docs.flashinfer.ai/)'s
+precompiled kernels for the installed FlashInfer and CUDA versions. Without them,
+vLLM downloads and compiles kernels at startup, which can add several minutes on
+Hopper and newer GPUs, **especially Blackwell**, and logs a warning. Run it in the
+same Python environment after every vLLM install or upgrade, and in custom
+container images. The kernels are tied to the FlashInfer version, and FlashInfer
+refuses to import when they do not match, so an upgrade needs them refreshed.
+With a PyTorch built for CUDA older than 12.9, only `flashinfer-cubin` is
+installed, because FlashInfer does not publish `flashinfer-jit-cache` for it.
+For CUDA overrides and nightly kernels, use the
+[FlashInfer CLI](https://docs.flashinfer.ai/cli.html#download-kernels) directly.
+
+We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu132`), set `--torch-backend=cu132` (or `UV_TORCH_BACKEND=cu132`). If this doesn't work, try running `uv self update` to update `uv` first.
 
 !!! note
     NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
 
-As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.0, and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.2, and public PyTorch release versions:
 
 ```bash
-# Install vLLM with a specific CUDA version (e.g., 13.0).
+# Install vLLM with a specific CUDA version (e.g., 13.2).
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-export CUDA_VERSION=130 # or other
+export CUDA_VERSION=132 # or other
 export CPU_ARCH=$(uname -m) # x86_64 or aarch64
 uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
 ```
@@ -51,7 +65,7 @@ uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_V
 LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.5.3` on <https://wheels.vllm.ai/nightly>. There are multiple indices that could be used:
 
 - `https://wheels.vllm.ai/nightly`: the default variant (CUDA with version specified in `VLLM_MAIN_CUDA_VERSION`) built with the last commit on the `main` branch. Currently it is CUDA 12.9.
-- `https://wheels.vllm.ai/nightly/<variant>`: all other variants. Now this includes `cu130`, and `cpu`. The default variant (`cu129`) also has a subdirectory to keep consistency.
+- `https://wheels.vllm.ai/nightly/<variant>`: all other variants. Now this includes `cu132`, and `cpu`. The default variant (`cu129`) also has a subdirectory to keep consistency.
 
 To install from nightly index, run:
 
@@ -94,9 +108,10 @@ If you only need to change Python code, you can build and install vLLM without c
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
+vllm download-kernels
 ```
 
-This command will do the following:
+The install command will do the following:
 
 1. Look for the current branch in your vLLM clone.
 1. Identify the corresponding base commit in the main branch.
@@ -117,19 +132,22 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
-In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the `main` branch was just merged and its precompiled wheel is not available yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to automatically select the most recent already-built commit on `main`.
+Wheels are published an hour or two after a commit lands on `main`. If the wheel for
+your merge-base with upstream `main` is not available yet, the installer uses the
+nearest older commit that has one, searching up to 20 commits back. It stops with an
+error if compiled sources or build configuration (`csrc/`, `cmake/`, `CMakeLists.txt`,
+`pyproject.toml`, `vllm/_custom_ops.py`) changed between that commit and your
+merge-base, and warns if `rust/` or `setup.py` did. This is a source-level check, not
+a guarantee of binary compatibility.
 
-```bash
-export VLLM_PRECOMPILED_WHEEL_COMMIT=nightly
-export VLLM_USE_PRECOMPILED=1
-uv pip install --editable .
-```
+Setting `VLLM_PRECOMPILED_WHEEL_LOCATION` or a full SHA in
+`VLLM_PRECOMPILED_WHEEL_COMMIT` skips this search and check.
 
 There are more environment variables to control the behavior of Python-only build:
 
 - `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
-- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit hash to download the pre-compiled wheel. It can be `nightly` to use the last **already built** commit on the main branch.
-- `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cu130`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
+- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit to download the pre-compiled wheel from. Must be a full 40-character SHA.
+- `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cu132`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
 
@@ -140,13 +158,8 @@ You can find more information about vLLM's wheels in [Install the latest code](#
 #### Full build (with compilation) {#full-build}
 
 !!! note "Compiler requirement"
-    Building from source requires GCC/G++ ≥ 11.3. PyTorch's C++20 headers are
-    not compatible with GCC 10 or GCC < 11.3. On Ubuntu 22.04:
-    ```bash
-    sudo apt-get install -y gcc-11 g++-11
-    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 \
-        --slave /usr/bin/g++ g++ /usr/bin/g++-11
-    ```
+    Building from source requires GCC/G++ ≥ 13 ([#58158](https://github.com/vllm-project/vllm/issues/58158)).
+    Ubuntu 24.04, the base of the default vLLM image, ships GCC 13 by default.
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
@@ -264,6 +277,12 @@ uv pip install -e .
 
 vLLM offers an official Docker image for deployment.
 The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai](https://hub.docker.com/r/vllm/vllm-openai/tags).
+
+The default CUDA release images use Ubuntu 24.04. Separate `-ubuntu2404`
+release tags are no longer published. Use `latest` or `v<version>` instead of
+`latest-ubuntu2404` or `v<version>-ubuntu2404`; for architecture-specific tags,
+use `latest-x86_64` / `latest-aarch64` or `v<version>-x86_64` /
+`v<version>-aarch64`.
 
 ```bash
 docker run --runtime nvidia --gpus all \
@@ -390,7 +409,7 @@ A docker container can be built for aarch64 systems such as the Nvidia Grace-Hop
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 \
+    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e \
     --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
     ```
 
@@ -400,8 +419,8 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
     ```bash
     DOCKER_BUILDKIT=1 docker build \
-    --build-arg CUDA_VERSION=13.0.2 \
-    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 \
+    --build-arg CUDA_VERSION=13.2.1 \
+    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.2-9f3983c9d680f3cc243dfa0524efcb881be7869e \
     --build-arg max_jobs=256 \
     --build-arg nvcc_threads=2 \
     --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \
@@ -440,11 +459,18 @@ ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
-`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image.
+`nvidia/cuda:13.5.0-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
+newer, the first NCCL release with Rubin (SM107) support.
 For `BUILD_BASE_IMAGE`, use:
 
 - `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
 - `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
+
+PyTorch does not publish CUDA 13.5 builder images or cu135 wheels yet, so the
+build stage and the prerelease PyTorch wheels in
+`requirements/rubin-prerelease.txt` stay on CUDA 13.4. Set `CUDA_VERSION` to
+the final image's CUDA version (13.5): the runtime stage installs the matching
+CUDA packages, including the `ptxas` above.
 
 ??? console "ARM64/AArch64 build command"
 
@@ -453,16 +479,17 @@ For `BUILD_BASE_IMAGE`, use:
       --file docker/Dockerfile \
       --target vllm-openai \
       --platform "linux/arm64" \
-      --tag "vllm/vllm-rubin-openai:prerelease-cu134-public-arm64" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu135-public-arm64" \
       --build-arg max_jobs="$(nproc)" \
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
-      --build-arg CUDA_VERSION=13.4 \
+      --build-arg CUDA_VERSION=13.5 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
@@ -473,16 +500,17 @@ For `BUILD_BASE_IMAGE`, use:
       --file docker/Dockerfile \
       --target vllm-openai \
       --platform "linux/amd64" \
-      --tag "vllm/vllm-rubin-openai:prerelease-cu134-public-amd64" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu135-public-amd64" \
       --build-arg max_jobs="$(nproc)" \
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
-      --build-arg CUDA_VERSION=13.4 \
+      --build-arg CUDA_VERSION=13.5 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.5.0-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
@@ -490,12 +518,18 @@ For `BUILD_BASE_IMAGE`, use:
     Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
     cannot inspect the host GPU. R100 and VR200 report compute capability 10.7,
     for which the generic `10.0` target provides family-compatible kernels.
-    The Ubuntu `devel` final image is also required: the corresponding `base`
-    image lacks the CUDA runtime/JIT package closure used by vLLM and the
-    prerelease PyTorch wheel.
 
     `RUN_WHEEL_CHECK=false` disables only the PyPI publication-size guard for
     this private staging image.
+
+!!! warning
+    Run the image on hosts with an R620 or newer driver. On older drivers the
+    NVIDIA Container Toolkit loads the image's CUDA 13.5 forward-compatibility
+    driver instead. On R610 hosts that driver reports no CUDA peer access
+    between GPUs, so torch symmetric memory and the FlashInfer all-reduce
+    fusion fall back to NCCL, and serving performance differs from a native
+    R620 driver. The image's `NVIDIA_REQUIRE_CUDA` does not list R570 or R590
+    drivers, so the toolkit refuses to start it on those.
 
 #### Use the custom-built vLLM Docker image**
 

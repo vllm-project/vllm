@@ -199,7 +199,7 @@ class MockLayer(AttentionLayerBase):
         self._q_scale_float = float(self._q_scale.item())
         # AttentionImpl for metadata builders to query
         self.impl = impl
-        # KV cache spec for get_kv_cache_spec
+        # KV cache spec for get_kv_cache_config
         self._kv_cache_spec = kv_cache_spec
 
     def get_attn_backend(self):
@@ -207,9 +207,11 @@ class MockLayer(AttentionLayerBase):
         # Return None as this is just a mock layer for benchmarking
         return None
 
-    def get_kv_cache_spec(self):
-        """Get the KV cache spec (required by AttentionLayerBase)."""
-        return self._kv_cache_spec
+    def get_kv_cache_config(self, vllm_config=None):
+        """Get the KV cache config (required by AttentionLayerBase)."""
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        return FullAttentionManager.layer_config(self._kv_cache_spec)
 
 
 @dataclass
@@ -284,8 +286,10 @@ class BenchmarkConfig:
     torch_profile_iters: int = 3
     warmup_ms: int | None = None
 
-    # "auto" or "fp8"
+    # Any CacheDType: "auto", "fp8", "int8_per_token_head", ...
     kv_cache_dtype: str = "auto"
+    # Model whose config the backend sees (dtype, rotary dims, ...)
+    model: str = "meta-llama/Meta-Llama-3-8B"
 
     # MLA-specific
     prefill_backend: str | None = None

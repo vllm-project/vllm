@@ -403,7 +403,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -436,7 +436,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
             rope_head_dim=hf_config.qk_rope_head_dim,
             enabled=(
                 cache_config.block_size > 0
-                and 4 in hf_config.compress_ratios
+                and "compressed_sparse_attention" in hf_config.layer_types
                 and cache_config.cache_dtype == "fp8_ds_mla"
             ),
             _when=lambda *, enabled: enabled,
@@ -898,7 +898,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -934,7 +934,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
             rope_head_dim=hf_config.qk_rope_head_dim,
             enabled=(
                 cache_config.block_size > 0
-                and 4 in hf_config.compress_ratios
+                and "compressed_sparse_attention" in hf_config.layer_types
                 and cache_config.cache_dtype != "fp8_ds_mla"
             ),
             _when=lambda *, enabled: enabled,
@@ -1356,9 +1356,7 @@ class SparseAttnCompressC128Block8Kernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
-        self, *, head_size: int, state_width: int
-    ) -> CompileKey:
+    def dispatch(self, *, head_size: int, state_width: int) -> CompileKey:
         return self.CompileKey(head_size=head_size, state_width=state_width)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -1366,7 +1364,7 @@ class SparseAttnCompressC128Block8Kernel(
         return self._trace_dispatch(self.dispatch)(
             head_size=hf_config.head_dim,
             state_width=hf_config.head_dim,
-            enabled=128 in hf_config.compress_ratios,
+            enabled="heavily_compressed_attention" in hf_config.layer_types,
             _when=lambda *, enabled: enabled,
         )
 
@@ -1653,7 +1651,7 @@ class SparseAttnNormRopeStoreKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -2007,7 +2005,7 @@ class SparseAttnNormRopeStoreFullKernel(
 
         return host_entrypoint
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         store_full_fp8: bool,
@@ -2040,7 +2038,7 @@ class SparseAttnNormRopeStoreFullKernel(
             rope_head_dim=hf_config.qk_rope_head_dim,
             enabled=(
                 cache_config.block_size > 0
-                and 128 in hf_config.compress_ratios
+                and "heavily_compressed_attention" in hf_config.layer_types
                 and cache_config.cache_dtype != "fp8_ds_mla"
             ),
             _when=lambda *, enabled: enabled,

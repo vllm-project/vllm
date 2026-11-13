@@ -155,9 +155,7 @@ def native_w8a8_block_matmul(
     return C
 
 
-def native_per_token_group_quant_fp8(
-    x, group_size, eps=1e-10, dtype=torch.float8_e4m3fn
-):
+def native_per_token_group_quant_fp8(x, group_size, eps=1e-10, dtype=FP8_DTYPE):
     """Function to perform per-token-group quantization on an input tensor
     `x` using native torch."""
     assert x.shape[-1] % group_size == 0, (
@@ -165,9 +163,7 @@ def native_per_token_group_quant_fp8(
     )
     assert x.is_contiguous(), "`x` is not contiguous"
 
-    finfo = torch.finfo(dtype)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     x_ = x.reshape(x.numel() // group_size, group_size)
     amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
@@ -251,25 +247,6 @@ def dequant(
             return (t.to(f32) * group_broadcast(scale, t.shape)).to(out_dtype)
     else:
         return t.to(out_dtype)
-
-
-def batched_dequant(
-    t: torch.Tensor,
-    scale: torch.Tensor | None,
-    block_shape: list[int] | None,
-    per_act_token_quant: bool,
-    out_dtype: torch.dtype | None = torch.float32,
-) -> torch.Tensor:
-    if scale is not None:
-        assert t.shape[0] == scale.shape[0]
-        out = torch.empty_like(t, dtype=out_dtype)
-        for e in range(t.shape[0]):
-            out[e] = dequant(
-                t[e], scale[e], block_shape, per_act_token_quant, out_dtype
-            )
-        return out
-
-    return t.to(out_dtype)
 
 
 def native_batched_masked_quant_matmul(

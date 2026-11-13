@@ -10,7 +10,6 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     get_target_lm_head,
     maybe_share_target_embed,
 )
-from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 # KV cache formats only MLA backends serve. The target's sparse MLA layers
 # canonicalize the shared cache_config to one of these while they are built
@@ -52,7 +51,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             backend=speculative_config.attention_backend,
         ),
         cache_config=_draft_cache_config(vllm_config),
-        load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
+        load_config=get_draft_load_config(vllm_config),
     )
     with set_model_tag("dflash_head"):
         dflash_model = get_model(

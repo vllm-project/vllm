@@ -3,7 +3,7 @@
 
 use crate::config::BenchConfig;
 use crate::error::{BenchError, Result};
-use crate::output::json::{compute_result_filename, save_result};
+use crate::output::json::save_point_result;
 
 /// Reset the server's prefix cache by calling POST /reset_prefix_cache.
 /// Requires VLLM_SERVER_DEV_MODE=1 on the vLLM server.
@@ -71,20 +71,9 @@ pub async fn run_concurrency_sweep(
         if let Some(factor) = num_prompts_factor {
             config.num_prompts = mc * factor;
         }
-        // Suppress per-run save (we save with concurrency suffix below)
-        config.save_result = false;
-        config.append_result = false;
-
-        let result = crate::benchmark::run_benchmark(&config).await?;
-
-        if base_config.save_result {
-            let model_id = config.model.as_deref().unwrap_or("unknown");
-            let file_name = compute_result_filename(&config, model_id, &current_dt);
-            if let Some(ref dir) = config.result_dir {
-                std::fs::create_dir_all(dir)?;
-            }
-            save_result(&result, &file_name)?;
-        }
+        let result = crate::benchmark::run_benchmark(&config.without_save()).await?;
+        let point = config.result_filename.is_some().then(|| format!("concurrency{mc}"));
+        save_point_result(&config, &result, &current_dt, point.as_deref())?;
 
         points.push(SweepPoint {
             label: format!("concurrency={mc}"),
@@ -146,20 +135,9 @@ pub async fn run_multi_turn_concurrency_sweep(
         if let Some(factor) = num_prompts_factor {
             config.num_prompts = mc * factor;
         }
-        // Suppress per-run save (we save with concurrency suffix below)
-        config.save_result = false;
-        config.append_result = false;
-
-        let result = crate::multi_turn::run_multi_turn_benchmark(&config).await?;
-
-        if base_config.save_result {
-            let model_id = config.model.as_deref().unwrap_or("unknown");
-            let file_name = compute_result_filename(&config, model_id, &current_dt);
-            if let Some(ref dir) = config.result_dir {
-                std::fs::create_dir_all(dir)?;
-            }
-            save_result(&result, &file_name)?;
-        }
+        let result = crate::multi_turn::run_multi_turn_benchmark(&config.without_save()).await?;
+        let point = config.result_filename.is_some().then(|| format!("concurrency{mc}"));
+        save_point_result(&config, &result, &current_dt, point.as_deref())?;
 
         points.push(SweepPoint {
             label: format!("concurrency={mc}"),
@@ -215,19 +193,10 @@ pub async fn run_rate_sweep(base_config: &BenchConfig, values: &[f64]) -> Result
 
         let mut config = base_config.clone();
         config.request_rate = rate;
-        config.save_result = false;
-        config.append_result = false;
 
-        let result = crate::benchmark::run_benchmark(&config).await?;
-
-        if base_config.save_result {
-            let model_id = config.model.as_deref().unwrap_or("unknown");
-            let file_name = compute_result_filename(&config, model_id, &current_dt);
-            if let Some(ref dir) = config.result_dir {
-                std::fs::create_dir_all(dir)?;
-            }
-            save_result(&result, &file_name)?;
-        }
+        let result = crate::benchmark::run_benchmark(&config.without_save()).await?;
+        let point = config.result_filename.is_some().then(|| format!("{rate:?}qps"));
+        save_point_result(&config, &result, &current_dt, point.as_deref())?;
 
         points.push(SweepPoint {
             label: format!("rate={rate_str}"),
@@ -376,9 +345,15 @@ impl SummaryColumn {
 pub fn parse_concurrency_values(s: &str) -> Result<Vec<usize>> {
     s.split(',')
         .map(|v| {
-            v.trim().parse::<usize>().map_err(|_| {
+            let value = v.trim().parse::<usize>().map_err(|_| {
                 BenchError::Config(format!("Invalid concurrency value: '{}'", v.trim()))
-            })
+            })?;
+            if value == 0 {
+                return Err(BenchError::Config(
+                    "--sweep-max-concurrency values must be greater than 0, got 0".into(),
+                ));
+            }
+            Ok(value)
         })
         .collect()
 }
@@ -560,5 +535,26 @@ mod tests {
             dash_count >= 2,
             "expected at least 2 dashes, got {dash_count}: {row}"
         );
+    }
+
+    #[test]
+    fn parse_concurrency_values_rejects_zero() {
+        for input in ["0", "0,1", "1,0", "1,0,16"] {
+            let err = parse_concurrency_values(input).expect_err("0 must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("--sweep-max-concurrency") && msg.contains("greater than 0"),
+                "{input}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_concurrency_values_accepts_positive() {
+        assert_eq!(
+            parse_concurrency_values("1,10,50").unwrap(),
+            vec![1, 10, 50]
+        );
+        assert_eq!(parse_concurrency_values(" 8 , 16 ").unwrap(), vec![8, 16]);
     }
 }

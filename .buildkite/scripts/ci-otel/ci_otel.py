@@ -417,7 +417,7 @@ def buildkit_spans(payload: dict) -> list[Span]:
                     status_code=status,
                 )
             )
-    for stage_name, index, total, label, tags, start_ns, end_ns, status in (
+    for stage_name, _, _, label, tags, start_ns, end_ns, status in (
         step for step in steps if step[0] == "BuildKit internals"
     ):
         vertex = str(tags.get("vertex", ""))

@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -30,6 +31,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -39,7 +41,6 @@ from .interns2_preview import (
     InternS2PreviewForConditionalGeneration,
     InternS2PreviewProcessingInfo,
 )
-from .qwen2_moe import Qwen2MoeMLP
 from .qwen3_5 import (
     Qwen3_5ForCausalLMBase,
     Qwen3_5Model,
@@ -155,7 +156,7 @@ class InternS2MobiusSharedExpertBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.shared_expert_gate",
         )
-        self.shared_expert = Qwen2MoeMLP(
+        self.shared_expert = Qwen3MoeMLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.shared_expert_intermediate_size,
             hidden_act=config.hidden_act,
@@ -417,12 +418,6 @@ class InternS2MobiusForCausalLM(Qwen3_5ForCausalLMBase):
         self.quant_config = vllm_config.quant_config
         self.scheduler_config = vllm_config.scheduler_config
 
-        if vllm_config.cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Intern-S2-Mobius does not support 'all' prefix caching; "
-                "use '--mamba-cache-mode=align' instead."
-            )
-
         nn.Module.__init__(self)
         self.config = config
         self.model = InternS2MobiusModel(
@@ -496,6 +491,7 @@ class InternS2MobiusForConditionalGeneration(InternS2PreviewForConditionalGenera
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
