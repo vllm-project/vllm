@@ -313,3 +313,163 @@ def test_flash_attn4_mixed_causal(
     )
 
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+# ---- FlashInfer TRTLLM-Gen test (per-token windows, causal+dense merge) ----
+
+
+@pytest.mark.parametrize("causal_dtype", [torch.bool, torch.int32])
+def test_flashinfer_mixed_causal_metadata(causal_dtype: torch.dtype):
+    from vllm.v1.attention.backends.flashinfer import _fill_mixed_causal_metadata
+
+    device = "cuda"
+    window_left = 3
+    # (query_len, seq_len, causal); the empty last request is CUDA graph padding.
+    reqs = [(4, 10, True), (6, 6, False), (1, 9, False), (2, 12, True), (0, 0, False)]
+    num_tokens = 16  # 13 query tokens + 3 padding tokens
+    query_lens, seq_lens, causal = zip(*reqs)
+    query_start_loc = torch.tensor([0, *query_lens], device=device).cumsum(0)
+    bounds = torch.full((2, num_tokens), -1, dtype=torch.int32, device=device)
+    token_causal = torch.ones(num_tokens, dtype=torch.bool, device=device)
+    _fill_mixed_causal_metadata(
+        query_start_loc.to(torch.int32),
+        torch.tensor(seq_lens, dtype=torch.int32, device=device),
+        torch.tensor(causal, dtype=causal_dtype, device=device),
+        num_tokens,
+        {window_left: bounds},
+        token_causal,
+    )
+
+    expected_bounds, expected_causal = [], []
+    for query_len, seq_len, is_causal in reqs:
+        for pos in range(seq_len - query_len, seq_len):
+            visible = [
+                k
+                for k in range(seq_len)
+                if abs(k - pos) <= window_left and (k <= pos or not is_causal)
+            ]
+            expected_bounds.append([visible[0], visible[-1]])
+            expected_causal.append(is_causal)
+    num_padding = num_tokens - len(expected_causal)
+    expected_bounds += [[0, 0]] * num_padding
+    expected_causal += [False] * num_padding
+    assert bounds.T.tolist() == expected_bounds
+    assert token_causal.tolist() == expected_causal
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FlashInfer TRTLLM-Gen attention requires an SM100-family GPU.",
+)
+@pytest.mark.parametrize(
+    "per_seq_causal", [[True, False, True, False], [False, True, False, True]]
+)
+@pytest.mark.parametrize(
+    "head_size, num_heads, sliding_window",
+    # Sliding layers use per-token windows; full layers merge causal and dense.
+    [(256, (16, 8), 32), (512, (16, 2), None)],
+)
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, current_platform.fp8_dtype()])
+@torch.inference_mode()
+def test_flashinfer_trtllm_mixed_causal(
+    per_seq_causal: list[bool],
+    head_size: int,
+    num_heads: tuple[int, int],
+    sliding_window: int | None,
+    kv_dtype: torch.dtype,
+):
+    from flashinfer.prefill import trtllm_batch_context_with_kv_cache
+
+    from vllm.v1.attention.backends.flashinfer import _fill_mixed_causal_metadata
+
+    set_random_seed(42)
+    device = "cuda"
+    dtype = torch.bfloat16
+    block_size = 16
+    # Bidirectional queries fit in the window; `ref_paged_attn` has no right bound.
+    query_lens = [1, 24, 16, 1]
+    kv_lens = [128, 300, 200, 256]
+    num_seqs = len(query_lens)
+    num_tokens = sum(query_lens)
+    num_query_heads, num_kv_heads = num_heads
+    scale = head_size**-0.5
+
+    num_pages = [(kv_len + block_size - 1) // block_size for kv_len in kv_lens]
+    max_num_pages = max(num_pages)
+    block_tables = torch.arange(
+        num_seqs * max_num_pages, dtype=torch.int32, device=device
+    ).view(num_seqs, max_num_pages)
+    # FP8 KV also runs the query in FP8, as the backend does.
+    query = torch.randn(num_tokens, num_query_heads, head_size, device=device)
+    query = query.to(kv_dtype)
+    kv_cache = torch.randn(
+        num_seqs * max_num_pages, 2, num_kv_heads, block_size, head_size, device=device
+    ).to(kv_dtype)
+    ref_output = ref_paged_attn(
+        query.to(dtype),
+        kv_cache[:, 0].transpose(1, 2).to(dtype).contiguous(),
+        kv_cache[:, 1].transpose(1, 2).to(dtype).contiguous(),
+        query_lens,
+        kv_lens,
+        block_tables,
+        scale,
+        per_seq_causal,
+        sliding_window,
+    )
+
+    seq_lens = torch.tensor(kv_lens, dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, *query_lens], device=device).cumsum(0)
+    query_start_loc = query_start_loc.to(torch.int32)
+    kv_indptr = torch.tensor([0, *num_pages], device=device).cumsum(0)
+    window_left = -1 if sliding_window is None else sliding_window - 1
+    window_bounds = {}
+    token_causal = None
+    if sliding_window is None:
+        token_causal = torch.empty(num_tokens, dtype=torch.bool, device=device)
+    else:
+        window_bounds[window_left] = torch.empty(
+            2, num_tokens, dtype=torch.int32, device=device
+        )
+    _fill_mixed_causal_metadata(
+        query_start_loc,
+        seq_lens,
+        torch.tensor(per_seq_causal, dtype=torch.int32, device=device),
+        num_tokens,
+        window_bounds,
+        token_causal,
+    )
+
+    workspace = torch.zeros(128 * 1024 * 1024, dtype=torch.int8, device=device)
+
+    def run(**kwargs) -> torch.Tensor:
+        out = torch.empty(
+            num_tokens, num_query_heads, head_size, dtype=dtype, device=device
+        )
+        trtllm_batch_context_with_kv_cache(
+            query=query,
+            kv_cache=kv_cache,
+            workspace_buffer=workspace,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            max_q_len=max(query_lens),
+            max_kv_len=max(kv_lens),
+            bmm1_scale=scale,
+            bmm2_scale=1.0,
+            batch_size=num_seqs,
+            cum_seq_lens_q=query_start_loc,
+            cum_seq_lens_kv=kv_indptr.to(torch.int32),
+            out=out,
+            **kwargs,
+        )
+        return out
+
+    if token_causal is not None:
+        output = torch.where(token_causal[:, None, None], run(), run(causal=False))
+    else:
+        starts, ends = window_bounds[window_left]
+        output = run(
+            variable_window_token_starts=starts, variable_window_token_ends=ends
+        )
+
+    atol, rtol = (6e-2, 2e-2) if kv_dtype != dtype else (1e-2, 1e-2)
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)

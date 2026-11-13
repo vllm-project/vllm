@@ -662,13 +662,29 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             and supports_trtllm_attention(is_prefill=True)
         ):
             attention_config.backend = AttentionBackendEnum.FLASHINFER
-            attention_config.use_trtllm_attention = True
             logger.info(
                 "DiffusionGemma: defaulting to FlashInfer TRTLLM-Gen attention "
                 "for text-only serving on an SM100-family GPU."
             )
 
         Gemma4Config.verify_and_update_config(vllm_config)
+
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+            if attention_config.use_trtllm_attention is False or not (
+                has_flashinfer() and supports_trtllm_attention(is_prefill=True)
+            ):
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer requires the TRTLLM-Gen context "
+                    "kernel. Use --attention-backend TRITON_ATTN instead."
+                )
+            if get_kv_quant_mode(vllm_config.cache_config.cache_dtype).is_nvfp4:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support an NVFP4 KV "
+                    "cache yet."
+                )
+            attention_config.use_trtllm_attention = True
 
         if attention_config.backend is None and not attention_config.use_non_causal:
             # Only the sm_100 default backend order reads this flag (it puts
