@@ -7,7 +7,6 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
-import importlib.util
 import json
 import multiprocessing
 import os
@@ -42,6 +41,7 @@ from vllm.model_executor.model_loader.weight_cache.warmup_cache.flashinfer_autot
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.import_utils import has_mooncake
 from vllm.utils.network_utils import get_open_port
 
 pytestmark = pytest.mark.skipif(
@@ -1881,8 +1881,7 @@ def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch):
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 @pytest.mark.skipif(
-    importlib.util.find_spec("mooncake") is None
-    or importlib.util.find_spec("mooncake.engine") is None,
+    not has_mooncake(),
     reason="Cross-host weight seeding requires Mooncake TransferEngine",
 )
 def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
