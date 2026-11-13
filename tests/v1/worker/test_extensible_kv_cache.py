@@ -867,6 +867,47 @@ def test_capture_gets_the_memory_warmup_committed(vmm, vllm_runner, monkeypatch)
 
 
 @requires_cuda
+def test_sizing_warmup_gets_the_memory_kernel_warmup_committed(
+    vmm, vllm_runner, monkeypatch
+):
+    """warmup_kernels can commit nearly all the blocks warmup may commit (e.g.
+    hybrid models' speculative Mamba blocks for max_num_seqs requests). They
+    are released before the sizing steps, whose transients would otherwise not
+    fit beside them; the steps commit only the blocks they address."""
+    from vllm.v1.worker import gpu_worker
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    committed = {}
+    warmup_kernels = gpu_worker.warmup_kernels
+    run_kv_cache_sizing_warmup = gpu_worker.run_kv_cache_sizing_warmup
+
+    def recording_warmup_kernels(model_runner, *args):
+        warmup_kernels(model_runner, *args)
+        kv_cache = model_runner.extensible_kv_cache
+        committed["kernel warmup"] = kv_cache.num_committed_blocks
+
+    def recording_sizing_warmup(model_runner, *args):
+        kv_cache = model_runner.extensible_kv_cache
+        committed["sizing warmup"] = kv_cache.num_committed_blocks
+        run_kv_cache_sizing_warmup(model_runner, *args)
+
+    monkeypatch.setattr(gpu_worker, "warmup_kernels", recording_warmup_kernels)
+    monkeypatch.setattr(
+        gpu_worker, "run_kv_cache_sizing_warmup", recording_sizing_warmup
+    )
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=256,
+        enable_extensible_kv_cache=True,
+        # Without capture, nothing else releases warmup's blocks.
+        enforce_eager=True,
+    ):
+        pass
+    assert committed["kernel warmup"] > 1
+    assert committed["sizing warmup"] == 1
+
+
+@requires_cuda
 def test_adaptive_verification_profiles_against_the_final_cache(
     vmm, vllm_runner, monkeypatch
 ):
