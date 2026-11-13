@@ -127,7 +127,7 @@ def stage_spec_decode_metadata(
     num_spec_decodes: int,
 ) -> None:
     """Stage speculative-decode metadata into CUDA-graph buffers."""
-    assert state_indices.is_cuda
+    assert state_indices.device.type == current_platform.device_type
     assert state_indices.ndim == 2
     batch_size, num_state_slots = staged_state_indices.shape
     BLOCK_ROWS = 32
