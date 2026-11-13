@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from typing import Literal
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.attention import HiSparseConfig
 from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
@@ -649,6 +651,55 @@ def hopper_selection():
 
 
 @blackwell_only
+@pytest.mark.parametrize("use_hisparse", [False, True])
+def test_hopper_sparse_mla_skips_backends_without_hisparse(
+    use_hisparse, hopper_selection
+):
+    """Head-512 sparse MLA prefers FlashInfer on Hopper, which has no HiSparse
+    path; with HiSparse the selector must pass over it."""
+    vllm_config = VllmConfig()
+    if use_hisparse:
+        vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    with set_current_vllm_config(vllm_config):
+        backend = get_attn_backend(
+            512, torch.bfloat16, None, use_mla=True, use_sparse=True
+        )
+    assert (backend.get_name() == "FLASHINFER_MLA_SPARSE_SM90") is not use_hisparse
+
+
+@pytest.fixture
+def sm120():
+    with patch.object(
+        type(current_platform),
+        "get_device_capability",
+        return_value=DeviceCapability(12, 0),
+    ):
+        yield
+
+
+@blackwell_only
+def test_sm120_selects_flashinfer_sparse_mla(sm120):
+    with set_current_vllm_config(VllmConfig()):
+        backend = get_attn_backend(
+            512, torch.bfloat16, None, use_mla=True, use_sparse=True
+        )
+    assert backend.get_name() == "FLASHINFER_MLA_SPARSE_SM120"
+
+
+@blackwell_only
+def test_sm120_sparse_mla_has_no_hisparse_backend(sm120):
+    """SM120's only sparse MLA backend has no validated HiSparse path, so
+    HiSparse must fail selection rather than run on it."""
+    vllm_config = VllmConfig()
+    vllm_config.attention_config.hisparse_config = HiSparseConfig()
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(ValueError, match="HiSparse not supported"),
+    ):
+        get_attn_backend(512, torch.bfloat16, None, use_mla=True, use_sparse=True)
+
+
+@blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("flash_attn_version", [None, 3, 4])
 def test_hopper_mm_prefix_selects_triton_flash_attn(
@@ -673,21 +724,54 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
+@pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
 def test_mm_prefix_selects_composite_without_changing_causal_default(
-    use_mm_prefix, kv_cache_dtype, blackwell_selection
+    use_mm_prefix, kv_cache_dtype, selected, blackwell_selection
 ):
-    """The image-mask requirement must reach CUDA's automatic backend priority."""
+    """The image-mask requirement must reach CUDA's automatic backend priority;
+    selecting FLASHINFER serves it natively."""
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
-        model="google/gemma-4-31B-it", dtype="bfloat16"
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        attention_config=AttentionConfig(backend=selected),
     ).create_engine_config()
     with set_current_vllm_config(config):
         backend = get_attn_backend(
             256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
         )
-    expected = "TRITON_FLASHINFER" if use_mm_prefix else "FLASHINFER"
-    assert backend.get_name() == expected
+    composite = use_mm_prefix and selected is None
+    assert backend.get_name() == ("TRITON_FLASHINFER" if composite else "FLASHINFER")
+
+
+@blackwell_only
+@pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
+@pytest.mark.parametrize("swizzled", [False, True])
+def test_mm_prefix_nvfp4_needs_swizzled_flashinfer(
+    selected, swizzled, blackwell_selection
+):
+    """An NVFP4 cache serves mm-prefix only on an explicit FLASHINFER whose
+    wrapper reads the swizzled V scales."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        kv_cache_dtype="nvfp4",
+        attention_config=AttentionConfig(backend=selected),
+    ).create_engine_config()
+    supported = selected is not None and swizzled
+    with (
+        patch(
+            "vllm.v1.attention.backends.flashinfer._MM_PREFIX_READS_SWIZZLED_V_SF",
+            swizzled,
+        ),
+        set_current_vllm_config(config),
+        nullcontext() if supported else pytest.raises(ValueError),
+    ):
+        backend = get_attn_backend(256, torch.bfloat16, "nvfp4", use_mm_prefix=True)
+        assert backend.get_name() == "FLASHINFER"
 
 
 @blackwell_only

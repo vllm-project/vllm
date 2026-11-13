@@ -7,10 +7,15 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    circular_buffer_layer,
+    make_kv_cache_group,
+    mamba_layer,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     BoundaryPut,
     LoadSpec,
     MooncakeLookupResult,
@@ -19,7 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ReqMeta,
     RequestTracker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (
     MooncakeStoreScheduler,
     _partial_tail_non_mamba_puts,
 )
@@ -28,12 +33,10 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
 )
+from vllm.v1.request import RequestStatus
 
 
 def _make_bare_scheduler(
@@ -72,18 +75,18 @@ def _make_bare_scheduler(
     scheduler._boundary_state_group_ids = frozenset({1})
     scheduler._store_coord = MooncakeStoreCoordinator(
         [
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["attention"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=max(16, hash_block_size),
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
                 ),
             ),
-            KVCacheGroupSpec(
+            make_kv_cache_group(
                 ["mamba"],
-                MambaSpec(
+                mamba_layer(
                     block_size=max(16, hash_block_size),
                     shapes=((1,),),
                     dtypes=(torch.float32,),
@@ -231,6 +234,11 @@ def _make_preemption_scheduler_output():
     )
 
 
+def _preempt(scheduler: MooncakeStoreScheduler):
+    scheduler._unfinished_requests["req-0"][0].status = RequestStatus.PREEMPTED
+    return scheduler.build_connector_meta(_make_preemption_scheduler_output())
+
+
 def _make_worker_output(completed_saves: dict[int, int]) -> SimpleNamespace:
     return SimpleNamespace(
         kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
@@ -291,15 +299,15 @@ def test_pending_load_for_non_chosen_connector_is_dropped():
 
 
 def _make_qsa_hybrid_cache_config():
-    full = FullAttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
-    circular = CircularBufferSpec(
+    full = AttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
+    circular = circular_buffer_layer(
         block_size=8,
         num_kv_heads=1,
         head_size=64,
         head_size_v=0,
         dtype=torch.float16,
     )
-    mamba = MambaSpec(
+    mamba = mamba_layer(
         block_size=800,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
@@ -309,9 +317,9 @@ def _make_qsa_hybrid_cache_config():
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["full"], full),
-            KVCacheGroupSpec(["qsa"], circular),
-            KVCacheGroupSpec(["mamba"], mamba),
+            make_kv_cache_group(["full"], full),
+            make_kv_cache_group(["qsa"], circular),
+            make_kv_cache_group(["mamba"], mamba),
         ],
     )
 
@@ -331,7 +339,7 @@ def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store."
         "scheduler.LookupKeyClient"
     ):
         scheduler = MooncakeStoreScheduler(vllm_config, _make_qsa_hybrid_cache_config())
@@ -539,7 +547,7 @@ def test_preemption_removes_tracker():
     )
     scheduler._request_trackers["req-0"].has_pending_offload = True
 
-    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    _preempt(scheduler)
 
     assert "req-0" not in scheduler._request_trackers
 
@@ -558,7 +566,7 @@ def test_preemption_clears_stale_load_state():
         can_load=True,
     )
 
-    meta = scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    meta = _preempt(scheduler)
 
     assert meta.requests == []
     assert "req-0" not in scheduler.load_specs
@@ -1319,9 +1327,9 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     scheduler.client = SimpleNamespace(discard=lambda *_: None)
     scheduler._num_workers = num_workers
     groups = list(scheduler._store_coord.kv_cache_groups)
-    groups[0] = KVCacheGroupSpec(
+    groups[0] = make_kv_cache_group(
         ["attention"],
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=attention_block_size,
             num_kv_heads=1,
             head_size=1,
@@ -1419,15 +1427,15 @@ def test_partial_tail_boundary_follows_eagle_block_drop_not_group_flags():
     """Core drops the Mamba checkpoint whenever EAGLE block drop is on, even if
     only the Mamba group carries the eagle flag."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["attention"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
@@ -1471,16 +1479,16 @@ def test_partial_tail_follows_lookahead_checkpoint(
 ):
     """Lookahead hashes move the prompt checkpoint and drop the proof margin."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["attention"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=8, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
             is_eagle_group=True,
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
@@ -1531,16 +1539,16 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
     """`--enable-mamba-shared-prefix-checkpoint` also hands off a sub-block
     Mamba state at the shared-prefix junction, below the prompt checkpoint."""
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["attention"],
-            FullAttentionSpec(
+            AttentionSpec(
                 block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
             ),
             is_eagle_group=True,
         ),
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             ["mamba"],
-            MambaSpec(
+            mamba_layer(
                 block_size=16,
                 shapes=((1,),),
                 dtypes=(torch.float32,),
@@ -1795,7 +1803,7 @@ def test_preemption_and_request_id_reuse_do_not_release_inflight_job():
     first = scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
     first_job_id = first.requests[0].store_job_id
 
-    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    _preempt(scheduler)
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     assert first_job_id in scheduler._pinned_saves
 
