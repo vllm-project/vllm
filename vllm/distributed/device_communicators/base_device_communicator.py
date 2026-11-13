@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from weakref import WeakValueDictionary
 
@@ -22,7 +22,7 @@ def set_rocm_expandable_segments_steady_state_disabled() -> None:
 
 
 @contextmanager
-def _rocm_expandable_segments_collective_guard() -> Iterator[None]:
+def _rocm_expandable_segments_collective_guard() -> Generator[None]:
     if not _rocm_expandable_segments_steady_state_disabled:
         yield
         return
@@ -208,7 +208,7 @@ class All2AllManagerBase:
         pass
 
     @contextmanager
-    def mask_remote_ranks(self) -> Iterator[None]:
+    def mask_remote_ranks(self) -> Generator[None]:
         yield
 
 
