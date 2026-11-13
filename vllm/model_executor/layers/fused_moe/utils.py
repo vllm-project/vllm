@@ -361,6 +361,9 @@ def _int8_quantize(
         if per_act_token:
             A, A_scale = per_token_quant_int8(A)
         elif A_scale is not None:
+            # Avoid a zero-grid launch without skipping EP dispatch/combine.
+            if A.numel() == 0:
+                return torch.empty_like(A, dtype=torch.int8), A_scale
             # Static per-tensor: use the optimized CUDA kernel
             A, A_scale, _ = ops.scaled_int8_quant(A, scale=A_scale)
         elif A_scale is None:

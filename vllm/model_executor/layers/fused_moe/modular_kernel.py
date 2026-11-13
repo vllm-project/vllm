@@ -140,6 +140,13 @@ class FusedMoEActivationFormat(Enum):
         return self == FusedMoEActivationFormat.BatchedExperts
 
 
+class RouterWeightApplication(Enum):
+    """Stage used when input-side router weighting is requested."""
+
+    PREPARE = "prepare"
+    GEMM1 = "gemm1"
+
+
 @dataclass
 class ExpertTokensMetadata:
     """Metadata regarding expert-token routing."""
@@ -638,6 +645,9 @@ class FusedMoEExperts(ABC):
         Sample subclasses that override are AITER and FlashInfer CUTLASS.
         """
         return False
+
+    def router_weight_application(self) -> RouterWeightApplication:
+        return RouterWeightApplication.PREPARE
 
     @staticmethod
     @abstractmethod
@@ -1198,6 +1208,8 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        self.router_weight_application = fused_experts.router_weight_application()
+
         # Experts that globalize recv_topk_idx themselves let a capable prepare
         # stage skip its standalone launch.
         from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
@@ -1210,6 +1222,7 @@ class FusedMoEKernelModularImpl:
             and hasattr(prepare_finalize, "defer_globalize")
         ):
             prepare_finalize.defer_globalize = True
+
         self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
@@ -1614,9 +1627,9 @@ class FusedMoEKernelModularImpl:
             expert_map (Optional[torch.Tensor]): A tensor mapping expert indices
                 from the global expert space to the local expert space of the
                 expert parallel shard.
-            apply_router_weight_on_input (bool): When true, the topk weights are
-                applied directly on the inputs. This is only applicable when
-                topk is 1.
+            apply_router_weight_on_input (bool): Apply router weights before
+                activation. The expert selects whether prepare or GEMM1 applies
+                them; GEMM2 and finalize must not apply them again.
             shared_experts: SharedExperts | None. The shared experts if any.
             shared_experts_input (Optional[torch.Tensor]): Optional separate
                 input for shared experts. For latent MoE, this is the original
@@ -1639,13 +1652,17 @@ class FusedMoEKernelModularImpl:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        apply_router_weight_in_prepare = (
+            apply_router_weight_on_input
+            and self.router_weight_application == RouterWeightApplication.PREPARE
+        )
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
             topk_weights,
             topk_ids,
             global_num_experts,
             expert_map,
-            apply_router_weight_on_input,
+            apply_router_weight_in_prepare,
         )
 
         # Stash the original unquantized hidden states on the LoRA context
