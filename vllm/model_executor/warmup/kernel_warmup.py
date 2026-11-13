@@ -5,9 +5,12 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import gc
 import json
 import sys
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -57,6 +60,30 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
+
+
+@contextmanager
+def _outside_kv_cache_transient_window(worker: "Worker") -> Generator[None]:
+    """Keep a one-off tuning step out of the extensible KV cache's reserve.
+
+    An extensible KV cache keeps free the allocator peak its warmup steps reach
+    (`reserved_headroom_bytes`). Autotuning profiles every candidate tactic
+    over all token buckets on scratch buffers that serving never allocates
+    again, so its peak is not a serving transient. Record the transient reached
+    before tuning, then restart peak tracking afterwards; the warmup steps that
+    follow run with the tuned tactics and measure their own transients.
+    """
+    kv_cache = worker.model_runner.extensible_kv_cache
+    if kv_cache is None:
+        yield
+        return
+    kv_cache.record_transient_peak()
+    try:
+        yield
+    finally:
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.reset_peak_memory_stats(worker.device)
 
 
 def _warmup_flashinfer_attention(worker: "Worker") -> None:
@@ -362,7 +389,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if enable_flashinfer_autotune is False:
         logger.info_once("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
-        flashinfer_autotune(worker.model_runner)
+        with _outside_kv_cache_transient_window(worker):
+            flashinfer_autotune(worker.model_runner)
 
     _warmup_flashinfer_attention(worker)
 
