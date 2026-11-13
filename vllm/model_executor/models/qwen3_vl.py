@@ -943,15 +943,8 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def _get_effective_video_kwargs(self) -> dict[str, Any]:
         video_processor = self.get_video_processor()
-        video_kwargs = self._merge_and_resolve_mm_processor_kwargs({}).get(
-            "videos_kwargs", {}
-        )
-        return {
-            **{
-                key: getattr(video_processor, key, None)
-                for key in video_processor.valid_kwargs.__annotations__
-            },
-            **video_kwargs,
+        video_kwargs = self._get_effective_mm_processor_kwargs({})["videos_kwargs"]
+        return video_kwargs | {
             "size": self._get_vision_size(
                 video_kwargs, default_size=video_processor.size
             ),

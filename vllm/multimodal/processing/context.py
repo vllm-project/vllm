@@ -514,6 +514,35 @@ class BaseProcessingInfo:
             supported_mm_processor_kwargs=self.supported_mm_processor_kwargs,
         )
 
+    def get_mm_processor_defaults(self) -> dict[str, dict[str, Any]]:
+        processor = self.get_hf_processor()
+        sub_processors: dict[str, Any] = {
+            "images_kwargs": getattr(processor, "image_processor", None),
+            "videos_kwargs": getattr(processor, "video_processor", None),
+        }
+
+        return {
+            scope: {
+                key: getattr(sub_processor, key, None)
+                for key in sub_processor.valid_kwargs.__annotations__
+            }
+            for scope, sub_processor in sub_processors.items()
+            if hasattr(sub_processor, "valid_kwargs")
+        }
+
+    @cached_property
+    def mm_processor_defaults(self) -> dict[str, dict[str, Any]]:
+        return self.get_mm_processor_defaults()
+
+    def _get_effective_mm_processor_kwargs(
+        self,
+        mm_kwargs: Mapping[str, object],
+    ) -> dict[str, Any]:
+        merged = self._merge_and_resolve_mm_processor_kwargs(mm_kwargs)
+        for scope, defaults in self.mm_processor_defaults.items():
+            merged[scope] = {**defaults, **merged.get(scope, {})}
+        return merged
+
     def get_default_tok_params(self) -> TokenizeParams:
         """Construct the default parameters for tokenization."""
         from vllm.renderers import TokenizeParams
