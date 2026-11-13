@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ctypes bindings to libibverbs: just enough for RC QPs and one-sided READs.
+"""ctypes bindings to libibverbs: just enough for RC QPs and RDMA WRITEs.
 
 Offsets follow the stable LP64 ABI of rdma-core's verbs.h. `ibv_post_send` and
 `ibv_poll_cq` are inline in verbs.h, so they are called through the context's
@@ -15,13 +15,17 @@ from functools import cache
 
 SEND_WR_BYTES = 128
 WC_BYTES = 48
+SEND_SIGNALED, SEND_INLINE = 2, 8
 
-_ACCESS = 1 | 4  # local write, remote read
-_ACCESS_RELAXED_ORDERING = 1 << 20
+_REMOTE_WRITE = 1 | 2  # local write, remote write
+_RELAXED = 1 << 20
+# Access of registered memory: read by this NIC only; peers' bulk writes, which
+# may land in any order; peers' flags, which land after their earlier writes.
+LOCAL, BULK, FLAGS = _RELAXED, _REMOTE_WRITE | _RELAXED, _REMOTE_WRITE
 _QPT_RC = 2
 _QPS_INIT, _QPS_RTR, _QPS_RTS = 1, 2, 3
 _OPS_POLL_CQ, _OPS_POST_SEND = 8 + 88, 8 + 200
-_MTU_BYTES = {1: 256, 2: 512, 3: 1024, 4: 2048, 5: 4096}
+MTU_BYTES = {1: 256, 2: 512, 3: 1024, 4: 2048, 5: 4096}
 
 _POST_SEND = ctypes.CFUNCTYPE(
     ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)
@@ -138,6 +142,7 @@ class Device:
         if lib.ibv_query_device(self.context, attr):
             raise RuntimeError(f"ibv_query_device({name}) failed")
         self.max_qp_wr = struct.unpack_from("<i", attr, 112)[0]
+        self.max_sge = struct.unpack_from("<i", attr, 120)[0]
         self.max_cqe = struct.unpack_from("<i", attr, 132)[0]
         # READs a QP may have in flight, as initiator and as target.
         self.rd_atomic = min(
@@ -163,23 +168,26 @@ class Device:
 
     def describe(self) -> str:
         kind = "InfiniBand" if self.is_ib else f"RoCE, GID index {self.gid_index}"
-        return f"{self.name} ({kind}, MTU {_MTU_BYTES.get(self.mtu, 0)})"
+        return f"{self.name} ({kind}, MTU {MTU_BYTES.get(self.mtu, 0)})"
 
     def address(self) -> tuple[bytes, int]:
         return self.gid, self.lid
 
-    def reg_host(self, address: int, num_bytes: int) -> tuple[int, int, int]:
+    def reg_host(
+        self, address: int, num_bytes: int, access: int
+    ) -> tuple[int, int, int]:
+        """Register memory with `access` LOCAL, BULK or FLAGS."""
         mr = _check(
-            _lib().ibv_reg_mr(self.pd, address, num_bytes, _ACCESS),
+            _lib().ibv_reg_mr(self.pd, address, num_bytes, access),
             f"ibv_reg_mr({num_bytes} B)",
         )
         return mr, *self._keys(mr)
 
-    def reg_dmabuf(self, fd: int, address: int, num_bytes: int) -> tuple[int, int, int]:
+    def reg_dmabuf(
+        self, fd: int, address: int, num_bytes: int, access: int
+    ) -> tuple[int, int, int]:
         mr = _check(
-            _lib().ibv_reg_dmabuf_mr(
-                self.pd, 0, num_bytes, address, fd, _ACCESS | _ACCESS_RELAXED_ORDERING
-            ),
+            _lib().ibv_reg_dmabuf_mr(self.pd, 0, num_bytes, address, fd, access),
             f"ibv_reg_dmabuf_mr({num_bytes} B)",
         )
         return mr, *self._keys(mr)
@@ -194,11 +202,15 @@ class Device:
             _lib().ibv_create_cq(self.context, depth, None, None, 0), "ibv_create_cq"
         )
 
-    def create_qp(self, cq: int, max_send_wr: int) -> tuple[int, int]:
+    def create_qp(
+        self, cq: int, max_send_wr: int, max_send_sge: int = 1, max_inline: int = 0
+    ) -> tuple[int, int]:
         """An RC QP sending only; returns it and its number."""
         attr = ctypes.create_string_buffer(64)
         struct.pack_into("<QQ", attr, 8, cq, cq)
-        struct.pack_into("<IIIII", attr, 32, max_send_wr, 1, 1, 1, 0)
+        struct.pack_into(
+            "<IIIII", attr, 32, max_send_wr, 1, max_send_sge, 1, max_inline
+        )
         struct.pack_into("<i", attr, 52, _QPT_RC)
         qp = _check(_lib().ibv_create_qp(self.pd, attr), "ibv_create_qp")
         return qp, struct.unpack_from("<I", ctypes.string_at(qp + 52, 4))[0]
@@ -208,7 +220,7 @@ class Device:
         lib = _lib()
         attr = ctypes.create_string_buffer(144)
         struct.pack_into("<I", attr, 0, _QPS_INIT)
-        struct.pack_into("<i", attr, 32, _ACCESS)
+        struct.pack_into("<i", attr, 32, _REMOTE_WRITE)
         struct.pack_into("<H", attr, 120, 0)
         struct.pack_into("<B", attr, 129, 1)  # port
         mask = 1 | 8 | 16 | 32  # state, access, pkey, port

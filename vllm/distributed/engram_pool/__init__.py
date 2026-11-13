@@ -107,16 +107,14 @@ class EngramPool:
             from vllm.distributed.engram_pool.nvlink import NvlinkTransport
 
             self.transport: object = NvlinkTransport(group)
-            self.output = torch.empty(
-                max_items * max_row_bytes, dtype=torch.uint8, device=self.device
-            )
         else:
             from vllm.distributed.engram_pool.rdma import RdmaTransport
 
             self.transport = RdmaTransport(group, max_items, max_row_bytes)
-            # The NIC may write fetched rows straight into it.
-            self.output = self.transport.output
         self.kind = transport
+        self.output = torch.empty(
+            max_items * max_row_bytes, dtype=torch.uint8, device=self.device
+        )
         self.stream = torch.cuda.Stream(device=self.device)
         self._metas: dict[tuple[int, ...], torch.Tensor] = {}
 
@@ -146,7 +144,7 @@ class EngramPool:
         shard_rows = min(rows_per_shard, num_rows - row_start)
         num_bytes = max(rows_per_shard * row_bytes, ROW_ALIGN)
         keep: list = []
-        rkeys_ptr = mapped_ptr = 0
+        keys_ptr = mapped_ptr = gatherers_ptr = 0
         peer_ptrs = None
         if self.kind == "nvlink":
             local, addresses = self.transport.share(num_bytes)  # type: ignore[attr-defined]
@@ -169,16 +167,23 @@ class EngramPool:
                 address = cumem.map()
                 local = local_gpu = device_view(address, num_bytes, cumem)
                 registered = (cumem, address)
-            bases, rkeys, mapped = self.transport.register(registered)  # type: ignore[attr-defined]
-            bases_t = torch.tensor(bases, dtype=torch.int64, device=self.device)
-            rkeys_t = torch.tensor(rkeys, dtype=torch.int32, device=self.device)
-            mapped_t = torch.tensor(mapped, dtype=torch.int64, device=self.device)
-            keep += [bases_t, rkeys_t, mapped_t]
-            bases_ptr, rkeys_ptr = bases_t.data_ptr(), rkeys_t.data_ptr()
-            mapped_ptr = mapped_t.data_ptr()
+            bases, keys, gatherers, mapped = self.transport.register(registered)  # type: ignore[attr-defined]
+            arrays = [
+                torch.tensor(values, dtype=dtype, device=self.device)
+                for values, dtype in (
+                    (bases, torch.int64),
+                    (keys, torch.int32),
+                    (mapped, torch.int64),
+                    (gatherers, torch.int32),
+                )
+            ]
+            keep += arrays
+            bases_ptr, keys_ptr, mapped_ptr, gatherers_ptr = (
+                array.data_ptr() for array in arrays
+            )
         meta = torch.tensor(
-            [local_gpu.data_ptr(), rows_per_shard, num_rows, bases_ptr, rkeys_ptr]
-            + [mapped_ptr, 0, 0],
+            [local_gpu.data_ptr(), rows_per_shard, num_rows, bases_ptr, keys_ptr]
+            + [mapped_ptr, gatherers_ptr, 0],
             dtype=torch.int64,
         )
         shard = local[: shard_rows * row_bytes].view(shard_rows, row_bytes)
