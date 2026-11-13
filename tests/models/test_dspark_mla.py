@@ -8,10 +8,15 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
+from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
 from vllm.models.deepseek_v41.nvidia import dspark as dsv41_dspark
 from vllm.models.kimi_k3.nvidia import dspark_mla
@@ -61,6 +66,62 @@ def test_dspark_mla_shares_frozen_target_weights_and_skips_training_head():
     mapper = K3DSparkForCausalLM.hf_to_vllm_mapper
     for name in ("confidence_head.weight", "embed_tokens.weight", "lm_head.weight"):
         assert mapper._map_name(name) is None
+
+
+@pytest.mark.cpu_test
+def test_context_projection_checkpoint_load_and_reload_preserve_output_columns(
+    dist_init,
+):
+    """Native loaders must select output rows, including after a weight reload.
+
+    Reconstruct the TP8 projection locally; this does not test a distributed
+    all-gather or the ROCm model's opt-in admission.
+    """
+    reference = ReplicatedLinear(
+        40, 16, bias=False, return_bias=False, params_dtype=torch.float32
+    )
+    shards = [
+        ColumnParallelLinear(
+            40,
+            16,
+            bias=False,
+            return_bias=False,
+            params_dtype=torch.float32,
+            tp_rank=rank,
+            tp_size=8,
+        )
+        for rank in range(8)
+    ]
+    models = [
+        nn.ModuleDict({"model": nn.ModuleDict({"context_proj": layer})})
+        for layer in [reference, *shards]
+    ]
+    inputs = torch.arange(120, dtype=torch.float32).reshape(3, 40) % 5 - 2
+    weight = torch.arange(640, dtype=torch.float32).reshape(16, 40) % 17 - 8
+    for checkpoint_weight in (weight, weight.flip(0)):
+        for model in models:
+            loaded = AutoWeightsLoader(model).load_weights(
+                [("context_proj.weight", checkpoint_weight)],
+                mapper=K3DSparkForCausalLM.hf_to_vllm_mapper,
+            )
+            assert loaded == {"model.context_proj.weight"}
+        torch.testing.assert_close(
+            torch.cat([shard.weight for shard in shards]),
+            reference.weight,
+            rtol=0,
+            atol=0,
+        )
+        # Integer-valued FP32 operands make the accumulation exact here.
+        gathered = torch.cat(
+            [torch.nn.functional.linear(inputs, shard.weight) for shard in shards],
+            dim=-1,
+        )
+        torch.testing.assert_close(
+            gathered,
+            torch.nn.functional.linear(inputs, reference.weight),
+            rtol=0,
+            atol=0,
+        )
 
 
 @pytest.mark.cpu_test
@@ -143,6 +204,7 @@ def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
         markov_rank=4,
     )
     vllm_config = SimpleNamespace(
+        additional_config={},
         speculative_config=SimpleNamespace(
             draft_model_config=SimpleNamespace(hf_config=config)
         ),
