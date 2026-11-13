@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for :mod:`vllm.entrypoints.cohere.cohere_chat_message`.
+"""Unit tests for `vllm.entrypoints.cohere.cohere_chat_message`.
 
 The module hosts the citation-carrying subclasses of the OpenAI chat
-completion protocol (``CohereChatMessage`` / ``CohereDeltaMessage``) plus
-the shared ``Citation`` / ``CitationSource`` shapes. These tests pin:
+completion protocol (`CohereChatMessage` / `CohereDeltaMessage`) plus
+the shared `Citation` / `CitationSource` shapes. These tests pin:
 
-1. Serialization behavior we own (empty-``citations`` cleanup on the
-   subclass ``_serialize``, ``exclude_none`` shape, round-trip).
-2. The constraint that ``type`` discriminators reject unknown values.
+1. Serialization behavior we own (empty-`citations` cleanup on the
+   subclass `_serialize`, `exclude_none` shape, round-trip).
+2. The constraint that `type` discriminators reject unknown values.
 """
 
 import pytest
@@ -29,7 +29,7 @@ from vllm.entrypoints.cohere.cohere_chat_message import (
 class TestCitationSource:
     def test_invalid_type_rejected(self):
         with pytest.raises(ValidationError):
-            CitationSource(type="other")  # type: ignore[arg-type]
+            CitationSource(type="other")
 
     def test_none_fields_excluded_from_dump(self):
         s = CitationSource(type="document", id="d1")
@@ -65,7 +65,7 @@ class TestCitationSource:
 class TestCitation:
     def test_invalid_type_rejected(self):
         with pytest.raises(ValidationError):
-            Citation(type="OTHER")  # type: ignore[arg-type]
+            Citation(type="OTHER")
 
     def test_dump_excludes_none_fields(self):
         c = Citation(start=0, end=5, text="hello")

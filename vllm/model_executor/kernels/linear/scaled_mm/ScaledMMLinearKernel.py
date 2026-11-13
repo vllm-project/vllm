@@ -27,6 +27,10 @@ class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     is_static_input_scheme: bool
     is_channelwise: bool
     input_symmetric: bool
+    # More than one logical output partition (e.g. QKV). Per-tensor weight
+    # scales of such layers hold one scale per partition and are expanded to
+    # per-channel scales after loading.
+    is_fused_module: bool = False
 
 
 @dataclass
@@ -63,6 +67,16 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod
@@ -196,6 +210,7 @@ class Int8ScaledMMLinearKernel(
             getattr(layer, w_q),
             getattr(layer, w_s),
             getattr(layer, i_s, None),
-            getattr(layer, i_zp, None),
+            # A loaded zero point of a symmetric scheme stays registered, unused.
+            None if self.config.input_symmetric else getattr(layer, i_zp, None),
             getattr(layer, azp_adj, None),
         )

@@ -205,3 +205,15 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
         dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
         return [memory_tensor.item()]
+
+    def shutdown(self) -> None:
+        super().shutdown()
+        # Release vLLM's communicators (TP/PP/DP/EP groups) now, as
+        # MultiprocExecutor's workers do. Left alive, they are torn down by
+        # static destructors at interpreter exit, where newer RCCL aborts the
+        # process ("terminate called without an active exception"). The world
+        # group and the default process group may belong to the launcher, so
+        # they stay.
+        from vllm.distributed.parallel_state import destroy_model_parallel
+
+        destroy_model_parallel()

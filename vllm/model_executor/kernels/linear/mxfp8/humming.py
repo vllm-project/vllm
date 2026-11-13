@@ -3,13 +3,20 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
+from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
+    humming_executed_input_quant_key,
     prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
 )
 from vllm.platforms import current_platform
+from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
@@ -17,6 +24,14 @@ from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 class HummingMxfp8LinearKernel(Mxfp8LinearKernel):
     """Humming GEMM Kernel for MXFP8."""
+
+    weight_quant_config = {
+        "quant_method": "humming",
+        "dtype": "float8e4m3",
+        "scale_dtype": "float8e8m0",
+        "group_size": 32,
+        "weight_scale_type": "group",
+    }
 
     @classmethod
     def is_supported(
@@ -37,22 +52,24 @@ class HummingMxfp8LinearKernel(Mxfp8LinearKernel):
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        # Always converts for MXFP8 activations, whatever the layer requests.
+        return humming_executed_input_quant_key(cls.weight_quant_config, kMxfp8Dynamic)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight_scale.data = layer.weight_scale.data.view(torch.float8_e8m0fnu)
         name_map = {"weight": "weight", "weight_scale": "weight_scale"}
 
-        quant_config = {
-            "quant_method": "humming",
-            "dtype": "float8e4m3",
-            "scale_dtype": "float8e8m0",
-            "group_size": 32,
-            "weight_scale_type": "group",
-        }
-
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
+        input_schema = quant_key_to_input_schema(kMxfp8Dynamic)
+        self.layer_config = prepare_humming_linear_layer_config(
+            layer, self.weight_quant_config, input_schema=input_schema
+        )
         self.compute_config = get_humming_linear_compute_config()
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+        self.locks = create_humming_locks(layer.weight.device)
 
     def apply_weights(
         self,
@@ -63,6 +80,7 @@ class HummingMxfp8LinearKernel(Mxfp8LinearKernel):
         return apply_humming_linear(
             layer,
             x,
+            skip_bias_add=bias is None,
             layer_config=self.layer_config,
             compute_config=self.compute_config,
             locks=self.locks,

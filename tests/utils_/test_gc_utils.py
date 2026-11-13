@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
+from array import array
 from dataclasses import dataclass
 from typing import Any
 
@@ -7,6 +9,8 @@ from vllm.utils.gc_utils import (
     GCDebugConfig,
     _compute_detailed_type,
     _compute_top_gc_collected_objects,
+    gc_untrack,
+    untracked_list,
 )
 
 
@@ -83,3 +87,17 @@ def test_gc_debug_config():
     config = GCDebugConfig('{"top_objects":5}')
     assert config.enabled
     assert config.top_objects == 5
+
+
+def test_untracked_list_stays_untracked():
+    blocks = untracked_list()
+    blocks.extend(Normal(i) for i in range(4))
+    blocks.append(Normal(4))
+    blocks[0] = Normal(5)
+    del blocks[-2:]
+    assert not gc.is_tracked(blocks)
+
+
+def test_gc_untrack_ignores_untracked_objects():
+    ids = array("i", range(4))
+    assert gc_untrack(ids) is ids and gc_untrack(None) is None

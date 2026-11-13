@@ -6,7 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.v1.kv_offload.base import LoadStoreSpec
+from vllm.v1.kv_offload.base import LoadStoreSpec, OffloadKey, StoreTrigger
 
 ReqId = str
 
@@ -62,6 +62,31 @@ class TransferJob:
     req_id: ReqId
     src_spec: LoadStoreSpec
     dst_spec: LoadStoreSpec
+    # Load only: completed before this step's forward pass.
+    sync: bool = False
+
+
+@dataclass(slots=True)
+class TransferJobStatus:
+    """Tracks scheduler-side state for a single transfer job."""
+
+    req_id: ReqId
+    # Number of workers still pending. Starts at num_workers,
+    # decremented as each worker reports completion. Job is done at 0.
+    pending_count: int
+    # Offload keys this job covers, in prefix order; passed to
+    # manager.complete_*().
+    keys: tuple[OffloadKey, ...]
+    is_store: bool
+    # Unlike an async load, store jobs may be created next to it.
+    is_sync_load: bool = False
+    failed: bool = False
+    # Store source blocks fenced after the request finishes.
+    deferred_fence_block_ids: list[int] | None = None
+    # Store source blocks fenced when the transfer is created.
+    fenced_block_ids: list[int] | None = None
+    # The trigger of the handler that made a store job. The scheduler sets it.
+    trigger: StoreTrigger | None = None
 
 
 @dataclass
@@ -83,11 +108,14 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     """
 
     completed_jobs: dict[int, int] = field(default_factory=dict)
+    failed_jobs: set[int] = field(default_factory=set)
     transfer_stats: TransferStats = field(default_factory=TransferStats)
 
-    def mark_completed(self, job_id: int) -> None:
+    def mark_completed(self, job_id: int, success: bool = True) -> None:
         """Record a transfer job completion from this worker."""
         self.completed_jobs[job_id] = 1
+        if not success:
+            self.failed_jobs.add(job_id)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -100,5 +128,6 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
 
         return OffloadingWorkerMetadata(
             completed_jobs=merged,
+            failed_jobs=self.failed_jobs | other.failed_jobs,
             transfer_stats=self.transfer_stats.aggregate(other.transfer_stats),
         )

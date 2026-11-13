@@ -2,11 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    nvfp4_weight_padding_bytes,
+    pad_nvfp4_activation_for_cutlass,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+)
 
 
 @dataclass
@@ -26,7 +38,7 @@ class NvFp4LinearKernel(ABC):
 
     Each subclass implements a specific GEMM backend (CUTLASS, Marlin, etc).
     The kernel selection mechanism iterates over registered subclasses in
-    priority order,calling ``is_supported`` and ``can_implement`` to find the best
+    priority order,calling `is_supported` and `can_implement` to find the best
     match for the current hardware.
     """
 
@@ -41,6 +53,35 @@ class NvFp4LinearKernel(ABC):
         """
         return None
 
+    def prepare_input(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | QuantizedActivation,
+    ) -> QuantizedActivation:
+        """Return 2D packed NVFP4 data with swizzled 128x4 block scales.
+
+        K is zero-padded to match the padded weight. Prequantized inputs are
+        validated and padded without modifying the caller's activation.
+        """
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is None:
+            assert isinstance(x, torch.Tensor)
+            data, scale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                padded_n=layer.weight.shape[1] * 2,
+            )
+            return QuantizedActivation(data, scale, x.dtype, x.shape, kNvfp4Dynamic)
+
+        data = qa.data.reshape(-1, qa.data.shape[-1])
+        assert data.shape[-1] == layer.input_size_per_partition // 2, (
+            f"Expected {layer.input_size_per_partition // 2} packed NVFP4 bytes "
+            f"per row, got {data.shape[-1]}"
+        )
+        data = pad_nvfp4_activation_for_cutlass(data, nvfp4_weight_padding_bytes(layer))
+        return replace(qa, data=data)
+
     @classmethod
     @abstractmethod
     def is_supported(
@@ -48,6 +89,16 @@ class NvFp4LinearKernel(ABC):
     ) -> tuple[bool, str | None]:
         """Return whether this kernel can run on the current platform."""
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod

@@ -4,7 +4,8 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) Torch Stable ABI Audit"
   key: torch-stable-abi-audit
-  timeout_in_minutes: 5
+  automatic_shard: true
+  timeout_in_minutes: 10
   source_file_dependencies:
   - .buildkite/check-torch-abi.py
   - csrc/
@@ -12,3 +13,21 @@ steps:
   - setup.py
   commands:
   - python3 /vllm-workspace/.buildkite/check-torch-abi.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Torch Stable ABI Audit"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 10
+      depends_on:
+      - image-build-amd
+      no_gpu: true
+      working_dir: /vllm-workspace/
+      source_file_dependencies:
+      - .buildkite/check-torch-abi.py
+      - csrc/
+      - cmake/
+      - setup.py
+      - vllm/platforms/rocm.py
+      commands:
+      - python3 /vllm-workspace/.buildkite/check-torch-abi.py

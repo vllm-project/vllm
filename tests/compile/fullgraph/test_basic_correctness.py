@@ -86,7 +86,7 @@ def test_compile_correctness(
         CompilationMode.VLLM_COMPILE,
     ]:
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"])
-        all_envs.append({})
+        all_envs.append(None)
     # inductor will change the output, so we only compare if the output
     # is close, not exactly the same.
     compare_all_settings(
@@ -94,7 +94,6 @@ def test_compile_correctness(
         all_args,
         all_envs,
         method=method if method != "generate" else "generate_close",
-        force_v1_runner=True,
     )
 
     all_envs.clear()
@@ -108,5 +107,5 @@ def test_compile_correctness(
         CompilationMode.VLLM_COMPILE,
     ]:
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
-        all_envs.append({})
-    compare_all_settings(model, all_args, all_envs, method=method, force_v1_runner=True)
+        all_envs.append(None)
+    compare_all_settings(model, all_args, all_envs, method=method)

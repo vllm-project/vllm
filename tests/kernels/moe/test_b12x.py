@@ -179,7 +179,14 @@ def _make_b12x_moe_kernel(
         num_experts=num_experts,
         experts_per_token=topk,
         hidden_dim=hidden_states.shape[1],
-        intermediate_size=w2.shape[2] * 2,
+        intermediate_size=w2.shape[2]
+        * (
+            32
+            if quant_config.weight_quant_dtype == "q8_0"
+            else 256
+            if quant_config.weight_quant_dtype in ("iq2_xs", "iq2_xxs")
+            else 2
+        ),
         in_dtype=hidden_states.dtype,
         activation=activation,
     )
@@ -437,6 +444,22 @@ def test_explicit_b12x_mxfp4_force_a16_uses_a16_contract(
     assert experts_cls is B12xExperts
 
 
+def test_explicit_b12x_mxfp4_force_a16_is_rejected_under_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forcing A16 drops a requested activation quantization, which
+    VLLM_STRICT_QUANT_SCHEME forbids like any other BF16 fallback."""
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(mxfp4_oracle.envs, "VLLM_B12X_MOE_FP4_FORCE_A16", True)
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", "1")
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
+    config.moe_backend = "b12x"
+
+    with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+        select_mxfp4_moe_backend(config, activation_key=kMxfp8Dynamic)
+
+
 @pytest.mark.parametrize(
     "force_a16,expected_backend",
     [
@@ -462,6 +485,35 @@ def test_deepseek_v4_b12x_activation_selection(
 
     assert backend == expected_backend
     assert experts_cls is B12xExperts
+
+
+def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit flashinfer_cutlass must try the W4A8 variant when the BF16
+    variant is unsupported (the BF16 variant is gated to SM90)."""
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+
+    monkeypatch.setattr(FlashInferExperts, "_supports_current_device", lambda: True)
+
+    def sm120_quant_gate(weight_key, activation_key):
+        return (weight_key, activation_key) == (
+            mxfp4_oracle.kMxfp4Static,
+            mxfp4_oracle.kMxfp8Dynamic,
+        )
+
+    monkeypatch.setattr(
+        FlashInferExperts, "_supports_quant_scheme", staticmethod(sm120_quant_gate)
+    )
+    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=64)
+    config.moe_backend = "flashinfer_cutlass"
+
+    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+
+    assert backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8
+    assert experts_cls is FlashInferExperts
 
 
 def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
@@ -490,7 +542,8 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
     processed_layers: list[torch.nn.Module] = []
     fake_experts = SimpleNamespace(
-        process_weights_after_loading=processed_layers.append
+        process_weights_after_loading=processed_layers.append,
+        keep_constants=lambda layer: None,
     )
     kernel = SimpleNamespace(fused_experts=fake_experts)
     monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda _: object())
@@ -550,7 +603,9 @@ def test_explicit_b12x_nvfp4_selection(
     selected_activation_keys = []
 
     def is_supported_config(cls, config, weight_key, activation_key, activation_format):
-        selected_activation_keys.append(activation_key)
+        selected_activation_keys.append(
+            cls.executed_activation_key(weight_key, activation_key)
+        )
         return True, None
 
     monkeypatch.setattr(B12xExperts, "is_supported_config", is_supported_config)
@@ -571,6 +626,39 @@ def test_explicit_b12x_nvfp4_selection(
     assert backend == NvFp4MoeBackend.B12X
     assert experts_cls is B12xExperts
     assert selected_activation_keys == [expected_activation_key]
+
+
+@pytest.mark.parametrize("force_a16", [False, True])
+def test_b12x_nvfp4_uninterleave_support_follows_executed_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    force_a16: bool,
+) -> None:
+    """Force-A16 runs W4A4 layers unquantized, so the W4A8-only uninterleave
+    rejection must not apply to them."""
+    monkeypatch.setattr(
+        nvfp4_oracle.envs,
+        "VLLM_B12X_MOE_FP4_FORCE_A16",
+        force_a16,
+    )
+    monkeypatch.setattr(
+        B12xExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    config = make_dummy_moe_config(
+        hidden_dim=128,
+        intermediate_size=64,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    )
+
+    supported, reason = B12xExperts.is_supported_config(
+        B12xExperts,
+        config,
+        kNvfp4Static,
+        kNvfp4Dynamic,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert force_a16 == (reason is None or "swigluoai" not in reason)
+    assert not force_a16 or supported
 
 
 @pytest.mark.parametrize(
@@ -1243,3 +1331,78 @@ def test_b12x_moe_cuda_graph_replay(
     assert torch.isfinite(expected).all()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not _has_b12x_moe(), reason="requires b12x MoE on SM120")
+@pytest.mark.parametrize("codec", ["iq2_xxs", "q8_0"])
+@pytest.mark.parametrize("tokens", [1, 2, 4])
+@torch.inference_mode()
+def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
+    from b12x.testing.iq2_xs_reference import moe_reference_iq2_xs
+
+    from tests.model_executor.kernels.test_b12x_linear import _block_weights
+
+    with set_current_vllm_config(VllmConfig()):
+        torch.manual_seed(71)
+        e, h, i, topk = 4, 256, 256, 2
+        raw1, raw2 = _block_weights(e * i, h, codec), _block_weights(e * h, i, codec)
+        w1 = raw1.view(e, i, *raw1.shape[1:]).cuda()
+        w2 = raw2.view(e, h, *raw2.shape[1:]).cuda()
+        x = torch.randn(tokens, h, device="cuda", dtype=torch.bfloat16) * 0.125
+        scores = torch.randn(tokens, e, device="cuda", dtype=torch.bfloat16)
+        from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantDesc
+
+        quant = FusedMoEQuantConfig(
+            _a1=FusedMoEQuantDesc(),
+            _a2=FusedMoEQuantDesc(),
+            _w1=FusedMoEQuantDesc(dtype=codec),
+            _w2=FusedMoEQuantDesc(dtype=codec),
+        )
+        activation = MoEActivation.RELU2_NO_MUL
+        kernel = _make_b12x_moe_kernel(x, w1, w2, topk, activation, quant)
+        weights, ids, _ = fused_topk(x, scores, topk, renormalize=False)
+
+        def apply():
+            return kernel.apply(
+                hidden_states=x,
+                w1=w1,
+                w2=w2,
+                topk_weights=weights,
+                topk_ids=ids,
+                activation=activation,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+        apply()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = apply()
+        for _ in range(2):
+            x.normal_(std=0.125)
+            scores.normal_()
+            new_weights, new_ids, _ = fused_topk(x, scores, topk, renormalize=False)
+            weights.copy_(new_weights)
+            ids.copy_(new_ids)
+            allocated = torch.accelerator.memory_allocated()
+            graph.replay()
+            torch.accelerator.synchronize()
+            assert torch.accelerator.memory_allocated() == allocated
+            expected = moe_reference_iq2_xs(
+                x,
+                raw1.view(e, i, *raw1.shape[1:]),
+                raw2.view(e, h, *raw2.shape[1:]),
+                ids,
+                weights,
+                activation="relu2",
+            )
+            assert torch.isfinite(output).all()
+            relative_l2 = (
+                output.float() - expected.float()
+            ).norm() / expected.float().norm()
+            cosine = torch.nn.functional.cosine_similarity(
+                output.float().flatten(), expected.float().flatten(), dim=0
+            )
+            assert cosine >= 0.999 and relative_l2 <= 0.01
+        graph.reset()
