@@ -116,7 +116,7 @@ def test_refusal_lists_every_reason():
         (QuantizationConfigArgs(moe="mxfp4"), True),
         ({"moe": "mxfp4"}, True),
         (QuantizationConfigArgs(moe=QuantSpec(weight="mxfp4", activation="mxfp4")), True),  # noqa: E501
-        (QuantizationConfigArgs(targets={"re:.*experts.*": "mxfp4"}), True),
+        (QuantizationConfigArgs(targets={"re:.*experts.*": "mxfp4"}), False),
         (QuantizationConfigArgs(moe=QuantSpec(weight="mxfp4", activation="mxfp8")), False),  # noqa: E501
         (QuantizationConfigArgs(moe=QuantSpec(weight="mxfp4", activation=None)), False),
         (QuantizationConfigArgs(moe="fp8_per_block"), False),

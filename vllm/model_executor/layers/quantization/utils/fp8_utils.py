@@ -1617,7 +1617,6 @@ def dequantize_block_fp8_moe_weights(
     num_w13_shards: int,
     weight_block_size: Sequence[int] | None,
     out_dtype: torch.dtype,
-    moe_block_shape: Sequence[int] | None = None,
 ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
     """Dequantize block-scaled FP8 MoE weights for online requantization.
 
@@ -1627,11 +1626,9 @@ def dequantize_block_fp8_moe_weights(
         w2_weight: `[E, K, I]` fp8 weights.
         w2_scale: `[E, ceil(K / bn), ceil(I / bk)]` block scales.
         num_w13_shards: 2 for gated (w1, w3), else 1.
-        weight_block_size: The `[bn, bk]` block shape of the checkpoint, None for
-            other (non-block) weight schemes, which are not supported.
+        weight_block_size: The `[bn, bk]` block shape of the scale grids, None
+            for other (non-block) weight schemes, which are not supported.
         out_dtype: The dequantized dtype.
-        moe_block_shape: Finer block shape of the scale grid when it was adapted
-            to TP sharding, tried if `weight_block_size` does not match.
 
     Returns:
         An iterator of `(experts, w13, w2)` over groups of experts, bounding the
@@ -1643,33 +1640,23 @@ def dequantize_block_fp8_moe_weights(
             "MoE requantization from FP8 is only supported for block-scaled weights."
         )
     num_experts = w13_weight.shape[0]
-    # fp32 staging of the scaled weights plus the `out_dtype` result.
+    # fp32 staging of the scaled weights and of the expanded scales, plus the
+    # `out_dtype` result.
     expert_bytes = (w13_weight[0].numel() + w2_weight[0].numel()) * (
-        4 + out_dtype.itemsize
+        4 + 4 + out_dtype.itemsize
     )
     experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
 
     def dequant(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        # The scale grid follows the checkpoint block shape, or the one adapted
-        # to TP sharding: take the one matching the scale shape.
         n, k = w.shape[-2:]
-        block = next(
-            (
-                b
-                for b in (weight_block_size, moe_block_shape)
-                if b is not None
-                and -(-n // b[0]) == scale.shape[-2]
-                and -(-k // b[1]) == scale.shape[-1]
-            ),
-            None,
-        )
-        if block is None:
+        if (-(-n // weight_block_size[0]), -(-k // weight_block_size[1])) != tuple(
+            scale.shape[-2:]
+        ):
             raise ValueError(
-                f"FP8 scale grid {tuple(scale.shape[-2:])} matches neither block "
-                f"shape {weight_block_size} nor {moe_block_shape} for a "
-                f"{(n, k)} weight."
+                f"FP8 scale grid {tuple(scale.shape[-2:])} does not match block "
+                f"shape {list(weight_block_size)} for a {(n, k)} weight."
             )
-        return dequant_block_fp8_to_bf16(w, scale, block, out_dtype)
+        return dequant_block_fp8_to_bf16(w, scale, weight_block_size, out_dtype)
 
     for start in range(0, num_experts, experts_per_chunk):
         experts = slice(start, min(start + experts_per_chunk, num_experts))

@@ -261,6 +261,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
+                # The layer's resolved request (`targets` included).
+                requested_activation_key=self.activation_quant_key,
             )
         )
 

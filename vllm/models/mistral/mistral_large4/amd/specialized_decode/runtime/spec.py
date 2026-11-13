@@ -32,20 +32,12 @@ def _is_online_mxfp4_a4w4(spec: QuantSpec | None) -> bool:
 
 
 def routed_experts_online_mxfp4_a4w4(config: VllmConfig) -> bool:
-    """Whether `--quantization-config` requantizes the routed experts to MXFP4
-    with MXFP4 activations (`{"moe": "mxfp4"}`, or an equivalent `targets`)."""
+    """Whether `--quantization-config '{"moe": "mxfp4"}'` requantizes the routed
+    experts to MXFP4 with MXFP4 activations (`targets` specs are not supported)."""
     args = getattr(config.model_config, "quantization_config", None)
     if isinstance(args, dict):
         args = QuantizationConfigArgs(**args)
-    if args is None:
-        return False
-    if args.targets is not None:
-        return any(
-            _is_online_mxfp4_a4w4(t if isinstance(t, QuantSpec) else None)
-            or (isinstance(t, str) and t == "mxfp4")
-            for t in args.targets.values()
-        )
-    return _is_online_mxfp4_a4w4(args.moe)
+    return args is not None and _is_online_mxfp4_a4w4(args.moe)
 
 
 @dataclass(frozen=True)

@@ -1371,15 +1371,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "False").lower() in ("true", "1")
     ),
-    # Whether to use aiter moe ops.
-    # By default is enabled.
     # Deprecated, will be removed in v0.35.0: use
-    # `--quantization-config '{"moe":"mxfp4"}'` (a4w4) or
-    # `--quantization-config '{"moe":{"weight":"mxfp4","activation":null}}'`.
+    # `--quantization-config '{"moe":"mxfp4"}'` (a4w4),
+    # `--quantization-config '{"moe":{"weight":"mxfp4","activation":"mxfp8"}}'`
+    # (a8w4) or `--quantization-config '{"moe":{"weight":"mxfp4","activation":null}}'`
+    # (a16w4).
     # ROCm: re-quantize block-FP8 routed experts to MXFP4 at load (half the
     # expert bytes, aiter MXFP4 MoE kernels). _ACT picks the activation dtype:
-    # a8w4 (fp8 per-token, FlyDSL interleaved kernels; default), a4w4 (MXFP4
-    # activations, FlyDSL separated kernels) or a16w4 (bf16, aiter Triton).
+    # a8w4 (MXFP8, FlyDSL interleaved kernels; default), a4w4 (MXFP4
+    # activations, FlyDSL separated kernels) or a16w4 (bf16).
     "VLLM_FP8_MOE_REQUANT": env_with_choices(
         "VLLM_FP8_MOE_REQUANT", "none", ["none", "mxfp4"], case_sensitive=False
     ),
@@ -1389,6 +1389,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["a8w4", "a4w4", "a16w4"],
         case_sensitive=False,
     ),
+    # Whether to use aiter moe ops.
+    # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
