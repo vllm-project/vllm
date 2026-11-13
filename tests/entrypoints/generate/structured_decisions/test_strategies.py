@@ -3,6 +3,7 @@
 import json
 import logging
 import math
+import string
 import threading
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
@@ -82,6 +83,7 @@ from vllm.outputs import (
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS
+from vllm.tokenizers import get_tokenizer
 
 TRACE_HEADERS = {
     "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
@@ -2017,6 +2019,19 @@ def test_knowline_discovers_labels_the_reply_starts_with():
         knowline.discover_labels(CharTok(), KNOWLINE_KW)
 
 
+def test_knowline_discovers_all_labels_on_the_real_tokenizer():
+    # The mocks cannot show this: a real vocabulary skips two-letter pairs
+    # that are not one token after the prompt, and discovery still fills
+    # every label a question may ask for.
+    tok = get_tokenizer("Qwen/Qwen3.5-0.8B")
+    labels, ids = knowline.discover_labels(tok, KNOWLINE_KW)
+    assert labels[:26] == list(string.ascii_uppercase)
+    assert len(labels) == 255
+    assert len(set(ids)) == len(ids)
+    assert labels[-1] == "JU"
+    assert sum(len(label) == 2 for label in labels) == 229
+
+
 def test_knowline_disabled_endpoints_log_the_reason(caplog, monkeypatch):
     class CharTok(KnowLineMockTok):
         def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
@@ -2272,6 +2287,26 @@ async def test_knowline_read_needs_the_prompt_within_max_model_len():
         )
 
 
+@pytest.mark.asyncio
+async def test_knowline_read_needs_the_question_within_max_model_len():
+    # The state fits, its question does not: this check names the question,
+    # unlike the early state check, so each bound has its own case.
+    strategy, _ = knowline_strategy(KnowLineMockTok(), max_model_len=48)
+    q = knowline_question("choice", {f"opt{i}": None for i in range(200)})
+    with pytest.raises(
+        StructuredDecisionError, match="question 'q': the prompt must fit 47 tokens"
+    ):
+        await strategy.read(
+            [q],
+            None,
+            "state",
+            request_id="r",
+            chat_template_kwargs=None,
+            lora_request=None,
+            priority=0,
+        )
+
+
 class KnowLineRecordingTok(KnowLineMockTok):
     """Records the thread of every render and encode call."""
 
@@ -2355,6 +2390,45 @@ async def test_knowline_rejects_a_long_state_before_encoding_the_questions():
     # The state is encoded once, not once more per question.
     assert len(tokenizer.encodes) == 1
     assert engine.generated == []
+
+
+@pytest.mark.asyncio
+async def test_knowline_state_text_parts_keep_their_text_on_the_real_template():
+    # A client that dumps pydantic models without exclude_none sends
+    # image_url null inside a text part; the real template reads such a
+    # part as media and drops the state, so the part must be rebuilt with
+    # only its text.
+    tok = get_tokenizer("Qwen/Qwen3.5-0.8B")
+    strategy, engine = knowline_strategy(tok)
+    q = knowline_question("noul", None)
+
+    async def read(state):
+        engine.generated.clear()
+        await strategy.read(
+            [q],
+            None,
+            state,
+            request_id="r",
+            chat_template_kwargs=None,
+            lora_request=None,
+            priority=0,
+        )
+        return tok.decode(engine.generated[0][0]["prompt_token_ids"])
+
+    null_key = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "I was billed twice.", "image_url": None}
+            ],
+        }
+    ]
+    clean = [
+        {"role": "user", "content": [{"type": "text", "text": "I was billed twice."}]}
+    ]
+    text = await read(null_key)
+    assert "I was billed twice." in text
+    assert text == await read(clean)
 
 
 def test_knowline_detects_a_template_that_drops_the_question_slot():
@@ -2449,3 +2523,55 @@ async def test_knowline_answers_a_request():
     )
     assert isinstance(media, ErrorResponse)
     assert "does not take image inputs" in media.error.message
+
+
+@pytest.mark.asyncio
+async def test_knowline_serves_the_decisions_endpoint():
+    tokenizer = KnowLineMockTok()
+    strategy, engine = knowline_strategy(tokenizer)
+    models = OpenAIServingModels(
+        SimpleNamespace(
+            model_config=engine.model_config,
+            renderer=None,
+            input_processor=None,
+        ),
+        [BaseModelPath(name="test-model", model_path="test-model")],
+    )
+    request = DecisionRequest(
+        model="test-model",
+        input="My parcel went to the wrong address.",
+        questions=[
+            {
+                "type": "predicate",
+                "name": "owed",
+                "instructions": "Is a refund owed?",
+            },
+            {
+                "type": "choice",
+                "name": "team",
+                "instructions": "Which team handles it?",
+                "choices": [{"value": "billing"}, {"value": "shipping"}],
+            },
+        ],
+    )
+    response = await OpenAIServingDecisions(models, strategy).create_decisions(request)
+    assert not isinstance(response, ErrorResponse)
+    dump = response.model_dump()
+    assert [a["name"] for a in dump["answers"]] == ["owed", "team"]
+    assert dump["answers"][0]["type"] == "predicate"
+    assert 0.0 <= dump["answers"][0]["probability"] <= 1.0
+    assert dump["answers"][1]["type"] == "choice"
+    assert dump["answers"][1]["choice"] == "billing"
+    assert {p["value"] for p in dump["answers"][1]["probabilities"]} == {
+        "billing",
+        "shipping",
+    }
+    # The trained prompt renders the stock questions too, and usage sums
+    # the reads.
+    assert len(engine.generated) == 2
+    for prompt, _, _ in engine.generated:
+        text = tokenizer.decode(prompt["prompt_token_ids"])
+        assert text.endswith(f"<assistant>{knowline.ANSWER}")
+    assert dump["usage"]["input_tokens"] == sum(
+        len(p["prompt_token_ids"]) for p, _, _ in engine.generated
+    )
