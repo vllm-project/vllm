@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 330" width="760" height="330" font-family="-apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif">
+<rect width="760" height="330" fill="#ffffff"/>
+<path d="M28 34 V28 H642 V34 M646 34 V28 H730 V34" fill="none" stroke="#d1d9e0" stroke-width="1.5"/>
+<text x="335" y="20" text-anchor="middle" font-size="12" fill="#59636e">28 blocks shared with the session's last turn</text>
+<text x="688" y="20" text-anchor="middle" font-size="12" fill="#59636e">4 new blocks</text>
+<text x="28" y="55" font-size="13" fill="#59636e"><tspan font-weight="600" fill="#1f2328">Session</tspan>  blocks kept from its last turn</text>
+<rect x="28" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="50" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="72" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="94" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="116" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="138" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="160" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="182" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="204" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="226" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="248" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="270" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="292" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="314" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="336" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="358" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="380" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="402" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="424" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="446" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="468" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="490" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="512" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="534" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="556" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="578" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="600" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="622" y="64" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<text x="28" y="131" font-size="13" fill="#59636e"><tspan font-weight="600" fill="#1f2328">main</tspan>  one cache lookup per block</text>
+<text x="730" y="131" font-size="12" font-weight="600" fill="#1f2328" text-anchor="end">29 lookups</text>
+<rect x="28" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="50" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="72" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="94" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="116" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="138" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="160" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="182" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="204" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="226" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="248" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="270" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="292" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="314" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="336" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="358" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="380" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="402" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="424" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="446" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="468" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="490" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="512" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="534" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="556" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="578" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="600" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="622" y="140" width="20" height="28" rx="4" fill="#ddf4ff" stroke="#0969da"/>
+<rect x="644" y="140" width="20" height="28" rx="4" fill="#ffebe9" stroke="#d1242f"/>
+<rect x="666" y="140" width="20" height="28" rx="4" fill="none" stroke="#818b98" stroke-dasharray="3 2"/>
+<rect x="688" y="140" width="20" height="28" rx="4" fill="none" stroke="#818b98" stroke-dasharray="3 2"/>
+<rect x="710" y="140" width="20" height="28" rx="4" fill="none" stroke="#818b98" stroke-dasharray="3 2"/>
+<text x="28" y="207" font-size="13" fill="#59636e"><tspan font-weight="600" fill="#1f2328">This PR</tspan>  one hash comparison, then reuse the session's blocks</text>
+<text x="730" y="207" font-size="12" font-weight="600" fill="#1f2328" text-anchor="end">1 comparison + 1 lookup</text>
+<rect x="28" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="50" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="72" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="94" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="116" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="138" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="160" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="182" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="204" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="226" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="248" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="270" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="292" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="314" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="336" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="358" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="380" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="402" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="424" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="446" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="468" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="490" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="512" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="534" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="556" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="578" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="600" y="216" width="20" height="28" rx="4" fill="#fff8c5" stroke="#9a6700"/>
+<rect x="622" y="216" width="20" height="28" rx="4" fill="#9a6700" stroke="#9a6700"/>
+<text x="632" y="235" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">=</text>
+<rect x="644" y="216" width="20" height="28" rx="4" fill="#ffebe9" stroke="#d1242f"/>
+<rect x="666" y="216" width="20" height="28" rx="4" fill="none" stroke="#818b98" stroke-dasharray="3 2"/>
+<rect x="688" y="216" width="20" height="28" rx="4" fill="none" stroke="#818b98" stroke-dasharray="3 2"/>
+<rect x="710" y="216" width="20" height="28" rx="4" fill="none" stroke="#818b98" stroke-dasharray="3 2"/>
+<line x1="28" y1="270" x2="730" y2="270" stroke="#d1d9e0"/>
+<rect x="28" y="288" width="14" height="14" rx="3" fill="#fff8c5" stroke="#9a6700"/>
+<text x="49" y="300" font-size="12" fill="#59636e">reused from the session, no lookup</text>
+<rect x="275.4" y="288" width="14" height="14" rx="3" fill="#9a6700" stroke="#9a6700"/>
+<text x="296.4" y="300" font-size="12" fill="#59636e">hash compared once</text>
+<rect x="425.2" y="288" width="14" height="14" rx="3" fill="#ddf4ff" stroke="#0969da"/>
+<text x="446.2" y="300" font-size="12" fill="#59636e">cache hit</text>
+<rect x="520.1" y="288" width="14" height="14" rx="3" fill="#ffebe9" stroke="#d1242f"/>
+<text x="541.1" y="300" font-size="12" fill="#59636e">cache miss</text>
+<rect x="621.1" y="288" width="14" height="14" rx="3" fill="none" stroke="#818b98" stroke-dasharray="3 2"/>
+<text x="642.1" y="300" font-size="12" fill="#59636e">not reached</text>
+</svg>

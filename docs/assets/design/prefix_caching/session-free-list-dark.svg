@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 318" width="760" height="318" font-family="-apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif">
+<rect width="760" height="318" fill="#0d1117"/>
+<defs><marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#9198a1"/></marker>
+<marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#3fb950"/></marker>
+</defs>
+<rect x="270" y="14" width="220" height="38" rx="19" fill="#151b23" stroke="#3d444d"/>
+<text x="380" y="38" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f6fc">Block freed (ref_cnt reaches 0)</text>
+<path d="M380 52 V72 M130 72 H630" fill="none" stroke="#3d444d" stroke-width="1.5"/>
+<polyline points="130,72 130,92" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#m)"/>
+<rect x="18" y="94" width="224" height="58" rx="8" fill="#151b23" stroke="#3d444d"/>
+<text x="130" y="118" text-anchor="middle" font-size="13" font-weight="600" fill="#f0f6fc">No hash, or evict_first</text>
+<text x="130" y="138" text-anchor="middle" font-size="11" fill="#9198a1" font-family="'SF Mono', Menlo, Consolas, monospace">prepend_n(blocks)</text>
+<polyline points="380,72 380,92" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#m)"/>
+<rect x="268" y="94" width="224" height="58" rx="8" fill="#151b23" stroke="#3d444d"/>
+<text x="380" y="118" text-anchor="middle" font-size="13" font-weight="600" fill="#f0f6fc">Cached, no session</text>
+<text x="380" y="138" text-anchor="middle" font-size="11" fill="#9198a1" font-family="'SF Mono', Menlo, Consolas, monospace">append_n(blocks)</text>
+<polyline points="630,72 630,92" fill="none" stroke="#3fb950" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#g)"/>
+<rect x="518" y="94" width="224" height="58" rx="8" fill="#151b23" stroke="#3fb950"/>
+<text x="630" y="118" text-anchor="middle" font-size="13" font-weight="600" fill="#f0f6fc">Cached, session_ref &gt; 0</text>
+<text x="630" y="138" text-anchor="middle" font-size="11" fill="#3fb950" font-family="'SF Mono', Menlo, Consolas, monospace">append_n(blocks, retained=True)</text>
+<polyline points="130,152 130,170 52,170 52,206" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#m)"/>
+<polyline points="380,152 380,170 462,170 462,206" fill="none" stroke="#9198a1" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#m)"/>
+<polyline points="630,152 630,170 722,170 722,206" fill="none" stroke="#3fb950" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#g)"/>
+<rect x="30" y="210" width="120" height="40" rx="6" fill="#151b23" stroke="#656c76" stroke-dasharray="4 3"/>
+<rect x="154" y="210" width="330" height="40" rx="6" fill="#121d2f" stroke="#4493f8"/>
+<rect x="520" y="210" width="210" height="40" rx="6" fill="#2e2a1f" stroke="#d29922"/>
+<text x="90" y="235" text-anchor="middle" font-size="12" fill="#9198a1">uncached</text>
+<text x="319" y="235" text-anchor="middle" font-size="12" fill="#4493f8">cached blocks, LRU by free time</text>
+<text x="625" y="235" text-anchor="middle" font-size="12" fill="#d29922">session blocks</text>
+<path d="M30 262 V268 H484 V262 M520 262 V268 H730 V262" fill="none" stroke="#3d444d" stroke-width="1.5"/>
+<text x="257" y="286" text-anchor="middle" font-size="12" font-weight="600" fill="#f0f6fc">free list</text>
+<text x="625" y="286" text-anchor="middle" font-size="12" font-weight="600" fill="#f0f6fc">retained list</text>
+<text x="30" y="306" font-size="11" fill="#9198a1">evicted first</text>
+<text x="625" y="306" text-anchor="middle" font-size="11" fill="#9198a1">evicted only when the free list is empty</text>
+</svg>

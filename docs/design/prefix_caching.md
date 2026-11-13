@@ -216,9 +216,11 @@ When a request with a `session_id` finishes, its cached blocks are marked as bel
 - **Eviction order.** Free blocks that belong to a live session are evicted only after every other free block. Nothing is pinned, so the cache capacity is unchanged and a session's blocks can still be evicted under memory pressure.
 - **Lookup.** The session remembers the blocks of its latest request. The next request with the same `session_id` reuses the shared prefix directly instead of looking up every block hash, which matters for very long contexts.
 
-![Where a freed block goes with session retention](../assets/design/prefix_caching/session-free-list.png)
+![Where a freed block goes with session retention](../assets/design/prefix_caching/session-free-list-light.svg#only-light)
+![Where a freed block goes with session retention](../assets/design/prefix_caching/session-free-list-dark.svg#only-dark)
 
-![Session prefix lookup compared with the normal lookup](../assets/design/prefix_caching/session-prefix-lookup.png)
+![Session prefix lookup compared with the normal lookup](../assets/design/prefix_caching/session-prefix-lookup-light.svg#only-light)
+![Session prefix lookup compared with the normal lookup](../assets/design/prefix_caching/session-prefix-lookup-dark.svg#only-dark)
 
 A session ends, and its blocks return to the normal LRU order, when any of the following happens:
 
