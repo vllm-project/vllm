@@ -24,6 +24,7 @@ Also includes support for QuIP and SpinQuant-style transforms as well as KV cach
 - **One-Shot Quantization**: Quantize models quickly with minimal calibration data
 - **vLLM Integration**: Seamlessly deploy quantized models with vLLM using the compressed-tensors format
 - **Hugging Face Compatibility**: Works with models from the Hugging Face Hub
+- **MoNE Expert Pruning**: Replace selected MoE experts with constant novice vectors; see [MoNE support](../../../design/expert_substitution.md) for checkpoint requirements and supported backends.
 
 ## Resources
 

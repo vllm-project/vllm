@@ -391,7 +391,6 @@ class DeepseekV32Model(torch.nn.Module):
         # Expert weights load through each MoE's runner so both per-expert
         # and stacked (fused) checkpoint layouts are handled, including the
         # compact rows of MoNE-pruned checkpoints.
-        expert_weights: dict[int, list[tuple[str, torch.Tensor]]] = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -405,8 +404,11 @@ class DeepseekV32Model(torch.nn.Module):
                 if isinstance(layer, DeepseekV32DecoderLayer) and isinstance(
                     layer.mlp, DeepseekV2MoE
                 ):
-                    expert_weights.setdefault(layer_idx, []).append(
-                        (experts_match.group(2), loaded_weight)
+                    loaded_params.update(
+                        f"layers.{layer_idx}.mlp.experts.{loaded}"
+                        for loaded in layer.mlp.experts.load_weights(
+                            ((experts_match.group(2), loaded_weight),)
+                        )
                     )
                     continue
                 if isinstance(layer, PPMissingLayer):
@@ -454,11 +456,6 @@ class DeepseekV32Model(torch.nn.Module):
                 loader = getattr(param, "weight_loader", default_weight_loader)
                 loader(param, loaded_weight)
             loaded_params.add(name)
-
-        for layer_idx, layer_expert_weights in expert_weights.items():
-            runner = self.layers[layer_idx].mlp.experts
-            for loaded in runner.load_weights(layer_expert_weights):
-                loaded_params.add(f"layers.{layer_idx}.mlp.experts.{loaded}")
         return loaded_params
 
 

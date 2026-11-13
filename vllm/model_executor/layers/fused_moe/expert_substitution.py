@@ -2,18 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Constant novice experts for MoNE-pruned checkpoints.
 
-MoNE (https://arxiv.org/abs/2507.00390) collapses low-importance experts into
-"novices" that return a constant vector. Checkpoints declare the per-layer
-retained expert count in `quantization_config.moe_sparsity_config` with
-`method="novice"` and store, per MoE layer:
-
-* the router at its full original width, with rows reordered so the retained
-  experts occupy the leading rows and the collapsed experts the trailing rows;
-* the retained experts left-shifted into compact stacked tensors
-  (`<experts prefix>.gate_up_proj` and `<experts prefix>.down_proj`), so
-  physical row `r` holds the expert of router row `r`;
-* one `<experts prefix>.novices` tensor of shape
-  `[num_collapsed, hidden_size]` whose rows match the trailing router rows.
+`quantization_config.moe_sparsity_config` declares retained expert counts.
+Leading router IDs index compact expert MLPs; trailing IDs index the constant
+vectors in `.novices`. See `docs/design/expert_substitution.md` for the
+checkpoint format and execution paths.
 """
 
 from collections.abc import Mapping
@@ -23,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
@@ -84,10 +77,9 @@ def get_expert_substitution_spec(model_config: Any) -> ExpertSubstitutionSpec | 
         )
         if raw is not None:
             return _parse_moe_sparsity_config(raw)
-    # Sub-model configs (e.g. the text model inside a multimodal wrapper)
-    # swap ``hf_config`` for the text config, which drops
-    # ``quantization_config``; the quant config object built from the
-    # top-level checkpoint config still carries the metadata.
+    # A multimodal wrapper may replace hf_config with a text config that lacks
+    # quantization_config. The quant config built from the outer checkpoint
+    # still carries the pruning metadata.
     from vllm.config import get_current_vllm_config_or_none
 
     current_config = get_current_vllm_config_or_none()
@@ -100,66 +92,46 @@ def get_expert_substitution_spec(model_config: Any) -> ExpertSubstitutionSpec | 
 
 
 class ConstantExpertSubstitution(nn.Module):
-    """Constant novice experts for the collapsed experts of one MoE layer.
-
-    Router outputs keep the full logical expert set. The trailing logical IDs
-    are the collapsed experts; `transform_routes` maps the leading (retained)
-    IDs to their compact physical rows and turns collapsed routes into
-    zero-weight routes to physical expert 0, so any decomposed MoE backend can
-    run them unchanged. The novice constants are loaded for checkpoint
-    compatibility but never evaluated, so their contribution is dropped.
-    """
+    """Weighted constant outputs for one layer's trailing logical experts."""
 
     def __init__(
         self,
         layer_idx: int,
         num_logical_experts: int,
-        substituted_expert_ids: tuple[int, ...],
+        num_compute_experts: int,
         hidden_size: int,
         params_dtype: torch.dtype,
     ) -> None:
         super().__init__()
-        substituted = set(substituted_expert_ids)
-        if not substituted <= set(range(num_logical_experts)):
+        if not 0 < num_compute_experts < num_logical_experts:
             raise ValueError(
-                f"novice experts for layer {layer_idx} must be within "
-                f"[0, {num_logical_experts}), got {sorted(substituted)}"
+                f"layer {layer_idx} must retain between 1 and "
+                f"{num_logical_experts - 1} experts, got {num_compute_experts}"
             )
-        if len(substituted) == num_logical_experts:
-            raise ValueError(f"layer {layer_idx} must retain at least one expert")
         self.layer_idx = layer_idx
-        self.substituted_expert_ids = tuple(sorted(substituted))
-        retained = [i for i in range(num_logical_experts) if i not in substituted]
-        self.num_compute_experts = len(retained)
-
-        # Retained experts map to their physical row r >= 0, collapsed
-        # experts to -1 - (their row in `novices`).
-        routes = [0] * num_logical_experts
-        for row, expert_id in enumerate(retained):
-            routes[expert_id] = row
-        for row, expert_id in enumerate(self.substituted_expert_ids):
-            routes[expert_id] = -1 - row
-        self._routes = tuple(routes)
-        self.register_buffer(
-            "expert_substitution_routes",
-            torch.tensor(routes, dtype=torch.int32),
-            persistent=False,
-        )
+        self.num_logical_experts = num_logical_experts
+        self.num_compute_experts = num_compute_experts
 
         # NaN marks rows that the checkpoint has not provided yet.
         self.novices = nn.Parameter(
-            torch.full((len(substituted), hidden_size), torch.nan, dtype=params_dtype),
+            torch.full(
+                (num_logical_experts - num_compute_experts, hidden_size),
+                torch.nan,
+                dtype=params_dtype,
+            ),
             requires_grad=False,
         )
         self.novices.weight_loader = self.weight_loader
 
-    @property
-    def num_logical_experts(self) -> int:
-        return len(self._routes)
-
-    def physical_expert_id(self, expert_id: int) -> int:
-        """Physical row of a retained expert, or -1 for a collapsed one."""
-        return max(self._routes[expert_id], -1)
+    @staticmethod
+    def supports_monolithic_routing(
+        routing_method: RoutingMethodType, *, use_grouped_topk: bool
+    ) -> bool:
+        """Whether captured IDs and logits suffice to reconstruct novice weights."""
+        return not use_grouped_topk and routing_method in (
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        )
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         if loaded_weight.shape != param.data.shape:
@@ -178,14 +150,46 @@ class ConstantExpertSubstitution(nn.Module):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> None:
-        """Remap routes in place, zeroing the weights routed to novices."""
-        valid = (topk_ids >= 0) & (topk_ids < self.num_logical_experts)
-        routes = self.expert_substitution_routes[
-            torch.where(valid, topk_ids, torch.zeros_like(topk_ids)).long()
-        ]
-        substituted = valid & (routes < 0)
-        topk_weights.masked_fill_(~valid | substituted, 0.0)
-        topk_ids.copy_(routes.clamp_min(0))
+        """Turn novice and invalid selections into zero-weight routes in place.
+
+        `topk_ids` and `topk_weights` have shape `[num_tokens, top_k]` and are
+        mutated. Compute the novice contribution before calling this method,
+        while the original routing IDs and weights are still available.
+        """
+        retained = (topk_ids >= 0) & (topk_ids < self.num_compute_experts)
+        topk_weights.masked_fill_(~retained, 0.0)
+        topk_ids.masked_fill_(~retained, 0)
+
+    def compute_output(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute novice output without changing logical routes.
+
+        Return the hidden-state shape and dtype, with zero padding beyond
+        the novice vector width. Weights include router normalization/scaling.
+        """
+        # Keep this dense even for sparse selections to avoid extra dispatch
+        # calls. Retained and invalid routes enter a discarded column.
+        substituted = (topk_ids >= self.num_compute_experts) & (
+            topk_ids < self.num_logical_experts
+        )
+        num_values, value_size = self.novices.shape
+        scales = topk_weights.new_zeros(
+            (topk_ids.shape[0], num_values + 1), dtype=torch.float32
+        )
+        scales.scatter_add_(
+            1,
+            torch.where(
+                substituted, topk_ids.long() - self.num_compute_experts, num_values
+            ),
+            topk_weights.float(),
+        )
+        output = torch.zeros_like(hidden_states)
+        output[..., :value_size] = scales[:, :num_values] @ self.novices.float()
+        return output
 
 
 def make_expert_substitution(
@@ -217,7 +221,7 @@ def make_expert_substitution(
     return ConstantExpertSubstitution(
         layer_idx,
         num_experts,
-        tuple(range(retained, num_experts)),
+        retained,
         hidden_size,
         params_dtype or torch.get_default_dtype(),
     )
@@ -240,7 +244,6 @@ class SubstitutedRoutedExperts(RoutedExperts):
                     "quantized MoE weights",
                     not self.quant_method.supports_expert_substitution,
                 ),
-                ("monolithic MoE backends", self.quant_method.is_monolithic),
                 ("MoE LoRA", moe_config.is_lora_enabled),
                 (
                     "EPLB",
@@ -264,14 +267,17 @@ class SubstitutedRoutedExperts(RoutedExperts):
             raise NotImplementedError(
                 "expert substitution does not support: " + ", ".join(unsupported)
             )
+        if self.quant_method.is_monolithic:
+            # Allocation and backend local range still use R. Only the native
+            # router's global expert count must cover all E logical experts.
+            self.global_num_experts = expert_substitution.num_logical_experts
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         # Retained experts of router rows 0..R-1 already sit in their compact
         # physical rows; collapsed router rows have no local expert.
-        physical_id = self.expert_substitution.physical_expert_id(expert_id)
-        if physical_id < 0:
+        if not 0 <= expert_id < self.expert_substitution.num_compute_experts:
             return -1
-        return super()._map_global_expert_id_to_local_expert_id(physical_id)
+        return super()._map_global_expert_id_to_local_expert_id(expert_id)
 
     def get_expert_mapping(
         self,
@@ -302,6 +308,13 @@ class SubstitutedRoutedExperts(RoutedExperts):
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Each TP rank holds the full novice vectors and routes. Compute/add
+        # their output once so the runner's all-reduce does not duplicate it.
+        constant_output = (
+            self.expert_substitution.compute_output(x, topk_weights, topk_ids)
+            if self.moe_config.tp_rank == 0
+            else None
+        )
         self.expert_substitution.transform_routes(topk_weights, topk_ids)
         output = super().forward_modular(
             x, topk_weights, topk_ids, shared_experts, shared_experts_input
@@ -310,4 +323,43 @@ class SubstitutedRoutedExperts(RoutedExperts):
             raise NotImplementedError(
                 "expert substitution does not support deferred MoE finalize"
             )
+        if constant_output is not None:
+            output.add_(constant_output[..., : output.shape[-1]])
+        return output
+
+    def forward_monolithic(
+        self,
+        x: torch.Tensor,
+        router_logits: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert router_logits is not None
+        assert x_scale is None, "expert substitution requires unquantized inputs"
+        # Capture on the contributing TP rank only. The buffer is allocated
+        # during graph capture and reused by graph replay without host sync.
+        selected_ids = (
+            torch.empty((x.shape[0], self.top_k), dtype=torch.int16, device=x.device)
+            if self.moe_config.tp_rank == 0
+            else None
+        )
+        output = self.quant_method.apply_monolithic(
+            layer=self,
+            x=x,
+            router_logits=router_logits,
+            input_ids=input_ids,
+            routing_replay_out=selected_ids,
+        )
+        if isinstance(output, UnfinalizedMoEOutput):
+            raise NotImplementedError(
+                "expert substitution does not support deferred MoE finalize"
+            )
+        if selected_ids is not None:
+            # For selected-softmax renormalization, the full-router denominator
+            # cancels. Use the backend's IDs to preserve its top-k tie choices.
+            weights = router_logits.gather(1, selected_ids.long()).float().softmax(-1)
+            constant_output = self.expert_substitution.compute_output(
+                x, weights, selected_ids
+            )
+            output.add_(constant_output[..., : output.shape[-1]])
         return output

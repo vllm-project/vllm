@@ -35,17 +35,12 @@ def _collect_expert_substitutions(
     return substitutions
 
 
-def _parse_novices_name(name: str) -> int | None:
-    """Return the decoder layer index of a `novices` tensor name."""
-    if not name.endswith(NOVICES_SUFFIX):
-        return None
-    return decoder_layer_index(name.removesuffix(NOVICES_SUFFIX))
-
-
 def as_expert_substitution_model(model_cls: type[_T], model_config: Any) -> type[_T]:
     """Load novice expert constants at the `load_weights` boundary.
 
     Initial loading and direct weight updates both go through `load_weights`.
+    Match novice tensors by decoder layer, since the runtime parameter lives
+    under `routed_experts.expert_substitution` rather than its checkpoint name.
     `novices` tensors of layers built elsewhere (other pipeline stages, MTP
     layers) are passed through, so the model's own loader skips them like any
     other weight of a layer it does not own.
@@ -70,10 +65,12 @@ def as_expert_substitution_model(model_cls: type[_T], model_config: Any) -> type
 
             def remaining_weights():
                 for name, loaded_weight in weights:
-                    layer_idx = _parse_novices_name(name)
-                    if layer_idx is None or layer_idx not in (
-                        self._expert_substitutions
-                    ):
+                    layer_idx = (
+                        decoder_layer_index(name)
+                        if name.endswith(NOVICES_SUFFIX)
+                        else None
+                    )
+                    if layer_idx is None or layer_idx not in self._expert_substitutions:
                         yield name, loaded_weight
                         continue
                     param_name, substitution = self._expert_substitutions[layer_idx]

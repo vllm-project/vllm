@@ -33,59 +33,40 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         # RoutedExperts was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
-        unfused_names = [
-            f"{layer_name}.0.{proj_name}"
-            for proj_name in (
+        projection_names = [
+            name
+            for name in (
                 layer.ckpt_gate_proj_name,
                 layer.ckpt_up_proj_name,
                 layer.ckpt_down_proj_name,
             )
+            if name is not None
         ]
-        # Checkpoints with stacked expert tensors (e.g. MoNE compact exports)
-        # target the fused module names without a per-expert index.
-        if layer.ckpt_up_proj_name is None:
-            fused_names = [f"{layer_name}.{layer.ckpt_gate_proj_name}"]
-        else:
-            gate_up = (
-                "gate_up_proj"
-                if (
-                    layer.ckpt_gate_proj_name == "gate_proj"
-                    and layer.ckpt_up_proj_name == "up_proj"
-                )
-                else "w13"
-                if (
-                    layer.ckpt_gate_proj_name == "w1"
-                    and layer.ckpt_up_proj_name == "w3"
-                )
-                else None
-            )
-            fused_names = [f"{layer_name}.{gate_up}"] if gate_up is not None else []
-        fused_names.append(f"{layer_name}.{layer.ckpt_down_proj_name}")
         # TODO: refactor this to use expert_mapping and check all layer numbers
         all_scheme_dicts = [
-            quant_config.get_scheme_dict(layer, name) for name in unfused_names
+            quant_config.get_scheme_dict(layer, f"{layer_name}.0.{name}")
+            for name in projection_names
         ]
-        scheme_dict = all_scheme_dicts.pop()
+        if all(scheme is None for scheme in all_scheme_dicts):
+            # Stacked checkpoints target modules without a per-expert index.
+            gate_up = {
+                ("gate_proj", "up_proj"): "gate_up_proj",
+                ("w1", "w3"): "w13",
+            }.get((layer.ckpt_gate_proj_name, layer.ckpt_up_proj_name))
+            if gate_up is not None:
+                projection_names = [gate_up, layer.ckpt_down_proj_name]
+            all_scheme_dicts = [
+                quant_config.get_scheme_dict(layer, f"{layer_name}.{name}")
+                for name in projection_names
+            ]
 
-        # multiple schemes found
-        if not all([cur_dict == scheme_dict for cur_dict in all_scheme_dicts]):
+        # Include ignored/unmatched projections (None) in the uniformity check.
+        scheme_dict = all_scheme_dicts[0]
+        if any(scheme != scheme_dict for scheme in all_scheme_dicts):
             raise ValueError(
                 "All MoE projections need to have same "
                 "quantization scheme but found multiple"
             )
-
-        if scheme_dict is None:  # ignored layer or stacked-only targets
-            fused_scheme_dicts = [
-                quant_config.get_scheme_dict(layer, name) for name in fused_names
-            ]
-            matched = [d for d in fused_scheme_dicts if d is not None]
-            if matched:
-                scheme_dict = matched[0]
-                if any(d != scheme_dict for d in matched):
-                    raise ValueError(
-                        "All MoE projections need to have same "
-                        "quantization scheme but found multiple"
-                    )
 
         if scheme_dict is None:  # ignored layer
             return UnquantizedFusedMoEMethod(layer.moe_config)

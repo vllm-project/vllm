@@ -45,14 +45,15 @@ logger = init_logger(__name__)
 # and ``experts.gate_up_proj.input_global_scale`` for
 # ``experts.w13_input_global_scale``.
 _FUSED_QUANT_SUFFIXES = (
-    "weight_packed",
-    "weight_scale",
-    "weight_global_scale",
-    "weight_scale_2",
-    "weight_zero_point",
-    "weight_shape",
-    "input_global_scale",
-    "input_scale",
+    ".weight",
+    ".weight_packed",
+    ".weight_scale",
+    ".weight_global_scale",
+    ".weight_scale_2",
+    ".weight_zero_point",
+    ".weight_shape",
+    ".input_global_scale",
+    ".input_scale",
 )
 
 
@@ -1068,7 +1069,7 @@ class RoutedExperts(PluggableLayer):
             )
             # Fused tensors and ambiguous names keep the full mapping.
             candidates = expert_mapping
-            if not is_fused and qual_name.count("experts.") == 1:
+            if not is_fused and has_single_experts_component:
                 candidates = named_expert or expert_mapping
 
             matched = False
@@ -1092,7 +1093,7 @@ class RoutedExperts(PluggableLayer):
                 # known suffixes onto the ``w13_``/``w2_`` parameter stem.
                 # Unrecognized suffixes keep the separator so unknown names
                 # still fail loudly.
-                if weight_name.endswith(tuple(f".{s}" for s in _FUSED_QUANT_SUFFIXES)):
+                if weight_name.endswith(_FUSED_QUANT_SUFFIXES):
                     weight_name = weight_name.replace(".w13_weight.", ".w13_").replace(
                         ".w2_weight.", ".w2_"
                     )

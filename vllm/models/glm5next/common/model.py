@@ -137,8 +137,10 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
 
 
 _EXPERTS_WEIGHT_RE = re.compile(r"^layers\.(\d+)\.mlp\.experts\.(.+)$")
-"""Matches a decoder-layer expert tensor, e.g. `layers.3.mlp.experts.
-gate_up_proj.weight_packed`; group 2 is the name relative to the MoE."""
+"""Matches a decoder-layer expert tensor; group 2 is relative to the MoE.
+
+For example, `layers.3.mlp.experts.gate_up_proj.weight_packed`.
+"""
 
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
@@ -1104,16 +1106,14 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
                 num_experts=self.config.n_routed_experts + num_fused_shared,
                 num_redundant_experts=num_redundant_experts,
-                routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
+                routed_experts_prefix="",
             )
         else:
             expert_params_mapping = []
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # Expert weights load through each MoE's runner so both per-expert
-        # and stacked (fused) checkpoint layouts are handled, including the
-        # compact rows of MoNE-pruned checkpoints.
-        expert_weights: dict[int, list[tuple[str, torch.Tensor]]] = {}
+        # Runner-based MoEs accept per-expert and stacked compact MoNE tensors;
+        # the native MegaMoE path keeps expert_params_mapping above.
 
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
         # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
@@ -1157,8 +1157,11 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 if isinstance(layer, Glm5NextDecoderLayer) and isinstance(
                     layer.mlp, Glm5NextMoE
                 ):
-                    expert_weights.setdefault(layer_idx, []).append(
-                        (experts_match.group(2), loaded_weight)
+                    loaded_params.update(
+                        f"layers.{layer_idx}.mlp.experts.{loaded}"
+                        for loaded in layer.mlp.experts.load_weights(
+                            ((experts_match.group(2), loaded_weight),)
+                        )
                     )
                     continue
                 if isinstance(layer, PPMissingLayer):
@@ -1218,7 +1221,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 break
             else:
                 is_expert_weight = False
-                success = False
                 for (
                     param_name,
                     weight_name,
@@ -1227,13 +1229,16 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 ) in expert_params_mapping:
                     if weight_name not in name:
                         continue
-                    # EPLB may map one checkpoint expert to several replicas.
+                    # A checkpoint expert may map to several physical replicas
+                    # under EPLB; keep `name` intact and try the next entry
+                    # when this physical expert is not local to the rank.
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
                     param = params_dict[name_mapped]
-                    success = param.weight_loader(
+                    weight_loader = param.weight_loader
+                    success = weight_loader(
                         param,
                         loaded_weight,
                         name_mapped,
@@ -1244,34 +1249,30 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                     if success:
                         name = name_mapped
                         break
-                if is_expert_weight:
-                    if success:
-                        loaded_params.add(name)
-                    continue
-                # Skip loading extra bias for GPTQ models.
-                if (
-                    name.endswith(".bias")
-                    and name not in params_dict
-                    and not _is_linear_attn(self.config)
-                ):  # noqa: E501
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped_name is None:
-                    continue
-                name = remapped_name
-                if is_pp_missing_parameter(name, self):
-                    continue
+                else:
+                    if is_expert_weight:
+                        continue
+                    # Skip loading extra bias for GPTQ models.
+                    if (
+                        name.endswith(".bias")
+                        and name not in params_dict
+                        and not _is_linear_attn(self.config)
+                    ):  # noqa: E501
+                        continue
+                    # Remapping the name of FP8 kv-scale.
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
+                        continue
+                    name = remapped_name
+                    if is_pp_missing_parameter(name, self):
+                        continue
 
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, **kwargs)
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
-
-        for layer_idx, layer_expert_weights in expert_weights.items():
-            runner = self.layers[layer_idx].mlp.experts
-            for loaded in runner.load_weights(layer_expert_weights):
-                loaded_params.add(f"layers.{layer_idx}.mlp.experts.{loaded}")
         return loaded_params
 
 
