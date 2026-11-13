@@ -1551,29 +1551,6 @@ class ModelConfig:
         if cls is not None:
             cls.verify_and_update_model_config(self)
 
-    def verify_dual_chunk_attention_config(
-        self,
-        load_config: LoadConfig,
-    ) -> None:
-        if hasattr(self.hf_config, "dual_chunk_attention_config"):
-            # Try loading the sparse attention config
-            from vllm.model_executor.model_loader.weight_utils import (
-                get_sparse_attention_config,
-            )
-
-            sparse_attn_config = get_sparse_attention_config(self, load_config)
-            if sparse_attn_config:
-                self.hf_config.dual_chunk_attention_config[
-                    "sparse_attention_config"
-                ] = sparse_attn_config
-                if (
-                    "sparse_attention_enabled"
-                    not in self.hf_config.dual_chunk_attention_config
-                ):
-                    self.hf_config.dual_chunk_attention_config[
-                        "sparse_attention_enabled"
-                    ] = True
-
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,

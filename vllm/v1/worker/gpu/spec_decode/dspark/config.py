@@ -122,7 +122,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             # Anchor-sampling DSpark drafts a block of num_speculative_tokens
             # query tokens in which the anchor itself is the first prediction
             # position (no separate bonus query).
-            return self.num_speculative_tokens
+            return self.num_scheduled_spec_tokens
         return super().num_lookahead_tokens
 
     def hash_factors(self) -> list[Any]:
@@ -134,7 +134,7 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         pcp_size = parallel_config.prefill_context_parallel_size
         if (
             dcp_size not in (1, pcp_size)
-            and self.spec_config.draft_model_config.use_mla
+            and self.spec_config.draft_decode_context_parallel_size != 1
         ):
             return (
                 "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "

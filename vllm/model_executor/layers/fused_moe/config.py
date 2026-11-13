@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Union
 
 import torch
@@ -106,6 +106,26 @@ def _quant_flags_to_group_shape(
             w_shape = GroupShape.PER_TOKEN
 
     return a_shape, w_shape
+
+
+class RoutedScaleMode(Enum):
+    """Where routed_scaling_factor is applied in a MoE layer."""
+
+    # The scale is passed to the router and the experts kernel instead of the
+    # runner: grouped top-k folds it into the top-k weights, and some kernels
+    # (e.g. ROCm AITER) apply it themselves.
+    ROUTER = "router"
+    # The runner multiplies the routed expert output by the scale.
+    OUTPUT = "output"
+    # Like OUTPUT, except that in FP16 with shared experts the runner divides
+    # the shared expert output by the scale instead, to avoid overflow. The
+    # model's decoder layer must compensate with matching divisions (see
+    # DeepseekV2DecoderLayer).
+    OUTPUT_FP16_GUARD = "output_fp16_guard"
+
+    @property
+    def scales_output(self) -> bool:
+        return self is not RoutedScaleMode.ROUTER
 
 
 # The type of method in top-K routing
@@ -546,8 +566,9 @@ class FusedMoEQuantConfig:
           "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
           for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
-        - per_out_ch_quant: Outputs have per channel quantization. (only
-          for cutlass).
+        - per_out_ch_quant: Weights have per output channel scales. It controls
+          how the MoE kernels (Triton, CUTLASS, AITER) index the weight scales,
+          independently of the activation scale layout.
         - block_shape: Optional block size for block-wise quantization.
           Incompatible with per_act_token and per_out_ch quant.
         - w1_scale: Optional scale to be used for w1.
@@ -670,6 +691,7 @@ def int8_w8a8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
 ) -> FusedMoEQuantConfig:
     """Construct a quant config for int8 activations and int8 weights."""
     return FusedMoEQuantConfig.make(
@@ -681,7 +703,7 @@ def int8_w8a8_moe_quant_config(
         w1_bias=w1_bias,
         w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
-        per_out_ch_quant=False,
+        per_out_ch_quant=per_out_ch_quant,
         block_shape=None,
     )
 

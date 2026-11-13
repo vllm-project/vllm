@@ -100,7 +100,9 @@ class PagedCacheView:
         )
         row_bytes = row_width * itemsize
         if block_stride % (block_size * row_bytes):
-            return cls(cache, cache, block_size, block_size)
+            # Blocks whole rows apart: kernels read the strided cache as flat rows.
+            assert block_stride % row_bytes == 0
+            return cls(cache, cache, block_size, block_stride // row_bytes)
         attention_cache = (
             raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
         )

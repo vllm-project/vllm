@@ -156,13 +156,6 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
 
         cache_config.cache_dtype = "fp8"
         logger.info_once("Using fp8 KV cache for GLM-5.3-Flash")
-        spec_config = vllm_config.speculative_config
-        if (
-            spec_config is not None
-            and spec_config.method not in ("mtp", "dspark")
-            and spec_config.kv_cache_dtype is None
-        ):
-            spec_config.kv_cache_dtype = "auto"
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -805,6 +798,19 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             from vllm.models.kimi_k3.nvidia.dense_draft import configure_dense_draft
 
             configure_dense_draft(vllm_config.speculative_config, hf_text_config)
+
+
+class HrmTextForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # The prompt attends bidirectionally during prefill, so its KV is not a
+        # causal function of the prefix.
+        if vllm_config.scheduler_config.enable_chunked_prefill:
+            logger.info("HRM-Text: disabling chunked prefill (non-causal prefill).")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+        if vllm_config.cache_config.enable_prefix_caching:
+            logger.info("HRM-Text: disabling prefix caching (non-causal prefill).")
+            vllm_config.cache_config.enable_prefix_caching = False
 
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
@@ -1552,6 +1558,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
+    "HrmTextForCausalLM": HrmTextForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,

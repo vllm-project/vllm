@@ -27,7 +27,10 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_request,
     make_scheduler_output,
 )
+from tests.v1.kv_connector.unit.utils import create_vllm_config, set_mtp_config
+from vllm import SamplingParams
 from vllm.config import KVTransferConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
@@ -65,16 +68,25 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.platforms import current_platform
+from vllm.utils.hashing import sha256
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config,
+    get_request_block_hasher,
+    init_none_hash,
+)
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     KVCacheTensor,
     KVQuantMode,
-    UniformTypeKVCacheSpecs,
 )
+from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 mori_available = importlib.util.find_spec("mori") is not None
@@ -84,19 +96,156 @@ pytestmark = pytest.mark.skipif(
     reason="UMBP is only available on ROCm with the mori package installed",
 )
 
-_LAYER1_SPEC = FullAttentionSpec(
+_LAYER1_SPEC = AttentionSpec(
     block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
 )
 _LAYER2_SPEC = replace(_LAYER1_SPEC, num_kv_heads=2)
 
 
+@pytest.mark.parametrize(
+    ("scheduled_compute", "preempted"),
+    [(True, False), (False, False), (True, True)],
+    ids=["computed", "pending-load", "preempted"],
+)
+def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
+    """The last sample makes a hash reusable; a pending load supplies no KV."""
+    config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
+    set_mtp_config(config)
+    config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
+    kv_config = _kv_cache_config()
+    kv_config.hash_block_size = 16
+    scheduler = UMBPStoreConnectorScheduler(
+        config,
+        kv_config,
+        _SchedulerHandle({}),
+        BlockIdentityCodec(UMBPNamespace("lookahead")),
+    )
+    pool = BlockPool(8, True, 16, enable_kv_cache_events=False)
+    scheduler.bind_gpu_block_pool(pool)
+    blocks = pool.get_new_blocks(2)
+    block_ids = ([block.block_id for block in blocks],)
+    init_none_hash(sha256)
+    request = Request(
+        "r",
+        list(range(32)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(16, sha256, 1),
+    )
+    scheduler.update_state_after_alloc(request, KVCacheBlocks((blocks,)), 0)
+    if scheduled_compute:
+        output = SchedulerOutput.make_empty()
+        output.scheduled_new_reqs = [
+            NewRequestData.from_request(request, block_ids, request.prefill_token_ids)
+        ]
+        output.num_scheduled_tokens = {"r": 32}
+        output.total_num_scheduled_tokens = 32
+        scheduler.build_connector_meta(output)
+    if preempted:
+        output = SchedulerOutput.make_empty()
+        output.preempted_req_ids = {"r"}
+        scheduler.build_connector_meta(output)
+    # The sampled token completes the second block's hash.
+    request.num_computed_tokens = 32
+    request.append_output_token_ids(32)
+    scheduler.request_finished(request, block_ids)
+    output = SchedulerOutput.make_empty()
+    output.finished_req_ids = {"r"}
+    plans = list(scheduler.build_connector_meta(output).iter_store_plans())
+    if scheduled_compute and not preempted:
+        assert [plan.block_hash for plan in plans] == [request.block_hashes[1]]
+        assert plans[0].token_ids == tuple(range(16, 33))
+        assert blocks[1].ref_cnt == 2
+    else:
+        assert plans == []
+        assert blocks[1].ref_cnt == 1
+    scheduler.close()
+
+
+def test_lazy_prefix_chain_skips_blocks_without_lookahead_hash():
+    """A block whose lookahead tokens never arrived has no hash to chain."""
+    config = create_vllm_config(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"lazy_offload": True},
+    )
+    set_mtp_config(config)
+    kv_config = _kv_cache_config()
+    kv_config.hash_block_size = 16
+    scheduler = UMBPStoreConnectorScheduler(
+        config,
+        kv_config,
+        _SchedulerHandle({}),
+        BlockIdentityCodec(UMBPNamespace("lazy-lookahead")),
+    )
+    assert scheduler.lazy_offload
+    init_none_hash(sha256)
+    request = Request(
+        "r",
+        list(range(32)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(16, sha256, 1),
+    )
+    # Aborted before sampling: the second block's hash needs token 33.
+    request.num_computed_tokens = 32
+    assert len(request.block_hashes) == 1
+    scheduler.request_finished(request, ([3, 4],))
+    assert set(scheduler._lazy_prefix_chains_by_block) == {3}
+    scheduler.close()
+
+
+@pytest.mark.parametrize("disable_lookahead", [False, True])
+def test_external_hit_uses_the_same_lookahead_policy_as_core(disable_lookahead):
+    config = create_vllm_config(kv_connector="UMBPStoreConnector", kv_role="kv_both")
+    set_mtp_config(config, disable_lookahead_block_hashes=disable_lookahead)
+    kv_config = _kv_cache_config()
+    kv_config.hash_block_size = 16
+    # Force the hybrid coordinator path, including an explicitly marked draft group.
+    group = kv_config.kv_cache_groups[0]
+    kv_config.kv_cache_groups.append(
+        replace(
+            group,
+            kv_cache_specs={"draft": group.distinct_specs[0]},
+            is_eagle_group=True,
+        )
+    )
+    codec = BlockIdentityCodec(UMBPNamespace("lookahead-hit"))
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(16, sha256, config.num_hash_lookahead_tokens)
+
+    def request(token_ids: list[int]) -> Request:
+        return Request(
+            "r", token_ids, SamplingParams(max_tokens=1), None, block_hasher=hasher
+        )
+
+    stored = request(list(range(33)))
+    runtime = _SchedulerHandle(
+        {
+            codec.key(block_hash, group): True
+            for block_hash in stored.block_hashes
+            for group in (0, 1)
+        }
+    )
+    scheduler = UMBPStoreConnectorScheduler(config, kv_config, runtime, codec)
+    # Drop recomputes the last block; lookahead reuses it.
+    assert scheduler.get_num_new_matched_tokens(stored, 0) == (
+        16 if disable_lookahead else 32,
+        True,
+    )
+    # A different token after the block invalidates its lookahead hash.
+    changed = request([*range(32), 99])
+    assert scheduler.get_num_new_matched_tokens(changed, 0) == (16, True)
+    scheduler.close()
+
+
 def _uniform_type_kv_cache_config(
-    layer2: FullAttentionSpec = _LAYER2_SPEC,
+    layer2: AttentionSpec = _LAYER2_SPEC,
     *,
     block_stride: int | None = None,
     num_blocks: int = 8,
 ) -> KVCacheConfig:
-    """One UniformTypeKVCacheSpecs group whose two layers have unequal pages.
+    """One full-attention group whose two layers have unequal pages.
 
     Without `block_stride` each layer is laid out layer-major with its own
     page as the block stride; with it both pages share one block-major stride.
@@ -116,12 +265,13 @@ def _uniform_type_kv_cache_config(
             )
         )
         offset += spec.page_size_bytes
-    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert group_spec is not None
+    group = KVCacheGroup.from_layers(
+        {name: FullAttentionManager.layer_config(spec) for name, spec in specs.items()}
+    )
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
-        kv_cache_groups=[KVCacheGroupSpec(list(specs), group_spec)],
+        kv_cache_groups=[group],
     )
 
 
@@ -377,7 +527,7 @@ def test_namespace_fingerprints_uniform_type_layer_specs(baseline, variant):
 
 
 def test_scheduler_uses_worker_namespace_for_uniform_type_groups(monkeypatch):
-    """The scheduler sees a flattened group spec; keys must still match."""
+    """The scheduler adopts the workers' namespace, so keys match."""
     install_memory_runtime(monkeypatch)
     worker_config = _uniform_type_kv_cache_config(block_stride=192)
     vllm_config = _vllm_config({"mode": "embedded"})
@@ -1949,8 +2099,12 @@ def _replicated_kv_cache_config() -> KVCacheConfig:
         num_blocks=8,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla"], replicated),
-            KVCacheGroupSpec(["gqa"], _LAYER2_SPEC),
+            KVCacheGroup.from_layers(
+                {"mla": FullAttentionManager.layer_config(replicated)}
+            ),
+            KVCacheGroup.from_layers(
+                {"gqa": FullAttentionManager.layer_config(_LAYER2_SPEC)}
+            ),
         ],
     )
 

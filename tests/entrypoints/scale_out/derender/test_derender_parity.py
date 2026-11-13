@@ -49,6 +49,9 @@ ARGS = [
     "--reasoning-parser",
     "deepseek_r1",
     "--enable-scale-out",
+    # Not the default, so every case also checks the derender role.
+    "--response-role",
+    "bot",
 ]
 
 TOOLS = [
@@ -160,6 +163,7 @@ def _engine_finish_reason(coupled_finish_reason: str) -> str:
 def _assert_parity(coupled: dict, disagg: dict) -> None:
     """Both paths saw the same tokens, so they must agree unconditionally."""
     c, d = coupled["choices"][0], disagg["choices"][0]
+    assert d["message"]["role"] == c["message"]["role"]
     assert d["message"]["content"] == c["message"]["content"]
     assert d["message"].get("reasoning") == c["message"].get("reasoning")
     assert _tool_sig(d) == _tool_sig(c)
@@ -205,6 +209,52 @@ async def test_parity_plain(client):
     ]
     coupled, disagg = await _run_parity_case(client, messages)
     _assert_parity(coupled, disagg)
+
+
+@pytest.mark.asyncio
+async def test_parity_echo_continue_final_message(client):
+    """`echo` with a continued assistant message: the role comes from that
+    message and its content is prepended."""
+    messages = [
+        {"role": "user", "content": "Count to five."},
+        {"role": "assistant", "content": "1, 2,"},
+    ]
+    coupled, disagg = await _run_parity_case(
+        client,
+        messages,
+        add_generation_prompt=False,
+        continue_final_message=True,
+        echo=True,
+        max_tokens=16,
+    )
+    _assert_parity(coupled, disagg)
+    assert disagg["choices"][0]["message"]["content"].startswith("1, 2,")
+
+
+@pytest.mark.asyncio
+async def test_parity_echo_refusal_part(client):
+    """`echo` of list content with a `refusal` part which has no `text`
+    key: both paths include its text."""
+    messages = [
+        {"role": "user", "content": "Count to five."},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "refusal", "refusal": "No."},
+                {"type": "text", "text": "1, 2,"},
+            ],
+        },
+    ]
+    coupled, disagg = await _run_parity_case(
+        client,
+        messages,
+        add_generation_prompt=False,
+        continue_final_message=True,
+        echo=True,
+        max_tokens=16,
+    )
+    _assert_parity(coupled, disagg)
+    assert disagg["choices"][0]["message"]["content"].startswith("No.\n1, 2,")
 
 
 @pytest.mark.asyncio
@@ -940,6 +990,7 @@ async def _inline_derender(
 def _assert_inline_parity(coupled: dict, inline: dict) -> None:
     assert len(inline["choices"]) == len(coupled["choices"])
     for c, i in zip(coupled["choices"], inline["choices"]):
+        assert i["message"]["role"] == c["message"]["role"]
         if c["token_ids"] is None:
             # Hidden reasoning suppresses token ids on both paths, so the two
             # generations can't be shown to match and their text may differ.
