@@ -63,6 +63,21 @@ def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
 
 
+def test_parser_slow_log_envs_are_not_compile_factors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Frontend-only diagnostics; enabling them while investigating a live
+    # deployment must not invalidate the compile cache.
+    monkeypatch.setenv("VLLM_PARSER_SLOW_LOG", "1")
+    monkeypatch.setenv("VLLM_PARSER_SLOW_CALL_SECONDS", "0.1")
+    monkeypatch.setenv("VLLM_PARSER_SLOW_REQUEST_SECONDS", "1")
+
+    factors = envs.compile_factors()
+    assert "VLLM_PARSER_SLOW_LOG" not in factors
+    assert "VLLM_PARSER_SLOW_CALL_SECONDS" not in factors
+    assert "VLLM_PARSER_SLOW_REQUEST_SECONDS" not in factors
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)

@@ -2618,6 +2618,12 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
+        # Frontend-only parser diagnostics; they cannot affect compiled graphs,
+        # and turning one on to investigate a live deployment must not send the
+        # next restart to a cold compile cache.
+        "VLLM_PARSER_SLOW_LOG",
+        "VLLM_PARSER_SLOW_CALL_SECONDS",
+        "VLLM_PARSER_SLOW_REQUEST_SECONDS",
     }
 
     from vllm.config.utils import normalize_value
