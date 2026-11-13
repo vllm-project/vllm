@@ -172,6 +172,8 @@ def _write_call(arguments: str) -> str:
         '{"tags": ["a", "b\\\\"], "meta": {"k": "v"}, "content": "end"}',
         '{"content": "trailing backslash \\\\\\\\"}',
         '{"content": "partial with \\"escape\\" and no end',
+        '{"data": [0, 12, 345], "k0": -6.5e3,\n\t"k1": true, "k2": null}',
+        '{"count": 123456',
     ],
     ids=[
         "escapes",
@@ -180,6 +182,8 @@ def _write_call(arguments: str) -> str:
         "array_strings",
         "trailing_backslash",
         "truncated",
+        "numbers_and_literals",
+        "truncated_number",
     ],
 )
 @pytest.mark.parametrize("chunk_size", [1, 2, 5])
@@ -189,27 +193,40 @@ def test_arg_value_extender_matches_conversion(tokenizer, arguments, chunk_size)
     outputs = []
     for config in (
         ripple_config(),
-        dataclasses.replace(ripple_config(), arg_value_extender=None),
+        dataclasses.replace(
+            ripple_config(), arg_value_extender=None, arg_structural_chars=None
+        ),
     ):
         parser = RippleParser(tokenizer, parser_engine_config=config)
-        outputs.append(
-            collect_output(
-                replay_streaming(
-                    parser,
-                    tokens,
-                    chunk_size=chunk_size,
-                    finished_on_last=True,
-                    tools=TOOLS,
-                )
-            ).tool_calls
+        results = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=TOOLS,
         )
+        # Compare every delta so a skipped conversion cannot delay output.
+        per_delta = [
+            [
+                (tc.index, tc.function.name, tc.function.arguments)
+                for tc in getattr(delta, "tool_calls", None) or []
+                if tc.function is not None
+            ]
+            for delta in results
+        ]
+        outputs.append((per_delta, collect_output(results).tool_calls))
     assert outputs[0] == outputs[1]
-    assert outputs[0][0]["name"] == "write"
+    assert outputs[0][1][0]["name"] == "write"
 
 
-def test_long_string_argument_converts_a_constant_number_of_times(tokenizer):
+@pytest.mark.parametrize(
+    ("key", "quote", "unit"),
+    [("content", '"', ' lorem \\"ipsum\\"'), ("size", "", "9")],
+    ids=["long_string", "long_number"],
+)
+def test_long_argument_converts_a_constant_number_of_times(tokenizer, key, quote, unit):
     counts = []
-    for n_words in (50, 500):
+    for n in (50, 500):
         calls = 0
 
         def counting_converter(raw_args: str, partial: bool) -> str:
@@ -218,8 +235,7 @@ def test_long_string_argument_converts_a_constant_number_of_times(tokenizer):
             return _ripple_arg_converter(raw_args, partial)
 
         config = dataclasses.replace(ripple_config(), arg_converter=counting_converter)
-        body = ' lorem \\"ipsum\\"' * n_words
-        arguments = f'{{"path": "a.txt", "content": "{body}"}}'
+        arguments = f'{{"path": "a.txt", "{key}": {quote}{unit * n}{quote}}}'
         text = _write_call(arguments)
         output = collect_output(
             replay_streaming(

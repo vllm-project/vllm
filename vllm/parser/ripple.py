@@ -169,6 +169,9 @@ def ripple_config() -> ParserEngineConfig:
         },
         arg_converter=_ripple_arg_converter,
         arg_value_extender=_ripple_arg_value_extender,
+        # The streamed prefix only grows at a key's colon, the whitespace
+        # after it, or an open string value, which the extender handles.
+        arg_structural_chars=frozenset('"{}[],: \t\n\r'),
         # Streaming cannot retract text it already sent, so keep the
         # non-streaming content the same.
         strip_content_whitespace_with_tools=False,
