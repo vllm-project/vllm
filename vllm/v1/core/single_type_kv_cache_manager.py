@@ -677,7 +677,7 @@ class SingleTypeKVCacheManager(ABC):
 
         freed: list[KVCacheBlock] = []
         for i in range(last_block - 1, first_block - 1, -1):
-            if blocks[i] == self._null_block:
+            if blocks[i] is self._null_block:
                 break
             freed.append(blocks[i])
             blocks[i] = self._null_block
@@ -1657,7 +1657,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 < cdiv(processed_computed_tokens, self.block_size) - 1
             ):
                 blocks = self.req_to_blocks[request_id]
-                if blocks[last_state_block_idx] != self._null_block:
+                if blocks[last_state_block_idx] is not self._null_block:
                     self.block_pool.free_blocks([blocks[last_state_block_idx]])
                     blocks[last_state_block_idx] = self._null_block
 
