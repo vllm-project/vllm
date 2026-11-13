@@ -108,6 +108,263 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
         manager._relocate_speculative_block([pinned_block], 0)
 
 
+def _align_manager(
+    num_spec_blocks: int = 2,
+    num_gpu_blocks: int = 16,
+    mode: str = "align",
+) -> tuple[MambaManager, BlockPool]:
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode=mode,
+        num_speculative_blocks=num_spec_blocks,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks, enable_caching=False, hash_block_size=4
+    )
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    return manager, pool
+
+
+def test_mamba_tier0_admission_reserves_window_as_nulls():
+    """A request priced down to the K=0 tier at admission gets its
+    speculative window as null row slots (no pool blocks): the row keeps
+    the standard layout — skip nulls, committed, window — so the state
+    indexing formula holds from birth and the promotion refills the
+    window."""
+    manager, pool = _align_manager()
+    assert manager.mark_spec_admission_tier0("r") is True
+    assert manager.is_spec_released("r")
+    free_before = pool.get_num_free_blocks()
+
+    blocks = manager.allocate_new_blocks("r", num_tokens=8, num_tokens_main_model=8)
+    row = manager.req_to_blocks["r"]
+    assert row == blocks
+    assert row[0] is pool.null_block
+    assert row[1].ref_cnt == 1
+    assert row[2:] == [pool.null_block, pool.null_block]
+    assert pool.get_num_free_blocks() == free_before - 1
+    assert "r" in manager._allocated_block_reqs
+
+
+def test_mamba_priced_admission_mark_guards():
+    """Only a fresh waiting request under a spec-decode align pool can be
+    priced down: the mark refuses pools without a speculative window,
+    non-align modes, and requests that already hold blocks."""
+    no_window, _ = _align_manager(num_spec_blocks=0)
+    assert no_window.mark_spec_admission_tier0("r") is False
+
+    non_align, _ = _align_manager(mode="none")
+    assert non_align.mark_spec_admission_tier0("r") is False
+
+    manager, pool = _align_manager()
+    assert manager.mark_spec_admission_tier0("r") is True
+    free_before = pool.get_num_free_blocks()
+    manager.allocate_new_blocks("r", num_tokens=8, num_tokens_main_model=8)
+    assert manager.spec_admission_priceable("r") is False
+    assert manager.is_spec_released("r")
+    assert pool.get_num_free_blocks() == free_before - 1
+
+
+def test_mamba_pinned_row_growth_fills_window_nulls():
+    """Decoding advances the state boundary into the pinned window: the
+    null positions must be refilled in place (the state chain needs real
+    blocks there) while the row keeps growing one slot per boundary
+    crossing."""
+    manager, pool = _align_manager()
+    assert manager.mark_spec_admission_tier0("r") is True
+    manager.allocate_new_blocks("r", num_tokens=8, num_tokens_main_model=8)
+    free_after_admission = pool.get_num_free_blocks()
+
+    manager.allocate_new_blocks("r", num_tokens=12, num_tokens_main_model=12)
+    row = manager.req_to_blocks["r"]
+    assert len(row) == 5
+    assert row[2].ref_cnt == 1 and row[3].ref_cnt == 1 and row[4].ref_cnt == 1
+    assert manager.take_spec_row_rebuilds() == {"r"}
+    assert pool.get_num_free_blocks() == free_after_admission - 3
+
+    manager.allocate_new_blocks("r", num_tokens=16, num_tokens_main_model=16)
+    row = manager.req_to_blocks["r"]
+    assert len(row) == 6
+    assert all(block.ref_cnt == 1 for block in row[1:])
+    assert manager.take_spec_row_rebuilds() == set()
+    assert pool.get_num_free_blocks() == free_after_admission - 4
+
+
+def test_mamba_pinned_row_growth_survives_multi_block_advance():
+    """A chunked prefill can advance the state boundary by several blocks
+    in ONE step (a long prompt across max-batched-token chunks). A
+    normal row absorbs the advance free via window relocation; a pinned
+    row has no scratch to relocate, so its row-length growth is explicit
+    — the per-step bound must budget the same window's worth or the row
+    accounting assert fires."""
+    manager, pool = _align_manager()
+    assert manager.mark_spec_admission_tier0("r") is True
+    manager.allocate_new_blocks("r", num_tokens=8, num_tokens_main_model=8)
+    row = manager.req_to_blocks["r"]
+    assert len(row) == 4
+    free_after_admission = pool.get_num_free_blocks()
+
+    # One step advances the boundary from cdiv(8,4)=2 to cdiv(20,4)=5
+    # blocks: num_new=3 against a chain bound of 1 — legal only because
+    # the pinned row budgets the window's worth.
+    manager.allocate_new_blocks("r", num_tokens=20, num_tokens_main_model=20)
+    row = manager.req_to_blocks["r"]
+    # The advance jumped past the swallowed window nulls (live_start
+    # lands beyond the row): they stay null as unexported checkpoint
+    # slots, the running-state slot and the new tail append physical —
+    # pure append, no in-place refill, no runner rebuild.
+    assert [b.is_null for b in row] == [True, False, True, True, False, False, False]
+    assert manager.take_spec_row_rebuilds() == set()
+    assert pool.get_num_free_blocks() == free_after_admission - 3
+
+    # The next single-block advance keeps the row accounting: the chain
+    # grows one slot and the swallowed window nulls stay unexported.
+    manager.allocate_new_blocks("r", num_tokens=24, num_tokens_main_model=24)
+    row = manager.req_to_blocks["r"]
+    assert len(row) == 8
+    assert [b.is_null for b in row] == [
+        True,
+        False,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert manager.take_spec_row_rebuilds() == set()
+    assert pool.get_num_free_blocks() == free_after_admission - 4
+
+
+def test_mamba_promotion_reallocates_fresh_blocks():
+    """The priced promotion refills the pinned window's null positions
+    with fresh hedge blocks: they are empty allocations, not computed
+    data, so no replay is needed and the allocate path counts the row as
+    a normal full-window row afterwards."""
+    manager, pool = _align_manager()
+    assert manager.mark_spec_admission_tier0("r") is True
+    manager.allocate_new_blocks("r", num_tokens=8, num_tokens_main_model=8)
+    row = manager.req_to_blocks["r"]
+    assert row[2:] == [pool.null_block, pool.null_block]
+    free_pinned = pool.get_num_free_blocks()
+
+    assert manager.promote_spec_blocks("r") is True
+    fresh = row[2:]
+    assert len(fresh) == 2
+    assert all(block.ref_cnt == 1 for block in fresh)
+    assert pool.get_num_free_blocks() == free_pinned - 2
+    assert not manager.is_spec_released("r")
+    assert manager.take_spec_row_rebuilds() == {"r"}
+    assert manager.promote_spec_blocks("r") is False
+
+    assert (
+        manager.get_num_blocks_to_allocate(
+            request_id="r",
+            num_tokens=8,
+            new_computed_blocks=[],
+            total_computed_tokens=8,
+            num_local_computed_tokens=8,
+            num_tokens_main_model=8,
+        )
+        == 0
+    )
+
+
+def test_mamba_promotion_prices_against_free_blocks():
+    """The promotion is priced: it refills only when the pool fits the
+    window (plus the reserve); a refused promotion leaves the row and
+    the pin untouched."""
+    manager, pool = _align_manager(num_gpu_blocks=8)
+    assert manager.mark_spec_admission_tier0("r") is True
+    manager.allocate_new_blocks("r", num_tokens=8, num_tokens_main_model=8)
+    free_pinned = pool.get_num_free_blocks()
+    row = list(manager.req_to_blocks["r"])
+
+    assert manager.promote_spec_blocks("r", reserve=free_pinned - 1) is False
+    assert manager.req_to_blocks["r"] == row
+    assert manager.is_spec_released("r")
+    assert pool.get_num_free_blocks() == free_pinned
+
+    assert manager.promote_spec_blocks("r", reserve=free_pinned - 2) is True
+    assert all(block.ref_cnt == 1 for block in manager.req_to_blocks["r"][2:])
+    assert not manager.is_spec_released("r")
+
+
+def test_mamba_promotion_never_replaces_committed_tail():
+    """A row whose window positions are committed blocks (the boundary
+    consumed them) has nothing to refill: the promotion must touch
+    nothing and just clear the stale pin — a blind tail replacement
+    would destroy committed state and leave the request unmarked with
+    no hedge."""
+    manager, pool = _align_manager()
+    committed = pool.get_new_blocks(3)
+    manager.req_to_blocks["r"] = list(committed)
+    manager._allocated_block_reqs.add("r")
+    manager._spec_released.add("r")
+    free_before = pool.get_num_free_blocks()
+
+    assert manager.promote_spec_blocks("r") is False
+    assert manager.req_to_blocks["r"] == committed
+    assert pool.get_num_free_blocks() == free_before
+    assert not manager.is_spec_released("r")
+
+
+def test_mamba_promotion_keeps_pin_when_row_missing():
+    """The admission mark pins row-less requests at the K=0 tier. The
+    promotion must not clear that pin before hedge blocks are actually
+    placed — an unpinned hedge-less row walks the relocation loop off
+    the end of the row."""
+    manager, _ = _align_manager()
+    assert manager.mark_spec_admission_tier0("r") is True
+    assert manager.is_spec_released("r")
+
+    assert manager.promote_spec_blocks("r") is False
+    assert manager.is_spec_released("r")
+
+
+def test_mamba_pin_cleared_on_free():
+    """The pin dies with the row: a freed request must not leave its
+    K=0 mark behind, or a later admission would silently inherit the
+    tier-0 window substitution."""
+    manager, _ = _align_manager()
+    assert manager.mark_spec_admission_tier0("r") is True
+    manager.allocate_new_blocks("r", num_tokens=8, num_tokens_main_model=8)
+    assert manager.is_spec_released("r")
+
+    manager.free("r")
+    assert not manager.is_spec_released("r")
+
+
+def test_mamba_k0_crossing_release_swaps_window_for_nulls():
+    """At the K=0 crossing a running row's real window is an idle hedge:
+    the release frees it into null positions (the born-null row shape),
+    joins the pin set, and the priced promotion refills fresh blocks
+    without replay."""
+    manager, pool = _align_manager()
+    manager.allocate_new_blocks("r", num_tokens=8, num_tokens_main_model=8)
+    assert manager.req_to_blocks["r"][-2:] != [pool.null_block, pool.null_block]
+    free_before = pool.get_num_free_blocks()
+
+    assert manager.release_spec_blocks("r") is True
+    assert manager.req_to_blocks["r"][-2:] == [pool.null_block, pool.null_block]
+    assert pool.get_num_free_blocks() == free_before + 2
+    assert manager.is_spec_released("r")
+    assert manager.take_spec_row_rebuilds() == {"r"}
+    assert manager.release_spec_blocks("r") is False
+
+    assert manager.promote_spec_blocks("r") is True
+    assert all(block.ref_cnt == 1 for block in manager.req_to_blocks["r"][-2:])
+    assert not manager.is_spec_released("r")
+
+
 def test_mamba_retirement_crosses_null_gaps():
     spec = MambaSpec(
         block_size=4,

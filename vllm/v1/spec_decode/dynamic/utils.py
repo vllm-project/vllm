@@ -74,6 +74,17 @@ def validate_and_normalize_dynamic_sd_schedule(
     return parsed_schedule
 
 
+def spec_tier_table_enabled(vllm_config) -> bool:
+    """True when a dynamic spec-tier table is configured.
+
+    The K0 slot-release / priced-admission mechanisms key on the table: the
+    scheduler arms them only when it exists, and the worker-side routing
+    must agree — an env var without a table leaves the mechanisms off.
+    """
+    sc = vllm_config.speculative_config
+    return sc is not None and bool(sc.num_speculative_tokens_per_batch_size)
+
+
 def build_dynamic_sd_schedule_lookup(
     num_speculative_tokens_per_batch_size: object,
     vllm_max_batch_size: int,

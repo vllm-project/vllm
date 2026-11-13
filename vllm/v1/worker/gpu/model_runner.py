@@ -1370,8 +1370,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
             if req_new_block_ids is not None:
+                # Requests in row_rebuild_reqs re-establish their full block
+                # rows: the scheduler sends the whole row because block
+                # positions changed under the append-only runner row (e.g.
+                # the K=0 slot release/resume refilled mamba window
+                # positions). Preemption-resumes do not flow through here —
+                # they are re-added via add_requests with overwrite=True.
                 self.block_tables.append_block_ids(
-                    req_index, req_new_block_ids, overwrite=False
+                    req_index,
+                    req_new_block_ids,
+                    overwrite=req_id in reqs.row_rebuild_reqs,
                 )
 
         # Update CPU num_computed_prefill_tokens.

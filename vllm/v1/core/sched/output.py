@@ -145,6 +145,10 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Requests whose block rows changed shape under the append-only runner
+    # row (K=0 slot release/resume): the runner must re-establish the full
+    # row from new_block_ids instead of appending to it.
+    row_rebuild_reqs: set[str] = field(default_factory=set)
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
