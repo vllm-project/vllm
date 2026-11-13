@@ -196,9 +196,15 @@ _SM107_WK_WEIGHTS_PROJECTION = GLM52ProjectionSpec(
         (5, SkinnyGemmConfig(5, 128, 2, k_unroll=2)),
         (6, SkinnyGemmConfig(6, 256, 1, k_unroll=2)),
         (8, SkinnyGemmConfig(8, 256, 1, k_unroll=2)),
+        (12, SkinnyGemmConfig(12, 256, 1, k_unroll=2)),
     ),
-    warp_splitk_configs=_warp_splitk_rows(
-        {16: (16, 8, 256, 14, 2), 32: (16, 8, 256, 16, 2)}, first_m=9
+    # M=12 keeps main's CuTe row; warp split-K is 9% slower there.
+    warp_splitk_configs=tuple(
+        row
+        for row in _warp_splitk_rows(
+            {16: (16, 8, 256, 14, 2), 32: (16, 8, 256, 16, 2)}, first_m=9
+        )
+        if row[0] != 12
     ),
 )
 

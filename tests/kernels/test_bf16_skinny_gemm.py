@@ -112,16 +112,6 @@ GLM_WARP_SPLITK_CASES = sorted(
     for num_tokens in _warp_splitk_probe_tokens(spec)
 )
 
-
-# Every planned ll_bf16 M: its dot-product kernel compiles M in, and its split-K
-# kernel changes regime with the M tile, so test them all (launches are cheap).
-GLM_LL_BF16_CASES = sorted(
-    (capability, spec.n, spec.k, num_tokens)
-    for capability, table in GLM_GPU_TABLES
-    for spec in table.values()
-    for num_tokens in spec.ll_bf16_tokens
-)
-
 QWEN4_EXP_SM90_CASES = [
     (n, k, num_tokens, config)
     for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS.items()
@@ -583,91 +573,48 @@ def test_glm52_sm107_warp_splitk_rows() -> None:
             "fi_warp_splitk": {
                 num_tokens for num_tokens, _ in spec.warp_splitk_configs
             },
-            "ll_bf16": set(spec.ll_bf16_tokens),
         }
         # Each M has one backend: a later backend must not hide another's row.
         assert sum(map(len, tokens_by_backend.values())) == len(plan)
         for backend, tokens in tokens_by_backend.items():
             assert {m for m, (b, _) in plan.items() if b == backend} == tokens
         covered[(spec.n, spec.k)] = set(plan)
-    # q_b at TP8 is the SM103 entry; the shared expert down uses cuBLAS from M=25.
+    # q_b at TP8 is the SM103 entry; the shared expert down uses cuBLAS from M=25
+    # and the indexer wk + weights_proj at M=7.
     assert covered.pop((2048, 2048)) == set(range(1, 17))
     assert covered.pop((6144, 512)) == set(range(1, 25))
+    assert covered.pop((160, 6144)) == set(range(1, 33)) - {7}
     assert all(tokens == set(range(1, 33)) for tokens in covered.values())
 
 
-def test_glm52_warp_splitk_warmup_units(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vllm.model_executor.warmup import cutedsl_warmup
+def test_glm52_warp_splitk_warmup_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 
-    registered: list[object] = []
-    warmup = glm52_gemm._WarpSplitKWarmup()
+    kernel = glm52_gemm._WARP_SPLITK_GEMM
+    compiled: list[object] = []
     monkeypatch.setattr(glm52_gemm, "_warp_splitk_module", lambda: object())
-    monkeypatch.setattr(glm52_gemm, "_warp_splitk_warmup", warmup)
-    monkeypatch.setattr(
-        cutedsl_warmup, "register_cutedsl_warmup_provider", registered.append
-    )
+    monkeypatch.setattr(kernel, "compile", compiled.append)
     monkeypatch.setattr(
         glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
     )
-    spec = glm52_gemm.GLM52_PROJECTIONS_SM107[(6144, 4096)]
+    o_proj = glm52_gemm.GLM52_PROJECTIONS_SM107[(6144, 4096)]
+    wk = glm52_gemm.GLM52_PROJECTIONS_SM107[(160, 6144)]
+    registry = JitWarmupRegistry(None)
 
-    glm52_gemm._request_warmup(torch.bfloat16, spec)
-    glm52_gemm._request_warmup(torch.bfloat16, spec)
+    with registry.activate():
+        for spec in (o_proj, wk, o_proj):
+            glm52_gemm._request_warmup(torch.bfloat16, spec)
+    registry.warmup()
 
-    assert registered == [warmup]
-    assert {unit.key for unit in warmup.get_cutedsl_warmup_compile_units()} == {
-        ("fi-warp-splitk", spec.n, spec.k, config)
+    # One registration per projection; M is dynamic, so one key per (N, K, tactic).
+    assert len(registry) == 2
+    planned = {
+        kernel.CompileKey(n=spec.n, k=spec.k, tactic=config)
+        for spec in (o_proj, wk)
         for _, config in spec.warp_splitk_configs
     }
-
-
-def test_glm52_ll_bf16_warmup_units(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vllm.model_executor.warmup import cutedsl_warmup
-
-    registered: list[object] = []
-    warmup = glm52_gemm._LLBf16Warmup()
-    monkeypatch.setattr(glm52_gemm.ll_bf16, "is_available", lambda: True)
-    monkeypatch.setattr(glm52_gemm, "_ll_bf16_warmup", warmup)
-    monkeypatch.setattr(glm52_gemm, "_warp_splitk_module", lambda: None)
-    monkeypatch.setattr(
-        cutedsl_warmup, "register_cutedsl_warmup_provider", registered.append
-    )
-    monkeypatch.setattr(
-        glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
-    )
-    gate_up = glm52_gemm.GLM52_PROJECTIONS_SM107[(1024, 6144)]
-    wk = glm52_gemm.GLM52_PROJECTIONS_SM107[(160, 6144)]
-
-    for spec in (gate_up, wk, gate_up):
-        glm52_gemm._request_warmup(torch.bfloat16, spec)
-
-    assert registered == [warmup]
-    planned = {
-        (spec.n, spec.k, num_tokens)
-        for spec in (gate_up, wk)
-        for num_tokens in spec.ll_bf16_tokens
-    }
-    units = warmup.get_cutedsl_warmup_compile_units()
-    assert len(units) == len(planned)
-    assert {unit.key for unit in units} == {("ll-bf16", *point) for point in planned}
-
-    # Each unit runs its (N, K, M) through ll_bf16_gemm, the runtime entry point,
-    # so warmup compiles whatever kernel the planned call will dispatch.
-    calls: list[tuple[int, int, int, torch.dtype, torch.dtype]] = []
-
-    def fake_ll_bf16_gemm(x, weight, output_dtype=torch.float32):
-        calls.append((weight.shape[0], x.shape[1], x.shape[0], x.dtype, output_dtype))
-
-    monkeypatch.setattr(glm52_gemm.ll_bf16, "ll_bf16_gemm", fake_ll_bf16_gemm)
-    monkeypatch.setattr(glm52_gemm.current_platform, "device_type", "cpu")
-    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
-    for unit in units:
-        unit.compile()
-    assert len(calls) == len(planned)
-    assert set(calls) == {
-        (n, k, num_tokens, torch.bfloat16, torch.bfloat16)
-        for n, k, num_tokens in planned
-    }
+    assert len(compiled) == len(planned)
+    assert set(compiled) == planned
 
 
 @pytest.mark.parametrize("capability,table", GLM_GPU_TABLES, ids=GLM_GPU_TABLE_IDS)
@@ -1350,21 +1297,49 @@ def test_glm_warp_splitk_selected_shapes(
     )
 
 
-@pytest.mark.parametrize("cuda_graph", [False, True])
-@pytest.mark.parametrize("capability,n,k,num_tokens", GLM_LL_BF16_CASES)
-def test_glm_ll_bf16_selected_shapes(
-    capability: tuple[int, int], n: int, k: int, num_tokens: int, cuda_graph: bool
+def test_glm_warp_splitk_warmup_matches_launch(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # ll_bf16 picks its kernels by architecture family, so any SM10x GPU (such as
-    # CI's B200) runs the SM107 rows' kernels.
-    if (
-        not torch.cuda.is_available()
-        or torch.cuda.get_device_capability()[0] != capability[0]
-    ):
-        pytest.skip(f"ll_bf16 rows of the SM{capability[0]}x tables need that family")
-    if not glm52_gemm.ll_bf16.is_available():
-        pytest.skip("ll_bf16 GEMM (CuTe DSL) is not available")
-    _check_glm52_planned_call(capability, n, k, num_tokens, "ll_bf16", cuda_graph)
+    """Warmup compiles the FlashInfer cache entries the planned calls look up, so
+    no planned call compiles at its first use (e.g. during CUDA graph capture)."""
+    _require_capability_and_warp_splitk((10, 7))
+    module = glm52_gemm._warp_splitk_module()
+    assert module is not None
+    compile_kernel = module._compile
+    compile_args: list[tuple[Any, ...]] = []
+
+    def record_compile(*args: Any) -> Any:
+        compile_args.append(args)
+        return compile_kernel(*args)
+
+    monkeypatch.setattr(module, "_compile", record_compile)
+    specs = [
+        spec
+        for spec in glm52_gemm.GLM52_PROJECTIONS_SM107.values()
+        if spec.warp_splitk_configs
+    ]
+    kernel = glm52_gemm._WarpSplitKGemm()
+    kernel.compile_many(
+        kernel.get_warmup_keys(
+            plans=[
+                (spec.n, spec.k, config)
+                for spec in specs
+                for _, config in spec.warp_splitk_configs
+            ]
+        )
+    )
+    warmed = set(compile_args)
+    compile_args.clear()
+
+    for spec in specs:
+        plan = spec.build_plan()
+        weight = torch.zeros(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
+        for num_tokens, _ in spec.warp_splitk_configs:
+            x = torch.zeros(num_tokens, spec.k, dtype=torch.bfloat16, device="cuda")
+            assert glm52_gemm.run_glm52_plan(plan, x, weight) is not None
+    torch.accelerator.synchronize()
+
+    assert compile_args and set(compile_args) <= warmed
 
 
 @pytest.mark.parametrize("capability,n,k,num_tokens", CUTE_CASES)
