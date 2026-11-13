@@ -36,6 +36,10 @@ HIDDEN, Q_RANK, HEAD_DIM, NOPE, ROPE = 5120, 1280, 512, 448, 64
 N_HEADS, O_GROUPS, O_RANK = 64, 8, 1024
 WINDOW, TOPK, SWA_BLOCK, CACHE_BLOCK = 128, 512, 32, 128
 RECORD, DATA, ALIGN = 584, 576, 576
+PLAIN_ROW = 512  # a plain fp8 KV row (--kv-cache-dtype fp8_e4m3)
+# the plain cache's per-tensor scales: not 1, so a scale applied twice, or not at
+# all, shows (vLLM's default scales are 1)
+KV_SCALE, Q_SCALE = 0.5, 0.25
 REPLAYS = 300
 HC = 4
 
@@ -71,9 +75,12 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 # ---------------------------------------------------------------- caches
 
 
-def _paged_cache(num_blocks: int, block: int, device) -> torch.Tensor:
+def _paged_cache(num_blocks: int, block: int, device, plain: bool = False):
     """[blocks, block, 584] u8 over pages of round_up(block * 584, 576) bytes,
-    the way vLLM binds a packed V4 cache."""
+    the way vLLM binds a packed V4 cache. `plain`: [blocks, block, 512]."""
+    if plain:
+        shape = (num_blocks, block, PLAIN_ROW)
+        return torch.zeros(shape, dtype=torch.uint8, device=device)
     page = -(-block * RECORD // ALIGN) * ALIGN
     raw = torch.zeros(num_blocks * page, dtype=torch.uint8, device=device)
     return torch.as_strided(raw, (num_blocks, block, RECORD), (page, RECORD, 1))
@@ -94,7 +101,13 @@ def _write_records(cache, block: int, slots, kv, fnuz: bool = False):
     """fp8_ds_mla records of roped bf16 kv rows at `slots`: the 448 nope dims
     in e4m3 with a UE8M0 per 64, the rope dims in bf16, as vLLM's insert.
     `fnuz`: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
-    window cache holds them. In FNUZ the OCP -0 byte would be NaN."""
+    window cache holds them. In FNUZ the OCP -0 byte would be NaN. A plain
+    cache (`_paged_cache`): all 512 dims e4m3 under `KV_SCALE`."""
+    if cache.shape[-1] == PLAIN_ROW:
+        slots = slots.to(kv.device).long()
+        q = (kv.float() / KV_SCALE).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        cache[slots // block, slots % block] = q.view(torch.uint8)
+        return
     fp8, fp8_max = torch.float8_e4m3fn, 448.0
     if fnuz:
         fp8, fp8_max = torch.float8_e4m3fnuz, 224.0
@@ -130,13 +143,21 @@ def _normed_kv(n: int, kv_norm, g, device):
 
 
 def _decode_step(
-    ratio: int, R: int, T: int, kv_norm, cos_sin, seed: int, fnuz: bool = False
+    ratio: int,
+    R: int,
+    T: int,
+    kv_norm,
+    cos_sin,
+    seed: int,
+    fnuz: bool = False,
+    plain: bool = False,
 ):
     """R requests x T tokens past random contexts: the step's metadata as
     vLLM's builders lay it out, its window rows and (ratio > 0) the compressed
     cache filled, a random top-512 a token. `fnuz`: the window records in
     FNUZ, as on gfx942. The compressed records stay OCP, as vLLM's Triton
-    compressor writes them on gfx942 too."""
+    compressor writes them on gfx942 too. `plain`: both caches of plain fp8
+    rows."""
     g = torch.Generator().manual_seed(seed)
     dev = kv_norm.device
     ctx = [int(c) for c in torch.randint(2000, 40000, (R,), generator=g)]
@@ -150,7 +171,7 @@ def _decode_step(
     for r, (lo, hi) in enumerate(spans):
         for lb in range(lo, hi + 1):
             bt[r, lb] = perm.pop()
-    swa = _paged_cache(n_swa, SWA_BLOCK, dev)
+    swa = _paged_cache(n_swa, SWA_BLOCK, dev, plain)
 
     def slot(r, p):
         return int(bt[r, p // SWA_BLOCK]) * SWA_BLOCK + p % SWA_BLOCK
@@ -196,7 +217,7 @@ def _decode_step(
         for r in range(R):
             for b in range(nblk[r]):
                 cbt[r, b] = perm.pop()
-        comp = _paged_cache(1 + sum(nblk), entries, dev)
+        comp = _paged_cache(1 + sum(nblk), entries, dev, plain)
         for r in range(R):
             idx = torch.arange(lens[r])
             slots = cbt[r, idx // entries].long() * entries + idx % entries
@@ -277,8 +298,7 @@ def _random_moe(moe, gd, gr, inter: int) -> None:
 # ---------------------------------------------------------------- the worker
 
 
-@ray.remote(num_gpus=1, max_calls=1)
-def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+def _numerics_worker(monkeypatch, tp_size, pp_size, rank, port, plain_fp8_kv):
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -291,13 +311,28 @@ def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         rocm_aiter_ops.refresh_env_variables()
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        init_test_distributed_environment(tp_size, pp_size, rank, port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         init_workspace_manager(device)
-        _check_layers(rank, tp_size, device)
+        _check_layers(rank, tp_size, device, plain_fp8_kv)
 
 
-def _check_layers(rank: int, tp: int, device) -> None:
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _numerics_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, False)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_numerics_plain_fp8_kv(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port
+):
+    _numerics_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port, True)
+
+
+def _check_layers(rank: int, tp: int, device, plain_fp8_kv: bool = False) -> None:
+    """The whole layer and the FFN launch against vLLM's chain at TP `tp`.
+    `plain_fp8_kv`: over plain fp8 rows (--kv-cache-dtype fp8_e4m3), against
+    vLLM's full-cache fp8 insert and aiter's fp8 sparse MLA."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -393,16 +428,28 @@ def _check_layers(rank: int, tp: int, device) -> None:
     sink = f32(H, gen=gs)
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
-    runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
+    group = get_tp_group().cpu_group
+    runner = DSV41MonoLayer(tp, rank, group, device, plain_fp8_kv=plain_fp8_kv)
     # the tuned builds' reference (``MonoBuild.generic``): at TP2 the ratio-2
     # steps take the tuned paths, 12 rows the small-width ones, 36 a partial
     # last token tile; their outputs must match the generic builds' bit for bit.
     generic = (
-        DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
+        DSV41MonoLayer(tp, rank, group, device, generic=True, plain_fp8_kv=plain_fp8_kv)
         if runner.build(1, 2).tuned_front
         else None
     )
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
+    f8 = torch.float8_e4m3fn
+    scales = {}
+    if plain_fp8_kv:
+        scales = {
+            n: torch.tensor([v], dtype=torch.float32, device=device)
+            for n, v in (
+                ("kv_scale", KV_SCALE),
+                ("q_scale", Q_SCALE),
+                ("q_scale_inv", 1.0 / Q_SCALE),
+            )
+        }
 
     def top6(x):
         """The top-6 experts as vLLM routes: sqrt(softplus(logits)) + bias."""
@@ -432,14 +479,16 @@ def _check_layers(rank: int, tp: int, device) -> None:
                 compress_ratio=ratio,
             )  # fmt: skip
         cos_sin = rope.cos_sin_cache.to(device=device, dtype=torch.float32)
-        s = _decode_step(ratio, R, T, kv_norm, cos_sin, seed=7 + ratio)
+        s = _decode_step(
+            ratio, R, T, kv_norm, cos_sin, seed=7 + ratio, plain=plain_fp8_kv
+        )
         M = s["M"]
         mw = MonoLayerWeights(
             attn=AttnWeights(
                 layer_id=21, wqkv=wqkv, wqkv_scale=wqkv_s, q_norm=q_norm,
                 kv_norm=kv_norm, wq_b=wq_b, wq_b_scale=wq_b_s, wo_a=wo_a,
                 wo_a_scale=wo_a_s, wo_b=wo_b, wo_b_scale=wo_b_s, attn_sink=sink,
-                cos_sin=cos_sin, ratio=ratio,
+                cos_sin=cos_sin, ratio=ratio, **scales,
             ),
             hc_attn_fn=seams["attn"]["fn"], hc_attn_scale=seams["attn"]["scale"],
             hc_attn_base=seams["attn"]["base"], attn_norm=seams["attn"]["norm"],
@@ -486,21 +535,41 @@ def _check_layers(rank: int, tp: int, device) -> None:
         )
         q8, qs = mxfp8_e4m3_quantize(qr)
         q = rocm_mxfp8_block32_gemm(q8, qs, wq_b, wq_b_s, bf).view(M, H, HEAD_DIM)
-        swa2d = s["swa_cache"].view(s["swa_cache"].shape[0], -1)
         swa_pre = s["swa_cache"].clone()
-        q_roped = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            q, kv, swa2d, s["slot_mapping"], s["positions"], cos_sin, H,
-            cfg.rms_norm_eps, SWA_BLOCK, False, False, True, False,
-        )  # fmt: skip
+        if plain_fp8_kv:
+            q_roped = torch.empty(M, H, HEAD_DIM, dtype=f8, device=device)
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+                q, kv, q_roped, s["swa_cache"].view(f8), s["slot_mapping"],
+                s["positions"], cos_sin, scales["kv_scale"], scales["q_scale_inv"],
+                cfg.rms_norm_eps, SWA_BLOCK, False,
+            )  # fmt: skip
+        else:
+            swa2d = s["swa_cache"].view(s["swa_cache"].shape[0], -1)
+            q_roped = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+                q, kv, swa2d, s["slot_mapping"], s["positions"], cos_sin, H,
+                cfg.rms_norm_eps, SWA_BLOCK, False, False, True, False,
+            )  # fmt: skip
         swa_ref = s["swa_cache"].clone()
         # the step's rows are new: the reference's insert changed the cache
         assert not torch.equal(swa_pre.view(torch.uint8), swa_ref.view(torch.uint8))
         attn = torch.empty(M, H, HEAD_DIM, dtype=bf, device=device)
-        rocm_aiter_ops.triton_sparse_mla_fwd(
-            q_roped, s["swa_cache"], attn, HEAD_DIM**-0.5, swa_ptr, swa_ind,
-            attn_sink=sink, extra_kv_buffer=s["comp_cache"],
-            extra_kv_indptr=top_ptr, extra_kv_indices=top_ind,
-        )  # fmt: skip
+        if plain_fp8_kv:
+            # as vLLM's plain path calls it (``deepseek_v4.amd.rocm``)
+            comp = s["comp_cache"]
+            rocm_aiter_ops.triton_sparse_mla_fwd(
+                q_roped, s["swa_cache"].view(f8), attn, HEAD_DIM**-0.5, swa_ptr,
+                swa_ind, kv_lora_rank=HEAD_DIM, qk_rope_head_dim=0,
+                q_scale=scales["q_scale"], kv_scale=scales["kv_scale"],
+                attn_sink=sink, extra_kv_buffer=None if comp is None else comp.view(f8),
+                extra_kv_indptr=top_ptr, extra_kv_indices=top_ind,
+                has_invalid=False, dot_precision="fp8",
+            )  # fmt: skip
+        else:
+            rocm_aiter_ops.triton_sparse_mla_fwd(
+                q_roped, s["swa_cache"], attn, HEAD_DIM**-0.5, swa_ptr, swa_ind,
+                attn_sink=sink, extra_kv_buffer=s["comp_cache"],
+                extra_kv_indptr=top_ptr, extra_kv_indices=top_ind,
+            )  # fmt: skip
         a8 = torch.empty(M, H * HEAD_DIM, dtype=torch.float8_e4m3fn, device=device)
         a_s = torch.empty(M, H * HEAD_DIM // 32, dtype=torch.uint8, device=device)
         rocm_inverse_rope_mxfp8_rows(attn, s["positions"], cos_sin, ROPE, a8, a_s)
@@ -630,12 +699,17 @@ def _check_layers(rank: int, tp: int, device) -> None:
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "fp8_e4m3"])
 @pytest.mark.parametrize("tp", [2, 4, 8])
-def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
+def test_mono_decode_layer_matches_vllm(
+    monkeypatch: pytest.MonkeyPatch, tp: int, kv_cache_dtype: str
+):
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)
+    plain = kv_cache_dtype == "fp8_e4m3"
+    worker = _mono_numerics_plain_fp8_kv if plain else _mono_numerics
+    multi_process_parallel(monkeypatch, tp, 1, worker)
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
