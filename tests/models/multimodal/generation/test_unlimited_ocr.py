@@ -23,6 +23,11 @@ DASH_BACKENDS = (
     ]
 )
 
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    reason="Unlimited-OCR-2 DASH attention requires CUDA or ROCm",
+)
+
 
 def _attention_class_names(model):
     from vllm.model_executor.layers.attention import Attention
