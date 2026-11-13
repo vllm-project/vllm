@@ -15,7 +15,6 @@ would pass even if the CP merge mixed heads.
 import os
 
 import pytest
-import ray
 import torch
 
 from vllm.distributed.parallel_state import get_tp_group
@@ -95,7 +94,6 @@ def _assert_same_topk(got, ref, q, cache, table, seq_lens, heads, query_len):
     assert swaps <= max(1, got.shape[1] * len(heads) // 100), swaps
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _run_cp_topk_matches_non_cp(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
@@ -190,11 +188,11 @@ def test_cp_topk_matches_non_cp_per_head(
         pytest.skip(f"Need at least {tp_size} GPUs to run the test.")
     if use_aiter:
         pytest.importorskip("aiter")
-        # Read when vLLM is imported, so it must be set before ray starts.
+        # Read when vLLM is imported, so it must be set before the ranks start.
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     else:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "0")
-    # Ray workers inherit the driver environment; multi_process_parallel
-    # passes no per-test arguments.
+    # The ranks inherit this environment; multi_process_parallel passes no
+    # per-test arguments.
     monkeypatch.setenv(_QUERY_LEN_ENV, str(query_len))
     multi_process_parallel(monkeypatch, tp_size, 1, _run_cp_topk_matches_non_cp)

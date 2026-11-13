@@ -18,7 +18,6 @@ Each stage contains one payload slot per source rank.
 """
 
 import pytest
-import ray
 import torch
 import torch.distributed as dist
 
@@ -294,7 +293,6 @@ def _run_epoch_wrap_case(fa, rank, local_rank, seed_epoch, device):
     assert all(checks), "Lamport stages did not advance safely across uint32 wrap"
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _run_stage_cleanup_test(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
@@ -333,7 +331,6 @@ def test_mnnvl_lamport_stage_cleanup(monkeypatch: pytest.MonkeyPatch):
     multi_process_parallel(monkeypatch, 2, 1, _run_stage_cleanup_test)
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _run_multimem_reduce_scatter_test(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,

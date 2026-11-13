@@ -4,7 +4,6 @@
 from types import SimpleNamespace
 
 import pytest
-import ray
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -214,7 +213,6 @@ def _make_bf16_top16_deferred_output(
     )
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _test_latent_moe_tail_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
@@ -324,7 +322,6 @@ def _run_latent_moe_tail_test(
     )
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _test_deferred_finalize_parity_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,

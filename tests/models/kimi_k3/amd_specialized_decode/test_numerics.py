@@ -17,7 +17,6 @@ regular-decode or spec-verify step, with random checkpoint-format weights:
 """
 
 import pytest
-import ray
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -925,7 +924,6 @@ def _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     return device
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _k2_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
@@ -1021,7 +1019,6 @@ def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) ->
     multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _k2_opt_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
@@ -1079,7 +1076,6 @@ def _gather(t: torch.Tensor) -> torch.Tensor:
     return torch.stack(out)
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _m1_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
@@ -1460,7 +1456,6 @@ def test_m1_tp8_dcp8_matches_vllm_ops_and_replays(
 STALLED = 3
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _fault_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,

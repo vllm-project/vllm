@@ -18,7 +18,6 @@ measured against the exact fp32 result and the kernels must be as close to it
 as vLLM is."""
 
 import pytest
-import ray
 import torch
 
 from vllm.platforms import current_platform
@@ -417,7 +416,6 @@ def _attn_output(runner, epoch: int, M: int, rank: int) -> torch.Tensor:
     return out
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _mono_layer_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.worker.workspace import init_workspace_manager

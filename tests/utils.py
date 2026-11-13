@@ -10,6 +10,7 @@ import itertools
 import json
 import os
 import random
+import shutil
 import signal
 import subprocess
 import sys
@@ -1364,7 +1365,7 @@ def init_test_distributed_environment(
     data_parallel_size: int = 1,
     data_parallel_master_port: int | None = None,
 ) -> None:
-    # Note: This function is often called from Ray worker processes, so we
+    # Note: This function is often called from multi_process_parallel ranks, so we
     # can't rely on pytest fixtures to set the config. We check if the config
     # is already set and only create a default one if needed.
     from vllm.config import (
@@ -1377,7 +1378,7 @@ def init_test_distributed_environment(
 
     # get_open_port() closes its probe socket before the ranks bind, leaving
     # the port unreserved, so prefer a file store as the executors do. This
-    # runs in every Ray worker, so the path must come from the shared token
+    # runs in every rank, so the path must come from the shared token
     # rather than a per-call uuid4(), or each rank would get its own file.
     if aiter_requires_tcp_store():
         distributed_init_method = f"tcp://localhost:{distributed_init_port}"
@@ -1434,63 +1435,138 @@ def init_test_distributed_environment(
             ensure_model_parallel_initialized(tp_size, pp_size)
 
 
+# Runs one rank of multi_process_parallel. Resolves the target by module and
+# qualified name, as spawn_new_process_for_each_test does, records the outcome
+# in result_file ("ok", "skip\n<reason>" or the traceback), then exits without
+# interpreter teardown: the parent judges the rank by that record, as ray.get
+# judged a task by its return, so live communicators cannot hang its exit.
+_RANK_CHILD_SCRIPT = """\
+import importlib, os, sys, traceback
+import cloudpickle, pytest
+from _pytest.outcomes import Skipped
+data = cloudpickle.loads(sys.stdin.buffer.read())
+try:
+    target = importlib.import_module(data["module"])
+    for name in data["qualname"].split("."):
+        target = getattr(target, name)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        target(monkeypatch, *data["args"])
+    outcome, code = "ok", 0
+except Skipped as exc:
+    outcome, code = f"skip\\n{exc}", 0
+except BaseException:
+    outcome, code = traceback.format_exc(), 1
+with open(data["result_file"] + ".tmp", "w") as fp:
+    fp.write(outcome)
+os.replace(data["result_file"] + ".tmp", data["result_file"])
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(code)
+"""
+
+
+def _kill_rank(proc: subprocess.Popen) -> None:
+    """Kill a rank and anything it started (it leads its own session)."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait()
+
+
 def multi_process_parallel(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
     pp_size: int,
-    test_target: Any,
+    test_target: Callable[..., None],
     data_parallel_size: int = 1,
 ) -> None:
-    import ray
-
-    # Using ray helps debugging the error when it failed as compared to
-    # multiprocessing. For local Ray workers, putting the repo root on
-    # PYTHONPATH is enough and avoids uploading the full source tree, which
-    # exceeds Ray's working_dir package size limit on CI.
-    env_vars = {
-        "PYTHONPATH": os.pathsep.join(
-            filter(None, [str(VLLM_PATH), os.environ.get("PYTHONPATH")])
-        ),
-        **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
-    }
-    ray.init(
-        runtime_env={
-            "env_vars": env_vars,
-        }
+    """Run `test_target(monkeypatch, tp_size, pp_size, rank, port, ...)` in one
+    fresh process per rank; `test_target` must be a module-level function.
+    Each rank gets its own MonkeyPatch (the caller's is not passed on) and
+    inherits the caller's environment. On the first failure, the remaining
+    ranks, which would otherwise block in a collective, are killed and the
+    test fails with the traceback of each rank that failed."""
+    assert "<locals>" not in test_target.__qualname__, (
+        "multi_process_parallel targets must be module-level functions"
     )
-
     distributed_init_port = get_open_port()
     # Separate port for the DP master group; only used when data_parallel_size > 1.
     data_parallel_master_port = get_open_port() if data_parallel_size > 1 else None
     world_size = data_parallel_size * tp_size * pp_size
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(VLLM_PATH.resolve()), env.get("PYTHONPATH")])
+    )
+    # One intra-op thread per rank, as Ray gave its workers.
+    env.setdefault("OMP_NUM_THREADS", "1")
+    result_dir = tempfile.mkdtemp(prefix="vllm_mpp_")
+    result_files = [os.path.join(result_dir, f"rank{r}") for r in range(world_size)]
+    procs: list[subprocess.Popen] = []
     try:
-        refs = []
         for rank in range(world_size):
+            args: tuple = (tp_size, pp_size, rank, distributed_init_port)
             if data_parallel_size > 1:
-                refs.append(
-                    test_target.remote(
-                        monkeypatch,
-                        tp_size,
-                        pp_size,
-                        rank,
-                        distributed_init_port,
-                        data_parallel_size,
-                        data_parallel_master_port,
-                    ),
+                args += (data_parallel_size, data_parallel_master_port)
+            proc = subprocess.Popen(
+                [sys.executable, "-c", _RANK_CHILD_SCRIPT],
+                stdin=subprocess.PIPE,
+                env=env,
+                start_new_session=True,
+            )
+            procs.append(proc)
+            assert proc.stdin is not None
+            proc.stdin.write(
+                cloudpickle.dumps(
+                    {
+                        "module": test_target.__module__,
+                        "qualname": test_target.__qualname__,
+                        "args": args,
+                        "result_file": result_files[rank],
+                    }
                 )
-            else:
-                refs.append(
-                    test_target.remote(
-                        monkeypatch,
-                        tp_size,
-                        pp_size,
-                        rank,
-                        distributed_init_port,
-                    ),
-                )
-        ray.get(refs)
+            )
+            proc.stdin.close()
+
+        # Poll until every rank has an outcome, or for 1s after the first
+        # failure so that ranks failing at about the same time are reported.
+        outcomes: dict[int, str] = {}
+        failures: list[tuple[bool, float, str]] = []
+        while len(outcomes) < world_size and (
+            not failures or time.time() < failures[0][1] + 1
+        ):
+            time.sleep(0.1)
+            for rank, proc in enumerate(procs):
+                if rank in outcomes:
+                    continue
+                if os.path.exists(result_files[rank]):
+                    with open(result_files[rank]) as fp:
+                        outcomes[rank] = fp.read()
+                    crashed, when = False, os.path.getmtime(result_files[rank])
+                elif proc.poll() is not None:
+                    outcomes[rank] = (
+                        f"<{_format_subprocess_exit(proc.returncode)}, "
+                        "no Python traceback; see the rank's output above>"
+                    )
+                    crashed, when = True, time.time()
+                else:
+                    continue
+                if outcomes[rank] != "ok" and not outcomes[rank].startswith("skip\n"):
+                    failures.append(
+                        (not crashed, when, f"rank {rank}:\n{outcomes[rank]}")
+                    )
+        if failures:
+            # Likely causes first: ranks that died without a Python traceback,
+            # then the earliest traceback; later ones are usually its peers.
+            raise RuntimeError(
+                f"{test_target.__qualname__} failed:\n"
+                + "\n".join(text for *_, text in sorted(failures))
+            )
+        skips = [o for o in outcomes.values() if o.startswith("skip\n")]
+        if skips:
+            pytest.skip(skips[0].removeprefix("skip\n"))
     finally:
-        ray.shutdown()
+        for proc in procs:
+            _kill_rank(proc)
+        shutil.rmtree(result_dir, ignore_errors=True)
         # All ranks are gone, so the file store has no readers left.
         Path(_test_rendezvous_path(distributed_init_port)).unlink(missing_ok=True)
 

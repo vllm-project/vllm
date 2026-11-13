@@ -4,7 +4,6 @@
 import ctypes
 
 import pytest
-import ray
 import torch
 import torch.distributed as dist
 
@@ -60,7 +59,6 @@ def _assert_aiter_handles_input(inp: torch.Tensor) -> None:
     )
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
@@ -104,7 +102,6 @@ def graph_allreduce(
             torch.testing.assert_close(out, expected)
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def eager_allreduce(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
@@ -160,7 +157,6 @@ def _num_memcpy_nodes(graph: torch.cuda.CUDAGraph) -> int:
     return count
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce_expandable_segments(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
@@ -250,7 +246,6 @@ def _assert_aiter_handles_rs(aiter_comm, inp: torch.Tensor) -> None:
     )
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def eager_ag_rs(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
@@ -305,7 +300,6 @@ def eager_ag_rs(
             torch.testing.assert_close(rs_out, rs_expected)
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def graph_ag_rs(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,

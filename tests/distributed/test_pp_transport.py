@@ -188,8 +188,8 @@ class _WorkerPool:
     def get(self) -> list:
         if self.workers is None:
             if not ray.is_initialized():
-                # As in multi_process_parallel: the repo on PYTHONPATH is
-                # enough for local Ray workers, and Ray must not narrow
+                # The repo on PYTHONPATH is enough for local Ray workers,
+                # and Ray must not narrow
                 # device visibility (each worker picks its device by rank).
                 env_vars = {
                     "PYTHONPATH": os.pathsep.join(

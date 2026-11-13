@@ -20,7 +20,6 @@ import shutil
 import subprocess
 
 import pytest
-import ray
 import torch
 
 from vllm.platforms import current_platform
@@ -277,7 +276,6 @@ def _random_moe(moe, gd, gr, inter: int) -> None:
 # ---------------------------------------------------------------- the worker
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.worker.workspace import init_workspace_manager
@@ -658,7 +656,6 @@ def test_mono_decode_k2_tp4_no_scratch(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------- gfx942
 
 
-@ray.remote(num_gpus=1, max_calls=1)
 def _mono_replay_942(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.worker.workspace import init_workspace_manager
