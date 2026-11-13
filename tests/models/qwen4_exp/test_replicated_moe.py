@@ -7,9 +7,9 @@ the model's `load_weights` and run the layer's forward over the real SP
 collectives: on two GPUs where there are any, as in CI, else on CPU (gloo).
 Replaced by torch versions, so that both devices run the same math: the
 attention (a row-parallel projection), the HC Triton ops, the MoE backend
-selection, the AITER top-k buffer (used only by the AITER kernel) and the
-expert kernel (`MoERunner._forward_impl`, a dense torch MoE over the runner's
-own weights).
+selection and the expert kernel (`MoERunner._forward_impl`, a dense torch MoE
+over the runner's own weights). On CPU the AITER top-k buffer is built on the
+host.
 """
 
 import zlib
@@ -41,10 +41,8 @@ from vllm.distributed import (
     initialize_model_parallel,
 )
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import (
-    expert_map_manager,
-    unquantized_fused_moe_method,
-)
+from vllm.model_executor.layers.fused_moe import unquantized_fused_moe_method
+from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
@@ -52,6 +50,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.models.qwen4_exp.amd import hyperconnection as hc_module
 from vllm.models.qwen4_exp.amd import model as model_module
+from vllm.models.qwen4_exp.amd.specialized_decode.runtime import guards
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -179,6 +178,21 @@ def _dense_impl(self, hidden_states, router_logits, *args, **kwargs):
     return out.to(hidden_states.dtype)
 
 
+class _HostTorch:
+    """`torch` as `rocm_aiter_moe` sees it on a CPU rank: its buffers on the host."""
+
+    def __getattr__(self, name):
+        return getattr(torch, name)
+
+    @staticmethod
+    def empty(*args, device=None, **kwargs):
+        return torch.empty(*args, **kwargs)
+
+    @staticmethod
+    def tensor(*args, device=None, **kwargs):
+        return torch.tensor(*args, **kwargs)
+
+
 _CALLS = {"all_gather": 0, "reduce_scatter": 0, "sp_shard": 0}
 
 
@@ -202,7 +216,7 @@ def _patches() -> None:
             "select_unquantized_moe_backend",
             lambda **kwargs: (UnquantizedMoeBackend.TRITON, None),
         ),
-        (expert_map_manager, "init_aiter_topK_meta_data", lambda **kwargs: None),
+        (rocm_aiter_moe, "torch", torch if ON_GPU else _HostTorch()),
         (rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: True),
         (model_module, "QwenGatedDeltaNetAttention", _RowParallelAttention),
         (MoERunner, "_forward_impl", _dense_impl),
@@ -233,6 +247,9 @@ def _build(config: VllmConfig) -> nn.Module:
     """Layer 0 of the real model: the model's `load_weights` gives each rank its
     share of `_checkpoint` (all of each expert at TP size 1); every other weight
     is seeded by name."""
+    # One model per process in vLLM: each starts without the AITER top-k buffer.
+    rocm_aiter_moe.aiter_topK_meta_data = None
+    rocm_aiter_moe.init_aiter_topK_meta_data.cache_clear()
     with set_current_vllm_config(config):
         model = model_module.Qwen4ExpModel(vllm_config=config, prefix="model")
         for name, param in model.named_parameters():
@@ -278,7 +295,32 @@ def _check_replicated_experts() -> None:
     torch.testing.assert_close(got, want, atol=2e-3, rtol=2e-2)
 
 
-def _check_unsupported_refused() -> None:
+def _check_dual_layout() -> None:
+    off_config = _make_config(monokernel=True)
+    on_config = _make_config(monokernel=True, **FLAG)
+    off, on = _build(off_config), _build(on_config)
+    # The specialized decode reads the flag-off TP2 shards in place.
+    shards = on.mlp.experts
+    assert shards.moe_config.tp_size == 2
+    for name in ("w13_weight", "w2_weight"):
+        want_shard = getattr(off.mlp.experts.routed_experts, name)
+        assert torch.equal(getattr(shards.routed_experts, name), want_shard)
+    assert on.mlp.replicated["experts"].moe_config.tp_size == 1
+    _, want = _forward(off, off_config)
+    calls, got = _forward(on, on_config)
+    assert calls == (1, 1, 0)
+    torch.testing.assert_close(got, want, atol=2e-3, rtol=2e-2)
+
+
+def _check_decode_guard_reads_tp_shards() -> None:
+    reason = "routed experts at TP size 1 (the kernels read TP2 shards)"
+    dual = _build(_make_config(monokernel=True, **FLAG))
+    one_layout = _build(_make_config(**FLAG))
+    assert reason not in guards._layer_reasons(dual)
+    assert reason in guards._layer_reasons(one_layout)
+
+
+def _check_separate_shared_expert_refused() -> None:
     config = _make_config(**FLAG)
     with (
         patch.object(
@@ -288,8 +330,6 @@ def _check_unsupported_refused() -> None:
         pytest.raises(ValueError, match="needs the AITER fused shared expert"),
     ):
         model_module.Qwen4ExpDecoderLayer(config, "linear_attention", "model.layers.0")
-    with pytest.raises(ValueError, match="does not support --monokernel"):
-        model_module._replicated_moe(_make_config(monokernel=True, **FLAG))
 
 
 def _run(rank: int, port: int, check) -> None:
@@ -322,7 +362,23 @@ def test_replicated_experts_run_whole_on_local_rows() -> None:
     mp.spawn(_run, args=(get_open_port(), _check_replicated_experts), nprocs=2)
 
 
-def test_unsupported_layouts_are_refused() -> None:
-    """A separate shared expert would stay TP-sharded and be added unreduced;
-    `--monokernel`'s specialized decode would sum whole experts twice."""
-    mp.spawn(_run, args=(get_open_port(), _check_unsupported_refused), nprocs=2)
+def test_dual_layout_keeps_shards_and_runs_whole_experts() -> None:
+    """With `--monokernel`, `mlp.experts` stays the TP2 shard the specialized
+    decode reads, while the stock forward runs the whole experts, loaded from
+    the same checkpoint tensors, on the rank's own rows."""
+    mp.spawn(_run, args=(get_open_port(), _check_dual_layout), nprocs=2)
+
+
+def test_specialized_decode_guard_refuses_whole_experts() -> None:
+    """The kernels sum the TP ranks' partial outputs: whole experts in
+    `mlp.experts` would be summed twice."""
+    mp.spawn(
+        _run, args=(get_open_port(), _check_decode_guard_reads_tp_shards), nprocs=2
+    )
+
+
+def test_separate_shared_expert_is_refused() -> None:
+    """A separate shared expert would stay TP-sharded and be added unreduced."""
+    mp.spawn(
+        _run, args=(get_open_port(), _check_separate_shared_expert_refused), nprocs=2
+    )
