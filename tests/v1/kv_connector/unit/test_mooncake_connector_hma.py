@@ -25,6 +25,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
 )
+from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -171,6 +175,64 @@ def test_get_sw_clipped_blocks_noop_no_hma():
     assert clipped == [[1, 2, 3]]
 
 
+@pytest.mark.cpu_test
+def test_receive_manifest_preserves_sparse_logical_block_positions():
+    block_size = 16
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        block_size=block_size,
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    kv_cache_config = make_kv_cache_config(
+        block_size=block_size, swa_enabled=True, sw_size=128
+    )
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    request = create_request(
+        num_tokens=128,
+        do_remote_prefill=True,
+        block_size=block_size,
+    )
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params.update(
+        remote_bootstrap_addr="http://test", transfer_id="transfer-0"
+    )
+
+    requested_indices = ([6, 7], [2, 6, 7])
+    groups = []
+    requested_ids = []
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        count = cdiv(request.num_tokens, group.kv_cache_spec.block_size)
+        blocks = [
+            KVCacheBlock(group_id * 100 + block_idx + 1) for block_idx in range(count)
+        ]
+        missing = set(requested_indices[group_id])
+        for block_idx, block in enumerate(blocks):
+            if block_idx not in missing:
+                block.set_block_hash((group_id, block_idx))
+        groups.append(blocks)
+        requested_ids.append(
+            [blocks[block_idx].block_id for block_idx in requested_indices[group_id]]
+        )
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(tuple(groups)),
+        num_external_tokens=32,
+    )
+    metadata = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+    pull = metadata.reqs_to_recv["my-engine-id"][request.request_id]
+
+    assert pull.local_block_ids == requested_ids
+    assert pull.logical_block_indices == [
+        list(indices) for indices in requested_indices
+    ]
+
+
 # ---------------------------------------------------------------------------
 #  test_metadata_hma_block_ids: MooncakeConnectorMetadata stores per-group IDs
 # ---------------------------------------------------------------------------
@@ -311,6 +373,68 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
         assert len(src_ptrs) > 0
         assert len(dst_ptrs) == len(src_ptrs)
         assert len(lengths) == len(src_ptrs)
+
+        guarded = worker._build_pull_metadata(
+            {
+                "d-positioned": PullReqMeta(
+                    d_req_id="d-positioned",
+                    transfer_id="xfer-positioned",
+                    local_block_ids=[[30, 31], [40, 41]],
+                    remote_engine_id="producer",
+                    remote_bootstrap_addr="producer:1234",
+                    logical_block_indices=[[0, 2], [1, 3]],
+                )
+            },
+            include_layout=False,
+        )
+        assert guarded.req_blocks["d-positioned"][1] == [
+            [30, 31],
+            [40, 41],
+            [],
+        ]
+
+        positioned_send = SendBlockMeta(
+            p_req_id="p-positioned",
+            transfer_id="xfer-positioned",
+            local_block_ids=[[10, 11, 12, 13], [20, 21, 22]],
+            ready=asyncio.Event(),
+            num_tokens=4 * block_size,
+        )
+        positioned_meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=1,
+            remote_tp_rank=0,
+            req_blocks={
+                "d-positioned": (
+                    "xfer-positioned",
+                    [[30, 31], [40, 41]],
+                )
+            },
+            req_block_indices={"d-positioned": [[0, 2], [1, 3]]},
+            kv_caches_base_addr=[0x2000],
+            block_lens=[block_len],
+            kv_block_lens=[block_len],
+        )
+
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = await worker._build_transfer_params(
+            [("d-positioned", positioned_send)],
+            positioned_meta,
+            local_regions,
+            remote_regions,
+        )
+
+        assert err_reqs == []
+        assert err_msg is None
+        assert src_ptrs == [0x1000 + 10 * block_len, 0x1000 + 12 * block_len]
+        assert dst_ptrs == [0x2000 + 30 * block_len, 0x2000 + 31 * block_len]
+        assert lengths == [block_len, block_len]
 
         worker.shutdown()
 

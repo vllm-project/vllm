@@ -2156,12 +2156,46 @@ def test_dflash_window_pool_memory_check_does_not_require_full_draft_context():
     assert result.num_blocks_by_pool == [target_blocks, draft_blocks]
 
 
-@pytest.mark.parametrize("connector", ["MooncakeConnector", "NixlConnector"])
-def test_dflash_window_pool_keeps_shared_layout_with_kv_transfer(connector):
+@pytest.mark.parametrize(
+    "connectors",
+    [
+        ["MooncakeConnector"],
+        ["MooncakeStoreConnector"],
+        ["MooncakeConnector", "MooncakeStoreConnector"],
+    ],
+    ids=["p2p", "store", "multi"],
+)
+def test_dflash_window_pool_supports_audited_kv_transfer(connectors):
+    """Audited connectors preserve allocator-local Draft block identities."""
+    config = _dflash_vllm_config()
+    connector_config = [
+        {"kv_connector": connector, "kv_role": "kv_both"} for connector in connectors
+    ]
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector=connectors[0] if len(connectors) == 1 else "MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=(
+            {} if len(connectors) == 1 else {"connectors": connector_config}
+        ),
+    )
+    specs = {
+        "target": new_kv_cache_spec(block_size=16),
+        "draft": replace(
+            new_sliding_window_spec(block_size=16, sliding_window=64),
+            is_draft=True,
+        ),
+    }
+
+    groups = kv_cache_planning.get_global_kv_cache_groups(config, [specs])
+
+    assert [group.block_pool_id for group in groups] == [0, 1]
+
+
+def test_dflash_window_pool_keeps_shared_layout_with_unaudited_kv_transfer():
     """Independent recovery is not enabled for an unaudited transfer backend."""
     config = _dflash_vllm_config()
     config.kv_transfer_config = KVTransferConfig(
-        kv_connector=connector, kv_role="kv_both"
+        kv_connector="NixlConnector", kv_role="kv_both"
     )
     specs = {
         "target": new_kv_cache_spec(block_size=16),

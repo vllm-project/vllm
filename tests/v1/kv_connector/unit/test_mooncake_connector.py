@@ -59,6 +59,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVQuantMode,
     MLAAttentionSpec,
 )
 from vllm.v1.request import RequestStatus
@@ -157,6 +158,49 @@ def test_region_length_validation_checks_replicated_gqa_heads(
         )
         is None
     ) == valid
+
+
+@pytest.mark.parametrize(
+    ("local_tp_rank", "expected"),
+    [(0, (True, 0, 0, 32768)), (1, (False, 0, 0, 32768))],
+)
+def test_sender_plan_tp_replicated_region(local_tp_rank, expected):
+    plan = _compute_sender_transfer_plan(
+        local_tp_rank=local_tp_rank,
+        local_tp_size=4,
+        remote_tp_rank=0,
+        remote_tp_size=1,
+        local_kv_block_len=32768,
+        remote_kv_block_len=32768,
+        producer_cache_replicated=False,
+        total_num_kv_heads=4,
+        region_cache_replicated=True,
+    )
+    assert plan == expected
+
+
+def test_region_length_validation_allows_tp_replicated_region():
+    local_regions = [
+        TransferRegion("target", 0, 0, 18432, 18432, group_index=0),
+        TransferRegion("indexer", 1, 0, 32768, 32768, group_index=1),
+    ]
+    remote_regions = [
+        TransferRegion("target", 0, 0, 73728, 73728, group_index=0),
+        TransferRegion("indexer", 1, 0, 32768, 32768, group_index=1),
+    ]
+
+    assert (
+        _validate_asymmetric_region_lengths(
+            local_regions=local_regions,
+            remote_regions=remote_regions,
+            local_tp_size=4,
+            remote_tp_size=1,
+            producer_cache_replicated=False,
+            total_num_kv_heads=4,
+            replicated_region_indices={1},
+        )
+        is None
+    )
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
@@ -1374,6 +1418,25 @@ def test_mooncake_compressed_kernel_split(kernel_block_size, raises):
         worker.shutdown()
 
 
+@pytest.mark.parametrize("head_major", [True, False])
+def test_nvfp4_head_resharding_requires_head_major_slots(head_major):
+    """Head-major K/V slots make complete NVFP4 heads byte-sliceable."""
+    spec = FullAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.NVFP4,
+        num_head_slots=2,
+        state_content_bytes=72,
+        kv_head_major_slots=head_major,
+    )
+
+    assert mooncake_connector._supports_nvfp4_head_resharding(spec, "LBHNC") is (
+        head_major
+    )
+
+
 @pytest.mark.asyncio
 async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
     """P4/D2 must retain KV until both D stages finish, including a no-op pull."""
@@ -2302,6 +2365,37 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
             assert worker.kv_block_len_per_layer == [spec.page_size_bytes] * 2
             assert worker.registered_layer_names == list(kv_caches)
             assert worker.registered_layer_indices == [0, 1]
+
+
+def test_register_flat_cache_uses_owning_pool_capacity():
+    spec = FullAttentionSpec(
+        block_size=maybe_update_block_size(16),
+        num_kv_heads=1,
+        head_size=16,
+        dtype=torch.float16,
+    )
+    target_name = "model.layers.0.self_attn"
+    draft_name = "model.layers.1.self_attn"
+    config = KVCacheConfig(
+        num_blocks=8,
+        num_blocks_by_pool=[8, 2],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([target_name], spec, block_pool_id=0),
+            KVCacheGroupSpec([draft_name], spec, block_pool_id=1),
+        ],
+    )
+    target = torch.zeros(8 * spec.page_size_bytes, dtype=torch.uint8)
+    draft = torch.zeros(2 * spec.page_size_bytes, dtype=torch.uint8)
+
+    with mooncake_register_worker(config) as (worker, _):
+        worker.register_kv_caches({target_name: target, draft_name: draft})
+
+        assert worker.block_len_per_layer == [
+            spec.page_size_bytes,
+            spec.page_size_bytes,
+        ]
+        assert worker.registered_group_indices == [0, 1]
 
 
 def test_register_noncontiguous_packed_allows_matching_pp():

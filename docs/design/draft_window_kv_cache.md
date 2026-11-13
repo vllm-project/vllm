@@ -23,14 +23,15 @@ The independent draft-window pool is enabled when all of the following hold:
 - KV-cache residency metrics are disabled;
 - KV-cache event publishing is disabled;
 - `num_gpu_blocks_override` is not set;
-- KV transfer is disabled.
+- KV transfer is disabled or uses only Mooncake P2P/Store connectors.
 
 Tensor and data parallel deployments are supported. The automatic extensible
 KV cache is disabled for eligible configurations because its current resize
 operation assumes one capacity shared by every KV group. If the extensible
 cache is explicitly enabled, it takes precedence and vLLM retains the shared
-layout. KV-transfer deployments also retain the shared layout; sparse P/D
-recovery is outside this change.
+layout. Other KV-transfer connectors retain the shared layout until
+allocator-local block identities and sparse recovery have been audited for
+those connectors.
 
 ## Storage
 
@@ -68,6 +69,25 @@ rewritten.
 
 This protection is based on the known target hit boundary. It does not maintain
 an endpoint cache or add endpoint-specific eviction state.
+
+## Prefill/decode transfer
+
+With Mooncake P/D disaggregation, the consumer reports the logical positions
+of the pages it needs after applying its local Draft window. The producer maps
+those positions to the retained pages instead of assuming both endpoints own
+the same dense suffix. Positioned metadata that is missing, inconsistent, or
+outside the producer's retained range is rejected rather than suffix-aligned.
+
+Main and Draft region registration follows each cache group's physical pool.
+Blocks remain pinned to their owning pool until the relevant workers report
+completion. Mooncake Store uses the same pool identity when registering,
+pinning, and releasing blocks.
+
+Heterogeneous-TP transfer follows cache-spec layout metadata. Head-sharded
+regions are split or gathered according to the producer and consumer TP sizes,
+while TP-replicated regions are sent by one producer rank. NVFP4 head
+re-sharding is enabled only when the cache spec declares byte-sliceable
+head-major slots and all layout checks pass.
 
 ## Correctness fallbacks
 

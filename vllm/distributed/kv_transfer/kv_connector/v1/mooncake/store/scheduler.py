@@ -151,6 +151,7 @@ class MooncakeStoreScheduler:
             for store_group_id, group_id in enumerate(self._store_group_ids)
         }
         store_groups = kv_cache_config.prefix_cacheable_groups
+        self._store_pool_ids = tuple(group.block_pool_id for group in store_groups)
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
@@ -188,10 +189,11 @@ class MooncakeStoreScheduler:
             self.enable_partial_hash_hits = self._store_coord.enable_partial_hash_hits
 
         self._gpu_block_pool: BlockPool | None = None
+        self._gpu_block_pools: tuple[BlockPool, ...] = ()
         self._num_workers = vllm_config.parallel_config.world_size
         self._next_store_job_id = 0
         # store_job_id -> (referenced block ids, ranks yet to report completion)
-        self._pinned_saves: dict[int, tuple[list[int], int]] = {}
+        self._pinned_saves: dict[int, tuple[list[tuple[int, int]], int]] = {}
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
@@ -204,6 +206,26 @@ class MooncakeStoreScheduler:
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
+        self._gpu_block_pools = (gpu_block_pool,)
+
+    def bind_gpu_block_pools(self, gpu_block_pools: tuple[BlockPool, ...]) -> None:
+        self._gpu_block_pool = gpu_block_pools[0]
+        self._gpu_block_pools = gpu_block_pools
+
+    def _pin_save_blocks(
+        self, store_job_id: int, block_ids: list[tuple[int, int]]
+    ) -> None:
+        block_ids = list(dict.fromkeys(block_ids))
+        if not block_ids:
+            return
+        self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
+        if len(self._gpu_block_pools) == 1:
+            pool = self._gpu_block_pools[0]
+            pool.touch([pool.blocks[block_id] for _, block_id in block_ids])
+            return
+        for pool_id, block_id in block_ids:
+            pool = self._gpu_block_pools[pool_id]
+            pool.touch([pool.blocks[block_id]])
 
     def _lookup_align(self) -> int:
         # Fine-grained hits may land on a hash boundary inside a block; without
@@ -534,14 +556,13 @@ class MooncakeStoreScheduler:
         so a reference keeps them out of the free queue even once the request
         itself is freed, until every rank reports the job done.
         """
-        pool = self._gpu_block_pool
         coord = self._store_coord
         assert coord is not None
         block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
         for req_meta in requests:
             if not req_meta.can_save:
                 continue
-            assert pool is not None, (
+            assert self._gpu_block_pools, (
                 "GPU block pool must be bound before any store job is emitted"
             )
             if req_meta.store_job_id is not None:
@@ -560,14 +581,17 @@ class MooncakeStoreScheduler:
                 )
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
-            block_ids = [put.block_id for put in req_meta.boundary_puts or []]
-            assert NULL_BLOCK_ID not in block_ids, (
+            block_ids = [
+                (self._store_pool_ids[put.group_id], put.block_id)
+                for put in req_meta.boundary_puts or []
+            ]
+            assert all(block_id != NULL_BLOCK_ID for _, block_id in block_ids), (
                 "A null block cannot back a boundary put"
             )
             if req_meta.token_len_chunk:
                 # Each rank may retry from an earlier successful save offset.
                 block_ids.extend(
-                    block_id
+                    (self._store_pool_ids[group_id], block_id)
                     for group_id, group in enumerate(req_meta.block_ids)
                     if group_id not in self._boundary_state_group_ids
                     for block_id in group
@@ -575,12 +599,7 @@ class MooncakeStoreScheduler:
                 )
             # An aligned boundary block may also be present in the request's
             # block table. Take and release exactly one reference per block.
-            block_ids = list(dict.fromkeys(block_ids))
-            assert NULL_BLOCK_ID not in block_ids
-            if not block_ids:
-                continue
-            self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
-            pool.touch([pool.blocks[block_id] for block_id in block_ids])
+            self._pin_save_blocks(store_job_id, block_ids)
 
     def register_finished_lookahead_save(
         self,
@@ -676,19 +695,18 @@ class MooncakeStoreScheduler:
             ),
             *mamba_puts,
         ]
-        pinned_block_ids = list(
-            dict.fromkeys(put.block_id for put in req_meta.boundary_puts)
-        )
+        pinned_block_ids = [
+            (self._store_pool_ids[put.group_id], put.block_id)
+            for put in req_meta.boundary_puts
+        ]
 
-        pool = self._gpu_block_pool
-        assert pool is not None, (
+        assert self._gpu_block_pools, (
             "GPU block pool must be bound before a finish-time handoff"
         )
         assert request.request_id not in self._finished_partial_tail_metas
         store_job_id = self._next_store_job_id
         self._next_store_job_id += 1
-        self._pinned_saves[store_job_id] = (pinned_block_ids, self._num_workers)
-        pool.touch([pool.blocks[block_id] for block_id in pinned_block_ids])
+        self._pin_save_blocks(store_job_id, pinned_block_ids)
 
         req_meta.store_job_id = store_job_id
         self._finished_partial_tail_metas[request.request_id] = req_meta
@@ -756,8 +774,7 @@ class MooncakeStoreScheduler:
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, MooncakeStoreWorkerMetadata):
             return
-        pool = self._gpu_block_pool
-        assert pool is not None
+        assert self._gpu_block_pools
         for store_job_id, count in meta.completed_saves.items():
             pinned = self._pinned_saves.get(store_job_id)
             if pinned is None:
@@ -773,7 +790,13 @@ class MooncakeStoreScheduler:
             )
             del self._pinned_saves[store_job_id]
             # Tail-first, as elsewhere, so the shared prefix is evicted last.
-            pool.free_blocks(pool.blocks[bid] for bid in reversed(block_ids))
+            if len(self._gpu_block_pools) == 1:
+                pool = self._gpu_block_pools[0]
+                pool.free_blocks(pool.blocks[bid] for _, bid in reversed(block_ids))
+                continue
+            for pool_id, block_id in reversed(block_ids):
+                pool = self._gpu_block_pools[pool_id]
+                pool.free_blocks([pool.blocks[block_id]])
 
     def has_pending_push_work(self) -> bool:
         """Keep the engine stepping while any store job still holds block refs.

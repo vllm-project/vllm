@@ -3265,13 +3265,17 @@ class VllmConfig:
         storage-geometry requirements are checked.
         """
         spec_config = getattr(self, "speculative_config", None)
+        kv_transfer_config = self.kv_transfer_config
         return bool(
             spec_config is not None
             and spec_config.method in {"dflash", "dspark"}
             and spec_config.uses_target_hidden_states
             and (
-                self.kv_transfer_config is None
-                or self.kv_transfer_config.kv_connector is None
+                kv_transfer_config is None
+                or kv_transfer_config.kv_connector is None
+                or kv_transfer_config.has_only_connectors(
+                    {"MooncakeConnector", "MooncakeStoreConnector"}
+                )
             )
             and not self.scheduler_config.disable_hybrid_kv_cache_manager
             and self.parallel_config.pipeline_parallel_size == 1

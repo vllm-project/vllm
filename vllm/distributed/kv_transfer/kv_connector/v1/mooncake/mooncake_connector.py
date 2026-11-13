@@ -268,12 +268,17 @@ def _compute_sender_transfer_plan(
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
     total_num_kv_heads: int | None = None,
+    region_cache_replicated: bool = False,
 ) -> tuple[bool, int, int, int]:
     """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
 
     if tp_ratio == 1:
         return True, 0, 0, local_kv_block_len
+
+    if region_cache_replicated:
+        producer_cache_replicated = True
+        total_num_kv_heads = None
 
     if total_num_kv_heads is not None:
         consumer_cache_replicated = remote_tp_size > total_num_kv_heads
@@ -337,6 +342,7 @@ def _validate_asymmetric_region_lengths(
     remote_tp_size: int,
     producer_cache_replicated: bool,
     total_num_kv_heads: int | None = None,
+    replicated_region_indices: Collection[int] = (),
 ) -> str | None:
     """Validate transfer-region metadata for a fixed producer/consumer pair.
 
@@ -361,6 +367,14 @@ def _validate_asymmetric_region_lengths(
     for idx, (local_region, remote_region) in enumerate(
         zip(local_regions, remote_regions)
     ):
+        if idx in replicated_region_indices:
+            if local_region.kv_block_len != remote_region.kv_block_len:
+                return (
+                    "Mooncake replicated KV region length mismatch at region "
+                    f"{idx}: local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}."
+                )
+            continue
         if tp_ratio == 1:
             if local_region.kv_block_len != remote_region.kv_block_len:
                 return (
@@ -626,6 +640,19 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
+def _supports_nvfp4_head_resharding(
+    spec: AttentionSpec, kv_cache_layout: str | None
+) -> bool:
+    return (
+        type(spec) is FullAttentionSpec
+        and spec.kv_quant_mode.is_nvfp4
+        and spec.kv_head_major_slots
+        and spec.num_heads == 2 * spec.num_kv_heads
+        and spec.dtype == torch.uint8
+        and kv_cache_layout == "LBHNC"
+    )
+
+
 class MooncakeXferMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -638,6 +665,9 @@ class MooncakeXferMetadata(
     kv_caches_base_addr: list[int]
     block_lens: list[int]
     kv_block_lens: list[int]
+    req_block_indices: dict[ReqId, list[list[int]]] = msgspec.field(
+        default_factory=dict
+    )
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
     registered_group_indices: list[int] = msgspec.field(default_factory=list)
@@ -724,6 +754,9 @@ class PullReqMeta:
     # A failure is sticky; still settle later peer results before releasing
     # destination blocks to prevent write-after-free from delayed peer writes.
     failed: bool = False
+    # Logical page positions paired with local_block_ids. None uses legacy
+    # suffix alignment for compatibility with older peers.
+    logical_block_indices: list[list[int]] | None = None
 
 
 @dataclass
@@ -736,6 +769,7 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    num_tokens: int | None = None
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -744,6 +778,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         # See comments in MooncakeBootstrapServer.
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
         self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
+        self.num_tokens: dict[ReqId, int] = {}
         self.reqs_not_processed: set[TransferId] = set()
         # D side: lease renewals to send this step, by remote P engine.
         self.lease_heartbeats: dict[EngineId, LeaseHeartbeat] = {}
@@ -754,6 +789,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[list[int]],
         kv_transfer_params: dict[str, Any],
         load_remote_cache: bool = True,
+        logical_block_indices: list[list[int]] | None = None,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
         if load_remote_cache:
@@ -764,6 +800,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
                 remote_engine_id=remote_engine_id,
                 remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
                 transfer_id=transfer_id,
+                logical_block_indices=logical_block_indices,
             )
         else:
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
@@ -1035,7 +1072,9 @@ class MooncakeConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]]]] = {}
+        self._reqs_need_recv: dict[
+            ReqId, tuple[Request, list[list[int]], list[list[int]]]
+        ] = {}
         self._reqs_need_send: dict[ReqId, tuple[Request, list[list[int]]]] = {}
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
@@ -1216,14 +1255,34 @@ class MooncakeConnectorScheduler:
                 # If remote_blocks and num_external_tokens = 0, we have
                 # a full prefix cache hit on the D worker. We need to call
                 # send_notif in _read_blocks to free the memory on the P.
-                unhashed_block_ids = (
-                    blocks.get_unhashed_block_ids_all_groups()
-                    if num_external_tokens > 0
-                    else ()
-                )
+                unhashed_block_ids = []
+                logical_block_indices = []
+                if num_external_tokens > 0:
+                    for group_blocks in blocks.blocks:
+                        unhashed_block_ids.append(
+                            [
+                                block.block_id
+                                for block in group_blocks
+                                if block.block_hash is None and not block.is_null
+                            ]
+                        )
+                        logical_block_indices.append(
+                            [
+                                block_idx
+                                for block_idx, block in enumerate(group_blocks)
+                                if block.block_hash is None and not block.is_null
+                            ]
+                        )
                 local_block_ids = self.get_sw_clipped_blocks(unhashed_block_ids)
+                logical_block_indices = self.get_sw_clipped_blocks(
+                    logical_block_indices
+                )
                 # Get unhashed blocks to pull from remote.
-                self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+                self._reqs_need_recv[request.request_id] = (
+                    request,
+                    local_block_ids,
+                    logical_block_indices,
+                )
                 if not any(local_block_ids):
                     # This pull only releases P's blocks and never reaches
                     # finished_recving, so stop renewing the lease now.
@@ -1253,12 +1312,17 @@ class MooncakeConnectorScheduler:
 
         # Loop through scheduled reqs and convert to PullReqMeta.
         if not self.is_kv_producer:
-            for req_id, (req, block_ids) in self._reqs_need_recv.items():
+            for req_id, (
+                req,
+                block_ids,
+                logical_block_indices,
+            ) in self._reqs_need_recv.items():
                 assert req.kv_transfer_params is not None
                 meta.add_new_req(
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    logical_block_indices=logical_block_indices,
                 )
             self._reqs_need_recv.clear()
 
@@ -1288,6 +1352,8 @@ class MooncakeConnectorScheduler:
                     kv_transfer_params=req.kv_transfer_params,
                     load_remote_cache=False,
                 )
+                if block_ids:
+                    meta.num_tokens[req_id] = req.num_prompt_tokens
             self._reqs_need_send.clear()
             meta.reqs_not_processed = self._reqs_not_processed
             self._reqs_not_processed = set()
@@ -1322,7 +1388,7 @@ class MooncakeConnectorScheduler:
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
             assert not self.is_kv_producer
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], [])
             params["do_remote_prefill"] = False
             return False, None
 
@@ -1820,6 +1886,11 @@ class MooncakeConnectorWorker:
                 if self.use_mla or self.kv_cache_config.has_mamba_layers
                 else self.transfer_topo.total_num_kv_heads
             ),
+            replicated_region_indices={
+                index
+                for index, region in enumerate(local_regions)
+                if self._region_cache_is_tp_replicated(region)
+            },
         )
         if validation_err is not None:
             response = MooncakeXferResponse(
@@ -2045,6 +2116,14 @@ class MooncakeConnectorWorker:
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
+            remote_block_indices_per_group = agent_meta.req_block_indices.get(d_req_id)
+            if (
+                remote_block_indices_per_group is not None
+                and len(remote_block_ids_per_group)
+                == len(send_meta.local_block_ids) + 1
+                and not remote_block_ids_per_group[-1]
+            ):
+                remote_block_ids_per_group = remote_block_ids_per_group[:-1]
 
             if not remote_block_ids_per_group or all(
                 len(g) == 0 for g in remote_block_ids_per_group
@@ -2078,6 +2157,48 @@ class MooncakeConnectorWorker:
                     group_specs[group_index].kv_cache_spec,
                     MambaSpec,
                 )
+                if remote_block_indices_per_group is not None and not is_mamba_group:
+                    if group_index >= len(remote_block_indices_per_group):
+                        has_block_error = True
+                        if err_msg is None:
+                            err_msg = (
+                                "Transfer request is missing logical block indices"
+                            )
+                        break
+                    logical_indices = remote_block_indices_per_group[group_index]
+                    if len(logical_indices) != len(remote_group):
+                        has_block_error = True
+                        if err_msg is None:
+                            err_msg = "Transfer block IDs and logical indices differ"
+                        break
+                    if logical_indices:
+                        if send_meta.num_tokens is None:
+                            has_block_error = True
+                            if err_msg is None:
+                                err_msg = (
+                                    "Positioned KV transfer requires the prompt "
+                                    "token count"
+                                )
+                            break
+                        block_size = group_specs[group_index].kv_cache_spec.block_size
+                        first_local_index = cdiv(
+                            send_meta.num_tokens, block_size
+                        ) - len(local_group)
+                        relative_indices = [
+                            index - first_local_index for index in logical_indices
+                        ]
+                        if any(
+                            index < 0 or index >= len(local_group)
+                            for index in relative_indices
+                        ):
+                            has_block_error = True
+                            if err_msg is None:
+                                err_msg = (
+                                    "Producer does not retain a requested logical "
+                                    "KV block"
+                                )
+                            break
+                        local_group = [local_group[index] for index in relative_indices]
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
                     # align-mode placeholders. They do not carry transferable
@@ -2183,6 +2304,9 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    region_cache_replicated=(
+                        self._region_cache_is_tp_replicated(local_region)
+                    ),
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2298,10 +2422,6 @@ class MooncakeConnectorWorker:
         packed_storage_to_region: dict[int, int] = {}
         packed_view_to_region: dict[tuple[int, int, int], int] = {}
         collapsed_views = 0
-        num_blocks = (
-            self.kv_cache_config.num_blocks * self._physical_blocks_per_logical_kv_block
-        )
-
         for layer_name, cache in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
             layer_spec = self._layer_specs.get(layer_name)
@@ -2315,6 +2435,11 @@ class MooncakeConnectorWorker:
             # recurrent states, unpacked only when binding the cache for execution.
             self._log_debug_cache_registration(layer_name, cache)
             group_index = self.kv_cache_config.transfer_group_index_by_layer[layer_name]
+            group = self.kv_cache_config.transfer_groups[group_index]
+            logical_num_blocks = self.kv_cache_config.num_blocks_by_pool[
+                group.block_pool_id
+            ]
+            num_blocks = logical_num_blocks * self._physical_blocks_per_logical_kv_block
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             if storage_addr not in seen_storage_ptrs:
@@ -3000,6 +3125,7 @@ class MooncakeConnectorWorker:
                 send_meta = self.reqs_need_send[transfer_id]
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
+                send_meta.num_tokens = metadata.num_tokens.get(p_req_id)
                 send_meta.expire_time = time.perf_counter() + (
                     self._kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )
@@ -3213,9 +3339,19 @@ class MooncakeConnectorWorker:
         *,
         include_layout: bool,
     ) -> MooncakeXferMetadata:
-        req_blocks = {
-            req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
+        req_blocks = {}
+        for req_id, pull_meta in pull_metas.items():
+            block_ids = [list(group) for group in pull_meta.local_block_ids]
+            if pull_meta.logical_block_indices is not None:
+                # Older producers ignore req_block_indices. The extra empty
+                # group makes them reject positioned requests instead of
+                # silently applying suffix alignment.
+                block_ids.append([])
+            req_blocks[req_id] = (pull_meta.transfer_id, block_ids)
+        req_block_indices = {
+            req_id: pull_meta.logical_block_indices
             for req_id, pull_meta in pull_metas.items()
+            if pull_meta.logical_block_indices is not None
         }
         if not include_layout:
             return MooncakeXferMetadata(
@@ -3226,6 +3362,7 @@ class MooncakeConnectorWorker:
                 remote_pp_size=self.pp_size,
                 layout_id=self._kv_layout_id,
                 req_blocks=req_blocks,
+                req_block_indices=req_block_indices,
                 kv_caches_base_addr=[],
                 block_lens=[],
                 kv_block_lens=[],
@@ -3238,6 +3375,7 @@ class MooncakeConnectorWorker:
             remote_pp_size=self.pp_size,
             layout_id=self._kv_layout_id,
             req_blocks=req_blocks,
+            req_block_indices=req_block_indices,
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,
             kv_block_lens=self.kv_block_len_per_layer,
@@ -3270,6 +3408,10 @@ class MooncakeConnectorWorker:
                     f"KV pages (layer {region.layer_name})."
                 )
             if spec.kv_quant_mode.is_nvfp4:
+                if _supports_nvfp4_head_resharding(
+                    spec, self.kv_cache_config.kv_cache_layout
+                ):
+                    continue
                 return (
                     "Mooncake KV-head re-sharding is not supported for NVFP4 KV cache."
                 )
@@ -3308,6 +3450,7 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        region_cache_replicated: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -3322,6 +3465,16 @@ class MooncakeConnectorWorker:
                 if self.use_mla or self.kv_cache_config.has_mamba_layers
                 else self.transfer_topo.total_num_kv_heads
             ),
+            region_cache_replicated=region_cache_replicated,
+        )
+
+    def _region_cache_is_tp_replicated(self, region: TransferRegion) -> bool:
+        layer_specs = getattr(self, "_layer_specs", None)
+        if layer_specs is None:
+            return False
+        return isinstance(
+            layer_specs.get(region.layer_name),
+            (MLAAttentionSpec, SlidingWindowMLASpec),
         )
 
     def _log_debug_cache_registration(

@@ -311,6 +311,12 @@ def test_scheduler_role_initializes_store_scheduler_only():
     connector.bind_gpu_block_pool(block_pool)
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
+    block_pools = (block_pool, MagicMock())
+    connector.bind_kv_cache_manager(SimpleNamespace(block_pools=block_pools))
+    mock_scheduler.return_value.bind_gpu_block_pools.assert_called_once_with(
+        block_pools
+    )
+
 
 def test_scheduler_reports_mooncake_cache_source():
     vllm_config = _make_vllm_config()

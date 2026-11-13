@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import uuid
+from collections.abc import Collection
 from dataclasses import field
 from typing import Any, Literal, get_args
 
@@ -194,4 +195,11 @@ class KVTransferConfig:
         return self.kv_connector == "MultiConnector" and any(
             child.get("kv_connector") == connector_name
             for child in self.kv_connector_extra_config.get("connectors", [])
+        )
+
+    def has_only_connectors(self, connector_names: Collection[str]) -> bool:
+        """Whether every configured connector belongs to `connector_names`."""
+        children = self._connector_children()
+        return bool(children) and all(
+            child.get("kv_connector") in connector_names for child in children
         )

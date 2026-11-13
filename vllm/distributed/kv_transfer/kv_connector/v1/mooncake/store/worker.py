@@ -2066,6 +2066,10 @@ class MooncakeStoreWorker:
 
         self.num_blocks = self._kv_cache_config.num_blocks
         use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
+        group_num_blocks = [
+            self._kv_cache_config.num_blocks_by_pool[group.block_pool_id]
+            for group in self._kv_cache_groups
+        ]
 
         if not use_group_regions:
             store_layer_names = {
@@ -2074,9 +2078,16 @@ class MooncakeStoreWorker:
                 for layer_name in group.layer_names
             }
             seen_storage_ptrs: set[int] = set()
+            layer_num_blocks = {
+                layer_name: num_blocks
+                for group, num_blocks in zip(
+                    self._kv_cache_groups, group_num_blocks, strict=True
+                )
+                for layer_name in group.layer_names
+            }
             cache_by_layer = {
                 layer_name: [
-                    group_kernel_blocks(view, self.num_blocks)
+                    group_kernel_blocks(view, layer_num_blocks[layer_name])
                     for view in _layer_views(cache)
                 ]
                 for layer_name, cache in kv_caches.items()
@@ -2102,8 +2113,13 @@ class MooncakeStoreWorker:
                     )
                 else:
                     self._device_regions[base_addr] = region_len
-            for group_id, (group, db) in enumerate(
-                zip(self._kv_cache_groups, self.token_dbs, strict=True)
+            for group_id, (group, db, num_blocks) in enumerate(
+                zip(
+                    self._kv_cache_groups,
+                    self.token_dbs,
+                    group_num_blocks,
+                    strict=True,
+                )
             ):
                 group_views = [
                     cache_by_layer[name]
@@ -2119,9 +2135,13 @@ class MooncakeStoreWorker:
                     group_tensors = [views[0] for views in group_views]
                 else:
                     group_tensors = [cache for views in group_views for cache in views]
-                db.store_layout.register_kv_caches(
-                    group_tensors or cache_tensors, self.num_blocks
-                )
+                registration_tensors = group_tensors or cache_tensors
+                if not group_tensors and len(set(group_num_blocks)) > 1:
+                    raise ValueError(
+                        "Missing KV cache tensors for a multi-pool Store group "
+                        f"{group_id}"
+                    )
+                db.store_layout.register_kv_caches(registration_tensors, num_blocks)
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0
@@ -2150,11 +2170,14 @@ class MooncakeStoreWorker:
                 cache = _layer_views(value)[0]
                 is_host_resident = group.host_resident
                 if is_host_resident:
-                    num_blocks = self._kv_cache_config.hisparse_host_num_blocks
-                    assert num_blocks is not None
+                    host_num_blocks = self._kv_cache_config.hisparse_host_num_blocks
+                    assert host_num_blocks is not None
+                    region_num_blocks = host_num_blocks
                 else:
-                    num_blocks = self._kv_cache_config.num_blocks
-                cache = group_kernel_blocks(cache, num_blocks)
+                    region_num_blocks = self._kv_cache_config.num_blocks_by_pool[
+                        group.block_pool_id
+                    ]
+                cache = group_kernel_blocks(cache, region_num_blocks)
                 cache_storage = cache.untyped_storage()
                 if is_host_resident:
                     base_addr = cache.data_ptr()
@@ -2162,10 +2185,11 @@ class MooncakeStoreWorker:
                 else:
                     base_addr = cache_storage.data_ptr()
                     region_len = cache_storage.nbytes()
-                if region_len % num_blocks != 0:
+                if region_len % region_num_blocks != 0:
                     raise ValueError(
                         f"KV cache region for {layer_name} has size {region_len}, "
-                        f"which is not divisible by its {num_blocks} blocks."
+                        "which is not divisible by its "
+                        f"{region_num_blocks} blocks."
                     )
 
                 registered_len = registered_buffers.get(base_addr)

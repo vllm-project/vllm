@@ -44,7 +44,7 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
@@ -266,6 +266,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
+
+    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
+        self._kv_cache_manager = kv_cache_manager
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_gpu_block_pools(kv_cache_manager.block_pools)
 
     def has_pending_push_work(self) -> bool:
         assert self.connector_scheduler is not None

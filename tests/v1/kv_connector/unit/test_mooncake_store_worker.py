@@ -5706,6 +5706,37 @@ def test_register_kv_caches_uses_committed_block_count():
     )
 
 
+def test_register_kv_caches_uses_each_groups_block_pool_capacity():
+    target_blocks = 10
+    draft_blocks = 3
+    worker = _make_bare_worker(num_gpu_blocks=target_blocks)
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+    )
+    groups = [
+        KVCacheGroupSpec(["target"], spec, block_pool_id=0),
+        KVCacheGroupSpec(["draft"], spec, block_pool_id=1),
+    ]
+    worker._kv_cache_config = KVCacheConfig(
+        num_blocks=target_blocks,
+        num_blocks_by_pool=[target_blocks, draft_blocks],
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    worker._kv_cache_groups = groups
+    worker.token_dbs = [MagicMock(), MagicMock()]
+    target_cache = torch.zeros(target_blocks, 4, dtype=torch.float16)
+    draft_cache = torch.zeros(draft_blocks, 4, dtype=torch.float16)
+
+    _register_with_mocked_threads(
+        worker, {"target": target_cache, "draft": draft_cache}
+    )
+
+    assert [
+        db.store_layout.register_kv_caches.call_args.args[1] for db in worker.token_dbs
+    ] == [target_blocks, draft_blocks]
+
+
 def test_register_kv_caches_separate_head_groups():
     # LHBNC gives each head group its own region; the K/V split doubles heads.
     layout = KVCacheLayout.LHBNC

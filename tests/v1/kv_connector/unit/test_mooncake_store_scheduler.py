@@ -66,6 +66,8 @@ def _make_bare_scheduler(
     scheduler._gpu_block_pool = BlockPool(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
+    scheduler._gpu_block_pools = (scheduler._gpu_block_pool,)
+    scheduler._store_pool_ids = (0, 0)
     scheduler._num_workers = 1
     scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
@@ -1300,7 +1302,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.num_prompt_tokens == 13
     assert req_meta.block_ids == ([0],)
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    assert scheduler._pinned_saves[store_job_id][0] == [(0, 7)]
     assert scheduler._gpu_block_pool.blocks[0].ref_cnt == 0
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     tracker = scheduler._request_trackers["req-0"]
@@ -1402,7 +1404,10 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
             (proof_end + attention_block_size - 1) // attention_block_size,
         )
     ] + [(1, 50, 44)]
-    assert set(scheduler._pinned_saves[req_meta.store_job_id][0]) == {50, *expected}
+    assert set(scheduler._pinned_saves[req_meta.store_job_id][0]) == {
+        (0, 50),
+        *((0, block_id) for block_id in expected),
+    }
     assert all(pool.blocks[i].ref_cnt == 1 for i in expected + [50])
     assert scheduler._finished_partial_tail_metas == {}
 
@@ -1676,7 +1681,7 @@ def test_resumed_prefill_claims_boundaries_past_prompt_length():
     # Aligned states at 16 and 32 are inside the resumed prefill; 48 is past it.
     assert meta.requests[0].boundary_puts == [(1, 7, 16), (1, 9, 32)]
     store_job_id = meta.requests[0].store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
+    assert scheduler._pinned_saves[store_job_id][0] == [(0, 7), (0, 9)]
 
 
 def test_boundary_state_job_pins_exact_blocks_once():
@@ -1696,7 +1701,7 @@ def test_boundary_state_job_pins_exact_blocks_once():
         (1, 9, 48),
     ]
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 8, 9]
+    assert scheduler._pinned_saves[store_job_id][0] == [(0, 7), (0, 8), (0, 9)]
     assert [scheduler._gpu_block_pool.blocks[i].ref_cnt for i in (7, 8, 9)] == [
         1,
         1,
@@ -1755,7 +1760,12 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
     req_meta = meta.requests[0]
     assert req_meta.block_ids == current_block_ids
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [8, 7, 2, 6]
+    assert scheduler._pinned_saves[store_job_id][0] == [
+        (0, 8),
+        (0, 7),
+        (0, 2),
+        (0, 6),
+    ]
     assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[5].ref_cnt == 0
     assert [pool.blocks[i].ref_cnt for i in (21, 22, 23, 24, 25, 26)] == [
@@ -1836,7 +1846,7 @@ def test_decode_consumer_claims_only_decode_boundary_state():
 
     assert meta.requests[0].boundary_puts == [(1, 9, 16)]
     store_job_id = meta.requests[0].store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [9]
+    assert scheduler._pinned_saves[store_job_id][0] == [(0, 9)]
 
 
 def test_resumed_partial_tail_uses_exact_boundary():
@@ -1918,12 +1928,54 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
     store_job_id = meta.requests[0].store_job_id
     # It leads the list, as in `pop_blocks_for_free`, so that the reversed free
     # puts it last in eviction priority.
-    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    assert scheduler._pinned_saves[store_job_id][0] == [(0, 7)]
     assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[7].ref_cnt == 1
 
     scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
     assert pool.blocks[7].ref_cnt == 0
+
+
+def test_store_pins_same_block_id_in_each_pool_until_all_ranks_finish():
+    """Overlapping allocator-local IDs must keep independent references."""
+    scheduler = _make_bare_scheduler()
+    pools = tuple(
+        BlockPool(
+            num_gpu_blocks=8,
+            enable_caching=False,
+            hash_block_size=16,
+        )
+        for _ in range(2)
+    )
+    scheduler.bind_gpu_block_pools(pools)
+    scheduler._store_pool_ids = (0, 1)
+    scheduler._boundary_state_group_ids = frozenset()
+    scheduler._num_workers = 2
+    groups = [pool.get_new_blocks(3) for pool in pools]
+    blocks = [block for group in groups for block in group]
+    assert groups[0][0].block_id == groups[1][0].block_id
+    meta = MooncakeStoreConnectorMetadata(
+        unfinished_request_ids=set(), preempted_req_ids=set()
+    )
+    req_meta = ReqMeta(
+        req_id="multi-pool",
+        token_len_chunk=16,
+        block_ids=tuple([block.block_id for block in group] for group in groups),
+        block_hashes=[b"hash"],
+        can_save=True,
+        num_prompt_tokens=16,
+    )
+    meta.add_request(req_meta)
+
+    scheduler._reference_save_blocks(meta.requests)
+
+    assert [block.ref_cnt for block in blocks] == [2] * len(blocks)
+    for pool, group in zip(pools, groups, strict=True):
+        pool.free_blocks(group)
+    scheduler.update_connector_output(_make_worker_output({req_meta.store_job_id: 1}))
+    assert [block.ref_cnt for block in blocks] == [1] * len(blocks)
+    scheduler.update_connector_output(_make_worker_output({req_meta.store_job_id: 1}))
+    assert [pool.get_num_free_blocks() for pool in pools] == [7, 7]
 
 
 def test_store_job_blocks_are_released_once_every_rank_reports():
