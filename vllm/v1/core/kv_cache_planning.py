@@ -61,13 +61,33 @@ logger = init_logger(__name__)
 AUTO_FIT_SHORT_MAX_MODEL_LEN = 8192
 
 
-def _more_kv_cache_memory_hint(vllm_config: VllmConfig) -> str:
-    """How the user can make room for the KV cache, for error messages."""
-    if vllm_config.cache_config.enable_extensible_kv_cache:
+def _more_kv_cache_memory_hint(
+    vllm_config: VllmConfig, after_warmup: bool = False
+) -> str:
+    """How the user can make room for the KV cache, for error messages.
+    after_warmup: the KV cache was sized after CUDA graph capture and warmup."""
+    cache_config = vllm_config.cache_config
+    if cache_config.enable_extensible_kv_cache:
+        used_by = "the model and its activations"
+        graphs_hint = ""
+        if after_warmup:
+            used_by = "the model, its activations, CUDA graphs and warmup"
+            graphs_hint = (
+                " CUDA graphs take less with fewer or smaller capture sizes in "
+                "the compilation config."
+            )
+        utilization = cache_config.resolved_gpu_memory_utilization
+        if utilization < 1.0:
+            return (
+                f"The KV cache gets what is left after {used_by} within "
+                f"`gpu_memory_utilization`={utilization}; increase it (with the "
+                "extensible KV cache it defaults to 1.0) or decrease "
+                f"`max_model_len` or `max_num_seqs`.{graphs_hint}"
+            )
         return (
             "The extensible KV cache already takes all device memory left after "
-            "the model and its activations; decrease `max_model_len` or "
-            "`max_num_seqs`, or the model needs a device with more memory."
+            f"{used_by}; decrease `max_model_len` or `max_num_seqs`, or the "
+            f"model needs a device with more memory.{graphs_hint}"
         )
     return (
         "Try increasing `gpu_memory_utilization` when initializing the engine "
@@ -1498,14 +1518,19 @@ def _auto_fit_max_model_len(
             left,
         )
         return
+    hint = (
+        "Increase `gpu_memory_utilization` or set --max-model-len explicitly."
+        if vllm_config.cache_config.resolved_gpu_memory_utilization < 1.0
+        else "Use more GPUs or set --max-model-len explicitly."
+    )
     logger.warning(
         "--max-model-len auto reduced max_model_len from %d to %d (%s). "
-        "Requests longer than %d tokens will be rejected. Increase "
-        "`gpu_memory_utilization` or set --max-model-len explicitly.",
+        "Requests longer than %d tokens will be rejected. %s",
         original_max,
         auto_fit_max,
         left,
         auto_fit_max,
+        hint,
     )
 
 
@@ -1851,7 +1876,7 @@ def shrink_kv_cache_configs(
                 partial(
                     _estimate_max_model_len_from_groups, builder, vllm_config, groups
                 ),
-                _more_kv_cache_memory_hint(vllm_config),
+                _more_kv_cache_memory_hint(vllm_config, after_warmup=True),
             )
         kv_cache_config.num_blocks = num_blocks
 

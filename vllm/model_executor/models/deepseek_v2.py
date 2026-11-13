@@ -56,6 +56,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -296,8 +297,7 @@ class DeepseekV2MoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
-        apply_routed_scale_to_output: bool = False,
-        divide_shared_output_in_fp16: bool = False,
+        routed_scale_mode: RoutedScaleMode = RoutedScaleMode.ROUTER,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -387,8 +387,7 @@ class DeepseekV2MoE(nn.Module):
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
-            divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+            routed_scale_mode=routed_scale_mode,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -1329,15 +1328,20 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         if is_moe_layer:
+            if rocm_aiter_ops.is_fused_moe_enabled():
+                # aiter applies routed_scaling_factor internally
+                routed_scale_mode = RoutedScaleMode.ROUTER
+            elif use_mha:
+                routed_scale_mode = RoutedScaleMode.OUTPUT
+            else:
+                # forward() only compensates in FP16 when not using MHA.
+                routed_scale_mode = RoutedScaleMode.OUTPUT_FP16_GUARD
             self.mlp = DeepseekV2MoE(
                 config=config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                # aiter applies routed_scaling_factor internally
-                apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
-                # forward() only compensates in FP16 when not using MHA.
-                divide_shared_output_in_fp16=not use_mha,
+                routed_scale_mode=routed_scale_mode,
             )
         else:
             self.mlp = DeepseekV2MLP(
