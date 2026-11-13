@@ -53,8 +53,7 @@ namespace mxfp4_rdna4 {
 
 using bf16_t = __hip_bfloat16;
 
-constexpr int kGroup = 32;  // MXFP4 E8M0 block
-constexpr float kE4M3Max = 448.0f;
+constexpr int kGroup = 32;    // MXFP4 E8M0 block
 constexpr int kGemvMaxM = 8;  // below this the matrix engine loses to GEMV
 
 template <typename T>
@@ -77,71 +76,6 @@ __device__ __forceinline__ half from_f(float v) {
 template <>
 __device__ __forceinline__ bf16_t from_f(float v) {
   return __float2bfloat16(v);
-}
-
-// Software OCP E4M3 encode (round-to-nearest-even, saturating). The activation
-// quantize kernel is memory bound, so this is not on the critical path.
-__device__ __forceinline__ uint8_t enc_e4m3(float v) {
-  uint32_t s = __float_as_uint(v) & 0x80000000u;
-  float a = __builtin_fabsf(v);
-  if (!(a > 0.0f)) return (uint8_t)(s >> 24);             // +-0 / NaN -> 0
-  if (a >= kE4M3Max) return (uint8_t)((s >> 24) | 0x7E);  // saturate to max
-  int e;
-  float m = frexpf(a, &e);  // a = m * 2^e, m in [0.5, 1)
-  int E = e - 1 + 7;        // unbiased (e-1) + E4M3 bias
-  int M;
-  if (E <= 0) {                            // subnormal: fixed exponent 2^-6
-    M = (int)__builtin_rintf(a * 512.0f);  // a / 2^-6 * 8
-    if (M >= 8) {
-      E = 1;
-      M -= 8;
-    } else
-      E = 0;
-  } else {
-    M = (int)__builtin_rintf((m * 2.0f - 1.0f) * 8.0f);
-    if (M == 8) {
-      M = 0;
-      E += 1;
-    }
-    // OCP E4M3 max normal is E=15,M=6 (448); only E=15,M=7 is NaN. Saturating
-    // the whole E==15 binade would flatten every value in [256,448) onto 448.
-    if (E > 15 || (E == 15 && M > 6)) return (uint8_t)((s >> 24) | 0x7E);
-  }
-  return (uint8_t)((s >> 24) | (E << 3) | M);
-}
-
-// ---------------------------------------------------------------------------
-// Activation quantize: a[M,K] -> aq[M,K] (E4M3) + ascale[M] (fp32), per row.
-// ---------------------------------------------------------------------------
-template <typename T>
-__global__ void quantize_a_e4m3(const T* __restrict__ a,
-                                uint8_t* __restrict__ aq,
-                                float* __restrict__ ascale, int M, int K) {
-  const int row = blockIdx.x;
-  if (row >= M) return;
-  const T* ar = a + (size_t)row * K;
-
-  float amax = 0.0f;
-  for (int k = threadIdx.x; k < K; k += blockDim.x)
-    amax = fmaxf(amax, __builtin_fabsf(to_f<T>(ar[k])));
-
-  __shared__ float red[32];
-  const int lane = threadIdx.x & 31, wave = threadIdx.x >> 5;
-  for (int off = 16; off; off >>= 1) amax = fmaxf(amax, __shfl_xor(amax, off));
-  if (lane == 0) red[wave] = amax;
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    float t = 0.0f;
-    for (int i = 0; i < (int)(blockDim.x >> 5); i++) t = fmaxf(t, red[i]);
-    red[31] = (t > 0.0f) ? (t / kE4M3Max) : 1.0f;
-    ascale[row] = red[31];
-  }
-  __syncthreads();
-
-  const float inv = 1.0f / red[31];
-  uint8_t* qr = aq + (size_t)row * K;
-  for (int k = threadIdx.x; k < K; k += blockDim.x)
-    qr[k] = enc_e4m3(to_f<T>(ar[k]) * inv);
 }
 
 #if defined(__HIP__MXFP4_RDNA4__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -298,7 +232,13 @@ inline int tile_cfg_override() {
 // ---------------------------------------------------------------------------
 // Torch entry point
 // ---------------------------------------------------------------------------
-torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a, torch::Tensor const& b_q,
+// `a` is the original fp16/bf16 activation, used by the GEMV path which keeps
+// full precision. `a_fp8`/`a_scale` are its per-token E4M3 quantization from
+// vLLM's scaled_fp8_quant, and drive the WMMA path.
+torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a,
+                               torch::Tensor const& a_fp8,
+                               torch::Tensor const& a_scale,
+                               torch::Tensor const& b_q,
                                torch::Tensor const& b_scales) {
   using namespace vllm::mxfp4_rdna4;
   TORCH_CHECK(a.is_cuda() && b_q.is_cuda() && b_scales.is_cuda());
@@ -310,6 +250,8 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a, torch::Tensor const& b_q,
   TORCH_CHECK(K % kGroup == 0, "K must be a multiple of 32");
   TORCH_CHECK(b_q.size(0) == K / 8, "b_q must be [K/8, N]");
   TORCH_CHECK(b_scales.size(0) == K / kGroup, "b_scales must be [K/32, N]");
+  TORCH_CHECK(a_fp8.size(0) == M && a_fp8.size(1) == K, "a_fp8 must be [M, K]");
+  TORCH_CHECK(a_scale.numel() == M, "a_scale must have M entries");
 
   const at::cuda::OptionalCUDAGuard guard(a.device());
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -326,32 +268,26 @@ torch::Tensor mxfp4_gemm_rdna4(torch::Tensor const& a, torch::Tensor const& b_q,
         <<<grd, 32 * (WM) * (WN), 0, stream>>>(aqp, asp, bq, bs, cp, M, N, K); \
   } while (0)
 
-#define DISPATCH(T, TT)                                                \
-  if (M <= kGemvMaxM) {                                                \
-    dim3 blk(32, 4);                                                   \
-    dim3 grd((N + 3) / 4);                                             \
-    gemv_mxfp4_rdna4<TT, kGemvMaxM><<<grd, blk, 0, stream>>>(          \
-        reinterpret_cast<const TT*>(a.data_ptr()), bq, bs,             \
-        reinterpret_cast<TT*>(c.data_ptr()), M, N, K);                 \
-  } else {                                                             \
-    auto aq = torch::empty({M, K}, a.options().dtype(torch::kUInt8));  \
-    auto as = torch::empty({M}, a.options().dtype(torch::kFloat32));   \
-    quantize_a_e4m3<TT><<<M, 256, 0, stream>>>(                        \
-        reinterpret_cast<const TT*>(a.data_ptr()),                     \
-        reinterpret_cast<uint8_t*>(aq.data_ptr()),                     \
-        reinterpret_cast<float*>(as.data_ptr()), M, K);                \
-    const auto* aqp = reinterpret_cast<const uint8_t*>(aq.data_ptr()); \
-    const auto* asp = reinterpret_cast<const float*>(as.data_ptr());   \
-    auto* cp = reinterpret_cast<TT*>(c.data_ptr());                    \
-    int cfg = tile_cfg_override();                                     \
-    if (cfg == 0) cfg = (M >= 256) ? 3 : ((M >= 32) ? 2 : 1);          \
-    if (cfg == 3) {                                                    \
-      LAUNCH_TILED(TT, 4, 2);                                          \
-    } else if (cfg == 2) {                                             \
-      LAUNCH_TILED(TT, 2, 2);                                          \
-    } else {                                                           \
-      LAUNCH_TILED(TT, 1, 1);                                          \
-    }                                                                  \
+#define DISPATCH(T, TT)                                                   \
+  if (M <= kGemvMaxM) {                                                   \
+    dim3 blk(32, 4);                                                      \
+    dim3 grd((N + 3) / 4);                                                \
+    gemv_mxfp4_rdna4<TT, kGemvMaxM><<<grd, blk, 0, stream>>>(             \
+        reinterpret_cast<const TT*>(a.data_ptr()), bq, bs,                \
+        reinterpret_cast<TT*>(c.data_ptr()), M, N, K);                    \
+  } else {                                                                \
+    const auto* aqp = reinterpret_cast<const uint8_t*>(a_fp8.data_ptr()); \
+    const auto* asp = reinterpret_cast<const float*>(a_scale.data_ptr()); \
+    auto* cp = reinterpret_cast<TT*>(c.data_ptr());                       \
+    int cfg = tile_cfg_override();                                        \
+    if (cfg == 0) cfg = (M >= 256) ? 3 : ((M >= 32) ? 2 : 1);             \
+    if (cfg == 3) {                                                       \
+      LAUNCH_TILED(TT, 4, 2);                                             \
+    } else if (cfg == 2) {                                                \
+      LAUNCH_TILED(TT, 2, 2);                                             \
+    } else {                                                              \
+      LAUNCH_TILED(TT, 1, 1);                                             \
+    }                                                                     \
   }
 
   if (a.scalar_type() == at::kHalf) {
