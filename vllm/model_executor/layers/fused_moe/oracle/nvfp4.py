@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
@@ -215,10 +216,11 @@ def nvfp4_backend_supports_csf_scales(
     backend: NvFp4MoeBackend, config: FusedMoEConfig, use_a16: bool
 ) -> bool:
     """Whether the backend keeps `csf` checkpoint scales compressed."""
+    kernel_config = get_current_vllm_config().kernel_config
     if (
         backend != NvFp4MoeBackend.B12X
         or _use_a16(backend, use_a16)
-        or not envs.VLLM_B12X_MOE_CSF_RESIDENT_SCALES
+        or kernel_config.b12x_moe_uncompressed_scales
     ):
         return False
     from vllm.model_executor.layers.fused_moe.b12x import B12xExperts

@@ -20,7 +20,12 @@ from tests.kernels.quantization.nvfp4_utils import (
 from tests.kernels.utils import torch_moe
 from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
 from vllm import _custom_ops as ops
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -612,18 +617,18 @@ def test_explicit_b12x_nvfp4_selection(
     assert selected_activation_keys == [expected_activation_key]
 
 
-def test_csf_scales_stay_resident_only_on_b12x_w4a4(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(nvfp4_oracle.envs, "VLLM_B12X_MOE_CSF_RESIDENT_SCALES", True)
+@pytest.mark.parametrize("uncompressed", [False, True])
+def test_csf_scales_stay_compressed_only_on_b12x_w4a4(uncompressed: bool) -> None:
     config = make_dummy_moe_config(hidden_dim=2560, intermediate_size=640)
-    assert nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
-    assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, True)
-    assert not nvfp4_backend_supports_csf_scales(
-        NvFp4MoeBackend.FLASHINFER_CUTLASS, config, False
-    )
-    monkeypatch.setattr(nvfp4_oracle.envs, "VLLM_B12X_MOE_CSF_RESIDENT_SCALES", False)
-    assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
+    kernel_config = KernelConfig(b12x_moe_uncompressed_scales=uncompressed)
+    with set_current_vllm_config(VllmConfig(kernel_config=kernel_config)):
+        assert nvfp4_backend_supports_csf_scales(
+            NvFp4MoeBackend.B12X, config, False
+        ) is (not uncompressed)
+        assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, True)
+        assert not nvfp4_backend_supports_csf_scales(
+            NvFp4MoeBackend.FLASHINFER_CUTLASS, config, False
+        )
 
 
 @pytest.mark.parametrize(
@@ -1377,7 +1382,7 @@ def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
 # Qwen3.8-Flash-Next routed-expert shards at TP1, TP2 and TP4.
 @pytest.mark.parametrize("intermediate_size", [640, 320, 160])
 @torch.inference_mode()
-def test_b12x_resident_csf_scales_match_decoded_scales(
+def test_b12x_compressed_csf_scales_match_decoded_scales(
     intermediate_size: int, workspace_init
 ) -> None:
     from vllm.v1.worker.workspace import lock_workspace
@@ -1471,7 +1476,7 @@ def test_b12x_resident_csf_scales_match_decoded_scales(
         # The eager calls also build the b12x plans that capture needs.
         # One token runs the micro kernel, 64 the dynamic one. The dynamic
         # kernel sums the experts with atomics, so only the micro kernel is
-        # bit-reproducible run to run, with decoded or with resident scales.
+        # bit-reproducible run to run, with decoded or with compressed scales.
         token_counts = (64, 1)
         tolerance = {64: 0.25, 1: 0.0}
         for tokens in token_counts:

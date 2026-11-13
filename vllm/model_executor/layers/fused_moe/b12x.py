@@ -199,7 +199,7 @@ def _normalize_expert_scale(scale: torch.Tensor) -> torch.Tensor:
     return scale.to(dtype=torch.float32).contiguous()
 
 
-# Expansion targets of the resident CSF scales, shared by all layers of one
+# Expansion targets of the compressed CSF scales, shared by all layers of one
 # shape. b12x rewrites the routed experts' scales before each call, so sharing
 # is safe while layers run one at a time on one stream.
 _CSF_SCALE_SCRATCH: dict[tuple[Any, ...], tuple[torch.Tensor, torch.Tensor]] = {}
@@ -506,7 +506,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         if self._csf_scales and hasattr(layer, "_b12x_prepared_experts"):
             # Captured graphs read the compressed storage of the first load.
             raise NotImplementedError(
-                "b12x MoE with resident CSF scales does not support weight reloading"
+                "b12x MoE with compressed CSF scales does not support weight reloading"
             )
         self._source_parameters_released = False
         self._refresh_quant_config(layer)
@@ -598,7 +598,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def supports_csf_scales(moe_config: mk.FusedMoEConfig) -> bool:
-        """Whether NVFP4 W4A4 experts can keep `csf` scales resident."""
+        """Whether NVFP4 W4A4 experts can keep `csf` scales compressed."""
         # b12x expands CSF scales into 128-row tiles of the hidden dimension.
         return moe_config.is_act_and_mul and moe_config.hidden_dim % 128 == 0
 
