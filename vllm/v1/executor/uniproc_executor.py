@@ -150,7 +150,8 @@ class UniProcExecutor(Executor):
             with torch.inference_mode():
                 return get_kv_transfer_group().poll_finished_recving()
         except Exception:
-            # Partial receive post-processing cannot be retried by fault tolerance.
+            # A failed poll may leave receive state partly updated, which fault
+            # tolerance cannot replay.
             self.is_failed = True
             raise
 

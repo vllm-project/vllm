@@ -5669,8 +5669,8 @@ def test_start_load_kv_queues_async_load():
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("is_hma_required", [False, True])
 def test_early_recv_reports_only_error_free_loads_early(is_hma_required):
-    """A load with errors must not run before the scheduler sees its invalid
-    blocks or failure, so only error-free loads go out early, each once."""
+    """Only loads without errors are reported early, each once, so the
+    scheduler sees invalid blocks or failures before the request runs."""
     store = MagicMock()
     store.batch_get_into_multi_buffers.side_effect = [[-1, 0], [0, 0], [0, 0]]
     recv_thread = _make_store_recving_thread(

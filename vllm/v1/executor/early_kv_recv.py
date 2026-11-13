@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Report completed KV pulls between model outputs and the next schedule()."""
+"""Report completed KV loads between model outputs and the next schedule()."""
 
 import os
 import time
@@ -100,14 +100,14 @@ class EarlyKVRecvSender:
         self._next_poll = 0.0
 
     def step_rpc_done(self) -> None:
-        """Worker thread: an `execute_model` or `sample_tokens` RPC finished."""
+        """Record that an `execute_model` or `sample_tokens` RPC finished."""
         self._last_step_rpc = time.monotonic()
 
     def wait_for_poll(self, rpc_mq: MessageQueue) -> bool:
-        """Spin until the next poll is due.
+        """Spin until the next poll is due and return True.
 
-        Returns False once an RPC is queued, or at once when no step RPC
-        arrived recently or no receive is pending.
+        Return False as soon as an RPC is queued, or immediately when no step
+        RPC arrived recently or no receive is pending.
         """
         if (
             time.monotonic() - self._last_step_rpc > _ACTIVE_WINDOW_S

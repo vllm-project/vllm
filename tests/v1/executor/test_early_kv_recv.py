@@ -10,7 +10,8 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 
 def test_poll_failure_exits_worker():
-    # No KV group: polling fails. An ordinary exception must not count as exit(1).
+    # Without a KV connector the poll fails. Exceptions are suppressed so that
+    # only os._exit(1) can produce exit code 1.
     code = """
 from contextlib import suppress
 with suppress(Exception):
@@ -47,7 +48,8 @@ def test_early_receives_share_normal_quorum(ordinary_rank, failed, invalid):
     normal = KVConnectorOutput()
     for rank in range(2):
         if rank == ordinary_rank:
-            # Ordinary votes include successful NIXL fallbacks and failures.
+            # A step-output vote: a failure, invalid blocks, or a success that
+            # was not reported early.
             normal = aggregate(
                 KVConnectorOutput(
                     finished_recving={"request"},
@@ -64,7 +66,8 @@ def test_early_receives_share_normal_quorum(ordinary_rank, failed, invalid):
     if not normal.finished_recving:
         normal = aggregate()
     # A step output with a vote may carry invalid blocks or a failure that the
-    # scheduler has not processed yet, so only all-early receives finish early.
+    # scheduler has not processed yet, so a receive finishes early only when
+    # every worker reported it early.
     assert early == ({"request"} if ordinary_rank is None else set())
     assert (normal.finished_recving or set()) == {"request"} - early
     assert normal.failed_recving == ({"request"} if failed else set())

@@ -703,7 +703,7 @@ class EngineCore:
         return interval > 1 and self.num_executed_steps % interval != 0
 
     def _poll_early_finished_recving(self) -> None:
-        # KV loads the workers finished since the last step can run in this one.
+        # Requests whose KV loads finished since the last step can run in this one.
         if finished_recving := self.model_executor.take_early_finished_recving():
             self.scheduler.add_finished_recving(finished_recving)
 

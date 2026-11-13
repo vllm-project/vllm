@@ -1198,8 +1198,8 @@ class WorkerProc:
             and not self.use_async_scheduling
             and isinstance(output, ModelRunnerOutput)
         ):
-            # The engine schedules as soon as it has this output, which is
-            # complete only now: report the step's receives ahead of it.
+            # The engine schedules as soon as it gets this output, so report
+            # the step's completed receives before sending it.
             self.early_kv_recv.poll()
 
         if isinstance(output, ExceptionWithKVConnectorOutput):
@@ -1258,13 +1258,14 @@ class WorkerProc:
                 "execute_model",
                 "sample_tokens",
             ):
-                # Other RPCs, e.g. sleep after a pause, keep the worker idle.
+                # Only step RPCs keep idle polling active, so a sleep RPC
+                # after a pause does not restart it.
                 early_kv_recv.step_rpc_done()
                 output_rank = rpc_request[3]
                 if self.use_async_scheduling or output_rank not in (None, self.rank):
-                    # Receives found during the step go out now rather than
-                    # with its output, ready only once the GPU finishes it.
-                    # A synchronous replying worker polls in enqueue_output().
+                    # Report receives found during the step now; its output is
+                    # ready only after the GPU finishes the step. A synchronous
+                    # replying worker polls in enqueue_output() instead.
                     early_kv_recv.poll()
             del rpc_request
 
