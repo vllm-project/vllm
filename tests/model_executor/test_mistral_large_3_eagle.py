@@ -7,9 +7,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from transformers import DeepseekV2Config
+from transformers import DeepseekV2Config, Mistral3Config
 
-from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.compilation import CompilationMode
 from vllm.model_executor.models import deepseek_v2 as deepseek_mod
 from vllm.model_executor.models import mistral_large_3_eagle as eagle_mod
@@ -175,3 +181,49 @@ def test_eagle_mistral_large3_loads_weights(tmp_path: Path):
         weight = torch.arange(config.hidden_size, dtype=model.norm.weight.dtype)
         assert model.load_weights([("norm.weight", weight)]) == {"norm.weight"}
         torch.testing.assert_close(model.norm.weight, weight, rtol=0, atol=0)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init", "workspace_init")
+def test_eagle_mistral_large3_preserves_target_config(tmp_path: Path):
+    text_config = DeepseekV2Config(
+        architectures=["MistralLarge3ForCausalLM"],
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=0,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        n_routed_experts=0,
+        n_shared_experts=0,
+        first_k_dense_replace=0,
+        max_position_embeddings=32,
+    )
+    target_path, draft_path = tmp_path / "target", tmp_path / "draft"
+    Mistral3Config(
+        architectures=["Mistral3ForConditionalGeneration"],
+        text_config=text_config.to_dict(),
+    ).save_pretrained(target_path)
+    text_config.save_pretrained(draft_path)
+    target = ModelConfig(
+        model=str(target_path), skip_tokenizer_init=True, max_model_len=32
+    )
+    parallel = ParallelConfig()
+    speculative = SpeculativeConfig(
+        method="eagle",
+        model=str(draft_path),
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=parallel,
+    )
+    config = VllmConfig(
+        model_config=target, parallel_config=parallel, speculative_config=speculative
+    )
+    quant_config = config.quant_config
+    assert target.is_multimodal_model
+    with set_current_vllm_config(config):
+        model = eagle_mod.EagleMistralLarge3ForCausalLM(vllm_config=config)
+    assert config.model_config is target
+    assert config.model_config.is_multimodal_model
+    assert config.quant_config is quant_config
+    assert model.config is speculative.draft_model_config.hf_config

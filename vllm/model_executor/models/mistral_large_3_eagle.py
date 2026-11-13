@@ -151,6 +151,7 @@ class EagleMistralLarge3ForCausalLM(
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
+        vllm_config = copy.copy(vllm_config)
         vllm_config.model_config = speculative_config.draft_model_config
         # draft model quantization config may differ from target model
         self.quant_config = VllmConfig.get_quantization_config(
