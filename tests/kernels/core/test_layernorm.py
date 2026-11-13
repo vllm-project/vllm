@@ -32,6 +32,24 @@ def _rms_norm_tolerance(dtype: torch.dtype) -> dict[str, float]:
     return ir.ops.rms_norm.get_tolerance(dtype)
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("has_weight", [False, True])
+def test_fused_add_rms_norm_empty(dtype: torch.dtype, has_weight: bool) -> None:
+    """Empty inputs preserve storage and leave subsequent GPU operations usable."""
+    hidden_size = 1024
+    x = torch.ones((1, hidden_size), dtype=dtype, device="cuda")
+    residual = torch.full_like(x, 2)
+    weight = torch.ones_like(x[0]) if has_weight else None
+
+    torch.ops._C.fused_add_rms_norm(x[:0], residual[:0], weight, 1e-6)
+    torch.accelerator.synchronize()
+
+    probe = torch.ones(1, device="cuda")
+    torch.testing.assert_close(probe.cpu(), torch.ones(1, device="cpu"))
+    torch.testing.assert_close(x, torch.ones_like(x), rtol=0, atol=0)
+    torch.testing.assert_close(residual, torch.full_like(residual, 2), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
