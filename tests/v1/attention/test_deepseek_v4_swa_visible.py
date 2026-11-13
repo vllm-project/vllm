@@ -2622,7 +2622,7 @@ def test_ds41_mega_attn_bi_decode_rows_match_prefill(
     )
     config.model_config.hf_config.index_topk = 512
     builder = DeepseekSparseSWAFlashMLAMetadataBuilder(
-        swa.get_kv_cache_spec(config), [swa.prefix], config, device
+        swa.get_kv_cache_config(config).spec, [swa.prefix], config, device
     )
     pages = (length + block_size - 1) // block_size
     table = torch.arange(pages, dtype=torch.int32, device=device).view(1, pages)
