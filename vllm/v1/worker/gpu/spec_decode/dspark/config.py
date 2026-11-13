@@ -43,8 +43,12 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             return _get_minimax_m3_dspark_draft(
                 target, load_config.download_dir if load_config else None
             )
-        # DeepSeek DSpark can ship the weights inside the target checkpoint
-        if not spec.quantization:
+        # DeepSeek DSpark can ship the weights inside the target checkpoint.
+        # Mistral Large 4 DSpark drafts ship in BF16.
+        if (
+            not spec.quantization
+            and target.hf_text_config.model_type != "mistral_large_4"
+        ):
             spec.quantization = target.quantization
         return target.model
 
@@ -62,6 +66,13 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             ]
             draft.quantization = target.quantization
             spec.update_arch_()
+        elif (
+            "MistralLarge4DSparkModel" in draft.architectures
+            and spec.kv_cache_dtype is None
+        ):
+            # The target's sparse fp8_ds_mla cache layout does not apply to the
+            # dense MLA draft layers.
+            spec.kv_cache_dtype = "auto"
 
     @classmethod
     def resolve_num_speculative_tokens(cls, spec: "SpeculativeConfig") -> None:
