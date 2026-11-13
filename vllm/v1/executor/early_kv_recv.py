@@ -63,18 +63,11 @@ class EarlyKVOutputAggregator(KVOutputAggregator):
         if deferred:
             # Complete through a later step output, so the scheduler sees the
             # failure or invalid blocks first.
-            self.ft_defer_kv_connector_outputs(
+            self._defer_kv_connector_outputs(
                 [KVConnectorOutput(finished_recving=deferred)]
             )
         finished = set[str]()
-        expected = self._expected_finished_count
-        for req_id in req_ids - deferred:
-            remaining = self._recv_remaining_count.get(req_id, expected) - 1
-            if remaining:
-                self._recv_remaining_count[req_id] = remaining
-            else:
-                finished.add(req_id)
-                self._recv_remaining_count.pop(req_id, None)
+        self._count_finished(req_ids - deferred, self._recv_remaining_count, finished)
         return finished
 
 

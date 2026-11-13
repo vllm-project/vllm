@@ -102,20 +102,6 @@ class KVOutputAggregator:
 
         # Aggregate kv_connector_output from all workers
 
-        def update_finished_set(
-            req_ids: set[str] | None,
-            remaining_count_dict: dict[str, int],
-            finished_set: set[str],
-        ) -> None:
-            for req_id in req_ids or ():
-                remaining_count = remaining_count_dict.get(
-                    req_id, self._expected_finished_count
-                )
-                remaining_count_dict[req_id] = remaining_count - 1
-                if remaining_count_dict[req_id] == 0:
-                    finished_set.add(req_id)
-                    del remaining_count_dict[req_id]
-
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
@@ -130,8 +116,8 @@ class KVOutputAggregator:
             assert o is not None
             kv_outputs.append(o.kv_connector_output)
 
-        # Salvaged outputs from failed workers join this round so their
-        # transfer progress isn't lost.
+        # Deferred outputs, e.g. salvaged from failed workers, join this round
+        # so their transfer progress isn't lost.
         for kv_output in chain(salvaged, kv_outputs):
             if not kv_output:
                 continue
@@ -148,10 +134,10 @@ class KVOutputAggregator:
                 )
                 self._expected_finished_count = kv_output.expected_finished_count
 
-            update_finished_set(
+            self._count_finished(
                 kv_output.finished_sending, self._send_remaining_count, finished_sending
             )
-            update_finished_set(
+            self._count_finished(
                 kv_output.finished_recving, self._recv_remaining_count, finished_recving
             )
 
@@ -214,6 +200,29 @@ class KVOutputAggregator:
 
         return output
 
+    def _count_finished(
+        self,
+        req_ids: set[str] | None,
+        remaining_count_dict: dict[str, int],
+        finished_set: set[str],
+    ) -> None:
+        """Count one report for each request and add those that reach the
+        quorum to `finished_set`."""
+        for req_id in req_ids or ():
+            remaining_count = remaining_count_dict.get(
+                req_id, self._expected_finished_count
+            )
+            remaining_count_dict[req_id] = remaining_count - 1
+            if remaining_count_dict[req_id] == 0:
+                finished_set.add(req_id)
+                del remaining_count_dict[req_id]
+
+    def _defer_kv_connector_outputs(
+        self, kv_connector_outputs: list[KVConnectorOutput | None]
+    ) -> None:
+        """Count KV connector outputs in the next aggregate()."""
+        self._salvaged_outputs.extend(o for o in kv_connector_outputs if o)
+
     def ft_defer_kv_connector_outputs(
         self, kv_connector_outputs: list[KVConnectorOutput | None]
     ) -> None:
@@ -226,7 +235,7 @@ class KVOutputAggregator:
         for o in kv_connector_outputs:
             if o is not None:
                 o.kv_cache_events = None
-        self._salvaged_outputs.extend(o for o in kv_connector_outputs if o)
+        self._defer_kv_connector_outputs(kv_connector_outputs)
 
 
 def _make_src_and_dst_indices(
