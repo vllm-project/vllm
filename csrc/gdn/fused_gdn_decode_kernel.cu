@@ -106,6 +106,16 @@ struct GdnDecodeStrides {
   int64_t state_slot;
 };
 
+// RecoverSSM replay record: per slot, value head and window position,
+// [correction (V), normalized key (K), decay exp(g) (1)] in fp32.
+struct GdnReplayRecord {
+  float* data;
+  int64_t slot;
+  int64_t head;
+  int64_t position;
+  int positions;
+};
+
 __device__ __forceinline__ float sigmoid_fast(float x) {
   return 1.0f / (1.0f + __expf(-x));
 }
@@ -154,8 +164,12 @@ __device__ __forceinline__ Sum2 warp_reduce_sum_pair(float x, float y) {
 // SplitV > 1 splits the V rows of one (request, value head) over a cluster of
 // SplitV CTAs along blockIdx.z, so small batches fill more SMs. The gated
 // RMSNorm over V then needs the partial sums of the other CTAs (via DSMEM).
+// WriteReplay (RecoverSSM verify): the window starts from the checkpoint in
+// state_indices[request, 0], which is only read. Instead of a state per token,
+// each token's replay record is written into the checkpoint's replay slot; the
+// commit after sampling folds the accepted prefix into the checkpoint.
 template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate,
-          int SplitV>
+          int SplitV, bool WriteReplay>
 __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     const __nv_bfloat16* __restrict__ mixed_qkv,
     const __nv_bfloat16* __restrict__ a, const __nv_bfloat16* __restrict__ b,
@@ -164,9 +178,9 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     const int* __restrict__ num_accepted_tokens, StateT* __restrict__ state,
     const __nv_bfloat16* __restrict__ output_gate,
     const void* __restrict__ norm_weight, __nv_bfloat16* __restrict__ out,
-    int H, int HV, int state_indices_width, int dt_bias_type,
-    bool norm_weight_is_bf16, float scale, float norm_eps,
-    GdnDecodeStrides strides) {
+    int H, int HV, int state_indices_width, int64_t state_indices_row,
+    int dt_bias_type, bool norm_weight_is_bf16, float scale, float norm_eps,
+    GdnDecodeStrides strides, GdnReplayRecord replay) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
   // Reduce binary size on architectures without cluster support.
   if constexpr (SplitV > 1) {
@@ -191,12 +205,13 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     return;
   }
 
-  const int accepted = num_accepted_tokens[request];
+  const int accepted = WriteReplay ? 1 : num_accepted_tokens[request];
   const int source_slot =
       accepted > 0 && accepted <= state_indices_width
-          ? state_indices[request * state_indices_width + accepted - 1]
+          ? state_indices[request * state_indices_row + accepted - 1]
           : 0;
-  if (source_slot <= 0 || num_tokens > kMaxMtpTokens) {
+  const int max_tokens = WriteReplay ? replay.positions : kMaxMtpTokens;
+  if (source_slot <= 0 || num_tokens > max_tokens) {
     for (int linear = tid; linear < num_tokens * kSliceV; linear += kThreads) {
       const int token = bos + linear / kSliceV;
       const int value = slice_begin + linear % kSliceV;
@@ -222,6 +237,13 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       value_head * kDimV * kDimK;
   copy_state_chunk<StateT, kChunkV, kDimK, 2>(
       &shared_state[0][0][0], source_state, first_chunk, tid, kThreads);
+  float* replay_record =
+      WriteReplay
+          ? replay.data + static_cast<int64_t>(source_slot) * replay.slot +
+                static_cast<int64_t>(value_head) * replay.head
+          : nullptr;
+  // The key and decay are the same in every CTA of a split; one writes them.
+  const bool write_replay_key = WriteReplay && split_rank == 0;
 
   // One warp per token. kMaxMtpTokens exceeds kWarps, so warps stride.
   // kTokenPasses bounds the trip count, so the compiler unrolls the passes.
@@ -256,6 +278,11 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       const int dim = lane + i * 32;
       shared_q[t][dim] = q_values[i] * q_scale;
       shared_k[t][dim] = k_values[i] * k_scale;
+      if constexpr (WriteReplay) {
+        if (write_replay_key) {
+          replay_record[t * replay.position + kDimV + dim] = shared_k[t][dim];
+        }
+      }
     }
     if (lane == 0) {
       const float a_value = __bfloat162float(
@@ -267,6 +294,13 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
                                                            dt_bias_type));
       shared_decay[t] = __expf(g);
       shared_beta[t] = sigmoid_fast(b_value);
+      if constexpr (WriteReplay) {
+        // The decay as multiplied below, so the commit replays this exact
+        // float.
+        if (write_replay_key) {
+          replay_record[t * replay.position + kDimV + kDimK] = shared_decay[t];
+        }
+      }
     }
   }
   __syncthreads();
@@ -326,6 +360,12 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
         const float delta =
             (__bfloat162float(shared_v[t][value]) - reduced_hk[row]) *
             shared_beta[t];
+        if constexpr (WriteReplay) {
+          // The reduced dot product, hence delta, is uniform across the warp.
+          if (lane == 0) {
+            replay_record[t * replay.position + value] = delta;
+          }
+        }
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
           h[row][i] += k_values[i] * delta;
@@ -346,7 +386,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
       }
 
       const int destination_slot =
-          state_indices[request * state_indices_width + t];
+          WriteReplay ? 0 : state_indices[request * state_indices_row + t];
       if (destination_slot > 0) {
         StateT* destination_state =
             state +
@@ -442,11 +482,11 @@ int choose_split_v(int num_blocks, int device) {
 }
 
 template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate,
-          int SplitV, typename... Args>
+          int SplitV, bool WriteReplay, typename... Args>
 cudaError_t launch_split(dim3 grid, cudaStream_t stream, Args... args) {
   const auto kernel =
       gdn_decode_post_conv_mtp_kernel<StateT, ValueHeadsPerKeyHead, SigmoidGate,
-                                      SplitV>;
+                                      SplitV, WriteReplay>;
   cudaLaunchAttribute attribute{};
   attribute.id = cudaLaunchAttributeClusterDimension;
   attribute.val.clusterDim = {1, 1, SplitV};
@@ -459,17 +499,18 @@ cudaError_t launch_split(dim3 grid, cudaStream_t stream, Args... args) {
   return cudaLaunchKernelEx(&config, kernel, args...);
 }
 
-template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate>
+template <typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate,
+          bool WriteReplay>
 void launch_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a_log,
     torch::stable::Tensor const& dt_bias,
     torch::stable::Tensor const& state_indices,
-    torch::stable::Tensor const& cu_seqlens,
-    torch::stable::Tensor const& num_accepted_tokens,
+    torch::stable::Tensor const& cu_seqlens, const int* num_accepted_tokens,
     torch::stable::Tensor& state, torch::stable::Tensor const& norm_weight,
     torch::stable::Tensor& out, const __nv_bfloat16* a, const __nv_bfloat16* b,
     const __nv_bfloat16* output_gate, int num_key_heads, int num_value_heads,
-    double scale, double norm_eps, GdnDecodeStrides strides) {
+    double scale, double norm_eps, GdnDecodeStrides strides,
+    GdnReplayRecord replay) {
   using torch::headeronly::ScalarType;
 
   const auto dt_bias_scalar_type = dt_bias.scalar_type();
@@ -486,18 +527,20 @@ void launch_gdn_decode_post_conv_mtp(
   const int split_v = choose_split_v(num_requests * num_value_heads,
                                      mixed_qkv.get_device_index());
   const auto launch = [&]<int SplitV>() {
-    return launch_split<StateT, ValueHeadsPerKeyHead, SigmoidGate, SplitV>(
+    return launch_split<StateT, ValueHeadsPerKeyHead, SigmoidGate, SplitV,
+                        WriteReplay>(
         dim3(num_requests, num_value_heads, SplitV), stream,
         static_cast<const __nv_bfloat16*>(mixed_qkv.data_ptr()), a, b,
         static_cast<const float*>(a_log.data_ptr()), dt_bias.data_ptr(),
         static_cast<const int*>(state_indices.data_ptr()),
-        static_cast<const int*>(cu_seqlens.data_ptr()),
-        static_cast<const int*>(num_accepted_tokens.data_ptr()),
+        static_cast<const int*>(cu_seqlens.data_ptr()), num_accepted_tokens,
         static_cast<StateT*>(state.data_ptr()), output_gate,
         norm_weight.data_ptr(), static_cast<__nv_bfloat16*>(out.data_ptr()),
         num_key_heads, num_value_heads, static_cast<int>(state_indices.size(1)),
-        dt_bias_type, norm_weight.scalar_type() == ScalarType::BFloat16,
-        static_cast<float>(scale), static_cast<float>(norm_eps), strides);
+        state_indices.stride(0), dt_bias_type,
+        norm_weight.scalar_type() == ScalarType::BFloat16,
+        static_cast<float>(scale), static_cast<float>(norm_eps), strides,
+        replay);
   };
   const cudaError_t error = split_v == 4   ? launch.template operator()<4>()
                             : split_v == 2 ? launch.template operator()<2>()
@@ -507,16 +550,17 @@ void launch_gdn_decode_post_conv_mtp(
                   cudaGetErrorString(error));
 }
 
-}  // namespace
-
-void fused_gdn_decode_post_conv_mtp(
+// num_accepted_tokens is null in replay mode (replay non-null), where every
+// window starts from the checkpoint in state_indices[:, 0].
+void run_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
     torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
     torch::stable::Tensor const& dt_bias,
     torch::stable::Tensor const& state_indices,
     torch::stable::Tensor const& cu_seqlens,
-    torch::stable::Tensor const& num_accepted_tokens,
-    torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
+    torch::stable::Tensor const* num_accepted_tokens,
+    torch::stable::Tensor& state, torch::stable::Tensor* replay,
+    torch::stable::Tensor const& output_gate,
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
     double scale, double norm_eps, const std::string& output_gate_activation) {
   using torch::headeronly::ScalarType;
@@ -542,9 +586,6 @@ void fused_gdn_decode_post_conv_mtp(
   STD_TORCH_CHECK(
       cu_seqlens.is_cuda() && cu_seqlens.scalar_type() == ScalarType::Int,
       "cu_seqlens must be a CUDA int32 tensor");
-  STD_TORCH_CHECK(num_accepted_tokens.is_cuda() &&
-                      num_accepted_tokens.scalar_type() == ScalarType::Int,
-                  "num_accepted_tokens must be a CUDA int32 tensor");
   const auto state_scalar_type = state.scalar_type();
   STD_TORCH_CHECK(
       state.is_cuda() && (state_scalar_type == ScalarType::Float ||
@@ -592,9 +633,15 @@ void fused_gdn_decode_post_conv_mtp(
   STD_TORCH_CHECK(
       cu_seqlens.dim() == 1 && cu_seqlens.numel() == num_requests + 1,
       "cu_seqlens must have N + 1 elements");
-  STD_TORCH_CHECK(num_accepted_tokens.dim() == 1 &&
-                      num_accepted_tokens.numel() == num_requests,
-                  "num_accepted_tokens must have N elements");
+  if (num_accepted_tokens != nullptr) {
+    STD_TORCH_CHECK(num_accepted_tokens->is_cuda() &&
+                        num_accepted_tokens->scalar_type() == ScalarType::Int,
+                    "num_accepted_tokens must be a CUDA int32 tensor");
+    STD_TORCH_CHECK(num_accepted_tokens->dim() == 1 &&
+                        num_accepted_tokens->numel() == num_requests &&
+                        num_accepted_tokens->is_contiguous(),
+                    "num_accepted_tokens must be contiguous with N elements");
+  }
   STD_TORCH_CHECK(
       a.dim() == 2 && a.size(0) == num_tokens && a.size(1) == num_value_heads,
       "a must have shape [L, HV]");
@@ -605,11 +652,12 @@ void fused_gdn_decode_post_conv_mtp(
                   "A_log must be contiguous with HV elements");
   STD_TORCH_CHECK(dt_bias.is_contiguous() && dt_bias.numel() == num_value_heads,
                   "dt_bias must be contiguous with HV elements");
-  STD_TORCH_CHECK(state_indices.is_contiguous(),
-                  "state_indices must be contiguous");
+  // Rows may be strided (RecoverSSM passes the checkpoint column of the
+  // [N, 1 + num_spec] spec state indices).
+  STD_TORCH_CHECK(state_indices.stride(1) == 1 &&
+                      state_indices.stride(0) >= state_indices.size(1),
+                  "state_indices must have contiguous rows");
   STD_TORCH_CHECK(cu_seqlens.is_contiguous(), "cu_seqlens must be contiguous");
-  STD_TORCH_CHECK(num_accepted_tokens.is_contiguous(),
-                  "num_accepted_tokens must be contiguous");
   STD_TORCH_CHECK(output_gate.dim() == 3 && output_gate.size(0) == num_tokens &&
                       output_gate.size(1) == num_value_heads &&
                       output_gate.size(2) == kDimV,
@@ -639,18 +687,52 @@ void fused_gdn_decode_post_conv_mtp(
 
   const GdnDecodeStrides strides{mixed_qkv.stride(0), a.stride(0), b.stride(0),
                                  output_gate.stride(0), state.stride(0)};
+  STD_TORCH_CHECK((num_accepted_tokens == nullptr) == (replay != nullptr),
+                  "exactly one of num_accepted_tokens and replay is required");
+  GdnReplayRecord replay_record{nullptr, 0, 0, 0, 0};
+  if (replay != nullptr) {
+    STD_TORCH_CHECK(
+        replay->is_cuda() && replay->scalar_type() == ScalarType::Float,
+        "replay must be a CUDA float32 tensor");
+    STD_TORCH_CHECK(
+        replay->dim() == 4 && replay->size(0) == state.size(0) &&
+            replay->size(1) == num_value_heads && replay->size(2) >= 1 &&
+            replay->size(2) <= kMaxMtpTokens &&
+            replay->size(3) == kDimV + kDimK + 1 && replay->stride(3) == 1,
+        "replay must have shape [slots, HV, P <= 9, 257] with contiguous "
+        "records");
+    STD_TORCH_CHECK(state_indices.size(1) == 1,
+                    "replay mode takes one checkpoint column per request");
+    replay_record = {static_cast<float*>(replay->data_ptr()), replay->stride(0),
+                     replay->stride(1), replay->stride(2),
+                     static_cast<int>(replay->size(2))};
+  }
+  const int* num_accepted_ptr =
+      num_accepted_tokens == nullptr
+          ? nullptr
+          : static_cast<const int*>(num_accepted_tokens->data_ptr());
   const auto* a_ptr = static_cast<const __nv_bfloat16*>(a.data_ptr());
   const auto* b_ptr = static_cast<const __nv_bfloat16*>(b.data_ptr());
   const auto* output_gate_ptr =
       static_cast<const __nv_bfloat16*>(output_gate.data_ptr());
-  const auto launch = [&]<typename StateT, int ValueHeadsPerKeyHead,
-                          bool SigmoidGate>() {
-    launch_gdn_decode_post_conv_mtp<StateT, ValueHeadsPerKeyHead, SigmoidGate>(
-        mixed_qkv, a_log, dt_bias, state_indices, cu_seqlens,
-        num_accepted_tokens, state, norm_weight, out, a_ptr, b_ptr,
-        output_gate_ptr, num_key_heads, num_value_heads, scale, norm_eps,
-        strides);
-  };
+  const auto launch =
+      [&]<typename StateT, int ValueHeadsPerKeyHead, bool SigmoidGate>() {
+        if (replay != nullptr) {
+          launch_gdn_decode_post_conv_mtp<StateT, ValueHeadsPerKeyHead,
+                                          SigmoidGate, true>(
+              mixed_qkv, a_log, dt_bias, state_indices, cu_seqlens, nullptr,
+              state, norm_weight, out, a_ptr, b_ptr, output_gate_ptr,
+              num_key_heads, num_value_heads, scale, norm_eps, strides,
+              replay_record);
+        } else {
+          launch_gdn_decode_post_conv_mtp<StateT, ValueHeadsPerKeyHead,
+                                          SigmoidGate, false>(
+              mixed_qkv, a_log, dt_bias, state_indices, cu_seqlens,
+              num_accepted_ptr, state, norm_weight, out, a_ptr, b_ptr,
+              output_gate_ptr, num_key_heads, num_value_heads, scale, norm_eps,
+              strides, replay_record);
+        }
+      };
   const auto dispatch_state_type = [&]<int ValueHeadsPerKeyHead>() {
     if (state_scalar_type == ScalarType::Float) {
       if (output_gate_activation == "sigmoid") {
@@ -684,4 +766,37 @@ void fused_gdn_decode_post_conv_mtp(
       dispatch_state_type.template operator()<8>();
       break;
   }
+}
+
+}  // namespace
+
+void fused_gdn_decode_post_conv_mtp(
+    torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
+    torch::stable::Tensor const& dt_bias,
+    torch::stable::Tensor const& state_indices,
+    torch::stable::Tensor const& cu_seqlens,
+    torch::stable::Tensor const& num_accepted_tokens,
+    torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
+    torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
+    double scale, double norm_eps, const std::string& output_gate_activation) {
+  run_gdn_decode_post_conv_mtp(mixed_qkv, a, b, a_log, dt_bias, state_indices,
+                               cu_seqlens, &num_accepted_tokens, state, nullptr,
+                               output_gate, norm_weight, out, scale, norm_eps,
+                               output_gate_activation);
+}
+
+void fused_gdn_decode_post_conv_mtp_replay(
+    torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
+    torch::stable::Tensor const& dt_bias,
+    torch::stable::Tensor const& state_indices,
+    torch::stable::Tensor const& cu_seqlens, torch::stable::Tensor& state,
+    torch::stable::Tensor& replay, torch::stable::Tensor const& output_gate,
+    torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
+    double scale, double norm_eps, const std::string& output_gate_activation) {
+  run_gdn_decode_post_conv_mtp(mixed_qkv, a, b, a_log, dt_bias, state_indices,
+                               cu_seqlens, nullptr, state, &replay, output_gate,
+                               norm_weight, out, scale, norm_eps,
+                               output_gate_activation);
 }

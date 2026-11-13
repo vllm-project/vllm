@@ -56,7 +56,7 @@ def _create_vllm_config_for_dsd(
         max_num_batched_tokens=max_capture_tokens,
     )
     vllm_config.parallel_config = ParallelConfig()
-    vllm_config.cache_config = SimpleNamespace(use_kda_recoverssm=False)
+    vllm_config.cache_config = SimpleNamespace(use_recoverssm=False)
     # num_speculative_tokens is the max K (num_speculative_steps). The manager
     # recovers num_new_sampled_tokens_per_step as
     # decode_query_len - num_speculative_tokens; with decode_query_len =
