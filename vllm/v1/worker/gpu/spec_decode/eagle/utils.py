@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import in_single_pp_stage
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.quantization.online.lm_head import (
     quantized_lm_head_copy,
@@ -14,7 +14,6 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
@@ -94,9 +93,7 @@ def maybe_share_target_embed(
         target_embed = target_embed.base_layer
     draft_embed = getattr(draft_inner, "embed_tokens", None)
 
-    if get_pp_group().world_size > 1 and not hasattr(
-        draft_model, "has_own_embed_tokens"
-    ):
+    if in_single_pp_stage() and not hasattr(draft_model, "has_own_embed_tokens"):
         return
 
     if target_embed is None:
@@ -122,9 +119,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
     vllm_config = speculative_config.apply_draft_overrides(vllm_config)
-    draft_load_config = get_pp_safe_draft_load_config(
-        get_draft_load_config(vllm_config)
-    )
+    draft_load_config = get_draft_load_config(vllm_config)
     if draft_load_config is not vllm_config.load_config:
         vllm_config = replace(vllm_config, load_config=draft_load_config)
     with set_model_tag("eagle_head"):
