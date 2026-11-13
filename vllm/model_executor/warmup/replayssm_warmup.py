@@ -97,7 +97,7 @@ def _temporary_replayssm_autotune_state(
 def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     """Warm request lifecycle kernels with bounded, non-padding cache slots."""
     config = runner.vllm_config
-    if not config.use_flashinfer_replayssm:
+    if not config.use_replayssm_trackers:
         return
     from vllm.v1.worker.extensible_kv_cache import (
         ensure_kv_cache_blocks,
@@ -109,13 +109,13 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
         return
 
     from vllm.model_executor.layers.mamba.abstract import MambaBase
+    from vllm.v1.core.kv_cache_utils import is_mamba_align_group, is_mamba_group
     from vllm.v1.kv_cache_interface import MambaSpec
     from vllm.v1.worker.replayssm_utils import ReplaySSMModelContext
 
     grouped = []
     for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
-        spec = group.kv_cache_spec
-        if not isinstance(spec, MambaSpec):
+        if not is_mamba_group(group):
             continue
         mixers = [
             layer
@@ -124,10 +124,13 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
                 layer := config.compilation_config.static_forward_context[name],
                 MambaBase,
             )
-            and layer.use_flashinfer_replayssm
+            and layer.use_replayssm_trackers
         ]
         if not mixers:
             continue
+        spec = group.kv_cache_specs[group.layer_names[0]]
+        assert isinstance(spec, MambaSpec)
+        align = is_mamba_align_group(group)
         table = runner.block_tables.input_block_tables[group_id]
         # Match the runtime stride without changing its block-table contents.
         scratch_table = torch.empty_strided(
@@ -153,9 +156,10 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
                 mixer._replayssm_ring_start.zero_()
                 mixer._replayssm_prev_num_accepted.zero_()
 
-        context = ReplaySSMModelContext.create(grouped, runner.max_num_reqs)
+        context = ReplaySSMModelContext.create(
+            grouped, runner.max_num_reqs, materialize_prefixes=align
+        )
         device = grouped[0][2].device
-        align = grouped[0][1].mamba_cache_mode == "align"
         block_size = grouped[0][1].block_size
         query_len = runner.decode_query_len
         idx_mapping = torch.zeros(1, dtype=torch.int64, device=device)
