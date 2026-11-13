@@ -429,6 +429,7 @@ def test_rdna_valid_for_any_batch():
     assert 512 in backend.get_supported_head_sizes()
 
 
+@requires_gfx1151
 def test_rdna_prefers_built_page_size():
     """Runs without --block-size get the pages the kernels are built for."""
     from vllm.config.cache import CacheConfig
