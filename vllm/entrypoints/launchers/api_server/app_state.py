@@ -9,6 +9,7 @@ from starlette.datastructures import State
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
+from vllm.entrypoints.openai.batches.api_router import init_batch_state
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
@@ -176,9 +177,8 @@ async def init_app_state(
 
     await init_endpoint_plugins_state(engine_client, state, args)
 
-    from vllm.entrypoints.openai.batch.api_router import init_batch_state
-
-    init_batch_state(state, args)
+    if args.enable_batch_api:
+        init_batch_state(state, args, supported_tasks)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0

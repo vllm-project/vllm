@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Integration tests for the Online Batch API.
-
-These tests start a vLLM server and exercise the full batch workflow
-via HTTP: upload file -> create batch -> poll status -> download results.
-
-Requires a GPU and model to be available.
-"""
-
 import json
 import time
 
@@ -21,19 +13,17 @@ MODEL_NAME = "facebook/opt-125m"
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(tmp_path_factory):
     args = [
         "--dtype",
         "float16",
         "--max-model-len",
         "256",
-        # opt-125m's tokenizer defines no chat template; supply one so
-        # /v1/chat/completions requests can be served.
         "--chat-template",
         "examples/template_chatml.jinja",
         "--enable-batch-api",
         "--batch-storage-dir",
-        "/tmp/vllm-test-batches",
+        str(tmp_path_factory.mktemp("batches")),
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -45,8 +35,6 @@ def base_url(server):
 
 
 def test_full_batch_workflow(base_url):
-    """Test: upload -> create batch -> poll -> get results."""
-    # 1. Upload input file
     batch_input = "\n".join(
         [
             json.dumps(
@@ -74,7 +62,6 @@ def test_full_batch_workflow(base_url):
     file_obj = upload_resp.json()
     assert file_obj["id"].startswith("file-")
 
-    # 2. Create batch
     create_resp = requests.post(
         f"{base_url}/v1/batches",
         json={
@@ -88,7 +75,6 @@ def test_full_batch_workflow(base_url):
     assert batch_obj["id"].startswith("batch-")
     assert batch_obj["status"] in ("validating", "in_progress")
 
-    # 3. Poll until complete
     batch_id = batch_obj["id"]
     for _ in range(60):
         status_resp = requests.get(f"{base_url}/v1/batches/{batch_id}")
@@ -103,7 +89,6 @@ def test_full_batch_workflow(base_url):
     assert batch_obj["request_counts"]["failed"] == 0
     assert batch_obj["output_file_id"] is not None
 
-    # 4. Download results
     output_resp = requests.get(
         f"{base_url}/v1/files/{batch_obj['output_file_id']}/content"
     )

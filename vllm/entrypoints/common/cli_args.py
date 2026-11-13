@@ -388,6 +388,16 @@ class FrontendArgs(BaseFrontendArgs):
     When disabled, the setting is also propagated to the engine's
     `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
     path instead of the fused Triton kernel."""
+    enable_batch_api: bool = False
+    """Enable the OpenAI-compatible Files (`/v1/files`) and Batches
+    (`/v1/batches`) endpoints."""
+    batch_storage_dir: str = os.path.expanduser("~/.vllm/batches")
+    """Directory where batch input, output and metadata files are stored."""
+    batch_retention_hours: int = 24
+    """Hours to keep finished batches and their files. 0 disables cleanup."""
+    batch_priority: int = 0
+    """Scheduling priority of batch requests. Higher values mean lower
+    priority. Only takes effect with `--scheduling-policy priority`."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -483,37 +493,6 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "frontend's gRPC services.",
     )
     parser = FrontendArgs.add_cli_args(parser)
-
-    parser.add_argument(
-        "--enable-batch-api",
-        action="store_true",
-        default=False,
-        help="Enable the OpenAI-compatible Files and Batches API endpoints "
-        "(/v1/files and /v1/batches). Disabled by default; when disabled "
-        "those endpoints return 501. Enabling activates on-disk batch "
-        "storage under --batch-storage-dir.",
-    )
-    parser.add_argument(
-        "--batch-storage-dir",
-        type=str,
-        default=os.path.expanduser("~/.vllm/batches"),
-        help="Directory for storing batch files and metadata. Default: ~/.vllm/batches",
-    )
-    parser.add_argument(
-        "--batch-retention-hours",
-        type=int,
-        default=24,
-        help="Hours to retain completed batches before cleanup. "
-        "Set to 0 to disable automatic cleanup. Default: 24",
-    )
-    parser.add_argument(
-        "--batch-priority",
-        type=int,
-        default=0,
-        help="Priority value for batch requests. Higher values = lower "
-        "priority. Online requests use 0. Set to >0 only if the model "
-        "is served with priority scheduling enabled. Default: 0",
-    )
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     return parser
