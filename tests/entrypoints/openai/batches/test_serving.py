@@ -227,6 +227,48 @@ async def test_invalid_lines_fail_the_batch(serving_batches, serving_files):
 
 
 @pytest.mark.asyncio
+async def test_request_validator_errors_report_the_line(serving_batches, serving_files):
+    invalid = {
+        "custom_id": "bad",
+        "method": "POST",
+        "url": CHAT_URL,
+        "body": {"model": "m", "messages": [], "top_logprobs": 5},
+    }
+    content = _chat_lines(1) + b"\n" + json.dumps(invalid).encode()
+
+    batch = await _create_batch(serving_batches, serving_files, content)
+    await serving_batches.wait_for_batch(batch.id, timeout=10)
+
+    assert batch.status == "failed"
+    assert batch.errors is not None
+    assert batch.errors.data[0].line == 2
+    assert "top_logprobs" in batch.errors.data[0].message
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_files_of_active_batches(storage_dir, serving_files):
+    serving = _make_serving_batches(
+        storage_dir, serving_files, _chat_handler(side_effect=_slow_chat_response)
+    )
+    file_obj = await serving_files.upload_file(_chat_lines(1), "in.jsonl", "batch")
+    request = BatchCreateRequest(input_file_id=file_obj.id, endpoint=CHAT_URL)
+    expired = await serving.create_batch(request)
+    active = await serving.create_batch(request)
+    assert isinstance(expired, BatchObject)
+    assert isinstance(active, BatchObject)
+    await asyncio.sleep(0.2)
+    expired.status = "failed"
+    expired.expires_at = int(time.time()) - 1
+
+    await serving._cleanup_expired()
+
+    assert await serving.get_batch(expired.id) is None
+    assert await serving_files.get_file(file_obj.id) is not None
+    await serving.cancel_batch(active.id)
+    await serving.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_list_batches_pagination(serving_batches, serving_files):
     for _ in range(3):
         await _create_batch(serving_batches, serving_files, _chat_lines(1))

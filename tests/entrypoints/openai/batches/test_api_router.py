@@ -105,6 +105,7 @@ def test_batch_workflow(client):
     output = client.get(f"/v1/files/{batch['output_file_id']}/content")
     assert json.loads(output.content)["custom_id"] == "req-0"
 
+    assert client.get("/v1/batches", params={"limit": 0}).status_code == 422
     listed = client.get("/v1/batches").json()
     assert [b["id"] for b in listed["data"]] == [batch_id]
     assert client.delete(f"/v1/files/{file_id}").json()["deleted"] is True

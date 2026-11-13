@@ -10,6 +10,7 @@ from vllm.entrypoints.openai.files.protocol import (
     FilePurpose,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_utils import atomic_writer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -108,5 +109,5 @@ class OpenAIServingFiles:
         logger.info("Loaded %d files from metadata", len(self._files))
 
     def _save_metadata(self) -> None:
-        with open(self._metadata_path, "w") as f:
+        with atomic_writer(self._metadata_path) as f:
             json.dump([obj.model_dump() for obj in self._files.values()], f)

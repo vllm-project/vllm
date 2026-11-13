@@ -4,8 +4,9 @@ from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from typing import Annotated
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from starlette.datastructures import State
 
@@ -53,7 +54,11 @@ async def create_batch(request: BatchCreateRequest, raw_request: Request):
 
 
 @router.get("/v1/batches")
-async def list_batches(raw_request: Request, limit: int = 20, after: str | None = None):
+async def list_batches(
+    raw_request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    after: str | None = None,
+):
     result = await batches(raw_request).list_batches(limit=limit, after=after)
     return JSONResponse(content=result.model_dump())
 

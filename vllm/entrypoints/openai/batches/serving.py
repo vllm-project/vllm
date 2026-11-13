@@ -32,7 +32,9 @@ from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_utils import atomic_writer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -40,7 +42,6 @@ logger = init_logger(__name__)
 BatchHandler: TypeAlias = Callable[..., Awaitable[Any]]
 
 MAX_CONCURRENT_REQUESTS = 256
-MAX_LIST_LIMIT = 100
 CLEANUP_INTERVAL_SECONDS = 15 * 60
 SHUTDOWN_TIMEOUT_SECONDS = 30
 
@@ -165,7 +166,7 @@ class OpenAIServingBatches:
             ids = [b.id for b in batches]
             batches = batches[ids.index(after) + 1 :] if after in ids else []
 
-        page = batches[: min(limit, MAX_LIST_LIMIT)]
+        page = batches[:limit]
         return BatchListResponse(
             data=page,
             has_more=len(batches) > len(page),
@@ -254,7 +255,7 @@ class OpenAIServingBatches:
     def _validate_line(batch: BatchObject, line: str) -> str | None:
         try:
             request = BatchRequestInput.model_validate_json(line)
-        except ValueError as e:
+        except (ValueError, VLLMValidationError) as e:
             return str(e)
         if request.url != batch.endpoint:
             return (
@@ -388,7 +389,7 @@ class OpenAIServingBatches:
                 batch.output_file_id,
                 batch.error_file_id,
             ):
-                if file_id is not None:
+                if file_id is not None and not self.is_file_in_active_batch(file_id):
                     await self._serving_files.delete_file(file_id)
             del self._batches[batch.id]
             logger.info("Cleaned up expired batch %s", batch.id)
@@ -405,5 +406,5 @@ class OpenAIServingBatches:
         logger.info("Loaded %d batches from metadata", len(self._batches))
 
     def _save_metadata(self) -> None:
-        with open(self._metadata_path, "w") as f:
+        with atomic_writer(self._metadata_path) as f:
             json.dump([b.model_dump() for b in self._batches.values()], f)
