@@ -12,12 +12,14 @@ import torch
 
 from vllm.model_executor.kernels.linear import (
     EmulationMxfp6LinearKernel,
+    HummingMxFp6LinearKernel,
     MxFp6LinearKernel,
     MxFp6LinearLayerConfig,
     init_mxfp6_linear_kernel,
     register_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8Dynamic32Sym,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp6E2M3Dynamic,
@@ -148,3 +150,71 @@ def test_init_mxfp6_linear_kernel_raises_when_no_kernel_matches(platform_mock):
 
     with pytest.raises(ValueError, match="Failed to find a kernel"):
         init_mxfp6_linear_kernel(weight_quant_key=kMxfp6E3M2Static)
+
+
+@pytest.mark.parametrize("weight_quant_key", _WEIGHT_QUANT_KEYS)
+def test_supports_quant_scheme_dispatches_on_weight_and_activation(weight_quant_key):
+    """Base and emulation MXFP6 kernels gate on weight and activation keys."""
+    for act_key in (None, kMxfp6E2M3Dynamic, kMxfp6E3M2Dynamic):
+        assert MxFp6LinearKernel._supports_quant_scheme(weight_quant_key, act_key)
+        assert EmulationMxfp6LinearKernel._supports_quant_scheme(
+            weight_quant_key, act_key
+        )
+    assert not MxFp6LinearKernel._supports_quant_scheme(weight_quant_key, kMxfp4Dynamic)
+    assert EmulationMxfp6LinearKernel._supports_quant_scheme(
+        weight_quant_key, kMxfp4Dynamic
+    )
+    for cls in (MxFp6LinearKernel, EmulationMxfp6LinearKernel):
+        assert not cls._supports_quant_scheme(kMxfp4Static, None)
+        assert not cls._supports_quant_scheme(weight_quant_key, kInt8Dynamic32Sym)
+
+    assert not HummingMxFp6LinearKernel._supports_quant_scheme(kMxfp4Static, None)
+    with patch(
+        "vllm.model_executor.kernels.linear.mxfp6.humming.quant_key_to_input_schema",
+        side_effect=ValueError("unsupported"),
+    ):
+        assert not HummingMxFp6LinearKernel._supports_quant_scheme(
+            weight_quant_key, kInt8Dynamic32Sym
+        )
+
+
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_init_mxfp6_linear_kernel_applies_override_and_scheme_gate(
+    platform_mock, monkeypatch
+):
+    """init_mxfp6_linear_kernel resolves linear.activation overrides and skips
+    kernels whose _supports_quant_scheme rejects the resolved scheme."""
+    import vllm.model_executor.kernels.linear as linear_kernels
+
+    platform_mock._enum = PlatformEnum.OOT
+    monkeypatch.setitem(
+        linear_kernels._POSSIBLE_MXFP6_KERNELS,
+        PlatformEnum.OOT,
+        [OOTMxFp6LinearKernel, EmulationMxfp6LinearKernel],
+    )
+
+    # OOTMxFp6LinearKernel inherits the base gate (MXFP6 or None activations),
+    # so overriding the activation to MXFP4 skips it and selects emulation.
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override", lambda: kMxfp4Dynamic
+    )
+    kernel = init_mxfp6_linear_kernel(
+        weight_quant_key=kMxfp6E3M2Static,
+        activation_quant_key=kMxfp6E3M2Dynamic,
+    )
+    assert isinstance(kernel, EmulationMxfp6LinearKernel)
+    assert kernel.config.activation_quant_key == kMxfp4Dynamic
+
+    # An explicit `activation: null` override runs weight-only and selects OOT.
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override_is_set", lambda: True
+    )
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override", lambda: None
+    )
+    kernel = init_mxfp6_linear_kernel(
+        weight_quant_key=kMxfp6E3M2Static,
+        activation_quant_key=kMxfp4Dynamic,
+    )
+    assert isinstance(kernel, OOTMxFp6LinearKernel)
+    assert kernel.config.activation_quant_key is None

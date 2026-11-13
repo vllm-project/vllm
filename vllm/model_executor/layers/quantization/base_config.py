@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -14,6 +15,7 @@ from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
+    from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
@@ -42,6 +44,27 @@ class QuantizeMethodBase(ABC):
     `weights_already_processed`. Methods must skip tensor transforms in
     that mode; the loader driver rejects methods that do not declare support.
     """
+
+    _layer_target_spec: "QuantSpec | None" = None
+    """Per-layer `quantization_config.targets` spec for deferred oracle calls."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        for method_name in ("create_weights", "process_weights_after_loading"):
+            if method_name not in cls.__dict__:
+                continue
+            method = cls.__dict__[method_name]
+
+            @functools.wraps(method)
+            def _wrapped(self, *args: Any, _method=method, **kw: Any) -> Any:
+                if self._layer_target_spec is None:
+                    return _method(self, *args, **kw)
+                from vllm.config.quantization import layer_target_spec_scope
+
+                with layer_target_spec_scope(self._layer_target_spec):
+                    return _method(self, *args, **kw)
+
+            setattr(cls, method_name, _wrapped)
 
     @abstractmethod
     def create_weights(
@@ -345,6 +368,7 @@ def resolve_quant_method(
             )
             target_spec = target[3] if target is not None else None
 
+    base_target_spec = target_spec if online_target is None else None
     # The checkpoint method of requantized experts is only a dequantization source.
     with (
         (
@@ -352,11 +376,13 @@ def resolve_quant_method(
             if online_target is not None and isinstance(layer, RoutedExperts)
             else nullcontext()
         ),
-        layer_target_spec_scope(target_spec if online_target is None else None),
+        layer_target_spec_scope(base_target_spec),
     ):
         # A `targets` spec without a weight key overrides the activation of the
         # checkpoint method.
         base_quant_method = quant_config.get_quant_method(layer, prefix)
+    if base_target_spec is not None and base_quant_method is not None:
+        base_quant_method._layer_target_spec = base_target_spec
     if online_config is None:
         # No online configuration: retain the checkpoint method.
         return base_quant_method
