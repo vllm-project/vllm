@@ -545,6 +545,39 @@ def test_rmsnorm_gated_3d_matches_flattened_2d(
     assert cuda_3d.shape == (num_tokens, num_heads, head_dim)
 
 
+@torch.inference_mode()
+def test_rmsnorm_gated_int64_row_offset() -> None:
+    """Rows past 2^31 // row stride need int64 offsets.
+
+    Mirrors RMSNormGated on the GDN output: [num_tokens, num_heads, 128]
+    flattened to rows of 128, so tokens from 2^31 // (num_heads * 128) on
+    (262,144 for 64 heads) wrap in int32.
+    """
+    num_heads, head_dim = 64, 128
+    num_tokens = 2**31 // (num_heads * head_dim) + 4
+    # x, z and the output, all bf16.
+    need = num_tokens * num_heads * head_dim * 2 * 3
+    free, _ = current_platform.mem_get_info()
+    if free < need + (1 << 30):
+        pytest.skip("not enough free device memory")
+
+    set_random_seed(0)
+    device = torch.device(DEVICE)
+    shape = (num_tokens, num_heads, head_dim)
+    x = torch.randn(shape, dtype=torch.bfloat16, device=device)
+    z = torch.randn(shape, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(head_dim, dtype=torch.bfloat16, device=device)
+
+    out = layernorm_fn(
+        x, weight, None, z=z, eps=1e-6, norm_before_gate=True, is_rms_norm=True
+    )
+
+    # Reference on the first token and the last tokens, past the int32 boundary.
+    rows = torch.tensor([0, *range(num_tokens - 4, num_tokens)], device=device)
+    ref = rms_norm_ref(x[rows], weight, None, z=z[rows], eps=1e-6)
+    torch.testing.assert_close(out[rows], ref, atol=1e-2, rtol=1e-2)
+
+
 if __name__ == "__main__":
     # Run a quick smoke test
     test_layer_norm_fwd_basic(128, 1024, torch.float16, 42, False)

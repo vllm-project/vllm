@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.hashing import safe_hash
+from vllm.utils.torch_utils import token_ids_to_tensor
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -351,37 +353,6 @@ class ExampleConnector(KVConnectorBase_V1):
                         mm_hashes=mm_hashes,
                     )
 
-        cached_reqs = scheduler_output.scheduled_cached_reqs
-        for i, req_id in enumerate(cached_reqs.req_ids):
-            resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
-            if not resumed_from_preemption or req_id not in self._requests_need_load:
-                continue
-
-            num_computed_tokens = cached_reqs.num_computed_tokens[i]
-            num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            new_block_ids = cached_reqs.new_block_ids[i]
-
-            # NOTE(rob): cached_req_data does not have the full
-            # list of token ids (only new tokens). So we look it
-            # up in the actual request object.
-            request = self._requests_need_load[req_id]
-            total_tokens = num_computed_tokens + num_new_tokens
-            token_ids = request.all_token_ids[:total_tokens]
-
-            # NOTE(rob): For resumed req, new_block_ids is all
-            # of the block_ids for the request.
-            assert new_block_ids is not None
-            block_ids = new_block_ids[0]
-
-            meta.add_request(
-                token_ids=token_ids,
-                block_ids=block_ids,
-                block_size=self._block_size,
-                is_store=False,
-                mm_hashes=[f.identifier for f in request.mm_features],
-            )
-            total_need_load += 1
-
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
         return meta
@@ -396,20 +367,20 @@ class ExampleConnector(KVConnectorBase_V1):
     ) -> bool:
         """Check if the cache is hit for the request."""
         return self._found_match_for_prompt(
-            list(request.prompt_token_ids or []),
+            request.prompt_token_ids or [],
             [f.identifier for f in request.mm_features],
         )
 
     def _found_match_for_prompt(
         self,
-        prompt_token_ids: list[int],
+        prompt_token_ids: Sequence[int],
         mm_hashes: list[str],
     ) -> bool:
         num_tokens_to_check = align_to_block_size(
             len(prompt_token_ids) - 1, self._block_size
         )
         foldername = self._generate_foldername_debug(
-            torch.tensor(prompt_token_ids)[:num_tokens_to_check],
+            token_ids_to_tensor(prompt_token_ids)[:num_tokens_to_check],
             mm_hashes,
             create_folder=False,
         )

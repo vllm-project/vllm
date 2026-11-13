@@ -102,6 +102,18 @@ moriio_read_mode_kv() {
     esac
 }
 
+# NIXL KV config. UCX backend.
+nixl_kv_cfg() {
+    cat <<EOF
+{
+  "kv_connector": "${KV_CONNECTOR}",
+  "kv_role": "${KV_ROLE}",
+  "kv_load_failure_policy": "recompute",
+  "kv_connector_extra_config": {"backends": ["UCX"], "kv_lease_duration": 180}
+}
+EOF
+}
+
 # ----------------------------------------------------------------- topology
 # Resolves MODEL_PATH, MODELS_YAML, the IP array, and the master/proxy addresses.
 # IP_ARRAY[0..xP-1] = prefill nodes, [xP..xP+yD-1] = decode nodes.
@@ -309,6 +321,7 @@ build_tp_cmd() {
 }
 EOF
 )
+    if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
     CMD+=(--kv-transfer-config "${kv_cfg}")
     log "role=${ROLE} mode=tp host=${HOST_IP:-0.0.0.0}:${port} kv_role=${KV_ROLE} tp=${TP_SIZE} read_mode=${MORIIO_READ_MODE}"
 }
@@ -337,6 +350,10 @@ build_ep_cmd() {
         --distributed-timeout-seconds "${DISTRIBUTED_TIMEOUT_SECONDS}"
     )
     local _mc; read -ra _mc <<< "${MODEL_CONFIG}"; CMD+=("${_mc[@]}")
+    # 2P2D EP16 only. At 0.85 the AITER MoE sort buffer runs out of memory.
+    if [[ "${KV_CONNECTOR:-}" == Nixl* && "${ROLE}" == "prefill" && "${xP}" -gt 1 ]]; then
+        CMD+=(--gpu-memory-utilization 0.75)
+    fi
 
     if [[ "${IS_MASTER}" == "1" ]]; then
         CMD+=(--api-server-count="${GPUS_PER_NODE}")
@@ -359,6 +376,7 @@ build_ep_cmd() {
 }
 EOF
 )
+        if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
         CMD+=(--kv-transfer-config "${kv_cfg}")
         log "role=${ROLE} mode=ep MASTER node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend} read_mode=${MORIIO_READ_MODE}"
     else

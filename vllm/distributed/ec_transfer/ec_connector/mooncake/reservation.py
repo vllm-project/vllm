@@ -91,7 +91,7 @@ class ConsumerReservation:
 class ConsumerReservationManager:
     """Own reservation transitions and destination allocation releases.
 
-    A remote writer owns a ``WRITING`` allocation. Cancellation and expiry are
+    A remote writer owns a `WRITING` allocation. Cancellation and expiry are
     therefore deferred until completion, unless refresh explicitly abandons
     that writer before replacing its reservation.
     """

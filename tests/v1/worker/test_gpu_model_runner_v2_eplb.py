@@ -202,12 +202,16 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
         def __init__(self):
             self.model = draft_model
             self.eplb_state = None
+            self.draft_logits = None
 
         def load_model(self, target_model):
             return None
 
         def set_eplb_state(self, state) -> None:
             self.eplb_state = state
+
+        def free_unused_weights(self, target_model) -> None:
+            return None
 
     monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
     monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
@@ -234,6 +238,7 @@ def test_v2_load_model_registers_dspark_speculator_with_eplb(monkeypatch):
         speculative_config=SimpleNamespace(
             method="dspark",
             draft_model_config=draft_model_config,
+            prefill_context_kv_only=False,
         ),
         speculator=speculator,
     )

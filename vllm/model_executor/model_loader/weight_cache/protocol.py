@@ -19,6 +19,7 @@ import socket
 import stat
 import struct
 import tempfile
+import time
 from dataclasses import dataclass, fields
 from typing import Any, NamedTuple
 
@@ -27,7 +28,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import CacheConfig, ModelConfig
+from vllm.config import CacheConfig, KernelConfig, ModelConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -46,6 +47,9 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+# Bound for one JSON message on the remote warmup-cache control plane.
+# Warmup cache tables are small JSON documents.
+MAX_JSON_MSG_SIZE = 1 << 26
 
 
 def _current_uid() -> int:
@@ -72,7 +76,7 @@ class UnsupportedPlatformForIPCError(Exception):
 def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
-    Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
+    Only CUDA/ROCm tensors get a real IPC handle from `TensorEntry`; other
     platforms (e.g. XPU) would silently ship every tensor by value instead.
 
     Raises:
@@ -98,7 +102,7 @@ def check_ipc_quant_support(model: torch.nn.Module) -> None:
 
     Raises:
         UnsupportedQuantForIPCError: If any quant method does not declare
-            ``supports_pre_processed_weights``.
+            `supports_pre_processed_weights`.
 
     """
     for name, module in model.named_modules():
@@ -138,7 +142,7 @@ def get_socket_path(
     *,
     is_draft: bool = False,
 ) -> str:
-    """Socket path of a daemon group; ``is_draft=False`` is the target.
+    """Socket path of a daemon group; `is_draft=False` is the target.
 
     The GPU uuid is hashed to keep the name well under the AF_UNIX path
     limit (~108 bytes) even with the draft role suffix.
@@ -167,7 +171,7 @@ def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None
 def verify_private_dir(directory: str, strict_perms: bool = True) -> None:
     """Verify a directory is a real dir owned by us and not world/group readable.
 
-    When ``strict_perms`` is False the group/world permission bits are not
+    When `strict_perms` is False the group/world permission bits are not
     checked; this is used for directories the operator explicitly configured
     (they own the trust decision), while the auto-derived per-user directory is
     always checked strictly.
@@ -328,6 +332,11 @@ class WeightCacheKey:
     dp_rank: int = 0
     enable_expert_parallel: bool = False
     expert_placement_strategy: str = "linear"
+    moe_backend: str = "auto"
+    """Kernel backends pick the processed weight layout (e.g. shuffled or
+    repacked), so weights processed for one backend are wrong for another."""
+    linear_backend: str = "auto"
+    linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_model_config(
@@ -344,6 +353,7 @@ class WeightCacheKey:
         dp_rank: int = 0,
         enable_expert_parallel: bool = False,
         expert_placement_strategy: str = "linear",
+        kernel_config: KernelConfig | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -360,6 +370,7 @@ class WeightCacheKey:
         arch = ",".join(getattr(hf_config, "architectures", None) or [])
         quant_config = getattr(hf_config, "quantization_config", None)
         checkpoint = hash_checkpoint(model_config.model) or model_config.model
+        kernel_config = kernel_config or KernelConfig()
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -385,6 +396,11 @@ class WeightCacheKey:
             dp_rank=dp_rank,
             enable_expert_parallel=enable_expert_parallel,
             expert_placement_strategy=expert_placement_strategy,
+            moe_backend=kernel_config.moe_backend,
+            linear_backend=kernel_config.linear_backend,
+            linear_backend_per_quant=tuple(
+                sorted((kernel_config.linear_backend_per_quant or {}).items())
+            ),
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -452,9 +468,45 @@ def recv_msg(sock: socket.socket) -> Any:
     return pickle.loads(_recv_exact(sock, length))
 
 
-def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
+def send_json(sock: socket.socket, obj: Any) -> None:
+    payload = json.dumps(obj).encode()
+    if len(payload) > MAX_JSON_MSG_SIZE:
+        raise ValueError("JSON message exceeds configured limit")
+    sock.sendall(_LEN_STRUCT.pack(len(payload)))
+    sock.sendall(payload)
+
+
+def recv_json(
+    sock: socket.socket,
+    max_size: int = MAX_JSON_MSG_SIZE,
+    deadline: float | None = None,
+) -> Any:
+    """Receive one JSON message.
+
+    Args:
+        sock: Connected socket.
+        max_size: Largest payload accepted.
+        deadline: `time.monotonic()` by which the whole message must have
+            arrived; a per-read timeout alone lets a peer trickle bytes
+            forever.
+
+    """
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size, deadline))
+    if length > max_size:
+        raise ValueError(f"Message size {length} exceeds limit {max_size}")
+    return json.loads(_recv_exact(sock, length, deadline))
+
+
+def _recv_exact(
+    sock: socket.socket, num_bytes: int, deadline: float | None = None
+) -> bytes:
     buf = bytearray()
     while len(buf) < num_bytes:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Peer did not send its message in time")
+            sock.settimeout(remaining)
         chunk = sock.recv(num_bytes - len(buf))
         if not chunk:
             raise ConnectionError("Socket closed while receiving message")

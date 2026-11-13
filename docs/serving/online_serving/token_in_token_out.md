@@ -6,6 +6,7 @@
 
 - `--enable-scale-out` registers it, with `/render`, `/derender` and `/inference/v1/abort_requests`.
 - `--tokens-only` always registers it, skips loading the tokenizer and forces `detokenize=False`. Stop strings (`sampling_params.stop`) are then rejected with a 400; use `stop_token_ids`.
+- `VLLM_SERVER_DEV_MODE=1` turns `--enable-scale-out` on unless `--disable-scale-out` is passed.
 - With neither flag, it returns 403 `Scale-out endpoints are disabled. Restart vllm serve with --enable-scale-out to enable them.`
 
 ```bash
@@ -45,6 +46,10 @@ The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprob
 ## Targeting a data-parallel rank (`X-data-parallel-rank`)
 
 Send the header `X-data-parallel-rank: <int>` to pin a request to one data-parallel (DP) engine rank; there is no body field. Without the header, or with a non-integer value, the request is load balanced. A rank outside `[0, data_parallel_size)` is rejected.
+
+## Request priority (`X-Vllm-Priority`)
+
+Send the header `X-Vllm-Priority: <int>` to set the request's priority. It overrides the body `priority`; a non-integer value is ignored. A header value or body `priority` outside `[-2**31, 2**31 - 1]` is rejected. Non-zero priorities require the server to use priority scheduling (`--scheduling-policy priority`). The Rust frontend does not read the header on this endpoint and uses only the body `priority`.
 
 ## Output modes
 
@@ -86,19 +91,32 @@ print(response["choices"][0]["token_ids"])
 
 ### Derender
 
-`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, resolved JSON only `chat_template_kwargs` and the history tool call count. A `parse_context` field this server doesn't know fails a `derender` request and is ignored at the other levels.
+`derender` returns the assistant `message` a coupled `/v1/chat/completions` would, without a separate [derender](derenderer.md) call. `/v1/chat/completions/render` and `/v1/messages/render` return `parse_context` on the `GenerateRequest`. Send it back with `output_mode: "derender"`. It carries the tools, `tool_choice`, `include_reasoning`, `return_tokens_as_token_ids`, resolved JSON only `chat_template_kwargs` and the history tool call count. A `parse_context` field this server doesn't know fails a `derender` request and is ignored at the other levels.
 
 - The parser reads the engine's `text`, so it sees the stop string cut and the post `adjust_request` decode flags. That makes it match coupled chat for parsers whose `adjust_request` changes decoding which `/derender` can't.
 - A server with a tool or reasoning parser needs `parse_context`. Without a parser, `message.content` is the plain text.
 - `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
 - `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs`, `token_ids` and `sampling_mask` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
-- `stream: true` isn't supported yet.
+- With `stream: true`, each choice carries a chat `delta` (`role`, `content`, `reasoning`, `tool_calls`) instead of `text`, and `finish_reason` follows coupled chat. `role` is set on the first chunk of each choice, `n > 1` is supported, and `null` fields are left out of `delta`. A chunk is sent whenever the engine output carries a parsed delta, visible token IDs, logprobs or a `finish_reason`. Parsing runs on the API server event loop, so `--api-server-count` scales it.
+- The message `role` is the generate server's `--response-role`. `parse_context` doesn't carry `messages`, `add_generation_prompt` or `echo`, so the last message's role and `echo` aren't applied. Use [`/derender`](derenderer.md) for those.
 - Cohere grounding citations aren't returned. The parser strips the citation spans from `content`, and the document map can't go over JSON in `parse_context`.
+
+A streamed tool call looks like this, with the usage chunk and `data: [DONE]` framed as at the other levels:
+
+```text
+data: {"request_id": "...", "output_mode": "derender", "choices": [{"index": 0, "token_ids": [151657], "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "chatcmpl-tool-...", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}, "finish_reason": null, ...}]}
+
+data: {"request_id": "...", "output_mode": "derender", "choices": [{"index": 0, "token_ids": [], "delta": {}, "finish_reason": "tool_calls", ...}]}
+```
 
 ### Logprobs
 
 With `output_mode: "tokens"`, logprobs are `GenerateLogProbs` with an integer `token_id` and `rank` per entry and no `token` or `bytes` (see [Generate Output Logprobs](renderer.md#generate-output-logprobs)). With `output_mode: "text"`, they are `ChatCompletionLogProbs` carrying the decoded token strings and their UTF-8 `bytes` for the sampled token and every entry in `top_logprobs`; a server started with `--return-tokens-as-token-ids` returns `token_id:N` placeholders there instead, as `/v1/completions` does.
+
+With `output_mode: "derender"`, `parse_context.return_tokens_as_token_ids` overrides the generate server's `--return-tokens-as-token-ids` when it is not `null`: `true` returns `token_id:N` placeholders with `bytes: null`, and `false` returns decoded tokens and UTF-8 bytes even when the server flag is enabled. An omitted or `null` value uses the generate server's flag. `/render` preserves explicit `true` and `false` without applying the render server's flag, and omits the context field when the request value is omitted or `null`. This setting affects logprobs only; the assistant message is still parsed from text.
+
+Upgrade generate nodes before using explicit request overrides: older generate nodes reject `parse_context.return_tokens_as_token_ids` with a 400 in derender mode. Requests with an omitted or `null` override remain compatible because `/render` leaves that field out. Unknown parse-context fields remain ignored in `tokens` and `text` modes.
 
 ### Errors
 
@@ -106,7 +124,6 @@ The server returns a 400 for:
 
 - `output_mode: "text"` or `"derender"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
 - `output_mode: "text"` or `"derender"` with `sampling_params.detokenize: false`.
-- `output_mode: "derender"` with `stream: true`.
 - `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a named `tool_choice` in `parse_context` that matches none of its `tools`. This is checked before generating.
 - An unsupported `output_mode` value.
 
@@ -126,6 +143,51 @@ The final output of every choice carries `weight_versions`, the label of the wei
 - With `stream: true`, only the last chunk of each choice carries the list, including the last chunk after an abort. Its offsets cover the whole output. Earlier chunks carry `null` or omit the field.
 - An output with no tokens, such as a request aborted before its first token, gets `[]`.
 - The labels are the ones you set with `/update_weight_version` or `/finish_weight_update`, see [Async Reinforcement Learning](../../training/async_rl.md#weight-versions-in-outputs). vLLM doesn't order or check them, and the label is `"default"` until you set one.
+
+## Multimodal inputs
+
+A request can carry media in two ways, and can use both at once:
+
+- `content_parts`: raw media (`image_url`, `audio_url` or `video_url`, each with an optional `uuid`). `token_ids` holds one placeholder token per item, and the server expands it.
+- `features`: items whose placeholders are already expanded in `token_ids`, at the ranges given in `mm_placeholders`. Pass the processed tensors in `kwargs_data`, or omit them to look the items up in the processor cache by `mm_hashes`.
+
+When both are set, every `content_parts` placeholder must come after the last `features` range. Only the tokens after that range are processed, so the expanded runs before it are left as they are. Models that insert media at the start of the prompt (such as PaliGemma, BLIP-2 and Molmo) would place a new item right after that range without an error, so don't combine the two fields for them.
+
+This fits multi-turn rollouts. Each turn resends the previous prompt with its images already expanded, adds the new turn with one placeholder per new image, and sends the earlier images as `features`:
+
+```python
+import httpx
+
+url = "http://localhost:8000/inference/v1/generate"
+
+# Turn 1: turn1_ids holds one <|image_pad|> for image A.
+turn1 = httpx.post(url, json={
+    "token_ids": turn1_ids,
+    "content_parts": [{"type": "image_url", "url": url_a, "uuid": "img-a"}],
+    "sampling_params": {"max_tokens": 256},
+    "return_token_ids": True,
+}).json()
+
+# Turn 2: image A is expanded in turn1["prompt_token_ids"];
+# turn2_ids appends one <|image_pad|> for image B.
+turn2 = httpx.post(url, json={
+    "token_ids": (
+        turn1["prompt_token_ids"] + turn1["choices"][0]["token_ids"] + turn2_ids
+    ),
+    "features": {
+        "mm_hashes": {"image": ["img-a"]},
+        "mm_placeholders": turn1["mm_placeholders"],
+    },
+    "content_parts": [{"type": "image_url", "url": url_b, "uuid": "img-b"}],
+    "sampling_params": {"max_tokens": 256},
+    "return_token_ids": True,
+}).json()
+```
+
+Here `"img-a"` finds image A in the processor cache because turn 1 sent it with that `uuid`. Two cases need a different approach:
+
+- If the server sets `--mm-processor-kwargs` or `--media-io-kwargs`, the `uuid` is hashed with them and is no longer the cache key. Take `features` from a [render](renderer.md) response instead.
+- If the item has been evicted from the cache, the request fails. Resend the item with `kwargs_data`.
 
 ## Aborting requests
 

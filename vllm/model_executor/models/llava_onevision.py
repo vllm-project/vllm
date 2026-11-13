@@ -114,10 +114,6 @@ LlavaOnevisionImageInputs: TypeAlias = (
     LlavaOnevisionImagePixelInputs | LlavaOnevisionImageEmbeddingInputs
 )
 
-LlavaOnevisionMultiInputs: TypeAlias = (
-    LlavaOnevisionImageInputs | LlavaOnevisionVideoPixelInputs
-)
-
 
 class LlavaOnevisionLikeConfig(LlavaNextLikeConfig, Protocol):
     video_token_index: int
@@ -236,13 +232,11 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_videos = mm_counts.get("video", 0)
-
         max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
+            max_total_frames // max(num_videos, 1), _MAX_FRAMES_PER_VIDEO
         )
 
         return max(max_frames_per_video, 1)
@@ -257,7 +251,9 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+            num_frames=self.get_num_frames_with_most_features(
+                seq_len, mm_counts.get("video", 0)
+            ),
         )
 
 
@@ -282,7 +278,7 @@ class LlavaOnevisionDummyInputsBuilder(
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
 
         return {

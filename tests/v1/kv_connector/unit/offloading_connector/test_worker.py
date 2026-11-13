@@ -6,6 +6,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    make_kv_cache_group,
+    make_kv_cache_group_from_specs,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     TransferJob,
@@ -13,25 +17,25 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    CanonicalKVCacheTensor,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -120,6 +124,15 @@ def _make_worker(
     )
     worker.worker = MagicMock()
 
+    page_size = 128
+    tensor = torch.zeros(NUM_BLOCKS, page_size, dtype=torch.int8, device=DEVICE_TYPE)
+    worker._kv_caches = CanonicalKVCaches(
+        tensors=[CanonicalKVCacheTensor(tensor=tensor, page_size_bytes=page_size)],
+        group_data_refs=[
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size)]
+        ],
+    )
+
     return worker, spec
 
 
@@ -136,13 +149,14 @@ def _store_metadata(job_id: int) -> OffloadingConnectorMetadata:
     )
 
 
-def _load_metadata(job_id: int) -> OffloadingConnectorMetadata:
+def _load_metadata(job_id: int, sync: bool = False) -> OffloadingConnectorMetadata:
     return OffloadingConnectorMetadata(
         load_jobs={
             job_id: TransferJob(
                 req_id="req",
                 src_spec=LoadStoreSpec(),
                 dst_spec=GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+                sync=sync,
             )
         },
         store_jobs={},
@@ -277,6 +291,101 @@ def test_start_kv_transfers_non_writer_still_submits_load():
     assert worker.build_connector_worker_meta() is None
 
 
+@pytest.mark.parametrize("sync", [False, True])
+def test_load_completion(sync: bool):
+    """Sync loads are submitted expedited and waited on, skip
+    finished_recving, and count as loads."""
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+
+    worker.start_kv_transfers(_load_metadata(11, sync=sync))
+
+    assert worker.worker is not None
+    worker.worker.submit_load.assert_called_once()
+    expedited = worker.worker.submit_load.call_args.kwargs.get("expedited", False)
+    assert expedited == sync
+    if sync:
+        worker.worker.wait.assert_called_once_with({11})
+    else:
+        worker.worker.wait.assert_not_called()
+
+    worker.worker.get_finished.return_value = [
+        TransferResult(job_id=11, success=True, transfer_size=64, transfer_time=0.5)
+    ]
+    assert worker.get_finished(set()) == (set(), set() if sync else {"req"})
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {11: 1}
+    assert meta.transfer_stats.load.bytes == 64
+    assert meta.transfer_stats.store.is_empty()
+
+
+def _kv_cache_config(num_groups: int) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[MagicMock() for _ in range(num_groups)],
+    )
+
+
+def _failed(job_id: int) -> list[TransferResult]:
+    return [TransferResult(job_id=job_id, success=False)]
+
+
+def test_failed_store_is_dropped_and_still_completes():
+    """A failed store is a future cache miss, not an error.
+
+    It must still be marked completed, or the scheduler's per-job pending
+    count never reaches zero, and marked failed so it is not published.
+    """
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.prepare_store_kv(_store_metadata(11))
+    worker.start_kv_transfers(_empty_metadata())
+    worker.worker.get_finished.return_value = _failed(11)
+
+    finished_sending, finished_recving = worker.get_finished(set())
+
+    assert finished_sending == set()
+    assert finished_recving == set()
+    assert worker.take_failed_recving() == set()
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {11: 1}
+    assert meta.failed_jobs == {11}
+
+
+def test_failed_load_fails_its_request():
+    """A failed load leaves undefined KV in its destination blocks.
+
+    The request is reported as finished, per the base contract, and as failed,
+    which the scheduler handles for any number of KV cache groups.
+    """
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.start_kv_transfers(_load_metadata(12))
+    worker.worker.get_finished.return_value = _failed(12)
+
+    _, finished_recving = worker.get_finished(set())
+
+    assert finished_recving == {"req"}
+    assert worker.take_failed_recving() == {"req"}
+    assert worker.take_failed_recving() == set()
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {12: 1}
+    assert meta.failed_jobs == {12}
+
+
+def test_failed_sync_load_raises():
+    """A sync load's request already ran on the KV it was meant to load."""
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.start_kv_transfers(_load_metadata(13, sync=True))
+    worker.worker.get_finished.return_value = _failed(13)
+
+    with pytest.raises(RuntimeError, match="sync load job 13 failed"):
+        worker.get_finished(set())
+
+
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,
@@ -306,9 +415,6 @@ def test_register_kv_caches(backend):
     run of the shared allocation starting at offset 0, so layer i of every group
     aliases the same bytes.
 
-    Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
-    the raw per-layer kv_caches registered by the connector.
-
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
     """
@@ -333,7 +439,7 @@ def test_register_kv_caches(backend):
     backend_cls = AttentionBackendEnum[backend].get_class()
     indexer_backend_cls = cast(type[AttentionBackend], DeepseekV32IndexerBackend)
 
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -406,14 +512,10 @@ def test_register_kv_caches(backend):
     ]
 
     kv_cache_groups = [
-        KVCacheGroupSpec(layer_names=attn_layer_names, kv_cache_spec=attn_spec),
-        KVCacheGroupSpec(layer_names=mla_layer_names, kv_cache_spec=mla_spec),
-        KVCacheGroupSpec(
-            layer_names=unaligned_mamba_layer_names, kv_cache_spec=unaligned_mamba_spec
-        ),
-        KVCacheGroupSpec(
-            layer_names=aligned_mamba_layer_names, kv_cache_spec=aligned_mamba_spec
-        ),
+        make_kv_cache_group(attn_layer_names, attn_spec),
+        make_kv_cache_group(mla_layer_names, mla_spec),
+        make_kv_cache_group(unaligned_mamba_layer_names, unaligned_mamba_spec),
+        make_kv_cache_group(aligned_mamba_layer_names, aligned_mamba_spec),
     ]
 
     attn_groups = [
@@ -525,7 +627,7 @@ def test_register_kv_caches(backend):
 
 
 def test_register_packed_kv_caches_skips_scratch_group():
-    attn_spec = FullAttentionSpec(
+    attn_spec = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
@@ -544,12 +646,11 @@ def test_register_packed_kv_caches_skips_scratch_group():
             )
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layers, attn_spec),
-            KVCacheGroupSpec(
+            make_kv_cache_group(layers, attn_spec),
+            make_kv_cache_group(
                 ["scratch"],
-                CircularBufferSpec(
-                    block_size=4, num_kv_heads=1, head_size=1, dtype=DTYPE
-                ),
+                AttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=DTYPE),
+                CircularBufferManager,
             ),
         ],
     )
@@ -567,11 +668,11 @@ def test_register_packed_kv_caches_skips_scratch_group():
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
 def test_register_kv_caches_uniform_type(backend):
-    """Test register_kv_caches with UniformTypeKVCacheSpecs.
+    """Test register_kv_caches with a group whose layer layouts differ.
 
     Two attention layers use the same backend but different num_kv_heads,
     giving them different per-layer page sizes. Each has its own
-    KVCacheTensor and are wrapped in a UniformTypeKVCacheSpecs group.
+    KVCacheTensor and they share one KV cache group.
     Verifies that each layer gets the correct tensor_idx and
     page_size_bytes in its block data ref.
     """
@@ -581,24 +682,19 @@ def test_register_kv_caches_uniform_type(backend):
 
     layer_a = "model.layers.0.self_attn"
     layer_b = "model.layers.1.self_attn"
-    spec_a = FullAttentionSpec(
+    spec_a = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
-    spec_b = FullAttentionSpec(
+    spec_b = AttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS * 2,
         head_size=HEAD_SIZE,
         dtype=DTYPE,
     )
     assert spec_a.page_size_bytes != spec_b.page_size_bytes
-
-    uniform_spec = UniformTypeKVCacheSpecs(
-        block_size=BLOCK_SIZE,
-        kv_cache_specs={layer_a: spec_a, layer_b: spec_b},
-    )
 
     # The group packs its two layers densely, one run each as their pages differ:
     # layer_a occupies the first page of every block, layer_b the rest.
@@ -621,10 +717,7 @@ def test_register_kv_caches_uniform_type(backend):
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=[layer_a, layer_b],
-                kv_cache_spec=uniform_spec,
-            )
+            make_kv_cache_group_from_specs({layer_a: spec_a, layer_b: spec_b})
         ],
     )
 

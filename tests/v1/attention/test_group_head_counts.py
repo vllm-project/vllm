@@ -8,12 +8,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionBackendImpl,
     CPUAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 requires_cpu = pytest.mark.skipif(
     not current_platform.is_cpu(), reason="CPU attention backend"
@@ -29,11 +32,12 @@ def _layers(layer_num_heads: list[int]):
     """Stand-in attention layers, one per head count, as one attention group."""
     return {
         f"layer_{i}": SimpleNamespace(
+            attn_type=AttentionType.DECODER,
             impl=MagicMock(
                 spec=CPUAttentionBackendImpl,
                 num_heads=num_heads,
                 sliding_window=None,
-            )
+            ),
         )
         for i, num_heads in enumerate(layer_num_heads)
     }
@@ -187,7 +191,7 @@ def test_cpu_builder_selects_native_group_for_single_request(
 
 
 def test_flash_attention_geometry_comes_from_the_group():
-    """FA3 must use group geometry for layers without an ``impl`` wrapper."""
+    """FA3 must use group geometry for layers without an `impl` wrapper."""
     layers = {f"layer_{i}": SimpleNamespace(num_heads=16) for i in range(2)}
     vllm_config = MagicMock()
     vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
@@ -233,3 +237,124 @@ def test_flash_attention_geometry_comes_from_the_group():
     assert builder.num_heads_q == 16
     assert builder.num_heads_kv == 2
     assert builder.headdim == 64
+
+
+def _triton_builder(
+    spec_num_kv_heads,
+    spec_head_size,
+    spec_head_size_v,
+    max_num_seqs=256,
+    capture_sizes=None,
+):
+    """Triton builder whose group geometry disagrees with the model-wide values."""
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
+
+    layers = {f"layer_{i}": SimpleNamespace(num_heads=16) for i in range(2)}
+    vllm_config = MagicMock()
+    vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
+    vllm_config.model_config.get_num_kv_heads.return_value = NUM_KV_HEADS
+    vllm_config.model_config.get_head_size.return_value = 128
+    vllm_config.model_config.rswa_window = None
+    vllm_config.speculative_config = None
+    vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+    if capture_sizes is None:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    else:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        vllm_config.compilation_config.cudagraph_capture_sizes = capture_sizes
+    kv_cache_spec = AttentionSpec(
+        block_size=16,
+        num_kv_heads=spec_num_kv_heads,
+        head_size=spec_head_size,
+        head_size_v=spec_head_size_v,
+        dtype=torch.bfloat16,
+    )
+
+    with patch(
+        "vllm.v1.attention.backends.utils.get_layers_from_vllm_config",
+        return_value=layers,
+    ):
+        return TritonAttentionMetadataBuilder(
+            kv_cache_spec=kv_cache_spec,
+            layer_names=list(layers),
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+        )
+
+
+def test_triton_geometry_comes_from_the_group():
+    """The 2D/3D threshold must follow the group's KV head count, not the model's."""
+    from vllm.v1.attention.backends.triton_attn import MIN_LAUNCH_GRID_SIZE_2D
+
+    builder = _triton_builder(
+        spec_num_kv_heads=2, spec_head_size=512, spec_head_size_v=512
+    )
+
+    assert builder.num_heads_kv == 2
+    assert builder.headdim == 512
+    assert builder.seq_threshold_3D == MIN_LAUNCH_GRID_SIZE_2D // 2
+
+
+def test_triton_threshold_snaps_before_the_max_num_seqs_cap():
+    """An off-grid max_num_seqs caps the scratch rows, not the snapped threshold."""
+    from vllm.v1.attention.backends.triton_attn import MIN_LAUNCH_GRID_SIZE_2D
+
+    builder = _triton_builder(
+        spec_num_kv_heads=2,
+        spec_head_size=512,
+        spec_head_size_v=512,
+        max_num_seqs=50,
+        capture_sizes=[1, 2, 4, *range(8, 104, 8)],
+    )
+
+    assert builder.seq_threshold_3D == MIN_LAUNCH_GRID_SIZE_2D // 2
+    assert builder.softmax_segm_max.shape[0] >= 50
+
+
+def test_triton_softmax_scratch_matches_the_kernel_stride():
+    """The scratch must match the kernel's stride, next_power_of_2(head_size)."""
+    from vllm.utils.math_utils import next_power_of_2
+
+    for head_size, head_size_v in ((192, 128), (128, 192), (256, 256)):
+        builder = _triton_builder(
+            spec_num_kv_heads=2,
+            spec_head_size=head_size,
+            spec_head_size_v=head_size_v,
+        )
+        assert builder.headdim == head_size
+        assert builder.softmax_segm_output.shape[-1] == next_power_of_2(head_size)
+
+
+@pytest.mark.parametrize("spec_kv_heads", [4, 40])
+def test_flashinfer_cudagraph_support_ignores_model_heads(monkeypatch, spec_kv_heads):
+    """A draft layer's KV heads need not divide the target's 24 query heads. Its
+    group keeps full CUDA graphs, as the target's own group does."""
+    pytest.importorskip("flashinfer")
+    import vllm.v1.attention.backends.flashinfer as backend
+
+    monkeypatch.setattr(backend, "_use_fa2_native_decode", lambda: False)
+    monkeypatch.setattr(backend, "force_use_trtllm_attention", lambda: None)
+    monkeypatch.setattr(backend, "supports_trtllm_attention", lambda **_: True)
+    monkeypatch.setattr(
+        backend,
+        "can_use_trtllm_attention",
+        lambda num_qo_heads, num_kv_heads, **_: num_qo_heads % num_kv_heads == 0,
+    )
+    monkeypatch.setattr(
+        backend.current_platform, "is_device_capability", lambda _: False
+    )
+    monkeypatch.setattr(
+        backend.current_platform, "is_device_capability_family", lambda f: f == 100
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(use_non_causal=False),
+        model_config=SimpleNamespace(
+            get_num_attention_heads=lambda _: 24, get_num_kv_heads=lambda _: 4
+        ),
+    )
+    spec = AttentionSpec(
+        block_size=16, num_kv_heads=spec_kv_heads, head_size=128, dtype=torch.bfloat16
+    )
+    support = backend.FlashInferMetadataBuilder.get_cudagraph_support(config, spec)
+    assert support == backend.AttentionCGSupport.UNIFORM_BATCH

@@ -7,7 +7,16 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, fields
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    NamedTuple,
+    NewType,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 import numpy as np
 import torch
@@ -90,6 +99,11 @@ TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 @dataclass
 class ReqContext:
+    """Per-request offloading state with optional token counts.
+
+    Counts are live until the scheduler finishes the request, then frozen.
+    """
+
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
@@ -104,6 +118,26 @@ class ReqContext:
     _offload_key_positions: dict[OffloadKey, int] = field(
         default_factory=dict, repr=False, init=False
     )
+
+    @property
+    def num_computed_tokens(self) -> int | None:
+        """Scheduler's computed token count, including in-flight work."""
+        return None
+
+    @property
+    def num_in_flight_tokens(self) -> int | None:
+        """Scheduled tokens whose output has not yet been processed."""
+        return None
+
+    @property
+    def num_prompt_tokens(self) -> int | None:
+        """Number of prompt tokens."""
+        return None
+
+    @property
+    def num_tokens(self) -> int | None:
+        """Number of prompt and output tokens, excluding speculative tokens."""
+        return None
 
     def set_state(self, val: Any) -> None:
         self._state[type(val)] = val
@@ -125,6 +159,16 @@ class LookupResult(Enum):
     HIT = auto()
     HIT_PENDING = auto()
     RETRY = auto()
+
+
+class StoreTrigger(Enum):
+    """Why the connector asks the manager to store the keys."""
+
+    # The chunks are complete. The eager store.
+    ON_COMPUTE = auto()
+    # The KV cache manager hands off a state block that is about to be reused.
+    # The source is short-lived, so the store cannot be postponed.
+    ON_HANDOFF = auto()
 
 
 class OffloadPolicy(Enum):
@@ -175,6 +219,8 @@ class OffloadingEvent:
     removal_expected: bool = False
     # Failed allocations release metadata without announcing a public eviction.
     metadata_only: bool = False
+    # Originating request context for a stored event.
+    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
 
 
 """
@@ -189,11 +235,6 @@ The class provides the following primitives:
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
         information required for performing the load.
-    touch() - marks the give blocks as recently used. Can be used
-        to track block's LRU. This function is separated from the
-        prepare_load function to allow setting block recency even
-        for blocks which do not need reading from the cache, such as
-        blocks that are cached by the GPU prefix cache.
     complete_load() - mark blocks which were previously prepared to be
         loaded as done loading. This is to re-allow their eviction.
     prepare_store() - prepare the given blocks to be written.
@@ -322,7 +363,7 @@ class OffloadingManager(ABC):
     ) -> CacheHitSource:
         """Return the cache tier that supplied a successful lookup.
 
-        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        This is queried only after `lookup` resolves to `HIT`. Composing
         managers can override it to retain the origin across asynchronous
         promotion into a primary tier. The default keeps out-of-tree managers
         compatible while making unknown provenance explicit.
@@ -351,17 +392,6 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark the given blocks as recently used.
-        This could in practice mean moving them to the end of an LRU list.
-
-        Args:
-            keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params).
-
-        """
-        return
-
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """Marks previous blocks that were prepared to load as done loading.
 
@@ -377,6 +407,8 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         """Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
@@ -385,6 +417,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: why the connector asks for the store.
 
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
@@ -399,6 +432,8 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
+        trigger: StoreTrigger,
         success: bool = True,
     ):
         """Marks blocks which were previously prepared to be stored, as stored.
@@ -409,6 +444,7 @@ class OffloadingManager(ABC):
         Args:
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
+            trigger: the trigger given to the matching prepare_store.
             success: whether the blocks were stored successfully.
 
         """
@@ -484,6 +520,11 @@ class OffloadingManager(ABC):
         """Evict all tracked blocks and reset internal state."""
         return
 
+    def on_reset_flushed(self) -> None:
+        """Called once workers have reported every job in flight at the last
+        reset_cache(); blocks it freed are no longer written by them."""
+        return
+
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None
@@ -498,7 +539,7 @@ class OffloadingManager(ABC):
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources.
 
-        The one exception to the rule that callers hold ``lock``: call this
+        The one exception to the rule that callers hold `lock`: call this
         without it. A manager with a background thread stops that thread here
         and may need the lock to do so.
         """
@@ -556,8 +597,10 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
 class CanonicalKVCacheTensor:
     """A canonicalized KV cache tensor whose first dimension is num_blocks.
 
-    With standardized layouts (RFC #42082) num_blocks is always the leading
-    logical dimension.
+    For attention backends where the raw tensor has num_blocks at a
+    non-leading physical dimension (e.g. FlashAttention's
+    (2, num_blocks, ...) layout), the tensor is split so that each
+    resulting CanonicalKVCacheTensor starts with (num_blocks, ...).
     """
 
     # The KV cache tensor with shape (num_blocks, ...)
@@ -642,6 +685,45 @@ class CanonicalKVCaches:
 
 
 @dataclass
+class DevicePointers:
+    """Pre-resolved device pointers for a transfer.
+
+    Flat arrays in canonical order:
+        for each group:
+            for each data_ref in group:
+                for each block in group:
+                    ptrs[i], sizes[i]
+    """
+
+    ptrs: np.ndarray  # uint64, device memory addresses
+    sizes: np.ndarray  # uint64, byte sizes per copy op
+    group_block_counts: tuple[int, ...]  # device blocks per group
+    group_data_ref_counts: tuple[int, ...]  # data_refs per group
+    block_indices: tuple[int, ...]  # logical block offset per group
+
+
+class DevicePointerGroupInfo(NamedTuple):
+    group_idx: int
+    group_size: int
+    n_data_refs: int
+    skip: int
+    n_chunks: int
+    dev_ptr_offset: int
+
+
+@runtime_checkable
+class IOCompletion(Protocol):
+    """Completion handle for an async I/O operation.
+
+    `concurrent.futures.Future` satisfies this unchanged.  Stream-ordered
+    backends can implement this with a CUDA event, avoiding a thread.
+    """
+
+    def done(self) -> bool: ...
+    def result(self, timeout: float | None = None) -> object: ...
+
+
+@dataclass
 class TransferResult:
     job_id: int
     success: bool
@@ -656,15 +738,23 @@ class OffloadingWorker(ABC):
 
     @abstractmethod
     def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        """Async GPU -> offloaded medium."""
+        """Async device -> offloaded medium."""
 
     @abstractmethod
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        device_ptrs: DevicePointers,
+        expedited: bool = False,
     ) -> bool:
-        """Async offloaded medium -> GPU."""
+        """Async offloaded medium -> device.
+
+        An expedited load is waited on within the step, so it should not queue
+        behind regular loads. Submission itself must still not block.
+        """
 
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...

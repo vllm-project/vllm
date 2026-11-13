@@ -35,6 +35,11 @@ TopLogprobsParam: TypeAlias = Annotated[
 
 MMPayload: TypeAlias = Literal["tensors", "none"]
 
+# Range of a request priority, in the body or the `X-Vllm-Priority` header:
+# int32, the type of `priority` in the Rust frontend.
+PRIORITY_MIN = -(2**31)
+PRIORITY_MAX = 2**31 - 1
+
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
 
@@ -182,7 +187,7 @@ def structured_outputs_from_response_format(
     structured_outputs: StructuredOutputsParams | None,
     response_format: AnyResponseFormat | None,
 ) -> StructuredOutputsParams | None:
-    """Apply ``response_format`` overrides to ``structured_outputs``."""
+    """Apply `response_format` overrides to `structured_outputs`."""
     if response_format is None or response_format.type == "text":
         return structured_outputs
 

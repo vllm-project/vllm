@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1-Flash mono decode layer: host side.
 
-One ``DSV41MonoLayer`` a TP rank runs every mono layer of a decode step (M <= 48
-rows): two persistent launches a layer (``layer``) from the layer's
+One `DSV41MonoLayer` a TP rank runs every mono layer of a decode step (M <= 48
+rows): two persistent launches a layer (`layer`) from the layer's
 inputs at the attention seam to its outputs at the next one -- the MoE's
 reduced output, the residual after the FFN seam and that seam's mixes -- with
 both TP all-reduces inside the kernels (symmetric peer memory). A layer whose
-attention vLLM runs (``ffn``) takes one launch from its unreduced attention
+attention vLLM runs (`ffn`) takes one launch from its unreduced attention
 output on. Every argument is a device pointer: the launches can be captured in a
 HIP graph. The kernels move their mailbox epoch on themselves; every rank runs
 the same launches, so the ranks' epochs agree.
@@ -22,6 +22,9 @@ from pathlib import Path
 
 import torch
 
+from vllm.logger import init_logger
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
+
 from .attention.front import FRONT_POINTS
 from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, WINDOW, Dims
 from .common.arch import GFX942
@@ -34,6 +37,7 @@ from .layer import (
     build_mono_ffn,
     build_mono_k1,
     build_mono_k2,
+    build_mono_k2k1,
     peer_half_bytes,
     scratch_bytes,
 )
@@ -42,8 +46,11 @@ from .stages.moe_shape import EXPERTS, TOPK
 
 __all__ = ["BLOCKS", "MAX_TOKENS", "AttnWeights", "DSV41MonoLayer", "MonoLayerWeights"]
 
+logger = init_logger(__name__)
+
 _LOG2E = 1.4426950408889634
 HC = 4
+MAX_ARG_BLOCKS = 1024
 
 
 def _ensure_writable_flydsl_cache() -> None:
@@ -58,7 +65,7 @@ def _ensure_writable_flydsl_cache() -> None:
 
 
 def _check_tensors(owner, tag: str, want: dict) -> None:
-    """Each named tensor of ``owner`` has the (shape, dtype) the kernels read,
+    """Each named tensor of `owner` has the (shape, dtype) the kernels read,
     contiguous: their buffer loads are unbounded, so a mismatch would read
     garbage rather than fault."""
     for name, (shape, dtype) in want.items():
@@ -108,7 +115,7 @@ class AttnWeights:
 
 @dataclass
 class MonoLayerWeights:
-    """One layer's tensors on this rank, in vLLM's loaded layout (``attn``:
+    """One layer's tensors on this rank, in vLLM's loaded layout (`attn`:
     None for a layer whose attention vLLM runs)."""
 
     attn: AttnWeights | None
@@ -132,7 +139,7 @@ class MonoLayerWeights:
     sw2_s: torch.Tensor
 
     def check(self, tp: int, experts: int = EXPERTS) -> None:
-        """The MoE's tensors: ``experts`` routed experts (384; the DSpark draft's
+        """The MoE's tensors: `experts` routed experts (384; the DSpark draft's
         128), TP-sharded intermediates (the routed one padded as the loader pads
         it), AITER's A8W4 layout, 32 x 32 E8M0 blocks for the shared expert."""
         d, fp4, e4m3, u8 = (
@@ -157,10 +164,10 @@ class MonoLayerWeights:
 
     def check_942(self, experts: int) -> None:
         """The MoE's tensors on gfx942, TP4, which are the copies that
-        ``weights942`` makes. The routed experts have their real intermediate
-        width without the loader's padding, as FP4 bytes in ``fp4_tile_major``
+        `weights942` makes. The routed experts have their real intermediate
+        width without the loader's padding, as FP4 bytes in `fp4_tile_major`
         order and E8M0 codes a row each. The shared expert is FNUZ bytes from
-        ``linear_copy``, with K padded to a multiple of 128. ``experts`` is 384
+        `linear_copy`, with K padded to a multiple of 128. `experts` is 384
         for the target layers and 128 for the DSpark draft layers."""
         d, u8 = MoeDims(4), torch.uint8
         inter, kp = d.inter_real, -(-d.sh_inter // 128) * 128
@@ -180,7 +187,7 @@ class MonoLayerWeights:
 
 
 class DSV41MonoLayer:
-    """The mono decode runner of one TP rank (``group``: its TP group, for the
+    """The mono decode runner of one TP rank (`group`: its TP group, for the
     peer-memory handle exchange; a gloo / CPU group)."""
 
     def __init__(
@@ -194,6 +201,8 @@ class DSV41MonoLayer:
         topk: int = TOPK,
         ug_groups: int = 2,
         swa_width: int = WINDOW,
+        generic: bool = False,
+        merge_widths: tuple[int, ...] = (),
     ):
         _ensure_writable_flydsl_cache()
         from .common.peer_memory import PeerBuffer
@@ -213,9 +222,10 @@ class DSV41MonoLayer:
         # rows) or the DSpark draft's, which has a runner of its own
         self.experts, self.topk, self.ug_groups = experts, topk, ug_groups
         self.swa_width = swa_width
+        self.generic = generic  # every build generic (``MonoBuild.generic``)
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
-        self._scratch: dict[int, torch.Tensor] = {}
+        self._scratch: dict[tuple[int, bool, bool], torch.Tensor] = {}
         # [epoch, -, -, -, a mark per CTA, the MoE's counters]
         self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=dev)
         self.q = torch.zeros(
@@ -238,6 +248,15 @@ class DSV41MonoLayer:
         self.post_a = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
         self.comb_a = torch.zeros(MAX_TOKENS, HC, HC, dtype=torch.float32, device=dev)
         self.pre_a = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
+        self.merge_widths = frozenset(merge_widths)
+        self._pending: dict | None = None
+        self._arg_blocks: dict[tuple, torch.Tensor] = {}
+        self._captured_blocks: set[tuple] = set()
+        self._k1_sets = [self._k1_set()]
+        self._out_sets: list[tuple[torch.Tensor, ...]] = []
+        if self.merge_widths:
+            self._k1_sets.append(self._k1_set(dev))
+            self._out_sets = [self._new_outs(MAX_TOKENS, dev) for _ in range(2)]
         self.peer = PeerBuffer(2 * peer_half_bytes(tp), group, rank, tp, dev)
         self.peer.bytes.zero_()
         self._qk_scale = (
@@ -246,12 +265,68 @@ class DSV41MonoLayer:
             .item()
         )
         self._kernels: dict = {}
+        self._builds: dict[tuple[int, int], MonoBuild] = {}
 
-    def scratch(self, tokens: int) -> torch.Tensor:
-        """Step width ``tokens``'s scratch: a width's layout has memory of its own
-        (``layer.scratch_layout``). Allocated at the width's first step, which is
-        eager: vLLM runs every graph's batch eagerly before capturing it."""
-        buf = self._scratch.get(tokens)
+    def _k1_set(self, dev=None) -> dict:
+        names: tuple[str, ...] = ("q", "kt", "klen", "res_mid", "post_a")
+        names += ("comb_a", "pre_a", "normed", "qr")
+        if dev is None:
+            return {n: getattr(self, n) for n in names}
+        return {n: torch.zeros_like(getattr(self, n)) for n in names}
+
+    def merged_kernel(self, key: MonoBuild, nkey: MonoBuild):
+        k = ("k2k1", key, nkey)
+        if k not in self._kernels:
+            self._kernels[k] = build_mono_k2k1(key, nkey)
+        return self._kernels[k]
+
+    def merges(self, tokens: int) -> bool:
+        if GFX942 or tokens not in self.merge_widths:
+            return False
+        return self.build(tokens, 0).tuned_front
+
+    @property
+    def pending(self) -> bool:
+        return self._pending is not None
+
+    def _arg_block(self, values: tuple) -> torch.Tensor | None:
+        blk = self._arg_blocks.get(values)
+        capturing = torch.cuda.is_current_stream_capturing()
+        if blk is None:
+            if capturing:
+                logger.warning_once(
+                    "DSv4.1 mono decode: a merged launch's arguments were first "
+                    "seen inside a CUDA graph capture; that boundary runs as "
+                    "two launches in the graph."
+                )
+                return None
+            if len(self._arg_blocks) >= MAX_ARG_BLOCKS:
+                self._arg_blocks = {
+                    k: v
+                    for k, v in self._arg_blocks.items()
+                    if k in self._captured_blocks
+                }
+            words = torch.tensor(values, dtype=torch.int64).pin_memory()
+            blk = words.to(self.device, non_blocking=True)
+            self._arg_blocks[values] = blk
+        if capturing:
+            self._captured_blocks.add(values)
+        return blk
+
+    def flush(self) -> None:
+        pend, self._pending = self._pending, None
+        if pend is not None:
+            _run_compiled(pend["k2"], *pend["args"], torch.cuda.current_stream())
+
+    def scratch(
+        self, tokens: int, tuned: bool = False, front: bool = False
+    ) -> torch.Tensor:
+        """Step width `tokens`'s scratch: a width's layout has memory of its own
+        (`layer.scratch_layout`), and so has a tuned build's. Allocated at the
+        width's first step, which is eager: vLLM runs every graph's batch
+        eagerly before capturing it."""
+        key = (tokens, tuned, front)
+        buf = self._scratch.get(key)
         if buf is None:
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
@@ -259,11 +334,13 @@ class DSV41MonoLayer:
                     "a CUDA graph capture"
                 )
             buf = torch.zeros(
-                scratch_bytes(tokens, self.tp, self.experts, self.topk, self.ug_groups),
+                scratch_bytes(
+                    tokens, self.tp, self.experts, self.topk, self.ug_groups, *key[1:]
+                ),
                 dtype=torch.uint8,
                 device=self.device,
             )
-            self._scratch[tokens] = buf
+            self._scratch[key] = buf
         return buf
 
     def first_pre_mix(self, tokens: int) -> torch.Tensor:
@@ -272,6 +349,21 @@ class DSV41MonoLayer:
     @staticmethod
     def supports(tokens: int) -> bool:
         return 1 <= tokens <= MAX_TOKENS
+
+    def build(self, tokens: int, ratio: int) -> MonoBuild:
+        key = (tokens, ratio)
+        if key not in self._builds:
+            self._builds[key] = MonoBuild(
+                tokens,
+                self.tp,
+                ratio,
+                experts=self.experts,
+                topk=self.topk,
+                ug_groups=self.ug_groups,
+                swa_width=self.swa_width,
+                generic=self.generic,
+            )
+        return self._builds[key]
 
     def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):
         key = (tokens, ratio, fold, index)
@@ -287,12 +379,13 @@ class DSV41MonoLayer:
                 topk=self.topk,
                 ug_groups=self.ug_groups,
                 swa_width=self.swa_width,
+                generic=self.generic,
             )
             # On gfx942, keylist.launch writes an index source's keys between
             # vLLM's indexer and K2 (forward), so its K2 is the one without
             # the key-table build.
             k2 = replace(b, index=False) if GFX942 else b
-            self._kernels[key] = (build_mono_k1(b), build_mono_k2(k2))
+            self._kernels[key] = (build_mono_k1(b), build_mono_k2(k2), b)
         return self._kernels[key]
 
     def ffn_kernel(self, tokens: int, experts: int, topk: int):
@@ -306,6 +399,7 @@ class DSV41MonoLayer:
                     timeline=self.timeline,
                     experts=experts,
                     topk=topk,
+                    generic=self.generic,
                 )
             )
         return self._kernels[key]
@@ -320,6 +414,19 @@ class DSV41MonoLayer:
             torch.empty(M, HC, HC, dtype=torch.float32, device=dev),
             torch.empty(M, HC, dtype=torch.float32, device=dev),
         )
+
+    @staticmethod
+    def _new_outs(M: int, dev: torch.device) -> tuple[torch.Tensor, ...]:
+        return (
+            torch.zeros(M, HIDDEN, dtype=torch.bfloat16, device=dev),
+            torch.zeros(M, HC, HIDDEN, dtype=torch.bfloat16, device=dev),
+            torch.zeros(M, HC, 1, dtype=torch.float32, device=dev),
+            torch.zeros(M, HC, HC, dtype=torch.float32, device=dev),
+            torch.zeros(M, HC, dtype=torch.float32, device=dev),
+        )
+
+    def _layer_outs(self, M: int, par: int) -> tuple[torch.Tensor, ...]:
+        return tuple(t[:M] for t in self._out_sets[par])
 
     def forward(
         self,
@@ -341,22 +448,28 @@ class DSV41MonoLayer:
         outs: tuple | None = None,
         fold: bool = True,
         select: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
+        defer: bool = False,
     ):
         """-> (out, residual, post_mix, res_mix, pre_mix): the layer's outputs
-        (``outs``: buffers to write them into). ``select(normed, qr)``: an index
-        source's top-k selection into ``topk_indices``, run between the
+        (`outs`: buffers to write them into). `select(normed, qr)`: an index
+        source's top-k selection into `topk_indices`, run between the
         kernels on K1's normed input and qr."""
         M = x.shape[0]
         assert self.supports(M), M
         a = w.attn
         assert a is not None
+        merges = self.merges(M)
+        assert not defer or merges
+        par = a.layer_id & 1 if merges else 0
+        kb = self._k1_sets[par]
         ratio = a.ratio
         index = select is not None
         assert not index or ratio
-        k1, k2 = self.kernels(M, ratio, fold, index)
+        k1, k2, b = self.kernels(M, ratio, fold, index)
+        scratch = self.scratch(M, b.tuned, b.tuned_front)
         st = torch.cuda.current_stream()
         if outs is None:
-            outs = self._outs(M, residual)
+            outs = self._layer_outs(M, par) if merges else self._outs(M, residual)
         out, res_out, post_out, comb_out, pre_out = outs
         for t_ in (x, residual, post_mix, res_mix, pre_mix, positions, slot_mapping):
             assert t_.is_contiguous()
@@ -386,20 +499,15 @@ class DSV41MonoLayer:
         else:
             comp, comp_stride, comp_block = self._dummy, 0, 1
             bt, bt_stride, topk = self._dummy, 0, self._dummy
-        k1(
-            residual.data_ptr(),
-            x.data_ptr(),
-            post_mix.data_ptr(),
-            res_mix.data_ptr(),
-            pre_mix.data_ptr(),
+        k1_own = (
             w.hc_attn_fn.data_ptr(),
             w.hc_attn_scale.data_ptr(),
             w.hc_attn_base.data_ptr(),
             w.attn_norm.data_ptr(),
-            self.res_mid.data_ptr(),
-            self.post_a.data_ptr(),
-            self.comb_a.data_ptr(),
-            self.pre_a.data_ptr(),
+            kb["res_mid"].data_ptr(),
+            kb["post_a"].data_ptr(),
+            kb["comb_a"].data_ptr(),
+            kb["pre_a"].data_ptr(),
             a.wqkv.data_ptr(),
             a.wqkv_scale.data_ptr(),
             a.q_norm.data_ptr(),
@@ -412,7 +520,7 @@ class DSV41MonoLayer:
             swa_cache.data_ptr(),
             swa_cache.stride(0),
             swa_block,
-            self.q.data_ptr(),
+            kb["q"].data_ptr(),
             swa_indices.data_ptr(),
             swa_lens.data_ptr(),
             comp_block,
@@ -420,17 +528,51 @@ class DSV41MonoLayer:
             bt_stride,
             topk.data_ptr(),
             token_to_req.data_ptr(),
-            self.kt.data_ptr(),
-            self.klen.data_ptr(),
-            self.normed.data_ptr(),
-            self.qr.data_ptr(),
-            self.scratch(M).data_ptr(),
-            self.epoch.data_ptr(),
+            kb["kt"].data_ptr(),
+            kb["klen"].data_ptr(),
+            kb["normed"].data_ptr(),
+            kb["qr"].data_ptr(),
             self.tl1.data_ptr() if self.timeline else 0,
-            stream=st,
         )
+        pend, self._pending = self._pending, None
+        ins = [t_.data_ptr() for t_ in (x, residual, post_mix, res_mix, pre_mix)]
+        blk = None
+        if (
+            pend is not None
+            and fold
+            and merges
+            and (pend["M"], pend["ins"]) == (M, ins)
+        ):
+            blk = self._arg_block(
+                k1_own
+                + tuple(ins[1:2] + ins[0:1] + ins[2:])
+                + (scratch.data_ptr(), self.peer.local)
+            )
+        if pend is not None and blk is None:
+            self._pending = pend
+            self.flush()
+            pend = None
+        if pend is not None:
+            assert blk is not None
+            _run_compiled(
+                self.merged_kernel(pend["key"], b), *pend["args"], blk.data_ptr(), st
+            )
+        else:
+            _run_compiled(
+                k1,
+                residual.data_ptr(),
+                x.data_ptr(),
+                post_mix.data_ptr(),
+                res_mix.data_ptr(),
+                pre_mix.data_ptr(),
+                *k1_own[:32],
+                scratch.data_ptr(),
+                self.epoch.data_ptr(),
+                self.tl1.data_ptr() if self.timeline else 0,
+                st,
+            )
         if select is not None:
-            select(self.normed[:M], self.qr[:M])
+            select(kb["normed"][:M], kb["qr"][:M])
             if GFX942:
                 # K1 of an index source writes no keys. The gfx942 K2 has no
                 # key-table build, so the keys of the top-k that select just
@@ -438,8 +580,8 @@ class DSV41MonoLayer:
                 from .keylist import launch as keylist_launch
 
                 keylist_launch(
-                    self.kt,
-                    self.klen,
+                    kb["kt"],
+                    kb["klen"],
                     slot_mapping,
                     positions,
                     swa_indices,
@@ -450,16 +592,16 @@ class DSV41MonoLayer:
                     comp_block_table=bt,
                     comp_block=comp_block,
                 )
-        k2(
-            self.q.data_ptr(),
+        k2_args = (
+            kb["q"].data_ptr(),
             swa_cache.data_ptr(),
             swa_cache.stride(0),
             swa_block,
             comp.data_ptr(),
             comp_stride,
             comp_block,
-            self.kt.data_ptr(),
-            self.klen.data_ptr(),
+            kb["kt"].data_ptr(),
+            kb["klen"].data_ptr(),
             slot_mapping.data_ptr(),
             swa_indices.data_ptr(),
             swa_lens.data_ptr(),
@@ -476,10 +618,10 @@ class DSV41MonoLayer:
             a.wo_b.data_ptr(),
             a.wo_b_scale.data_ptr(),
             self._zero_rec.data_ptr(),
-            self.res_mid.data_ptr(),
-            self.post_a.data_ptr(),
-            self.comb_a.data_ptr(),
-            self.pre_a.data_ptr(),
+            kb["res_mid"].data_ptr(),
+            kb["post_a"].data_ptr(),
+            kb["comb_a"].data_ptr(),
+            kb["pre_a"].data_ptr(),
             w.hc_ffn_fn.data_ptr(),
             w.hc_ffn_scale.data_ptr(),
             w.hc_ffn_base.data_ptr(),
@@ -499,14 +641,18 @@ class DSV41MonoLayer:
             w.sw2.data_ptr(),
             w.sw2_s.data_ptr(),
             out.data_ptr(),
-            self.scratch(M).data_ptr(),
+            scratch.data_ptr(),
             self.peer.local,
             self.peer.addresses.data_ptr(),
             self.rank,
             self.epoch.data_ptr(),
             self.tl2.data_ptr() if self.timeline else 0,
-            stream=st,
         )
+        if defer:
+            outp = [t_.data_ptr() for t_ in (out, res_out, post_out, comb_out, pre_out)]
+            self._pending = {"k2": k2, "key": b, "M": M, "args": k2_args, "ins": outp}
+        else:
+            _run_compiled(k2, *k2_args, st)
         return outs
 
     def ffn(
@@ -523,17 +669,19 @@ class DSV41MonoLayer:
         """-> (out, residual, post_mix, res_mix, pre_mix) of a layer whose
         attention vLLM ran: the attention's TP reduce, the FFN seam, the MoE and
         its all-reduce in one launch. The routed expert count is the gate
-        weight's row count, and ``topk`` is the layer's picks a token: 384 / 6
+        weight's row count, and `topk` is the layer's picks a token: 384 / 6
         for the target, 128 / 3 for a DSpark draft layer."""
         M = part.shape[0]
         assert self.supports(M), M
+        self.flush()
         for t_ in (part, residual, post_mix, res_mix, pre_mix):
             assert t_.is_contiguous()
         assert part.dtype == residual.dtype == torch.bfloat16
         if outs is None:
             outs = self._outs(M, residual)
         out, res_out, post_out, comb_out, pre_out = outs
-        self.ffn_kernel(M, w.gate_w.shape[0], topk)(
+        _run_compiled(
+            self.ffn_kernel(M, w.gate_w.shape[0], topk),
             part.data_ptr(),
             residual.data_ptr(),
             post_mix.data_ptr(),
@@ -564,6 +712,6 @@ class DSV41MonoLayer:
             self.rank,
             self.epoch.data_ptr(),
             self.tl3.data_ptr() if self.timeline else 0,
-            stream=torch.cuda.current_stream(),
+            torch.cuda.current_stream(),
         )
         return outs

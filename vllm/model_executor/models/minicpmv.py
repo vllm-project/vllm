@@ -786,7 +786,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         num_video_tokens_total = self.get_max_video_frame_tokens() * num_frames
         return num_video_tokens_total
 
@@ -806,15 +808,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self.get_max_video_frames(seq_len - max_image_tokens)
+        max_total_frames = self.get_max_video_frames(seq_len)
         max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
+            max_total_frames // max(num_videos, 1), _MAX_FRAMES_PER_VIDEO
         )
 
         return max(max_frames_per_video, 1)
@@ -854,7 +852,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         image_width, image_height = self.info.get_image_size_with_most_features()
         video_width, video_height = self.info.get_video_frame_size_with_most_features()
         num_video_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, num_videos
         )
 
         video_overrides = mm_options.get("video")
@@ -1483,7 +1481,7 @@ def _mcpmv_normalize_tgt_sizes(
     tgt_sizes: torch.Tensor | list[torch.Tensor],
     slice_counts: list[int],
 ) -> torch.Tensor:
-    """Normalize tgt_sizes to shape ``(total_slices, 2)``."""
+    """Normalize tgt_sizes to shape `(total_slices, 2)`."""
     if isinstance(tgt_sizes, list):
         if not tgt_sizes:
             tgt_sizes = torch.zeros((0, 2), dtype=torch.long)
@@ -1516,7 +1514,7 @@ def _mcpmv_pack_flat_pixels(
     patch_size: int,
     tgt_sizes: torch.Tensor,
 ) -> torch.Tensor:
-    """Pack slice tensors into a fixed ``(max_num_slices, 3*H*W)`` buffer."""
+    """Pack slice tensors into a fixed `(max_num_slices, 3*H*W)` buffer."""
     import torch.nn.functional as F
 
     flat_dim = 3 * pixel_height * pixel_width
@@ -1579,7 +1577,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         return th * tw
 
     def _mcpmv_patch_grid_keys(self) -> tuple[tuple[int, int], ...]:
-        """Ordered patch-grid keys ``(nb_h, nb_w)`` for the capture axis."""
+        """Ordered patch-grid keys `(nb_h, nb_w)` for the capture axis."""
         max_side = int(self.vpm.embeddings.image_size) // int(
             self.vpm.embeddings.patch_size
         )
@@ -1662,9 +1660,7 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         return int(
             info.get_num_frames_with_most_features(
                 seq_len=self.vllm_config.model_config.max_model_len,
-                mm_counts={
-                    "video": self.multimodal_config.get_limit_per_prompt("video")
-                },
+                num_videos=self.multimodal_config.get_limit_per_prompt("video"),
             )
         )
 
@@ -1911,8 +1907,8 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        """Eager encoder path; returns ``(total_tokens, embed_dim)`` like
-        ``encoder_cudagraph_forward``.
+        """Eager encoder path; returns `(total_tokens, embed_dim)` like
+        `encoder_cudagraph_forward`.
         """
         mm_kwargs_no_flat = {
             k: v

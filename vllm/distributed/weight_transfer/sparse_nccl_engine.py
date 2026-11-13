@@ -30,7 +30,8 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
-    worker_init_payload,
+    build_worker_init_payload,
+    run_trainer_rendezvous,
     worker_init_process_group,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -84,7 +85,7 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     dtype_names: list[str]
     shapes: list[list[int]]
     num_updates_list: list[int]
-    """Number of sparse entries to receive for each parameter in ``names``."""
+    """Number of sparse entries to receive for each parameter in `names`."""
 
     def __post_init__(self) -> None:
         num_params = len(self.names)
@@ -138,14 +139,23 @@ class SparseNCCLWeightTransferEngine(
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
+        # after the group forms, so the error reaches the trainer; destroy the
+        # group, so a retry starts clean
+        if init_info.use_load_plan:
+            self.shutdown()
+            raise ValueError("use_load_plan is supported by the dense NCCL backend")
 
     def start_weight_update(self) -> None:
         """No-op: sparse patches are applied in place, no layerwise reload."""
         pass
 
     def finish_weight_update(self) -> None:
-        """No-op: sparse patches are applied in place, no layerwise reload."""
-        pass
+        """No layerwise reload; rebuild model-level derived state once."""
+        from vllm.model_executor.model_loader.weight_utils import (
+            finalize_model_weights,
+        )
+
+        finalize_model_weights(self.model)
 
     def receive_weights(self, update_info: SparseNCCLWeightTransferUpdateInfo) -> None:
         """Receive sparse flat-index patches from the trainer and apply them."""
@@ -230,6 +240,10 @@ class SparseNCCLTrainerWeightTransferEngine(
         self.model_update_group: PyNcclCommunicator | None = None
 
     @classmethod
+    def _build_worker_init_payload(cls, init_info: SparseNCCLTrainerInitInfo) -> dict:
+        return build_worker_init_payload(init_info)
+
+    @classmethod
     def trainer_init(
         cls,
         init_info: SparseNCCLTrainerInitInfo,
@@ -241,28 +255,17 @@ class SparseNCCLTrainerWeightTransferEngine(
         if not engine.is_sender:
             return engine
 
-        # Workers sit at rank_offset 1, after the single trainer sender rank 0.
-        # Sparse transfers are never packed, so the worker keeps the unpacked
-        # defaults on its init info.
-        worker_init_info = NCCLWeightTransferInitInfo(
-            master_address=init_info.master_address,
-            master_port=init_info.master_port,
-            rank_offset=1,
-            world_size=init_info.world_size,
-        )
-
-        # The inference workers block inside init_weight_transfer_engine waiting
-        # for the NCCL rendezvous, so we kick that off on a side thread while we
-        # open the trainer endpoint (rank 0); both sides must rendezvous together.
-        with ThreadPoolExecutor(max_workers=1) as exe:
-            future = exe.submit(
-                engine.client.init_weight_transfer_engine,
-                worker_init_payload(worker_init_info),
+        payload = cls._build_worker_init_payload(init_info)
+        try:
+            run_trainer_rendezvous(
+                init_worker=lambda: engine.client.init_weight_transfer_engine(payload),
+                init_trainer=lambda: setattr(
+                    engine, "model_update_group", open_trainer_endpoint(init_info)
+                ),
             )
-            # Open the trainer endpoint as NCCL rank 0 on the current device
-            # (the init info satisfies the helper's rendezvous protocol).
-            engine.model_update_group = open_trainer_endpoint(init_info)
-            future.result()  # surface any inference-side init error
+        except BaseException:
+            engine.shutdown()  # init failed (e.g. the workers refused): free the group
+            raise
 
         return engine
 
@@ -368,8 +371,8 @@ class SparseNCCLTrainerWeightTransferEngine(
         than relying on same-stream ordering. See
         `NCCLTrainerWeightTransferEngine._post_send_sync` for why there is no
         cross-rank barrier."""
-        if torch.cuda.is_available():
-            torch.cuda.current_stream().synchronize()
+        if torch.accelerator.is_available():
+            torch.accelerator.current_stream().synchronize()
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:

@@ -27,13 +27,13 @@ from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
-from ..late_chunking import (
+from ..scoring.io_processor import JinaRankingIOProcessorMixin
+from ..token_embed.late_chunking import (
     attach_late_chunking_metadata,
     build_late_chunking_metadata,
     prepare_late_chunking_input,
 )
-from ..scoring.io_processor import JinaRankingIOProcessorMixin
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     ChunkedEmbeddingMetadata,
@@ -384,7 +384,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
     @staticmethod
     def _load_task_instructions(hf_config: Any) -> dict[str, str] | None:
-        """Extract ``task_instructions`` from the HF model config."""
+        """Extract `task_instructions` from the HF model config."""
         ti = getattr(hf_config, "task_instructions", None)
         if not isinstance(ti, dict) or not ti:
             return None
@@ -395,7 +395,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         model: str | Any,
         revision: str | None,
     ) -> dict[str, str] | None:
-        """Load ``task_instructions`` from ``config_sentence_transformers.json``."""
+        """Load `task_instructions` from `config_sentence_transformers.json`."""
         from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
         try:
@@ -458,7 +458,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
     ) -> None:
         """Raise if any output exceeds *max_tokens_check* tokens.
 
-        Used to enforce ``truncate=NONE`` with an explicit ``max_tokens``:
+        Used to enforce `truncate=NONE` with an explicit `max_tokens`:
         the pipeline runs without truncation and we reject afterwards.
         """
         if max_tokens_check is None:
@@ -476,7 +476,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _resolve_cohere_truncation(
         request: CohereEmbedRequest,
     ) -> tuple[int | None, Literal["left", "right"] | None]:
-        """Return ``(truncate_prompt_tokens, truncation_side)``."""
+        """Return `(truncate_prompt_tokens, truncation_side)`."""
         if request.truncate == "NONE":
             return None, None
         if request.truncate == "START":
@@ -497,13 +497,13 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _get_request_factory_cohere_online(
         self, ctx: PoolingServeContext
     ) -> Sequence[AnyRenderParam]:
-        """Convert a ``CohereEmbedRequest`` into engine prompts.
+        """Convert a `CohereEmbedRequest` into engine prompts.
 
         If a model has a chat template the task instruction are rendered
         as a system prompt. Otherwise they are just prepended to the input text.
 
         Images and mixed inputs are always batch-rendered through the chat
-        template in one ``render_chat`` call.
+        template in one `render_chat` call.
         """
         request = ctx.request
         assert isinstance(request, CohereEmbedRequest)
@@ -660,7 +660,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         return [prefix + t for t in texts]
 
     def _get_task_instruction_prefix(self, input_type: str | None) -> str | None:
-        """Return the task-instruction prefix for *input_type*, or ``None``."""
+        """Return the task-instruction prefix for *input_type*, or `None`."""
         if not self.task_instructions or input_type is None:
             return None
         return self.task_instructions.get(input_type) or None
@@ -674,6 +674,25 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
 class TokenEmbedIOProcessor(PoolingIOProcessor):
     name = "token_embed"
+
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
+        requests = super().get_request_factory_online(ctx)
+        if ctx.pooling_params.late_chunking_params is not None:
+            for request in requests:
+                slot = LateChunkingSlot()
+                ctx.late_chunking.append(slot)
+                request["late_chunking"] = slot
+        return requests
+
+    def post_process_online(self, ctx: PoolingServeContext):
+        if ctx.late_chunking:
+            for output, slot in zip(
+                ctx.final_res_batch, ctx.late_chunking, strict=True
+            ):
+                assert slot.metadata is not None
+                attach_late_chunking_metadata(output, slot.metadata)
 
     def get_request_factory_offline(
         self, ctx: AnyOfflineInputsContext

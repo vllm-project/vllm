@@ -195,11 +195,11 @@ def get_compressed_slot_mapping(
     dcp_world_size: int = 1,
     cp_interleave: int = 1,
 ) -> torch.Tensor:
-    """Slot mapping for writing the compressed states of ``num_tokens`` tokens.
+    """Slot mapping for writing the compressed states of `num_tokens` tokens.
 
-    Every ``compress_ratio`` tokens share one compressed state, written by the
+    Every `compress_ratio` tokens share one compressed state, written by the
     last of them: that token maps to the state's slot, the others to PAD. A
-    token whose own ``slot_mapping`` entry is PAD maps to PAD too: SWA bounded
+    token whose own `slot_mapping` entry is PAD maps to PAD too: SWA bounded
     replay recomputes tokens whose KV is cached already, and their compressed
     states must not be rewritten either.
     """
