@@ -91,19 +91,33 @@ def _build_with_device_query_start_loc(
 
 
 @pytest.mark.parametrize(
-    "device_query_start_loc",
+    "device_query_start_loc, expected_spec_tokens",
     [
         # Adaptive verification trimmed the verify row 4 -> 2 (1 admitted draft
         # + 1 bonus); the prefill row keeps its scheduled window. Device total
         # (130) < host total (132).
         pytest.param(
-            torch.tensor([0, 2, 130], dtype=torch.int32), id="adaptive-trimmed"
+            torch.tensor([0, 2, 130], dtype=torch.int32),
+            2,
+            id="adaptive-trimmed",
         ),
         # Control: device == host plan; must keep building as before.
-        pytest.param(torch.tensor([0, 4, 132], dtype=torch.int32), id="no-trim"),
+        pytest.param(torch.tensor([0, 4, 132], dtype=torch.int32), 4, id="no-trim"),
     ],
 )
-def test_gdn_adaptive_trimmed_mixed_batch_builds(device_query_start_loc):
+def test_gdn_adaptive_trimmed_mixed_batch_builds(
+    device_query_start_loc, expected_spec_tokens
+):
     meta = _build_with_device_query_start_loc(device_query_start_loc)
     assert meta.num_spec_decodes == 1
     assert meta.num_prefills == 1
+    # The mixed branch repeats the per-request spec mask by `query_lens` and splits
+    # the token order with a stable argsort. Both outputs are sized by the DEVICE
+    # token total, so they pin the value the builder must not take from the host
+    # plan: the verify row owns the first `expected_spec_tokens` slots and the
+    # prefill row the rest, up to query_start_loc[-1].
+    device_total = int(device_query_start_loc[-1])
+    assert meta.spec_token_indx.tolist() == list(range(expected_spec_tokens))
+    assert meta.non_spec_token_indx.tolist() == list(
+        range(expected_spec_tokens, device_total)
+    )
