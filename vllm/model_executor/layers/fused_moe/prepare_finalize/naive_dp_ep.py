@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -98,6 +99,10 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         # hidden_states and writes the gathered result back to the context so
         # experts can use the per-rank-local mapping.
         self._lora_context = None
+        # Set from the experts' mxfp8_dispatch_predicate(): given the gathered
+        # token count and top-k, whether to quantize the deferred BF16 input
+        # here and gather FP8 rows and E8M0 scales instead.
+        self.mxfp8_dispatch_predicate: Callable[[int, int], bool] | None = None
 
     def set_lora_context(self, ctx) -> None:
         self._lora_context = ctx
@@ -189,9 +194,19 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
-            a1, quant_config, defer_input_quant
+        mxfp8 = (
+            self._maybe_mxfp8_quantize(a1, topk_ids.size(1))
+            if defer_input_quant
+            else None
         )
+        scales: list[torch.Tensor] | None
+        if mxfp8 is not None:
+            a1q, a1q_scale_orig = mxfp8
+            scales = [a1q_scale_orig.view(torch.uint8)]
+        else:
+            a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
+                a1, quant_config, defer_input_quant
+            )
 
         # When LoRA is active, dispatch the per-token LoRA id along with
         # hidden_states so every rank receives the correct mapping for the
@@ -236,7 +251,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 dispatched_lora_mapping = gathered_extras.pop()
                 assert lora_ctx is not None
                 lora_ctx.local_token_lora_mapping = dispatched_lora_mapping
-            if scales is not None:
+            if mxfp8 is not None:
+                assert a1q_scale_orig is not None
+                (a1q_scale,) = gathered_extras
+                a1q_scale = a1q_scale.view(a1q_scale_orig.dtype)
+            elif scales is not None:
                 a1q_scale = _unwrap_scale_and_prepare_for_moe(
                     gathered_extras, quant_config
                 )
@@ -244,6 +263,38 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 a1q_scale = a1q_scale_orig
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
+
+    def _maybe_mxfp8_quantize(
+        self, a1: torch.Tensor, topk: int
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """MXFP8 rows and E8M0 scales of `a1`, quantized as the experts would
+        quantize the gathered batch, or None to dispatch `a1` as is.
+
+        Eager DP steps only: a captured graph or a sequence-parallel
+        dispatch (whose gathered size is not the DP total) keeps BF16.
+        """
+        if (
+            self.mxfp8_dispatch_predicate is None
+            or self.is_sequence_parallel
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        dp_metadata = get_forward_context().dp_metadata
+        if dp_metadata is None:
+            return None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        if sizes is None or not self.mxfp8_dispatch_predicate(sum(sizes), topk):
+            return None
+        from aiter import dtypes
+        from aiter.ops.quant import per_1x32_mx_quant_hip
+
+        return per_1x32_mx_quant_hip(
+            a1,
+            None,
+            quant_dtype=dtypes.fp8,
+            scale_type=dtypes.fp8_e8m0,
+            shuffle=False,
+        )
 
     def finalize(
         self,

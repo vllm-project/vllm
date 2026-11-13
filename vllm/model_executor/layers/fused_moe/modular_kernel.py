@@ -947,6 +947,13 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         padding return the unpadded size."""
         return hidden_dim
 
+    def mxfp8_dispatch_predicate(self) -> Callable[[int, int], bool] | None:
+        """Given the gathered token count and top-k, whether a dispatch that
+        defers input quantization may pass these experts MXFP8 rows with
+        unswizzled E8M0 scales instead of BF16, or None if they never accept
+        that."""
+        return None
+
     @abstractmethod
     def workspace_shapes(
         self,
@@ -1210,6 +1217,10 @@ class FusedMoEKernelModularImpl:
             and hasattr(prepare_finalize, "defer_globalize")
         ):
             prepare_finalize.defer_globalize = True
+        if hasattr(prepare_finalize, "mxfp8_dispatch_predicate"):
+            prepare_finalize.mxfp8_dispatch_predicate = (
+                fused_experts.mxfp8_dispatch_predicate()
+            )
         self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
