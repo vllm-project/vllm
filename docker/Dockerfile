@@ -1224,7 +1224,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # The installs above may move packages the KV connector layer relied on.
 RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
         && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-        python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt; \
+        python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt \
+        && python3 -c "import torch, lmcache.cuda_ops"; \
     fi
 
 # enable fast downloads from hf (for testing)
@@ -1301,6 +1302,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
+        # LMCache wheels do not pin torch at runtime, so a wheel built against
+        # another torch installs fine and only fails here.
+        python3 -c "import torch, lmcache.cuda_ops"; \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
         # The CI image does the same via requirements/test/kv_connectors_cuda.in.
