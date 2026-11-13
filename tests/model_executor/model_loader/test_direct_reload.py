@@ -76,6 +76,17 @@ def test_output_padding_reload_keeps_unpadded_parameters_and_addresses(dist_init
     }
 
 
+@pytest.mark.parametrize("bias", [True, False])
+def test_output_padding_flagged_for_reload_fill(dist_init, bias):
+    padded = MergedColumnParallelLinear(4, [4, 4], bias=bias, padding_size=3)
+    plain = MergedColumnParallelLinear(4, [4, 4], bias=bias)
+    flagged = {
+        n for n, p in padded.named_parameters() if getattr(p, "fill_on_reload", 0)
+    }
+    assert flagged == ({"weight", "bias"} if bias else {"weight"})
+    assert not any(hasattr(p, "fill_on_reload") for p in plain.parameters())
+
+
 class _Method(QuantizeMethodBase):
     """Post-load processing given as a function of the layer; counts runs."""
 
@@ -525,6 +536,73 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     ckpt = model.proj.weight._ckpt
     replace_parameter(model.proj, "weight", model.mimo.weight)
     assert model.proj.weight._ckpt == ckpt
+
+
+def test_replace_parameter_keeps_only_the_target_reload_fill_flag():
+    model = _cold_start(_checkpoint())
+    model.mimo.weight.fill_on_reload = True
+    replace_parameter(model.proj, "weight", model.mimo.weight)
+    assert not hasattr(model.proj.weight, "fill_on_reload")
+    weight = model.mimo.weight
+    replace_parameter(model.mimo, "weight", weight.data.t().contiguous())  # kept
+    assert model.mimo.weight is weight and weight.fill_on_reload
+
+
+def _with_padded_rows(monkeypatch, fn=_pack, flag=True):
+    """Adds `rows.weight`: (6, 4), zero at construction; its loader writes
+    rows [:4] only."""
+    monkeypatch.setitem(_SHAPES, "rows.weight", ((4, 4), torch.float32))
+    monkeypatch.setitem(_PWAL, "rows", fn)
+    init = _ToyModel.__init__
+
+    def with_rows(self):
+        init(self)
+        weight = torch.nn.Parameter(torch.zeros(6, 4), requires_grad=False)
+        weight.weight_loader = lambda param, w: param.data[:4].copy_(w)
+        if flag:
+            weight.fill_on_reload = True
+        self.rows.weight = weight
+
+    monkeypatch.setattr(_ToyModel, "__init__", with_rows)
+
+
+@pytest.mark.parametrize("dummy", [False, True], ids=["real", "dummy"])
+def test_flagged_padding_zeroed_at_begin(monkeypatch, dummy):
+    # (e) at runtime: viewed back, the padding rows hold transposed bytes,
+    # which the loader skips
+    _with_padded_rows(monkeypatch)
+    if dummy:  # `load_format=dummy`: no loader runs
+        with _DEVICE:
+            model = _ToyModel()
+        for param in model.parameters():
+            param.data.fill_(7)
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    else:
+        model = _cold_start(_checkpoint())
+    assert model.rows.weight.fill_on_reload  # survives `replace_parameter`
+    ptrs = _ptrs(_state(model))
+    _reload(model, _checkpoint(1.01))
+    _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+    assert _ptrs(_state(model)) == ptrs
+
+
+def test_unflagged_padding_keeps_stale_bytes(monkeypatch):
+    _with_padded_rows(monkeypatch, flag=False)
+    model = _cold_start(_checkpoint())
+    _reload(model, _checkpoint(1.01))
+    expected = _state(_cold_start(_checkpoint(1.01)))
+    assert not torch.equal(_state(model)["rows.weight"][1], expected["rows.weight"][1])
+
+
+def test_flagged_tensor_shared_from_another_model_not_zeroed(monkeypatch):
+    # a draft sharing a target layer: the target owns its flagged weight
+    _with_padded_rows(monkeypatch, fn=None)
+    target = _cold_start(_checkpoint())
+    draft = _cold_start(_checkpoint())
+    draft.rows = target.rows
+    before = _state(target)
+    begin_direct_reload(draft)
+    _assert_same(_state(target), before, addresses=True)
 
 
 def _config(**overrides) -> SimpleNamespace:

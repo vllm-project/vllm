@@ -807,17 +807,17 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
-        for name in self.padding_fill_params():
-            param = getattr(self, name)
-            self._zero_output_padding(param)
-            set_weight_attrs(
-                param, {"weight_loader_numel": param[:-padding_size].numel()}
-            )
-
-    def padding_fill_params(self) -> list[str]:
-        if not self.padding_size:
-            return []
-        return ["weight"] + (["bias"] if self.bias is not None else [])
+        if padding_size:
+            for param in (self.weight, self.bias):
+                if param is None:
+                    continue
+                self._zero_output_padding(param)
+                set_weight_attrs(
+                    param, {"weight_loader_numel": param[:-padding_size].numel()}
+                )
+                # The loader zeroes the padding too, but a load plan skips loader
+                # fills: direct reload zero-fills it at begin instead.
+                param.fill_on_reload = True
 
     def _zero_output_padding(self, param: torch.Tensor) -> None:
         if self.padding_size and (param is self.weight or param is self.bias):

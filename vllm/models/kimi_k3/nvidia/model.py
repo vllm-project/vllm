@@ -554,6 +554,7 @@ class KimiMoE(nn.Module):
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
+                intermediate_size_unpadded=moe_intermediate_size,
                 activation=config.hidden_act,
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
@@ -577,19 +578,11 @@ class KimiMoE(nn.Module):
                 runner_cls=LatentMoERunner if self.use_latent_moe else None,
             )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
-            w13_weight = getattr(self.experts, "w13_weight", None)
-            if w13_weight is None:
-                w13_weight = getattr(self.experts, "w13_weight_packed", None)
-            w2_weight = getattr(self.experts, "w2_weight", None)
-            if w2_weight is None:
-                w2_weight = getattr(self.experts, "w2_weight_packed", None)
-            if w13_weight is not None:
-                w13_weight.data.zero_()
-            if w2_weight is not None:
-                w2_weight.data.zero_()
-            self.experts.moe_config.intermediate_size_per_partition_unpadded = (
-                moe_intermediate_size // self.tp_size
-            )
+            # Zero what a direct reload zero-fills at begin (weights and scales,
+            # whatever their names), so a cold start matches a reload.
+            for param in self.experts.routed_experts.parameters(recurse=False):
+                if getattr(param, "fill_on_reload", False):
+                    param.data.zero_()
 
     def _maybe_overlap_router_and_down_proj(
         self, hidden_states: torch.Tensor
