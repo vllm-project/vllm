@@ -331,6 +331,7 @@ class OpenAIServingModels:
 
                     try:
                         await self.engine_client.add_lora(lora_request)
+                        lora_request.load_inplace = False
                         self.lora_requests[lora_name] = lora_request
                         logger.info(
                             "Resolved and loaded LoRA adapter '%s' using %s",
