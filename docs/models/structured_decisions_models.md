@@ -425,9 +425,11 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   state is flattened to indented text, not JSON. A chat template that
   rejects the conversation folds the ask into the last user turn, or
   renders the whole chat as one user message.
-- Labels run `A` to `Z`, then `AA` on, each one token right after
-  `Answer:`, so a choice can have up to 255 options and a score up to 255
-  levels. Every label must be one token, or serving is disabled.
+- Labels run `A` to `Z`, then two-letter labels from `AA`, skipping any
+  that is not one token right after `Answer:`. A choice can have up to 255
+  options and a score up to 255 levels. With the checkpoint's tokenizer,
+  26 two-letter labels are skipped and the 255th label is `JU`. A
+  tokenizer with fewer than 255 such labels disables serving.
 - This is a hybrid model (GDN linear attention). With prefix caching, vLLM
   prefills any prompt over one 1088-token mamba block as a single chunk,
   and that chunk must replay a piecewise CUDA graph: the default capture
@@ -442,16 +444,18 @@ vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
   labels, so every question, up to 255 options, is one read.
 - A request reads the state and the question a second time when the
   single-pass request fits the marker's `twice_max_tokens` bound, 3000 by
-  default, as the checkpoint was trained. The bound is on the read-once
+  default, as in the reference server. The bound is on the read-once
   size, which counts the state once, and a request at exactly the bound
   still doubles; the doubled prompt meters both copies, so
   `usage.input_tokens` is about twice the logical size under the bound.
   Setting the bound to 0 serves every request single-pass:
   `--hf-overrides '{"knowline_config": {"twice_max_tokens": 0}}'`. That
-  layout is out of distribution for a checkpoint trained with re-reading,
-  so answers and probabilities shift. A marker that is not a dict, or a
-  bound that is negative, boolean or not an integer, disables the
-  decisions endpoints, with the reason logged. `--hf-overrides` replaces
+  is Gen1's prompt layout: Gen1.5 has Gen1's weights, and its model card
+  says of reading twice that "Nothing was trained". Answers and
+  probabilities then differ from the reference server's. A marker that is
+  not a dict, a bound that is negative, boolean or not an integer, or the
+  marker on an architecture other than Qwen3.5 disables the decisions
+  endpoints, with the reason logged. `--hf-overrides` replaces
   the whole `knowline_config` field; it does not merge with one the
   checkpoint already ships.
 - Answers keep the trained shapes: a `noul` answers the probability of true

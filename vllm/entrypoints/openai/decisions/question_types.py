@@ -117,7 +117,7 @@ def build_question(
 ) -> Question:
     if not qid:
         raise StructuredDecisionError("question ids must be non-empty")
-    available = question_types or QUESTION_TYPES
+    available = QUESTION_TYPES if question_types is None else question_types
     try:
         qtype = available[type_name]
     except KeyError:

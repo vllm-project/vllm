@@ -68,6 +68,7 @@ from vllm.entrypoints.serve.exception_handling.register import (
     init_exception_handler,
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.inputs import mm_input
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import PlaceholderRange
@@ -1667,6 +1668,61 @@ def test_knowline_selection():
                 hf_config=SimpleNamespace(knowline_config={}),
             ),
             generate,
+        )
+    # The marker on another architecture would serve a format that model
+    # was never trained on.
+    with pytest.raises(ValueError, match="not LlamaForCausalLM"):
+        select_read_strategy(
+            SimpleNamespace(
+                architecture="LlamaForCausalLM",
+                logprobs_mode="raw_logprobs",
+                hf_config=SimpleNamespace(knowline_config={}),
+            ),
+            generate,
+        )
+
+
+def test_question_types_mapping_is_not_replaced_when_empty():
+    with pytest.raises(StructuredDecisionError, match="supported: \\[\\]"):
+        build_question("q", "noul", None, None, 255, question_types={})
+
+
+@pytest.mark.asyncio
+async def test_knowline_read_rejects_labels_without_a_finite_logprob():
+    strategy, engine = knowline_strategy(KnowLineMockTok())
+    generate = engine.generate
+
+    async def no_finite_logprob(prompt, params, request_id, **kwargs):
+        async for output in generate(prompt, params, request_id, **kwargs):
+            for logprob in output.outputs[0].logprobs[0].values():
+                logprob.logprob = -math.inf
+            yield output
+
+    engine.generate = no_finite_logprob
+    with pytest.raises(GenerationError, match="no finite label logprob"):
+        await strategy.read(
+            [knowline_question("noul", None)],
+            None,
+            "state",
+            request_id="r",
+            chat_template_kwargs=None,
+            lora_request=None,
+            priority=0,
+        )
+
+
+def test_knowline_template_must_render_text():
+    class TokenTok(KnowLineMockTok):
+        def apply_chat_template(self, msgs, **kw):
+            return [1, 2, 3]
+
+    with pytest.raises(StructuredDecisionError, match="must render text"):
+        knowline.render_prompts(
+            TokenTok(),
+            "state",
+            [knowline_question("noul", None)],
+            template_kwargs=KNOWLINE_KW,
+            twice_max_tokens=3000,
         )
 
 
