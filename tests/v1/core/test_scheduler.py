@@ -96,6 +96,22 @@ from .utils import (
 pytestmark = pytest.mark.cpu_test
 
 
+def _start_decoding(scheduler: Scheduler) -> None:
+    (request,) = create_requests(num_requests=1, num_tokens=8)
+    scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     ("async_scheduling", "outcome", "num_speculative_tokens"),
     [

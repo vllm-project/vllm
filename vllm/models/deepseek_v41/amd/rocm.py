@@ -547,7 +547,10 @@ class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64, 128]
+        # The ROCm sparse MLA and V4.1 indexer paths both consume 128-token
+        # manager blocks. Do not inherit the SM90-specific 64-token choice:
+        # block-major mixed-page layouts cannot split an interleaved block.
+        return [128]
 
     @staticmethod
     def get_builder_cls() -> type[DeepseekV41ROCMAiterMLASparseMetadataBuilder]:

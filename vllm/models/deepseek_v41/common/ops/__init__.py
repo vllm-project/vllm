@@ -16,6 +16,9 @@ from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
     _fp32x2_to_fp4x2 as _fp32x2_to_fp4x2,  # re-export for .indexer_k_store
 )
+from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
+    _fp32x2_to_fp4x2_rocm as _fp32x2_to_fp4x2_rocm,
+)
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
 )
