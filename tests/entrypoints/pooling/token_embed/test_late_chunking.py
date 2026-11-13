@@ -4,6 +4,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import mock
 from unittest.mock import Mock
 
@@ -80,7 +81,7 @@ def late_chunk_processor():
         }
     ]
     processor.chat_template = None
-    processor.chat_template_content_format = "auto"
+    cast(Any, processor).chat_template_content_format = "auto"
     processor.trust_request_chat_template = True
     return processor
 

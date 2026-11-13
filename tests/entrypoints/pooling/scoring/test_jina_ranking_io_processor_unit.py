@@ -3,6 +3,7 @@
 """Unit tests for JinaRankingIOProcessor request building."""
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
@@ -28,7 +29,7 @@ def offline_processor_and_context():
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024)
     )
     proc.chat_template = None
-    proc.chat_template_content_format = "auto"
+    cast(Any, proc).chat_template_content_format = "auto"
     proc.trust_request_chat_template = True
     ctx = OfflineScoringInputsContext(
         pooling_task="token_embed",
