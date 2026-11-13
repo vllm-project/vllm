@@ -167,10 +167,10 @@ def get_beam_search_eos_token_ids(
     generation_config: dict[str, Any], eos_token_id: int | None
 ) -> set[int]:
     """Return the token ids that end generation: the tokenizer EOS plus the
-    generation config's ``eos_token_id``.
+    generation config's `eos_token_id`.
 
     This uses a separate SamplingParams so the params sent to the engine keep
-    their own ``stop_token_ids`` and are validated as before.
+    their own `stop_token_ids` and are validated as before.
     """
     params = SamplingParams()
     params.update_from_generation_config(generation_config, eos_token_id)

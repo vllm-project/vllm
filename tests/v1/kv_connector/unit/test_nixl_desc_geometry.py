@@ -23,6 +23,10 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    make_kv_cache_group,
+    make_kv_cache_group_from_specs,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
@@ -33,16 +37,22 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.models.kimi_k3.common.dsa_cache import KimiK3IndexerBackend
+from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     SparseCacheRole,
     create_kv_cache_views,
 )
@@ -158,7 +168,7 @@ def _make_packed_mla_view_worker(
             offset=offset,
         )
         tensors.append(tensor)
-        groups.append(KVCacheGroupSpec([name], spec))
+        groups.append(make_kv_cache_group([name], spec))
         (caches[name],) = create_kv_cache_views(
             raw, spec, num_blocks, KVCacheLayout.BLHNC, tensor
         )
@@ -331,26 +341,6 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("remote_block_size", [8, 32])
-def test_packed_mla_rejects_unequal_block_sizes_before_peer_registration(
-    remote_block_size,
-):
-    producer, _ = _make_packed_mla_view_worker({"L0": (0, 128)}, 128, pp_size=2)
-    metadata = msgspec.msgpack.decode(
-        producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
-    )
-    metadata.engine_id = "remote"
-    metadata.block_size = remote_block_size
-    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
-        producer.add_remote_agent(metadata)
-    assert len(producer.nixl_wrapper.dlists) == 1  # Only the local list exists.
-    assert producer.tp_mappings == {}
-    assert "remote" not in producer.dst_num_blocks
-    with pytest.raises(KeyError):
-        producer.transfer_topo.get_engine_info("remote")
-
-
-@pytest.mark.cpu_test
 def test_local_descriptors_follow_each_region_pool_capacity():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -374,8 +364,8 @@ def _register_overlaid_mla_worker(
 ):
     """Register two MLA layers overlaid on one allocation.
 
-    ``tail_bytes`` leaves spare bytes past the last block, the way an allocation
-    rounded up to a page boundary does. Clearing ``page_covers_view`` narrows
+    `tail_bytes` leaves spare bytes past the last block, the way an allocation
+    rounded up to a page boundary does. Clearing `page_covers_view` narrows
     each layer's view below its page, leaving the block interior non-contiguous.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
@@ -387,7 +377,6 @@ def _register_overlaid_mla_worker(
     )
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MLAAttentionSpec,
     )
@@ -408,7 +397,7 @@ def _register_overlaid_mla_worker(
         "layer.0": backing[:, :view_size],
         "layer.1": backing[:, :view_size],
     }
-    groups = [KVCacheGroupSpec([layer_name], spec) for layer_name in caches]
+    groups = [make_kv_cache_group([layer_name], spec) for layer_name in caches]
 
     worker_cls = NixlPushConnectorWorker if push_pp else NixlConnectorWorker
     worker = object.__new__(worker_cls)
@@ -580,11 +569,12 @@ def _make_mla_hybrid_worker(
     num_logical_blocks,
     worker_cls=None,
     kda_only_tensor=False,
+    mamba=True,
 ):
     """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
-    layout.
+    layout, or a pure MLA one without `mamba`.
 
-    ``kda_only_tensor`` adds a third layer to the first KDA group in a tensor
+    `kda_only_tensor` adds a third layer to the first KDA group in a tensor
     no other group uses, as when a model has more SSM than MLA layers."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
@@ -595,7 +585,6 @@ def _make_mla_hybrid_worker(
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MambaSpec,
         MLAAttentionSpec,
@@ -622,6 +611,7 @@ def _make_mla_hybrid_worker(
     layer_names = {
         prefix: [f"{prefix}.{i}" for i in range(num_layers)]
         for prefix, num_layers in (("mla", 2), ("kda_a", num_tensors), ("kda_b", 2))
+        if mamba or prefix == "mla"
     }
     kv_cache_config = KVCacheConfig(
         num_blocks=num_logical_blocks,
@@ -635,9 +625,8 @@ def _make_mla_hybrid_worker(
             for names in layer_names.values()
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(layer_names["mla"], mla_spec),
-            KVCacheGroupSpec(layer_names["kda_a"], kda_spec),
-            KVCacheGroupSpec(layer_names["kda_b"], kda_spec),
+            make_kv_cache_group(names, mla_spec if prefix == "mla" else kda_spec)
+            for prefix, names in layer_names.items()
         ],
     )
 
@@ -757,22 +746,33 @@ def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
 
 
 @pytest.mark.cpu_test
-def test_nixl_keeps_packed_sparse_mla_manager_block():
+@pytest.mark.parametrize(
+    ("indexer_backend", "tokens_per_state"),
+    [
+        # GLM-5.3-Flash: a compressed kpool indexer.
+        (Glm5NextIndexerBackend, 4),
+        # Kimi-K3.1: a token indexer, written at kernel slots.
+        (KimiK3IndexerBackend, 1),
+    ],
+)
+def test_nixl_keeps_packed_sparse_mla_manager_block(indexer_backend, tokens_per_state):
     """Like the worker, NIXL keeps packed sparse MLA + indexer manager blocks."""
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
     from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
-    from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
-    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
     specs = {
         "mla": MLAAttentionSpec(
             1152, num_kv_heads=1, head_size=512, dtype=torch.bfloat16
         ),
         "indexer": MLAAttentionSpec(
-            1152, num_kv_heads=1, head_size=128, dtype=torch.uint8, tokens_per_state=4
+            1152,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.uint8,
+            tokens_per_state=tokens_per_state,
         ),
     }
-    backends = {"mla": FlashMLASparseBackend, "indexer": Glm5NextIndexerBackend}
+    backends = {"mla": FlashMLASparseBackend, "indexer": indexer_backend}
     layers = {
         name: MagicMock(spec=AttentionLayerBase, **{"get_attn_backend.return_value": b})
         for name, b in backends.items()
@@ -787,7 +787,7 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
         compilation_config=SimpleNamespace(static_forward_context=layers),
     )
     worker.kv_cache_config = KVCacheConfig(
-        2, [], [KVCacheGroupSpec(list(specs), UniformTypeKVCacheSpecs(1152, specs))]
+        2, [], [make_kv_cache_group_from_specs(specs)]
     )
 
     worker._sync_block_size_with_kernel()
@@ -814,7 +814,7 @@ def test_nixl_compressed_kernel_split(layout, kernel_block_size, raises):
     spec = MLAAttentionSpec(
         384, num_kv_heads=1, head_size=128, dtype=torch.uint8, tokens_per_state=8
     )
-    kv_cache_config = KVCacheConfig(2, [], [KVCacheGroupSpec(["summary"], spec)])
+    kv_cache_config = KVCacheConfig(2, [], [make_kv_cache_group(["summary"], spec)])
     vllm_config = create_vllm_config(block_size=384)
     vllm_config.cache_config.kv_cache_layout = layout.name
     vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
@@ -908,7 +908,7 @@ def _assert_local_writes_within(worker, owned_ranges):
     assert nixl.xfers, "no transfers were posted"
     violations = []
     total_descs = 0
-    for op, local_handle, local_ids, _, remote_ids in nixl.xfers:
+    for _, local_handle, local_ids, _, remote_ids in nixl.xfers:
         assert len(local_ids) == len(remote_ids)
         desc_arr = nixl.dlists[local_handle]
         for i in local_ids:
@@ -966,6 +966,7 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
             "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": 2,
+            "remote_num_tokens": 16,
         },
     )
     meta = metadata.reqs_to_recv["req-b"]
@@ -982,6 +983,48 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
     # rank 1 carries only its SSM shard.
     assert len(worker.nixl_wrapper.xfers) == 2
     assert total > 0
+
+
+@pytest.mark.cpu_test
+def test_hetero_ppl_pull_without_remote_num_tokens_fails():
+    """Without remote_num_tokens D cannot pair blocks across block sizes by
+    token, so the pull fails instead of reading mismatched blocks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    worker = _make_mla_hybrid_worker(
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=12,
+        remote_ssm_sizes=(24, 32),
+    )
+    _register_remote_agents(worker, meta_r, 2)
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req-b",
+        local_block_ids=([2, 5], [1], [7]),
+        kv_transfer_params={
+            "remote_block_ids": [[1, 4], [5], [2]],
+            "remote_engine_id": "remote-engine",
+            "remote_request_id": "prefill-req-b",
+            "remote_host": "remote-host",
+            "remote_port": 1234,
+            "tp_size": 2,
+        },
+    )
+    meta = metadata.reqs_to_recv["req-b"]
+    worker._recving_metadata["req-b"] = meta
+
+    worker._read_blocks_for_req("req-b", meta)
+
+    assert not worker.nixl_wrapper.xfers
+    assert worker.get_transfer_results().failed_recving == {"req-b"}
 
 
 @pytest.mark.cpu_test
@@ -1044,12 +1087,21 @@ def _resolve(
 
 
 def _run_hetero_case(
-    local_block, kernel, remote_block, num_tokens, tp_size=2, remote_kernel=None
+    local_block,
+    kernel,
+    remote_block,
+    num_tokens,
+    tp_size=2,
+    remote_kernel=None,
+    mamba=True,
+    cached=0,
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
-    ``remote_kernel`` defaults to the local kernel block size; a smaller
-    value additionally exercises block_size_ratio > 1.
+    `remote_kernel` defaults to the local kernel block size; a smaller
+    value additionally exercises block_size_ratio > 1. Without `mamba` the
+    model is pure MLA, whose local prefix hit of `cached` blocks is not
+    pulled.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
@@ -1059,14 +1111,15 @@ def _run_hetero_case(
     # Transfer unit: the remote kernel block when it divides the local one.
     unit = math.gcd(kernel, remote_kernel)
     remote_ppl = remote_block // remote_kernel
-    matched = num_tokens - 1  # mamba N-1 rule
-    n_local = -(-num_tokens // local_block)
+    matched = num_tokens - 1 if mamba else num_tokens  # mamba N-1 rule
+    n_local = -(-matched // local_block)  # D allocates for the pulled tokens
     n_remote = -(-matched // remote_block)
 
     worker = _make_mla_hybrid_worker(
         local_block_size=local_block,
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
+        mamba=mamba,
     )
     # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
     # shards of each.
@@ -1082,8 +1135,12 @@ def _run_hetero_case(
     # Sparse ids so neighbors exist between the request's blocks.
     local_attn = [2 * i + 1 for i in range(n_local)]
     remote_attn = [2 * i + 2 for i in range(n_remote)]
-    local_ids = (local_attn, [0], [2 * n_local + 2])
-    remote_ids = [remote_attn, [1], [0]]
+    if mamba:
+        local_ids: tuple[list[int], ...] = (local_attn, [0], [2 * n_local + 2])
+        remote_ids = [remote_attn, [1], [0]]
+    else:
+        local_ids = (local_attn[cached:],)
+        remote_ids = [remote_attn]
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -1096,6 +1153,7 @@ def _run_hetero_case(
             "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": tp_size,
+            "remote_num_tokens": matched,
         },
     )
     meta = metadata.reqs_to_recv["req-b"]
@@ -1124,7 +1182,7 @@ def _run_hetero_case(
     desc_page = worker.block_len_per_layer[0] * unit // kernel
     meta_r_num_blocks_bytes = (meta_r.num_blocks // remote_ppl) * remote_unified
     covered_tokens = set()
-    for op, lh, lids, rh, rids in nixl.xfers:
+    for _, lh, lids, rh, rids in nixl.xfers:
         larr, rarr = nixl.dlists[lh], nixl.dlists[rh]
         for li, ri in zip(lids, rids):
             lreg, lkind, ltok = _resolve(
@@ -1166,7 +1224,7 @@ def _run_hetero_case(
 
     # Invariant 3: full coverage of the matched tokens, at the finest
     # transfer granularity.
-    needed = {t for t in range(0, matched - matched % unit, unit)}
+    needed = set(range(cached * local_block, matched - matched % unit, unit))
     missing = needed - covered_tokens
     assert not missing, (
         f"tokens never transferred: {sorted(missing)[:8]} "
@@ -1180,7 +1238,7 @@ def _run_hetero_case(
     # those blocks must be either written by the transfer or zeroed by the
     # receive post-process. Stale bytes surface as mid-response garbage
     # once decode grows into the untransferred tail.
-    for op, lh, lids, rh, rids in nixl.xfers:
+    for _, lh, lids, _, _ in nixl.xfers:
         larr = nixl.dlists[lh]
         for li in lids:
             addr, length, _ = (int(x) for x in larr[int(li)])
@@ -1193,7 +1251,7 @@ def _run_hetero_case(
     assert "req-b" in done_recving
     n_excluded = -(-matched // local_block)
     stale = []
-    for b in local_attn[:n_excluded]:
+    for b in local_attn[cached:n_excluded]:
         for region, t in enumerate(worker._test_tensors):
             page = t[b * local_unified : (b + 1) * local_unified]
             n_stale = int((page == 0xAA).sum())
@@ -1209,21 +1267,26 @@ def _run_hetero_case(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "local_block,remote_block",
+    "local_block,remote_block,mamba",
     [
-        (12, 8),  # ppl 3 vs 2
-        (36, 8),  # ppl 9 vs 2 (large ppl asymmetry, scaled)
-        (24, 4),  # ppl 6 vs 1
-        (16, 24),  # remote larger than local (D_TP > P_TP direction)
+        (12, 8, True),  # ppl 3 vs 2
+        (36, 8, True),  # ppl 9 vs 2 (large ppl asymmetry, scaled)
+        (24, 4, True),  # ppl 6 vs 1
+        (16, 24, True),  # remote larger than local (D_TP > P_TP direction)
+        (16, 24, False),  # pure MLA
     ],
 )
 @pytest.mark.parametrize("num_tokens", list(range(2, 40)))
-def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens):
+def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens, mamba):
     """Sweep prompt lengths across block-boundary residues for several
     hetero-ppl geometries; assert neighbor-safety, token alignment, and
     coverage of every transferred kernel block."""
     _run_hetero_case(
-        local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
+        local_block,
+        kernel=4,
+        remote_block=remote_block,
+        num_tokens=num_tokens,
+        mamba=mamba,
     )
 
 
@@ -1278,19 +1341,22 @@ def test_hetero_block_split_is_declined(worker_cls, local_block, remote_block):
     # (8), the remote logical block (8) and the local logical block (24).
     [2, 5, 8, 9, 13, 16, 17, 21, 24, 25, 29, 32, 33, 41, 48, 49],
 )
-def test_hetero_ppl_with_block_size_ratio(num_tokens):
+@pytest.mark.parametrize("mamba,cached", [(True, 0), (False, 2)])
+def test_hetero_ppl_with_block_size_ratio(num_tokens, mamba, cached):
     """Both hetero regimes at once: kernel blocks differ (local 8 / remote
     4, block_size_ratio=2) *and* physical_blocks_per_logical differs (3 vs
     2). The transfer is clipped at remote sub-block granularity by the
-    pairing and front-trimmed by _apply_prefix_caching, so the
-    untransferred tail can span both a partial block and whole blocks —
-    the case each of the two former zeroing paths handled only half of."""
+    pairing, so the untransferred tail can span both a partial block and
+    whole blocks — the case each of the two former zeroing paths handled
+    only half of."""
     _run_hetero_case(
         local_block=24,
         kernel=8,
         remote_block=8,
         remote_kernel=4,
-        num_tokens=num_tokens,
+        num_tokens=num_tokens + cached * 24,
+        mamba=mamba,
+        cached=cached,
     )
 
 
@@ -1364,11 +1430,83 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
         worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
 
 
+@pytest.mark.cpu_test
+def test_dcp_rejects_different_logical_block_sizes():
+    worker = _make_mla_hybrid_worker(
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8, mamba=False
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=12,
+        remote_ssm_sizes=(24, 32),
+    )
+    with pytest.raises(NotImplementedError, match="matching P/D logical block sizes"):
+        worker.add_remote_agent(
+            meta_r, remote_tp_rank=0, remote_tp_size=2, remote_dcp_size=2
+        )
+
+
+@pytest.mark.cpu_test
+def test_dcp_pull_with_block_size_ratio_writes_stay_within_request_blocks():
+    """DCP pairs blocks by position, which needs equal logical block sizes
+    but not equal kernel blocks: with remote kernel blocks half the local
+    ones, every local block is read as remote-sized sub-blocks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    worker = _make_mla_hybrid_worker(
+        local_block_size=8, kernel_block_size=8, num_logical_blocks=8, mamba=False
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=8,
+        remote_ssm_sizes=(24, 32),
+    )
+    worker._remote_agents[meta_r.engine_id] = {
+        (0, rank): worker.add_remote_agent(
+            meta_r, remote_tp_rank=rank, remote_tp_size=2, remote_dcp_size=2
+        )
+        for rank in range(2)
+    }
+
+    local_ids = ([2, 5],)
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req-b",
+        local_block_ids=local_ids,
+        kv_transfer_params={
+            "remote_block_ids": [[1, 4]],
+            "remote_engine_id": "remote-engine",
+            "remote_request_id": "prefill-req-b",
+            "remote_host": "remote-host",
+            "remote_port": 1234,
+            "tp_size": 2,
+            "dcp_size": 2,
+        },
+        local_num_computed_blocks=(0,),
+    )
+    meta = metadata.reqs_to_recv["req-b"]
+    meta.local_physical_block_ids = worker._logical_to_kernel_block_ids(
+        meta.local_block_ids, worker._physical_blocks_per_logical_kv_block
+    )
+    worker._recving_metadata["req-b"] = meta
+
+    worker._read_blocks_for_req("req-b", meta)
+
+    _assert_local_writes_within(worker, _owned_byte_ranges(worker, local_ids))
+    assert worker.get_transfer_results().failed_recving == set()
+
+
 def _make_csa_linear_ple_worker(
     scratch_aliases: str = "compressed", ple_page_size: int = 256
 ):
-    """``scratch_aliases`` selects which pages the compressor ring overlays;
-    ``ple_page_size`` widens the PLE page beyond the page it shares a region
+    """`scratch_aliases` selects which pages the compressor ring overlays;
+    `ple_page_size` widens the PLE page beyond the page it shares a region
     with (block-outer layout: both start at byte 0 of the block)."""
     from unittest.mock import MagicMock
 
@@ -1379,18 +1517,15 @@ def _make_csa_linear_ple_worker(
     )
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
-        CircularBufferSpec,
-        FullAttentionSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MambaSpec,
         MLAAttentionSpec,
-        UniformTypeKVCacheSpecs,
     )
 
     main_kv_specs = {
-        f"main_kv.{index}": FullAttentionSpec(
+        f"main_kv.{index}": AttentionSpec(
             block_size=4,
             num_kv_heads=1,
             head_size=16,
@@ -1409,7 +1544,7 @@ def _make_csa_linear_ple_worker(
         for index in range(2)
     }
     compressor_state_specs = {
-        f"compressor_state.{index}": CircularBufferSpec(
+        f"compressor_state.{index}": AttentionSpec(
             block_size=2,
             num_kv_heads=1,
             head_size=32,
@@ -1441,10 +1576,8 @@ def _make_csa_linear_ple_worker(
         )
     }
 
-    def group(specs):
-        uniform = UniformTypeKVCacheSpecs.from_specs(specs)
-        assert uniform is not None
-        return KVCacheGroupSpec(list(specs), uniform)
+    def group(specs, manager_cls=None):
+        return make_kv_cache_group_from_specs(specs, manager_cls)
 
     tensor_regions: tuple[tuple[str, ...], ...]
     if scratch_aliases == "compressed":
@@ -1484,9 +1617,9 @@ def _make_csa_linear_ple_worker(
         ],
         kv_cache_groups=[
             group(compressed_sparse_specs),
-            group(compressor_state_specs),
-            KVCacheGroupSpec(["mamba.sharded"], sharded_mamba_spec),
-            KVCacheGroupSpec(["mamba.ple"], ple_spec),
+            group(compressor_state_specs, CircularBufferManager),
+            make_kv_cache_group(["mamba.sharded"], sharded_mamba_spec),
+            make_kv_cache_group(["mamba.ple"], ple_spec),
         ],
     )
 
@@ -1724,12 +1857,10 @@ def _make_ring_worker():
         NixlConnectorWorker,
     )
     from vllm.v1.kv_cache_interface import (
-        CircularBufferSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MLAAttentionSpec,
-        UniformTypeKVCacheSpecs,
     )
 
     paged_specs = {
@@ -1739,7 +1870,7 @@ def _make_ring_worker():
         for index in range(2)
     }
     ring_specs = {
-        f"ring.{index}": CircularBufferSpec(
+        f"ring.{index}": AttentionSpec(
             block_size=6,
             num_kv_heads=1,
             head_size=32,
@@ -1749,10 +1880,8 @@ def _make_ring_worker():
         for index in range(2)
     }
 
-    def group(specs):
-        uniform = UniformTypeKVCacheSpecs.from_specs(specs)
-        assert uniform is not None
-        return KVCacheGroupSpec(list(specs), uniform)
+    def group(specs, manager_cls=None):
+        return make_kv_cache_group_from_specs(specs, manager_cls)
 
     # Both rings overlay the second paged region, so the scratch group must
     # address only that region while the paged group spans both. The rings'
@@ -1773,7 +1902,7 @@ def _make_ring_worker():
             for region_index, layer_names in enumerate(tensor_regions)
             for layer_name in layer_names
         ],
-        kv_cache_groups=[group(paged_specs), group(ring_specs)],
+        kv_cache_groups=[group(paged_specs), group(ring_specs, CircularBufferManager)],
     )
 
     vllm_config = create_vllm_config(block_size=4)
@@ -1848,12 +1977,10 @@ def _make_shared_base_ring_worker():
         NixlConnectorWorker,
     )
     from vllm.v1.kv_cache_interface import (
-        CircularBufferSpec,
+        AttentionSpec,
         KVCacheConfig,
-        KVCacheGroupSpec,
         KVCacheTensor,
         MLAAttentionSpec,
-        UniformTypeKVCacheSpecs,
     )
 
     num_blocks = 2
@@ -1866,7 +1993,7 @@ def _make_shared_base_ring_worker():
     swa_spec = MLAAttentionSpec(
         block_size=4, num_kv_heads=1, head_size=32, dtype=torch.uint8
     )
-    ring_spec = CircularBufferSpec(
+    ring_spec = AttentionSpec(
         block_size=8,
         num_kv_heads=1,
         head_size=32,
@@ -1874,10 +2001,8 @@ def _make_shared_base_ring_worker():
         dtype=torch.uint8,
     )
 
-    def group(specs):
-        uniform = UniformTypeKVCacheSpecs.from_specs(specs)
-        assert uniform is not None
-        return KVCacheGroupSpec(list(specs), uniform)
+    def group(specs, manager_cls=None):
+        return make_kv_cache_group_from_specs(specs, manager_cls)
 
     swa_name, ring_name = "layers.0.swa", "layers.2.compressor"
     kv_cache_config = KVCacheConfig(
@@ -1893,7 +2018,7 @@ def _make_shared_base_ring_worker():
         ],
         kv_cache_groups=[
             group({swa_name: swa_spec}),
-            group({ring_name: ring_spec}),
+            group({ring_name: ring_spec}, CircularBufferManager),
         ],
     )
 
@@ -1953,6 +2078,45 @@ def test_shared_base_regions_with_distinct_block_lens_stay_separate():
     )
 
 
+@pytest.mark.parametrize(
+    ("layout", "transfer_block_size"),
+    [(KVCacheLayout.BLHNC, 1024), (KVCacheLayout.LBNHC, 64)],
+)
+def test_packed_blocks_transfer_whole_for_small_kernel_block_drafts(
+    monkeypatch, layout, transfer_block_size
+):
+    """A Kimi-K3.1 DSpark draft's FLASHINFER_MLA takes 32/64-token kernel
+    blocks. In a packed layout it views them inside each block, so transfers
+    keep whole blocks; otherwise its block size splits them."""
+    from vllm.distributed.kv_transfer.kv_connector import utils as kv_utils
+    from vllm.v1.worker.utils import select_common_block_size
+
+    class _DraftBackend:
+        @staticmethod
+        def get_supported_kernel_block_sizes(_spec):
+            return [32, 64]
+
+    spec = MLAAttentionSpec(
+        block_size=1024, num_kv_heads=1, head_size=576, dtype=torch.uint8
+    )
+    layer = SimpleNamespace(get_attn_backend=lambda: _DraftBackend)
+    monkeypatch.setattr(
+        kv_utils, "get_layers_from_vllm_config", lambda *_: {"draft": layer}
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
+    )
+    kv_cache_config = SimpleNamespace(
+        transfer_groups=[make_kv_cache_group(["draft"], spec)]
+    )
+
+    backends, specs = kv_utils.get_current_attn_backends_and_specs(
+        vllm_config, kv_cache_config, [_DraftBackend]
+    )
+
+    assert select_common_block_size(1024, backends, specs) == transfer_block_size
+
+
 # Real model KV layouts, end to end on CPU: vLLM's planner and allocator build
 # P's and D's caches, D reads one request from P, and the recorded descriptors
 # are run as memory copies so every byte can be checked. Each case is the
@@ -1972,20 +2136,24 @@ def _attn(heads, head, head_v=None, window=None):
             dtype=_BF16,
         )
         if window is not None:
-            return SlidingWindowSpec(sliding_window=window, **kwargs)
-        return FullAttentionSpec(**kwargs)
+            return SlidingWindowManager.layer_config(
+                AttentionSpec(**kwargs), sliding_window=window
+            )
+        return FullAttentionManager.layer_config(AttentionSpec(**kwargs))
 
     return make
 
 
 def _mla(head=576, dtype=_BF16, **kwargs):
     def make(block_size, _mamba_page):
-        return MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=head,
-            dtype=dtype,
-            **kwargs,
+        return FullAttentionManager.layer_config(
+            MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=head,
+                dtype=dtype,
+                **kwargs,
+            )
         )
 
     return make
@@ -1993,12 +2161,14 @@ def _mla(head=576, dtype=_BF16, **kwargs):
 
 def _mamba(shapes, mamba_type):
     def make(block_size, mamba_page):
-        return MambaSpec(
-            block_size=block_size,
-            shapes=shapes,
-            dtypes=(_BF16, torch.float32),
-            page_size_padded=mamba_page,
-            mamba_type=mamba_type,
+        return MambaManager.layer_config(
+            MambaSpec(
+                block_size=block_size,
+                shapes=shapes,
+                dtypes=(_BF16, torch.float32),
+                page_size_padded=mamba_page,
+                mamba_type=mamba_type,
+            )
         )
 
     return make
@@ -2149,36 +2319,38 @@ def _real_model_side(model, layout):
     vllm_config.cache_config.kv_cache_layout = layout
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     # A Mamba page is padded to the attention page, which holds it.
-    specs = {name: make(block_size, None) for name, make in layers}
+    layer_configs = {name: make(block_size, None) for name, make in layers}
     mamba_page = max(
         (
-            spec.page_size_bytes
-            for spec in specs.values()
-            if not isinstance(spec, MambaSpec)
+            lc.spec.page_size_bytes
+            for lc in layer_configs.values()
+            if not isinstance(lc.spec, MambaSpec)
         ),
         default=None,
     )
-    specs = {name: make(block_size, mamba_page) for name, make in layers}
+    layer_configs = {name: make(block_size, mamba_page) for name, make in layers}
     resolved = resolve_kv_cache_layout(
-        vllm_config, [_LAYOUT_PREFERENCE], specs.values()
+        vllm_config, [_LAYOUT_PREFERENCE], layer_configs.values()
     )
-    groups = get_global_kv_cache_groups(vllm_config, [specs])
+    groups = get_global_kv_cache_groups(vllm_config, [layer_configs])
     vllm_config.cache_config.num_gpu_blocks_override = 2 + sum(
-        _blocks_per_request(g.kv_cache_spec) for g in groups
+        _blocks_per_request(g) for g in groups
     )
-    kv_cache_config = get_kv_cache_configs(vllm_config, [specs], [1 << 40], groups)[0]
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [layer_configs], [1 << 40], groups
+    )[0]
     kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
     caches = allocate_kv_cache(
         kv_cache_config,
         torch.device("cpu"),
         resolved,
-        [g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups],
+        [g.block_size for g in kv_cache_config.kv_cache_groups],
     )
     return vllm_config, kv_cache_config, caches
 
 
-def _blocks_per_request(spec):
-    return 1 if isinstance(spec, MambaSpec) else 2
+def _blocks_per_request(group):
+    return 1 if issubclass(group.manager_cls, MambaManager) else 2
 
 
 def _real_model_worker(engine_id, vllm_config, kv_cache_config, caches):
@@ -2188,8 +2360,9 @@ def _real_model_worker(engine_id, vllm_config, kv_cache_config, caches):
     )
 
     use_mla = any(
-        isinstance(g.kv_cache_spec, MLAAttentionSpec)
+        isinstance(spec, MLAAttentionSpec)
         for g in kv_cache_config.kv_cache_groups
+        for spec in g.kv_cache_specs.values()
     )
     fake_backend = MagicMock()
     fake_backend.get_name.return_value = "FLASHMLA" if use_mla else "FLASH_ATTN"
@@ -2273,7 +2446,7 @@ def test_real_model_layout_pull_copies_every_page(model, p_layout, d_layout):
     p_ids: list[list[int]] = []
     d_ids: list[list[int]] = []
     for g in groups:
-        n = _blocks_per_request(g.kv_cache_spec)
+        n = _blocks_per_request(g)
         p_ids.append([1 + sum(map(len, p_ids)) + k for k in range(n)])
         d_ids.append(
             [d_kv_config.num_blocks - 1 - sum(map(len, d_ids)) - k for k in range(n)]

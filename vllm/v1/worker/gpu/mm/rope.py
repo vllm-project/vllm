@@ -100,12 +100,9 @@ class RopeState:
         idx_mapping: torch.Tensor,
         query_start_loc: torch.Tensor,
         prefill_lens: torch.Tensor,
-        num_computed_tokens: torch.Tensor,
-        pos_delta: torch.Tensor | None = None,
+        input_positions: torch.Tensor,
     ) -> None:
-        """Write the batch's positions. ``pos_delta`` (per token, optional) moves
-        each token from its chain position, the same on every section: a verify
-        plan's row sits at its depth in the plan."""
+        """Prepare M-RoPE positions from global token indices in batch order."""
         num_reqs = idx_mapping.shape[0]
         _prepare_rope_positions_kernel[(num_reqs,)](
             self.positions,
@@ -117,11 +114,9 @@ class RopeState:
             idx_mapping,
             query_start_loc,
             prefill_lens,
-            num_computed_tokens,
-            pos_delta if pos_delta is not None else query_start_loc,
+            input_positions,
             BLOCK_SIZE=1024,
             NUM_DIMS=self.num_dims,
-            HAS_POS_DELTA=pos_delta is not None,
         )
 
 
@@ -158,31 +153,29 @@ def _prepare_rope_positions_kernel(
     idx_mapping_ptr,
     query_start_loc_ptr,
     prefill_lens_ptr,
-    num_computed_tokens_ptr,
-    pos_delta_ptr,  # [num_tokens] int32: plan position - chain position
+    input_positions_ptr,
     BLOCK_SIZE: tl.constexpr,
     NUM_DIMS: tl.constexpr,
-    HAS_POS_DELTA: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
 
     prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-    is_prefill = num_computed < prefill_len
 
     query_start = tl.load(query_start_loc_ptr + batch_idx)
     query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
     query_len = query_end - query_start
+    start = tl.load(input_positions_ptr + query_start, mask=query_len > 0, other=0)
+    is_prefill = start < prefill_len
 
     delta = tl.load(prefill_delta_ptr + req_state_idx)
 
     for i in range(0, query_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
-        orig_pos = num_computed + block
-        if HAS_POS_DELTA:
-            plan_delta = tl.load(pos_delta_ptr + query_start + block, mask=mask)
+        orig_pos = tl.load(
+            input_positions_ptr + query_start + block, mask=mask, other=0
+        )
 
         for j in tl.static_range(NUM_DIMS):
             if is_prefill:
@@ -192,11 +185,9 @@ def _prepare_rope_positions_kernel(
                     + j * prefill_positions_stride1
                     + orig_pos,
                     mask=mask,
-                )
+                ).to(tl.int64)
             else:
                 pos = orig_pos + delta
-            if HAS_POS_DELTA:
-                pos += plan_delta
             tl.store(
                 positions_ptr + j * positions_stride + query_start + block,
                 pos,

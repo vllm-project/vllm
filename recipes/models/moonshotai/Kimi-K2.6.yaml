@@ -175,7 +175,6 @@ guide: |
     --trust-remote-code \
     --kv-cache-dtype fp8 \
     --block-size 64 \
-    --gpu-memory-utilization 0.90 \
     --attention-backend TOKENSPEED_MLA \
     --attention-config '{"use_prefill_query_quantization":true}' \
     --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
@@ -198,7 +197,6 @@ guide: |
     --trust-remote-code \
     --kv-cache-dtype fp8 \
     --block-size 64 \
-    --gpu-memory-utilization 0.90 \
     --attention-backend TOKENSPEED_MLA \
     --attention-config '{"use_prefill_query_quantization":true}' \
     --disable-hybrid-kv-cache-manager \
@@ -300,7 +298,10 @@ guide: |
 
   ## Troubleshooting
 
-  - **OOM errors:** Lower `--gpu-memory-utilization` or adjust TP/EP to match your GPU count.
+  - **OOM errors:** Lower `--max-num-seqs`, `--max-num-batched-tokens` or `--max-model-len`, or adjust
+    TP/EP to match your GPU count. On CUDA and ROCm, vLLM sizes the KV cache from memory measured after
+    warmup, so leave `--gpu-memory-utilization` unset unless the GPU is shared
+    ([details](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization)).
   - **Vision encoder performance:** Use `--mm-encoder-tp-mode data` to run the vision encoder
     in data-parallel mode. The encoder is small, so TP adds communication overhead with little gain.
   - **Unique multimodal inputs:** Pass `--mm-processor-cache-gb 0` to avoid caching overhead.

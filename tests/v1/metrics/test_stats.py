@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+from prometheus_client import CollectorRegistry
 
-from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.config import SpeculativeConfig
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PrefixCacheStats,
     PromptTokenStats,
@@ -14,7 +17,71 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.utils import compute_iteration_details
+from vllm.v1.spec_decode.metrics import (
+    SpecDecodingLogging,
+    SpecDecodingProm,
+    SpecDecodingStats,
+)
+
+
+@pytest.mark.parametrize(
+    "num_verified_per_req, expected_per_pos",
+    [([3, 0, 0], [1, 1, 1, 0, 0]), ([1, 1, 1], [3, 0, 0, 0, 0])],
+)
+def test_verified_counters_differ_from_proposals(
+    num_verified_per_req, expected_per_pos
+):
+    registry = CollectorRegistry()
+    config = SpeculativeConfig(
+        method="ngram",  # no weights needed
+        num_speculative_tokens=5,
+    )
+    prom = SpecDecodingProm(
+        speculative_config=config,
+        registry=registry,
+        labelnames=["engine"],  # any string
+        per_engine_labelvalues={0: ["0"]},  # any string
+    )
+    stats = SpecDecodingStats.new(num_spec_tokens=5)
+    for num_verified in num_verified_per_req:
+        stats.observe_draft_stats_per_req(
+            num_draft_tokens=5,
+            num_verified_tokens=num_verified,
+            num_accepted_tokens=0,
+        )
+    assert stats.num_verified_tokens_per_pos == expected_per_pos
+    assert sum(expected_per_pos) == stats.num_verified_tokens
+    prom.observe(stats)
+
+    samples = {
+        sample.name: sample.value
+        for metric in registry.collect()
+        for sample in metric.samples
+    }
+    assert samples["vllm:spec_decode_num_drafts_total"] == 3
+    assert samples["vllm:spec_decode_num_draft_tokens_total"] == 15
+    assert samples["vllm:spec_decode_num_accepted_tokens_total"] == 0
+    assert samples["vllm:spec_decode_num_verified_tokens_total"] == 3
+
+    per_pos_name = "vllm:spec_decode_num_verified_tokens_per_pos_total"
+    for pos, expected in enumerate(expected_per_pos):
+        labels = {"engine": "0", "position": str(pos)}
+        assert registry.get_sample_value(per_pos_name, labels) == expected
+
+
+def test_adaptive_verified_budget_logging():
+    stats = SpecDecodingStats.new(num_spec_tokens=5)
+    stats.observe_draft_stats_per_req(
+        num_draft_tokens=5, num_accepted_tokens=2, num_verified_tokens=3
+    )
+
+    spec_logging = SpecDecodingLogging()
+    spec_logging.observe(stats)
+    messages: list[str] = []
+    spec_logging.log(log_fn=lambda fmt, *args: messages.append(fmt % args))
+
+    assert len(messages) == 1
+    assert "Verified: 3 tokens" in messages[0]
 
 
 def test_iteration_stats_repr():
@@ -136,19 +203,6 @@ def test_prefix_cache_stats_hits_by_source_serialization():
         CacheHitSource.P2P: 4,
         CacheHitSource.HOST: 4,
     }
-
-
-def test_compute_iteration_details_includes_encoder_stats():
-    scheduler_output = SchedulerOutput.make_empty()
-    scheduler_output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
-        num_inputs=2,
-        output_tokens=392,
-    )
-
-    iteration_details = compute_iteration_details(scheduler_output)
-
-    assert iteration_details.num_encoder_inputs == 2
-    assert iteration_details.num_encoder_output_tokens == 392
 
 
 def test_prefill_kv_computed_with_cache():
@@ -381,3 +435,19 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+@pytest.mark.parametrize("reported", [None, True, False])
+@pytest.mark.parametrize("frontend", [True, False])
+def test_engine_core_watermarking_overrides_frontend_flag(frontend, reported):
+    """EngineCore's flag replaces the frontend's guess; None keeps it."""
+    req_stats = RequestStateStats(is_watermarked=frontend)
+    IterationStats().update_from_output(
+        EngineCoreOutput(request_id="r", new_token_ids=[1], watermarking=reported),
+        engine_core_timestamp=0.0,
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=LoRARequestStates(),
+        lora_name=None,
+    )
+    assert req_stats.is_watermarked == (frontend if reported is None else reported)

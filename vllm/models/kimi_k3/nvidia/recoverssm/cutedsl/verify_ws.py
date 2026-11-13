@@ -3,7 +3,7 @@
 """KDA RecoverSSM verify with the fused short convolution on the fifth-generation
 tensor cores, warp specialized (the dim-first conv state layout).
 
-The math and the per-item MMA / solve are those of ``verify.py`` (read its
+The math and the per-item MMA / solve are those of `verify.py` (read its
 docstring first). What differs is how an item's inputs reach the CTA:
 
 * A producer warp (warp 4) walks the CTA's items (the first is the CTA's own, the
@@ -88,7 +88,7 @@ def state_sw128_layout():
 
 @asm()
 def bulk_load(dst, src, size, barrier):
-    """``size`` bytes global -> shared on ``barrier`` (complete_tx)."""
+    """`size` bytes global -> shared on `barrier` (complete_tx)."""
     code = "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes"
     code += " [$0], [$1], $2, [$3];"
     return code, "r,l,r,r,~{memory}", (dst, Int64(src), Int32(size), barrier)
@@ -131,7 +131,7 @@ def consumer_sync():
 
 
 class KdaTcVerify2:
-    """Same arguments as ``KdaTcVerify`` with ``conv=True`` and the dim-first conv
+    """Same arguments as `KdaTcVerify` with `conv=True` and the dim-first conv
     state [slots, 3HK, Q + 2] (channel rows contiguous). Requires 16-byte aligned
     qkv / raw_g rows, conv state channel blocks, conv weight and dt_bias (checked by
     the host wrapper)."""
@@ -172,7 +172,7 @@ class KdaTcVerify2:
 
     @cute.jit
     def load_state(self, tma_atom, tma_tensor, a_tile, barrier, slot, head, lane):
-        """Warp-wide: TMA state (slot, head) into ``a_tile`` on ``barrier``."""
+        """Warp-wide: TMA state (slot, head) into `a_tile` on `barrier`."""
         from cutlass.cute.nvgpu import cpasync
 
         H: cutlass.Constexpr = self.heads
@@ -714,7 +714,7 @@ def at_ptr(tensor, *coord):
 
 
 def at_address(tensor, *coord):
-    """64-bit global address of ``tensor[coord]``."""
+    """64-bit global address of `tensor[coord]`."""
     return Int64(at_ptr(tensor, *coord).toint())
 
 

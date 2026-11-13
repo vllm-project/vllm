@@ -190,7 +190,7 @@ class MiniCPMOProcessor(ProcessorMixin):
                 audio_part = audio_parts[idx]
                 merge_audio = []
                 cur_audio = []
-                for aid, (part, audio) in enumerate(zip(audio_part, audios)):
+                for aid, (_, audio) in enumerate(zip(audio_part, audios)):
                     if aid == 0 or audio_part[aid] == audio_part[aid - 1]:
                         cur_audio.append(audio)
                     else:
