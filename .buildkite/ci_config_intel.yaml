@@ -3,9 +3,13 @@ job_dirs:
   - ".buildkite/intel_jobs"
 run_all_patterns:
   - ".buildkite/ci_config_intel.yaml"
+  - ".buildkite/image_build/image_build_xpu.sh"
   - ".buildkite/scripts/hardware_ci/run-intel-test.sh"
+  - ".dockerignore"
   - "docker/Dockerfile"
   - "docker/Dockerfile.xpu"
+  - "docker/Dockerfile.xpu_base"
+  - "docker/docker-bake-xpu.hcl"
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/xpu.txt"

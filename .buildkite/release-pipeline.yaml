@@ -136,7 +136,7 @@ steps:
         agents:
           queue: cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.xpu ."
+          - "docker buildx bake -f docker/docker-bake-xpu.hcl --load --set vllm-build.tags=vllm-ci:build-image --set vllm-build.args.max_jobs=16 --set vllm-build.args.GIT_REPO_CHECK=1 --progress plain vllm-build"
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -379,12 +379,21 @@ steps:
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
           - |
-            DOCKER_BUILDKIT=1 docker build \
-              $(bash .buildkite/scripts/docker-build-metadata-args.sh xpu) \
-              --build-arg GIT_REPO_CHECK=1 \
-              --target vllm-openai \
-              --progress plain \
-              -f docker/Dockerfile.xpu .
+            metadata_output=$$(bash .buildkite/scripts/docker-build-metadata-args.sh xpu)
+            read -r -a metadata_args <<< "$$metadata_output"
+            bake_args=()
+            while (( $${#metadata_args[@]} )); do
+              (( $${#metadata_args[@]} >= 2 )) || { echo "Incomplete metadata option" >&2; exit 1; }
+              case "$${metadata_args[0]}" in
+                --build-arg) bake_args+=(--set "vllm-openai.args.$${metadata_args[1]}") ;;
+                --tag) bake_args+=(--set "vllm-openai.tags=$${metadata_args[1]}") ;;
+                *) echo "Unexpected metadata option: $${metadata_args[0]}" >&2; exit 1 ;;
+              esac
+              metadata_args=("$${metadata_args[@]:2}")
+            done
+            docker buildx bake -f docker/docker-bake-xpu.hcl --load \
+              "$${bake_args[@]}" --set vllm-openai.args.GIT_REPO_CHECK=1 \
+              --progress plain vllm-openai
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-xpu"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-xpu" release-images'
         env:
