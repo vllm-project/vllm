@@ -198,6 +198,17 @@ class ParallelConfig:
     Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
     Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
     """
+    enable_hc_sp_replicated_moe: bool = False
+    """Keep every routed expert and the fused shared expert of the Qwen4Exp
+    decoder layers whole on each TP rank and run the MoE on the rank's own HC SP
+    rows, so the MoE input all-gather and output reduce-scatter go away; the
+    attention ones stay (ROCm, TP=2). Each rank holds all expert weights instead
+    of a 1/TP slice. Every step, decode included, uses this layout. It needs
+    `--enable-hc-sp` and the AITER fused shared expert (`VLLM_ROCM_USE_AITER=1`,
+    `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`). Not supported with expert
+    parallelism (so neither with EPLB), DP>1, PP>1, PCP>1, DBO, speculative
+    decoding, routed-experts capture or `--monokernel`.
+    """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_batch_sharded_sampling: bool | None = None
@@ -1285,6 +1296,26 @@ class ParallelConfig:
                 "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
                 f"be at least the number of microbatches ({self.num_ubatches})."
             )
+
+        if self.enable_hc_sp_replicated_moe:
+            flag = "--enable-hc-sp-replicated-moe"
+            if not current_platform.is_rocm():
+                raise ValueError(f"{flag} requires ROCm")
+            if not self.enable_hc_sp:
+                raise ValueError(f"{flag} requires --enable-hc-sp")
+            if self.tensor_parallel_size != 2:
+                raise ValueError(f"{flag} supports TP=2 only")
+            # EPLB requires expert parallelism. The MoE layer folds PCP ranks
+            # into its TP group, which would shard the experts again.
+            for unsupported, enabled in (
+                ("expert parallelism", self.enable_expert_parallel),
+                ("DP>1", self.data_parallel_size > 1),
+                ("PP>1", self.pipeline_parallel_size > 1),
+                ("PCP>1", self.prefill_context_parallel_size > 1),
+                ("DBO", self.use_ubatching),
+            ):
+                if enabled:
+                    raise ValueError(f"{flag} does not support {unsupported}")
 
         return self
 

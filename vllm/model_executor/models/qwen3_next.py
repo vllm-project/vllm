@@ -142,6 +142,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         reduce_results: bool = True,
+        experts_tp_size: int | None = None,
     ):
         super().__init__()
 
@@ -239,6 +240,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=getattr(config, "norm_topk_prob", True),
             quant_config=quant_config,
+            # None: the TP world size. 1 keeps every expert whole on each rank.
+            tp_size=experts_tp_size,
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
