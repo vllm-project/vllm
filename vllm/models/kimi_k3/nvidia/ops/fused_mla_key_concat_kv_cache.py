@@ -33,7 +33,11 @@ _OP_FP8 = torch.float8_e4m3fn
 
 
 def _to_op_fp8(t: torch.Tensor) -> torch.Tensor:
-    return t.view(_OP_FP8) if t.dtype == current_platform.fp8_dtype() else t
+    return t.view(_OP_FP8) if t.dtype == torch.float8_e4m3fnuz else t
+
+
+def _op_fp8_cache(kv_cache: torch.Tensor) -> torch.Tensor:
+    return kv_cache if kv_cache.dtype == _OP_FP8 else kv_cache.view(_OP_FP8)
 
 
 def fused_mla_key_concat_kv_cache_insert(
@@ -157,7 +161,7 @@ def fused_mla_qkv_quant_kv_cache_fp8_insert(
         _to_op_fp8(q_fp8),
         _to_op_fp8(k_fp8),
         _to_op_fp8(v_fp8),
-        _to_op_fp8(kv_cache),
+        _op_fp8_cache(kv_cache),
         slot_mapping,
         q_scale_inv,
         k_scale_inv,
@@ -299,7 +303,7 @@ def fused_mla_decode_q_concat_kv_cache_insert(
         )
     elif fp8_q:
         assert cache_scale_inv is not None, "fp8 decode requires cache_scale_inv"
-        cache = kv_cache if kv_cache.dtype == _OP_FP8 else kv_cache.view(_OP_FP8)
+        cache = _op_fp8_cache(kv_cache)
         torch.ops._C.fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
             ql_nope,
             q_pe,
