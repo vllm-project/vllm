@@ -2,8 +2,8 @@
 
 A decode executor for small decode batches of DeepSeek-V4.1 on GB300, enabled
 with `--additional-config '{"decode_backend": "latency_specialized"}'` (the
-default, `auto`, keeps the stock decode). With it off, the model runs exactly as
-without this package. One executor runs the target model and another the
+default, `auto`, keeps the stock decode). Attention-metadata CUDA graphs also
+run on the default path. One executor runs the target model and another the
 DSpark draft model, on the target's kernels and streams.
 
 ## Scope
@@ -85,7 +85,7 @@ graph.
 
 | Package | Contents |
 | --- | --- |
-| `runtime/` | The target's and the draft's executors and their per-step gates, the model state, warm-up, attention-metadata CUDA graphs |
+| `runtime/` | The target's and the draft's executors and their per-step gates, the model state, warm-up, attention-metadata CUDA graphs shared with the default path |
 | `boundary/` | The mHC between sublayers on the fused all-reduce + mHC kernel, and the publishing `wo_b` GEMM |
 | `attention/` | The attention step: low-batch MXFP8 and BF16 projections, the row-sharded indexer, candidate overlap, shared sparse-index tables and the sparse-MLA decode |
 | `moe/` | The MoE step with a deferred or in-layer finalize, and the low-batch routed-expert GEMMs |
@@ -122,7 +122,7 @@ graph.
 | Sparse-MLA decode on a CuTe DSL kernel, a thread block cluster per token with one CTA per 128 columns (`attention/sparse_mla_cute.py`) | the target's causal decode while every token's cluster is resident at once (at width 640, up to 8 requests with DSpark on a GB300) |
 | Otherwise the TRTLLM-gen sparse-MLA decode, launched on a KV-counter buffer zeroed once | all other executor steps |
 | Engram WKV chain on a side stream right after each layer's lookup | all executor steps, with host-offloaded TP-only tables and a CuTe DSL MXFP8 `wkv` |
-| Attention metadata builds recorded at CUDA graph capture, one per batch shape the FULL decode graphs serve, and replayed | FULL-graph uniform decode |
+| Attention metadata builds recorded at CUDA graph capture and replayed on both paths; the specialized path adds the lookback side-stream gather | FULL-graph uniform decode without context parallelism or micro-batching, with recordable builders |
 | LM head on FlashInfer's CuTe DSL BF16 GEMM | 1-16 rows |
 | Logits gathered with the executor's Lamport all-gather | up to 4 MiB a rank (at TP4, 32 FP32 or 64 BF16 rows) |
 

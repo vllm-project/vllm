@@ -6,8 +6,8 @@ DeepSeek-V4.1-Flash on random weights at TP4 with DSpark, served with
 `test_kernels.py` and `test_numerics.py` next to it, which
 check each path against the op it replaces, this runs the engine: the
 target's and the DSpark draft's executors and their per-step gates, the CUDA
-graphs, the recorded metadata builds and the weights the executors take off
-the layers.
+graphs, the metadata builds recorded on both decode paths and the weights
+the executors take off the layers.
 
 The layers hold each variant: 0 sliding window only, 1 ratio-2 KV and index
 source, 2 a ratio-2 consumer with an Engram, 3 ratio-1 KV, index and
@@ -286,7 +286,7 @@ class StepRecorder:
         decode = language_model.specialized_decode
         draft_decode = draft.specialized_decode
         model_state = self.model_runner.model_state
-        graphs = getattr(model_state, "graphs", None)
+        graphs = getattr(model_state, "attn_metadata_graphs", None)
         return {
             # Prefill steps run the layers from here on a subset of the rows.
             "decoder_replay_start": core.decoder_replay_start,
@@ -537,7 +537,7 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["logits"] == ["LogitsProcessor"], rank
         assert rank["draft_logits"] == "LogitsProcessor", rank
         assert rank["markov_sampling"] == "NoneType", rank
-        assert rank["metadata_graphs"] == 0, rank
+        assert rank["metadata_graphs"] > 0, rank
     stock = ("attention", "ffn", "stock_fused_mhc_max_rows", "draft_attention")
     for key in stock:
         assert paths_on[0][key] == paths_off[0][key], key

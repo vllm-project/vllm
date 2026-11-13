@@ -13,8 +13,10 @@ metadata eagerly.
 """
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.compilation.cudagraph_pool import capture_pool
@@ -29,12 +31,16 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekSparseSWAFlashInferMetadataBuilder,
     DeepseekV4FlashInferSparseMLAMetadataBuilder,
 )
+from vllm.models.deepseek_v41.nvidia.flashmla import (
+    DeepseekSparseSWAFlashMLAMetadataBuilder,
+)
+from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadataBuilder
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerMetadataBuilder,
 )
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
@@ -46,8 +52,10 @@ _RECORDABLE_BUILDERS = frozenset(
     {
         CompressorMetadataBuilder,
         DeepseekSparseSWAFlashInferMetadataBuilder,
+        DeepseekSparseSWAFlashMLAMetadataBuilder,
         DeepseekV41SparseIndexerMetadataBuilder,
         DeepseekV4FlashInferSparseMLAMetadataBuilder,
+        DeepseekV4FlashMLAMetadataBuilder,
     }
 )
 
@@ -60,6 +68,33 @@ GraphKey = tuple[int, int, int, int]
 Branch = list[tuple[int, AttentionGroup]]
 # Builds the metadata of the attention groups it is given.
 BuildFn = Callable[[list[list[AttentionGroup]]], dict[str, Any]]
+
+
+def padded_decode_batch(
+    key: GraphKey, input_buffers: InputBuffers, max_model_len: int
+) -> InputBatch:
+    """A dummy uniform decode batch padded like a runtime step of `key`. Like
+    a capture, it takes worst-case sequence lengths, which bound host values
+    only, so its recorded build serves every step of the key."""
+    num_reqs, num_reqs_padded, num_tokens, num_tokens_padded = key
+    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    # The padded requests are empty.
+    query_start_loc_np = np.full(num_reqs_padded + 1, num_tokens, dtype=np.int32)
+    query_start_loc_np[: num_reqs + 1] = input_batch.query_start_loc_np
+    return replace(
+        input_batch,
+        num_reqs_after_padding=num_reqs_padded,
+        num_tokens_after_padding=num_tokens_padded,
+        query_start_loc=input_buffers.query_start_loc[: num_reqs_padded + 1],
+        query_start_loc_np=query_start_loc_np,
+        seq_lens=input_buffers.seq_lens[:num_reqs_padded],
+        seq_lens_cpu_upper_bound=torch.full(
+            (num_reqs_padded,), max_model_len, dtype=torch.int32
+        ),
+        input_ids=input_buffers.input_ids[:num_tokens_padded],
+        positions=input_buffers.positions[:num_tokens_padded],
+        is_padding=input_buffers.is_padding[:num_tokens_padded],
+    )
 
 
 class AttnMetadataCudaGraphs:
@@ -173,7 +208,7 @@ class AttnMetadataCudaGraphs:
         entry = self._graphs.get(key)
         if entry is None:
             logger.warning_once(
-                "DeepSeek-V4.1 specialized decode: a FULL decode step has no "
+                "DeepSeek-V4.1: a FULL decode step has no "
                 "recorded attention-metadata build; building it eagerly."
             )
             return None

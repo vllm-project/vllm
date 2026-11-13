@@ -562,6 +562,10 @@ steps:
   source_file_dependencies:
   - vllm/models/deepseek_v41/nvidia/
   - vllm/models/deepseek_v41/attention.py
+  - vllm/models/deepseek_v41/sparse_mla.py
+  - vllm/config/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/kv_cache_interface.py
   - vllm/models/deepseek_v41/common/
   - vllm/v1/worker/gpu/model_states/
   - vllm/model_executor/layers/fused_moe/config.py

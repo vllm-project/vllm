@@ -12,6 +12,7 @@ import torch
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
+    KVTransferConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -314,6 +315,59 @@ def test_speculator_capture_preserves_decode_query_bounds(
 
 
 _DECODE_QUERY_LEN = 3
+
+
+@pytest.mark.parametrize(
+    "mode,pcp,dcp,ubatching,cuda,fast_prefill,kv_transfer,expected",
+    [
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, False, True, False, False, True),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, 1, 1, False, True, False, False, True),
+        (CUDAGraphMode.NONE, 1, 1, False, True, False, False, False),
+        (CUDAGraphMode.PIECEWISE, 1, 1, False, True, False, False, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 2, 1, False, True, False, False, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1, 2, False, True, False, False, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, True, True, False, False, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, False, False, False, False, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, False, True, True, False, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, False, True, False, True, False),
+    ],
+    ids=[
+        "decode",
+        "mixed",
+        "none",
+        "piecewise",
+        "pcp",
+        "dcp",
+        "ubatch",
+        "rocm",
+        "fast-prefill",
+        "kv-transfer",
+    ],
+)
+def test_deepseek_v41_metadata_graphs_gate(
+    monkeypatch, mode, pcp, dcp, ubatching, cuda, fast_prefill, kv_transfer, expected
+):
+    """Only CUDA FULL decode without context parallelism, ubatching, fast-prefill
+    KV sharing or KV transfer records."""
+    from vllm.models.deepseek_v41.nvidia.model_state import (
+        _records_metadata_graphs,
+    )
+    from vllm.platforms import current_platform
+
+    config = VllmConfig()
+    config.compilation_config.cudagraph_mode = mode
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.parallel_config.decode_context_parallel_size = dcp
+    config.parallel_config.ubatch_size = 2 if ubatching else 1
+    config.cache_config.kv_sharing_fast_prefill = fast_prefill
+    if kv_transfer:
+        config.kv_transfer_config = KVTransferConfig(
+            kv_connector="ExampleConnector", kv_role="kv_both"
+        )
+    # Platform detection is the external hardware boundary; configs stay real.
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+
+    assert _records_metadata_graphs(config) is expected
 
 
 def _create_decode_vllm_config(

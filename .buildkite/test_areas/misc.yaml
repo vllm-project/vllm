@@ -364,6 +364,7 @@ steps:
   depends_on:
     - image-build-cpu
   source_file_dependencies:
+    - vllm/models/deepseek_v41/
     - vllm/config/
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"

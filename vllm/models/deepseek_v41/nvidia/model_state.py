@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -19,6 +19,7 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -35,6 +36,12 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from .specialized_decode.runtime.metadata_graphs import (
+        AttnMetadataCudaGraphs,
+        GraphKey,
+    )
 
 
 @triton.jit
@@ -208,6 +215,26 @@ def _skip_tail_min_remaining(vllm_config: VllmConfig, window: int) -> int | None
     return max_graph_tokens + 2 * window
 
 
+def _records_metadata_graphs(vllm_config: VllmConfig) -> bool:
+    """Whether FULL decode steps replay their attention-metadata builds from
+    CUDA graphs (`AttnMetadataCudaGraphs`) instead of building them eagerly.
+    The recorded builds take no part in context parallelism, micro-batching,
+    fast-prefill KV sharing or KV transfer, and only FULL decode graphs replay
+    them."""
+    parallel = vllm_config.parallel_config
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+    return (
+        current_platform.is_cuda()
+        and cudagraph_mode is not None
+        and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and not parallel.use_ubatching
+        and not vllm_config.cache_config.kv_sharing_fast_prefill
+        and vllm_config.kv_transfer_config is None
+    )
+
+
 class DeepseekV41ModelState(DefaultModelState):
     """DefaultModelState plus the engram lookback window and SWA bounded replay.
 
@@ -229,6 +256,11 @@ class DeepseekV41ModelState(DefaultModelState):
     batch in eager steps: each prefill's last `window` rows (one row for a
     chunk far from its prompt's end) as a sub-batch with metadata and a forward
     context of its own, like a microbatch.
+
+    With FULL decode CUDA graphs, the attention-metadata build of every
+    uniform decode shape they serve is recorded at capture and replayed in
+    place of the eager build (`AttnMetadataCudaGraphs`), when every builder
+    of the step is recordable.
     """
 
     def __init__(
@@ -324,6 +356,26 @@ class DeepseekV41ModelState(DefaultModelState):
             self._skip_tail_min_remaining = _skip_tail_min_remaining(
                 vllm_config, layers.window
             )
+
+        self.attn_metadata_graphs: AttnMetadataCudaGraphs | None = None
+        if _records_metadata_graphs(vllm_config):
+            from .specialized_decode.runtime import metadata_graphs
+
+            self.attn_metadata_graphs = metadata_graphs.AttnMetadataCudaGraphs(
+                vllm_config,
+                vllm_config.num_speculative_tokens
+                + self.num_new_sampled_tokens_per_step,
+            )
+        # The key whose metadata build capture_inner_cudagraphs records.
+        self._recording_key: GraphKey | None = None
+
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, block_tables: BlockTables
+    ) -> None:
+        super().initialize_kv_cache(kv_cache_config, block_tables)
+        if self.attn_metadata_graphs is not None:
+            # Memory profiling's recordings wrote the builders of its KV cache.
+            self.attn_metadata_graphs.release()
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -477,9 +529,94 @@ class DeepseekV41ModelState(DefaultModelState):
             values, out=self._replay_start[:num_reqs]
         )
 
-    def _build_attn_metadata(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """The step's attention-metadata build (`DefaultModelState.prepare_attn`)."""
-        return super().prepare_attn(*args, **kwargs)
+    def _build_attn_metadata(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+        ubatch_idx: int = 0,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """The step's attention-metadata build (`DefaultModelState.prepare_attn`),
+        replayed from its recording for the FULL decode steps that have one."""
+        build = super().prepare_attn
+        graphs = self.attn_metadata_graphs
+        if graphs is not None and self._recording_key is not None:
+            return graphs.capture(
+                self._recording_key,
+                attn_groups,
+                block_tables,
+                lambda groups: build(
+                    input_batch,
+                    cudagraph_mode,
+                    block_tables,
+                    slot_mappings,
+                    groups,
+                    kv_cache_config,
+                    **kwargs,
+                ),
+            )
+        if (
+            graphs is not None
+            and not for_capture
+            and ubatch_idx == 0
+            and graphs.can_record(attn_groups)
+        ):
+            key = graphs.key(input_batch, cudagraph_mode)
+            if key is not None:
+                self._before_metadata_replay(input_batch)
+                attn_metadata = graphs.replay(key)
+                if attn_metadata is not None:
+                    return attn_metadata
+        return build(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=for_capture,
+            ubatch_idx=ubatch_idx,
+            **kwargs,
+        )
+
+    def _before_metadata_replay(self, input_batch: InputBatch) -> None:
+        """Hook run right before a step replays its recorded metadata build."""
+
+    def _record_metadata_graphs(
+        self,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        """Record the metadata build of every decode step the FULL decode graphs
+        serve, on dummy batches of that step's shape."""
+        graphs = self.attn_metadata_graphs
+        if graphs is None:
+            return
+        graphs.release()
+        if not graphs.can_record(attn_groups):
+            return
+        from .specialized_decode.runtime.metadata_graphs import padded_decode_batch
+
+        for key in graphs.capture_keys():
+            self._recording_key = key
+            try:
+                self.prepare_attn(
+                    padded_decode_batch(key, input_buffers, self.max_model_len),
+                    CUDAGraphMode.FULL,
+                    block_tables.get_dummy_block_tables(key[1]),
+                    block_tables.get_dummy_slot_mappings(key[3]),
+                    attn_groups,
+                    kv_cache_config,
+                )
+            finally:
+                self._recording_key = None
 
     def _warm_up_replay_kernels(
         self, input_batch: InputBatch, slot_mappings: torch.Tensor
@@ -716,6 +853,9 @@ class DeepseekV41ModelState(DefaultModelState):
                 capture_desc=desc,
             )
 
+        self._record_metadata_graphs(
+            input_buffers, block_tables, attn_groups, kv_cache_config
+        )
         if self.decoder_replay_layers is not None:
             # profile_only captures use pre-KV-cache groups: rebuild the copies.
             self._init_replay_attn_groups(attn_groups)

@@ -8,6 +8,7 @@ it. Needs one SM100-family GPU; about 5 minutes, mostly kernel compilation.
 Run: pytest -v tests/models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -1180,6 +1181,192 @@ def test_sparse_mla_decode_launches_the_stock_decode(
 
 
 # ------------------------------------------------ metadata-build graphs
+
+
+class _MetadataModel(nn.Module):
+    token_lookback_depth = 0
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
+    ids=["decode", "mixed"],
+)
+@pytest.mark.parametrize("builder_kind", ["swa", "mla1", "mla2", "unsupported"])
+def test_default_metadata_graph_capture_and_replay(builder_kind, mode):
+    """Real FlashMLA builders refresh the default state's captured GPU buffers.
+
+    Capture through the model-state hook, change sequence lengths and slots,
+    then compare every returned GPU tensor with the eager build. A base MLA
+    builder outside the allowlist and non-FULL or secondary microbatch steps
+    must instead return freshly built metadata.
+    """
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.models.deepseek_v41.nvidia.flashmla import (
+        DeepseekSparseSWAFlashMLABackend,
+        DeepseekSparseSWAFlashMLAMetadataBuilder,
+    )
+    from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime import (
+        metadata_graphs,
+    )
+    from vllm.models.deepseek_v41.sparse_mla import (
+        DeepseekV4FlashMLABackend,
+        DeepseekV4FlashMLAMetadataBuilder,
+        DeepseekV4SparseMLAMetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        MLAAttentionSpec,
+        SlidingWindowMLASpec,
+    )
+    from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+    from vllm.v1.worker.utils import AttentionGroup
+
+    config = create_vllm_config(
+        max_model_len=256,
+        max_num_seqs=4,
+        max_num_batched_tokens=8,
+        hf_config_override={
+            "sliding_window": 8,
+            "compress_ratios": [0, 1, 2],
+            "index_topk": 8,
+        },
+    )
+    config.compilation_config.cudagraph_mode = mode
+    config.compilation_config.decode_cudagraph_capture_request_sizes = [1, 2, 4]
+    config.compilation_config.max_decode_cudagraph_capture_tokens = 4
+    if builder_kind == "swa":
+        spec = SlidingWindowMLASpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+            sliding_window=8,
+            model_version="deepseek_v4",
+        )
+        backend = DeepseekSparseSWAFlashMLABackend
+        builder_cls = DeepseekSparseSWAFlashMLAMetadataBuilder
+    else:
+        spec = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+            tokens_per_state=2 if builder_kind == "mla2" else 1,
+            model_version="deepseek_v4",
+        )
+        backend = DeepseekV4FlashMLABackend
+        builder_cls = (
+            DeepseekV4SparseMLAMetadataBuilder
+            if builder_kind == "unsupported"
+            else DeepseekV4FlashMLAMetadataBuilder
+        )
+    group = AttentionGroup(
+        backend=backend,  # type: ignore[type-abstract]
+        layer_names=["layer0"],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+        metadata_builders=[
+            builder_cls(spec, ["layer0"], config, DEVICE) for _ in range(2)
+        ],
+    )
+    groups = [[group]]
+    kv_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+    )
+    buffers = InputBuffers(4, 8, DEVICE)
+    tables = BlockTables([64], 4, 8, [4], DEVICE)
+    state = DeepseekV41ModelState(config, _MetadataModel(), None, DEVICE)
+    assert state.attn_metadata_graphs is not None
+    state.initialize_kv_cache(kv_config, tables)
+    state.capture_inner_cudagraphs(buffers, tables, groups, kv_config)
+    graphs = state.attn_metadata_graphs
+    key = (3, 4, 3, 4)
+    assert set(graphs._graphs) == (
+        set() if builder_kind == "unsupported" else set(graphs.capture_keys())
+    )
+    assert state._recording_key is None
+    batch = metadata_graphs.padded_decode_batch(key, buffers, state.max_model_len)
+    block_tables = tables.get_dummy_block_tables(4)
+    slots = tables.get_dummy_slot_mappings(4)
+
+    def build(batch_, mode=CUDAGraphMode.FULL, ubatch_idx=0):
+        return state.prepare_attn(
+            batch_,
+            mode,
+            block_tables,
+            slots,
+            groups,
+            kv_config,
+            ubatch_idx=ubatch_idx,
+        )["layer0"]
+
+    def snapshot(metadata):
+        return {
+            name: value.clone()
+            for name, value in vars(metadata).items()
+            if isinstance(value, torch.Tensor) and value.is_cuda
+        }
+
+    for step in (0, 1):
+        # An eager prefill leaves a different token-to-request map behind.
+        other = InputBatch.make_dummy(1, 4, buffers)
+        DefaultModelState.prepare_attn(
+            state, other, CUDAGraphMode.NONE, block_tables, slots, groups, kv_config
+        )
+        buffers.query_start_loc[:5].copy_(torch.from_numpy(batch.query_start_loc_np))
+        seq_lens = torch.tensor([16 + step, 31 + step, 62 + step, 0])
+        buffers.seq_lens.copy_(seq_lens)
+        buffers.positions[:4].copy_((seq_lens - 1).clamp_min(0))
+        block_tables[0].copy_(
+            torch.arange(16, dtype=torch.int32, device=DEVICE).view(4, 4)
+        )
+        slots[0].copy_(torch.tensor([15 + step, 94 + step, 189 + step, -1]))
+        batch = replace(batch, seq_lens_cpu_upper_bound=seq_lens)
+        actual = build(batch)
+        recorded = graphs._graphs.get(key)
+        if recorded is None:
+            assert build(batch) is not actual
+        else:
+            assert actual is recorded[1]["layer0"]
+        replayed = snapshot(actual)
+        assert replayed["slot_mapping"].shape == (4,)
+        eager = DefaultModelState.prepare_attn(
+            state, batch, CUDAGraphMode.FULL, block_tables, slots, groups, kv_config
+        )["layer0"]
+        expected = snapshot(eager)
+        assert replayed.keys() == expected.keys()
+        for name in expected:
+            assert torch.equal(replayed[name], expected[name]), (step, name)
+        # The second microbatch owns different persistent builder buffers.
+        secondary = build(batch, ubatch_idx=1)
+        assert secondary is not actual
+        for name, tensor in snapshot(secondary).items():
+            assert torch.equal(tensor, expected[name]), name
+        for runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
+            unpadded = InputBatch.make_dummy(3, 3, buffers)
+            fallback = build(unpadded, runtime_mode)
+            assert fallback is not build(unpadded, runtime_mode)
+            fallback_tensors = snapshot(fallback)
+            eager = DefaultModelState.prepare_attn(
+                state, unpadded, runtime_mode, block_tables, slots, groups, kv_config
+            )["layer0"]
+            for name, tensor in snapshot(eager).items():
+                assert torch.equal(fallback_tensors[name], tensor), (
+                    runtime_mode,
+                    name,
+                )
+        batch = metadata_graphs.padded_decode_batch(key, buffers, state.max_model_len)
+
+    # A new KV-cache binding must not replay the profiling cache's recordings.
+    state.initialize_kv_cache(kv_config, tables)
+    assert graphs._graphs == {}
 
 
 class _ChainBuilder:
