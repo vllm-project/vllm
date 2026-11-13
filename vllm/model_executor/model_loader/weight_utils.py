@@ -40,6 +40,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_world_group,
+    in_single_pp_stage,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
@@ -1324,7 +1325,10 @@ def fastsafetensors_weights_iterator(
     """
     from fastsafetensors.parallel_loader import ParallelLoader
 
-    if torch.distributed.is_initialized():
+    distributed = torch.distributed.is_initialized()
+    # Other pipeline stages do not load a model built as a single stage, so
+    # collectives that include their ranks would hang.
+    if distributed and not in_single_pp_stage():
         pg = torch.distributed.group.WORLD
     else:
         pg = SingleGroup()
@@ -1335,7 +1339,7 @@ def fastsafetensors_weights_iterator(
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
-    nogds = pg.size() > 1
+    nogds = distributed and torch.distributed.get_world_size() > 1
 
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
@@ -1410,7 +1414,10 @@ def instanttensor_weights_iterator(
         # Entering here only in unit tests where the world group is not initialized.
         process_group = None
     else:
-        process_group = world_group.device_group if world_group.world_size > 1 else None
+        # Other pipeline stages do not load a model built as a single stage, so
+        # collectives that include their ranks would hang.
+        distributed = world_group.world_size > 1 and not in_single_pp_stage()
+        process_group = world_group.device_group if distributed else None
 
     gpu_weight_names: list[str] = []
     cpu_weights: dict[str, list[str]] = {}
