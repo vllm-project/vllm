@@ -5707,6 +5707,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
   - vllm/v1/kv_cache_interface.py
   - tests/v1/kv_connector/unit/test_umbp_
   - tests/v1/kv_connector/umbp_test_utils.py
@@ -5921,6 +5923,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
   - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - vllm/v1/core/block_pool.py
+  - vllm/v1/core/kv_cache_utils.py
   - tests/v1/kv_connector/umbp_integration/
   - tests/v1/kv_connector/umbp_test_utils.py
   - tests/v1/kv_connector/conftest.py

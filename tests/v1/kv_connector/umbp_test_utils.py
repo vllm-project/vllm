@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU byte-copy runtime for UMBP connector contract tests."""
+"""Shared fixtures for UMBP connector tests.
+
+Configs, request and scheduler-output builders, fake runtime handles, a CPU
+byte-copy runtime, and a `umbp_standalone_server` launcher.
+"""
 
 import contextlib
 import ctypes
@@ -10,7 +14,8 @@ import signal
 import subprocess
 import threading
 import traceback
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,8 +25,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVLayoutDescriptor,
     RankTopology,
+    StoreEventResult,
     TransferJobState,
     TransferJobStatus,
+    UMBPConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.base import (
     IUMBPRuntime,
@@ -38,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
 
 
 class _EmbeddedStore:
@@ -244,10 +252,10 @@ def mori_has_umbp() -> bool:
     return True
 
 
+@dataclass
 class StandaloneServer:
-    def __init__(self, address: str, process: subprocess.Popen):
-        self.address = address
-        self.process = process
+    address: str
+    process: subprocess.Popen
 
     def kill(self) -> None:
         self.process.kill()
@@ -446,6 +454,30 @@ def make_scheduler_output(
         ),
         num_scheduled_tokens=dict(scheduled_tokens or {}),
         kv_connector_block_state=block_state,
+    )
+
+
+def complete_store(
+    scheduler,
+    event_id: int,
+    workers: int = 1,
+    failed: Iterable[tuple[int, bytes]] = (),
+) -> None:
+    """Report store event `event_id` done by `workers` workers.
+
+    Args:
+        scheduler: The `UMBPStoreConnectorScheduler` that planned the store.
+        event_id: The `store_event` of the step's connector metadata.
+        workers: How many workers report the event in this output.
+        failed: `(group_id, block_hash)` objects that failed to store.
+
+    """
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=UMBPConnectorWorkerMetadata(
+                store_events={event_id: StoreEventResult(workers, set(failed))}
+            )
+        )
     )
 
 
