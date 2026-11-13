@@ -105,7 +105,7 @@ class LayerStages:
     # Dense layers whose MLP runs as the CuTe GEMVs.
     dense: dict[int, Any]
 
-    def _build_mega(self) -> dict[int, Any]:
+    def _build_mega(self, prefill_q: int = 1) -> dict[int, Any]:
         from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
         from ..grouped_moe import GroupedExperts, shared_weights
@@ -115,6 +115,11 @@ class LayerStages:
         tokens = [b for b in self.batches if self.policy("moe", b)]
         per_route_tokens = [m for m in tokens if self.policy("moe", m) == "per_route"]
         grouped_tokens = [m for m in tokens if self.policy("moe", m) == "grouped"]
+        if prefill_q > 1:
+            # only prune when requests rows > 1, eg. MTP 5-> prefill_q = 6
+            for sizes in (per_route_tokens, grouped_tokens):
+                sizes.extend(m // prefill_q for m in tuple(sizes) if m % prefill_q == 0)
+                sizes[:] = sorted(set(sizes))
         mega: dict[int, Any] = {}
         self.shared: dict[int, Any] = {}
         if not tokens:  # MTP verify steps hold q >= 2 tokens per request
@@ -221,14 +226,14 @@ class LayerStages:
         logger.info("Specialized decode runs %d dense MLPs as GEMVs", len(dense))
         return dense
 
-    def _mega_moe(self, layer, x):
+    def _mega_moe(self, layer, x, choice: str):
         """Routed experts as one kernel, left unfinalized for the boundary."""
         from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 
         moe = layer.mlp
         per_route, grouped = self.mega[layer.layer_idx]
         bias = moe.gate.e_score_correction_bias
-        if self.policy("moe", x.shape[0]) == "grouped":
+        if choice == "grouped":
             # The grouped kernel runs the shared expert as one more expert.
             logits = self._router(moe, x)
             rows, ids, weights, shared = grouped(x, logits, bias)
@@ -301,7 +306,7 @@ class LayerStages:
         with _override(o_proj, "reduce_results", False, partial):
             return layer.self_attn(hidden_states=x, positions=step.positions), partial
 
-    def mlp(self, layer, x):
+    def mlp(self, layer, x, moe_policy_tokens: int | None = None):
         """The FFN output and whether it is still TP-partial."""
         partial = self.partial(x.shape[0])
         dense = self.dense.get(layer.layer_idx)
@@ -310,10 +315,12 @@ class LayerStages:
             if not partial:
                 out = tensor_model_parallel_all_reduce(out)
             return out, partial
-        if layer.layer_idx in self.mega and self.policy("moe", x.shape[0]):
+        moe_tokens = x.shape[0] if moe_policy_tokens is None else moe_policy_tokens
+        choice = self.policy("moe", moe_tokens)
+        if layer.layer_idx in self.mega and choice:
             if partial:
-                return self._mega_moe(layer, x), True
-            if self.policy("moe", x.shape[0]) == "grouped":
+                return self._mega_moe(layer, x, choice), True
+            if choice == "grouped":
                 return self._grouped_moe(layer, x), False
         if layer._mlp_is_moe:
             config = layer.mlp.experts.moe_config
