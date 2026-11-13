@@ -64,6 +64,7 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -127,6 +128,7 @@ class Qwen3Attention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
+        qk_norm: bool = True,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -204,8 +206,10 @@ class Qwen3Attention(nn.Module):
             attn_type=attn_type,
             **attention_kwargs,
         )
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
         self,
@@ -214,13 +218,11 @@ class Qwen3Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        # Add qk-norm
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
+        if self.qk_norm:
+            q_by_head = self.q_norm(q.view(*q.shape[:-1], -1, self.head_dim))
+            q = q_by_head.view(q.shape)
+            k_by_head = self.k_norm(k.view(*k.shape[:-1], -1, self.head_dim))
+            k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -445,7 +447,13 @@ class Qwen3Model(nn.Module, EagleModelMixin):
 
 
 class Qwen3ForCausalLM(
-    LocalArgmaxMixin, nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    LocalArgmaxMixin,
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsQuant,
 ):
     hf_to_vllm_mapper = Qwen3Model.hf_to_vllm_mapper
     packed_modules_mapping = {
@@ -459,7 +467,7 @@ class Qwen3ForCausalLM(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config.get_text_config()
         quant_config = vllm_config.quant_config
 
         self.config = config

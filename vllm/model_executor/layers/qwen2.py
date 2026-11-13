@@ -26,7 +26,6 @@
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
@@ -34,19 +33,10 @@ from transformers import Qwen2Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.attention import (
-    Attention,
-    EncoderOnlyAttention,
-)
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    RowParallelLinear,
-)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
@@ -57,136 +47,15 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
     SupportsQuant,
 )
-from vllm.model_executor.models.qwen3 import Qwen3MLP, Qwen3Model
+from vllm.model_executor.models.qwen3 import Qwen3Attention, Qwen3MLP, Qwen3Model
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    extract_layer_index,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
-
-
-class Qwen2Attention(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_parameters: dict[str, Any],
-        max_position: int = 4096 * 32,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: dict[str, Any] | None = None,
-        qk_norm: bool = False,
-        rms_norm_eps: float = 1e-6,
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
-        self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
-        self.dual_chunk_attention_config = dual_chunk_attention_config
-        self.qk_norm = qk_norm
-
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-
-        # QK Normalization support (used in BAGEL and some other models)
-        if self.qk_norm:
-            self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-            self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position,
-            rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
-        )
-        attn_cls = (
-            EncoderOnlyAttention
-            if attn_type == AttentionType.ENCODER_ONLY
-            else Attention
-        )
-        attention_kwargs: dict[str, Any] = {}
-        if dual_chunk_attention_config:
-            attention_kwargs = {
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-        self.attn = attn_cls(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            attn_type=attn_type,
-            prefix=f"{prefix}.attn",
-            **attention_kwargs,
-        )
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        # Apply QK normalization if enabled (before RoPE)
-        if self.qk_norm:
-            # Reshape to apply per-head normalization
-            # q shape: (total_tokens, q_size) -> (total_tokens, num_heads, head_dim)
-            total_tokens = q.shape[0]
-            q = q.view(total_tokens, self.num_heads, self.head_dim)
-            k = k.view(total_tokens, self.num_kv_heads, self.head_dim)
-
-            # Apply normalization
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-
-            # Reshape back
-            q = q.view(total_tokens, self.q_size)
-            k = k.view(total_tokens, self.kv_size)
-
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
 
 
 class Qwen2DecoderLayer(nn.Module):
@@ -216,11 +85,12 @@ class Qwen2DecoderLayer(nn.Module):
         # Check if QK normalization is enabled (used in BAGEL and some other models)
         qk_norm = getattr(config, "qk_norm", False)
 
-        self.self_attn = Qwen2Attention(
+        self.self_attn = Qwen3Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
+            qkv_bias=True,
             cache_config=cache_config,
             quant_config=quant_config,
             rope_parameters=config.rope_parameters,
