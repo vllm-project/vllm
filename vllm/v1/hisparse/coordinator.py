@@ -27,7 +27,6 @@ from vllm.v1.hisparse.types import (
     SparseKVRowMirror,
 )
 from vllm.v1.kv_cache_interface import (
-    HiSparseResidentSpec,
     KVCacheConfig,
 )
 from vllm.v1.request import Request
@@ -116,11 +115,7 @@ class HiSparseCoordinator:
         hot_managers: list[HiSparseHotManager] = []
         resident_group_ids: list[int] = []
         for group_id, (group, manager) in enumerate(zip(groups, managers)):
-            if isinstance(group.kv_cache_spec, HiSparseResidentSpec):
-                if not isinstance(manager, HiSparseResidentManager):
-                    raise TypeError(
-                        "HiSparse resident specs require resident cache managers."
-                    )
+            if isinstance(manager, HiSparseResidentManager):
                 resident_managers.append(manager)
                 resident_group_ids.append(group_id)
                 assert not group.host_resident
@@ -444,6 +439,8 @@ class HiSparseCoordinator:
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
+        if not state.pinned_clean:
+            return
         self._unpin_pages(request_id, state, sorted(state.pinned_clean, reverse=True))
 
     def _on_block_reused(self, block: KVCacheBlock) -> None:
@@ -561,6 +558,11 @@ class HiSparseCoordinator:
         manager = self.host_manager
         if manager is None:
             return
+        # A lookahead hash arrives only once the tokens after its page are known.
+        num_computed_tokens = min(
+            num_computed_tokens,
+            len(request.block_hashes) * manager.block_pool.hash_block_size,
+        )
         request_id = request.request_id
         self._get_request_state(request_id).publication = _PendingPublication(
             request=request,

@@ -13,6 +13,8 @@ from vllm.multimodal.processing.context import TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.transformers_utils.processors.deepseek_ocr import calculate_aspect_ratios
 
+from .test_common import _assert_inputs_equal
+
 
 @pytest.mark.parametrize("overrides, expected", [({}, 128), ({"rswa_window": 0}, None)])
 def test_v2_output_window_reaches_runtime_config(overrides, expected):
@@ -156,6 +158,65 @@ def test_image_cache_identity_without_cropping(kwargs_on_init: bool):
         == results[1]["mm_placeholders"]["image"][0].length
     )
     assert results[0]["prompt_token_ids"] == results[2]["prompt_token_ids"]
+
+
+def test_v2_multi_page_request_uses_processor_cache():
+    config = ModelConfig(
+        model="baidu/Unlimited-OCR-2",
+        limit_mm_per_prompt={"image": 2},
+        max_model_len=8192,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    prompt = processor.info.get_tokenizer().encode(
+        "<PAGE><image><PAGE><image>Multi page parsing."
+    )
+    images = [Image.new("RGB", (1920, 1080), color) for color in ("red", "blue")]
+    cache = MultiModalProcessorOnlyCache(config)
+    results = []
+    for data in (images, [None, None]):
+        inputs = ProcessorInputs(
+            prompt=prompt,
+            mm_data_items=processor.info.parse_mm_data({"image": data}),
+            mm_uuid_items={"image": ["page-0", "page-1"]},
+            cache=cache,
+        )
+        results.append(processor.apply(inputs, TimingContext(enabled=False)))
+
+    assert results[0]["prompt_token_ids"] == results[1]["prompt_token_ids"]
+    assert results[0]["mm_hashes"] == results[1]["mm_hashes"]
+
+
+def test_v2_partial_cache_hit_matches_uncached_request():
+    config = ModelConfig(
+        model="baidu/Unlimited-OCR-2",
+        limit_mm_per_prompt={"image": 2},
+        max_model_len=8192,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(config)
+    tokenizer = processor.info.get_tokenizer()
+    page_a = Image.new("RGB", (1920, 1080), "red")
+    page_b = Image.new("RGB", (768, 1024), "blue")
+
+    def apply(text, data, uuids, cache):
+        inputs = ProcessorInputs(
+            prompt=tokenizer.encode(text),
+            mm_data_items=processor.info.parse_mm_data({"image": data}),
+            mm_uuid_items={"image": uuids},
+            cache=cache,
+        )
+        return processor.apply(inputs, TimingContext(enabled=False))
+
+    two_pages = "<PAGE><image><PAGE><image>Multi page parsing."
+    expected = apply(two_pages, [page_b, page_a], ["page-b", "page-a"], None)
+
+    cache = MultiModalProcessorOnlyCache(config)
+    apply("<PAGE><image>Multi page parsing.", [page_a], ["page-a"], cache)
+    actual = apply(two_pages, [page_b, None], ["page-b", "page-a"], cache)
+
+    assert expected["mm_placeholders"]["image"][0].length != (
+        expected["mm_placeholders"]["image"][1].length
+    )
+    _assert_inputs_equal(actual, expected)
 
 
 def test_v2_gundam_matches_official_wide_page_grid():
