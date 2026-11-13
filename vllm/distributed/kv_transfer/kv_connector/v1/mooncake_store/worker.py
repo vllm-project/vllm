@@ -72,6 +72,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     StoreShardId,
     TokenMajorStoreLayout,
     group_compact_kernel_blocks,
+    layer_range_index,
     split_layer_range,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
@@ -88,6 +89,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.distributed.utils import get_default_pp_partition, get_pp_indices
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
@@ -142,6 +144,19 @@ def _store_spec_family(spec: KVCacheSpec) -> Literal["attention", "mamba"] | Non
 
 def _group_layer_specs(group: KVCacheGroup) -> tuple[KVCacheSpec, ...]:
     return tuple(group.kv_cache_specs[name] for name in group.layer_names)
+
+
+def _group_layer_ranges(
+    layer_names: Sequence[str], layer_ranges: tuple[tuple[int, int], ...]
+) -> tuple[tuple[int, int], ...]:
+    """The stage's layer ranges that hold some of a group's layers. KV cache
+    groups are formed over the whole model, so a range without layers of a
+    group has none at any PP size."""
+    used = {
+        layer_range_index(layer_ranges, extract_layer_index(name))
+        for name in layer_names
+    }
+    return tuple(r for index, r in enumerate(layer_ranges) if index in used)
 
 
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
@@ -1930,10 +1945,15 @@ class MooncakeStoreWorker:
             )
         plan = plans[0] if plans else None
         fallback_reason: str | None = None
-        if len(self._kv_cache_groups) != 1:
-            fallback_reason = "the KV cache has several groups"
-        elif self._kv_cache_config.hisparse_host_num_blocks is not None:
+        if self._kv_cache_config.hisparse_host_num_blocks is not None:
             fallback_reason = "HiSparse host cache registration is per group"
+        elif any(
+            group.prefix_cacheable and not group.layer_names
+            for group in self._kv_cache_groups
+        ):
+            fallback_reason = "a KV cache group has no layers on this stage"
+        elif plans is not None and len(self._kv_cache_groups) != 1:
+            fallback_reason = "Store TP sharing has several KV cache groups"
         elif plan is not None and not issubclass(plan.layout_cls, AttentionStoreLayout):
             fallback_reason = "the Store TP layout is not an attention layout"
         elif plan is not None and any(
@@ -1979,6 +1999,11 @@ class MooncakeStoreWorker:
             hash_block_size = (
                 self.hash_block_size if group.prefix_cacheable else group.block_size
             )
+            group_ranges = (
+                _group_layer_ranges(group.layer_names, layer_ranges)
+                if layer_ranges is not None
+                else None
+            )
             plan = plans[group_idx] if plans is not None else None
             if plan is None:
                 group_metadata = dataclasses.replace(
@@ -1998,9 +2023,9 @@ class MooncakeStoreWorker:
                                 group_metadata,
                                 group.block_size,
                                 hash_block_size,
-                                layer_ranges,
+                                group_ranges,
                             )
-                            if layer_ranges is not None
+                            if group_ranges is not None
                             else None
                         ),
                     )
@@ -2009,7 +2034,7 @@ class MooncakeStoreWorker:
             assert self.store_tp_size is not None
             store_pp = f"@store_pp:{self.pp_size}"
             schema_fingerprint = plan.schema_fingerprint
-            if layer_ranges is not None:
+            if group_ranges is not None:
                 # Keys name their layer range and every layer has the same
                 # spec, so instances of all PP sizes share one namespace.
                 assert plan.store_chunk_size is not None
@@ -2042,7 +2067,7 @@ class MooncakeStoreWorker:
                     tp_rank=plan.tp_rank,
                     layer_specs=cast(tuple[AttentionSpec, ...], plan.layer_specs),
                     store_chunk_size=plan.store_chunk_size,
-                    layer_ranges=layer_ranges,
+                    layer_ranges=group_ranges,
                 )
             else:
                 store_layout = MambaStoreLayout(

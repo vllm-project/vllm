@@ -193,7 +193,7 @@ def split_layer_range(
     return tuple(zip(cuts[:-1], cuts[1:]))
 
 
-def _layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> int:
+def layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> int:
     """Index of the range holding `layer`. Layers past the last range (e.g. a
     draft model's on the last PP stage) belong to the last range."""
     if layer >= layer_ranges[-1][1]:
@@ -215,7 +215,7 @@ def _tensor_ranges(
     if layer_names is None or len(layer_names) != num_caches:
         raise ValueError("Store layer ranges need the layer name of each KV cache")
     ranges = [
-        _layer_range_index(layer_ranges, extract_layer_index(name))
+        layer_range_index(layer_ranges, extract_layer_index(name))
         for name in layer_names
     ]
     if len(set(ranges)) != len(layer_ranges):

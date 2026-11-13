@@ -272,13 +272,15 @@ add ranges, and a lookup checks one key per range.
 
 The listed PP sizes use the default layer partition. An instance whose own stages
 are set with `VLLM_PP_LAYER_PARTITION` also splits at its own boundaries. Every
-instance that shares the entries must use the same list. `pp_sizes` applies to
-one KV cache group, with the rank-local layout or with Store TP sharing of
-attention layers that all have the same KV cache spec. With Store TP sharing,
-instances that differ in both TP and PP size share entries too, for example a
+instance that shares the entries must use the same list. With the rank-local
+layout, `pp_sizes` also applies to hybrid models: each KV cache group stores one
+object per range that holds some of its layers. With Store TP sharing, it applies
+to one KV cache group of attention layers that all have the same KV cache spec,
+and instances that differ in both TP and PP size share entries too, for example a
 PP = 2, TP = 1 instance and a PP = 1, TP = 2 instance with `"store_tp_size": 2`.
-With several KV cache groups (hybrid models), HiSparse, or attention layers with
-different specs, the connector logs a warning and ignores `pp_sizes`.
+With HiSparse, Store TP sharing of several KV cache groups or of attention layers
+with different specs, or a KV cache group with no layers on a stage, the
+connector logs a warning and ignores `pp_sizes`.
 
 **Proxy:**
 

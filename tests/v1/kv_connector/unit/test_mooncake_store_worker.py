@@ -3617,14 +3617,30 @@ def test_pp_sizes_share_layer_range_keys_across_pp_sizes(
         ),
     )
 
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+
     def layout(pp_size: int, rank: int):
+        kv_config = KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                make_kv_cache_group(
+                    [
+                        f"model.layers.{i}.self_attn.attn"
+                        for i in range(rank * 2 // pp_size, (rank + 1) * 2 // pp_size)
+                    ],
+                    spec,
+                )
+            ],
+            prefix_cache_retention_interval=0,
+        )
         w = worker.MooncakeStoreWorker(
             _make_vllm_config(
                 rank=rank,
                 pipeline_parallel_size=pp_size,
                 extra_config={"pp_sizes": [1, 2], **store_config},
             ),
-            _make_kv_cache_config(),
+            kv_config,
         )
         store_layout = w.token_dbs[0].store_layout
         assert type(store_layout) is layout_cls
@@ -3639,6 +3655,83 @@ def test_pp_sizes_share_layer_range_keys_across_pp_sizes(
         for stage in stages
         for shard in stage.local_shard_ids
     ]
+
+
+@pytest.mark.cpu_test
+def test_pp_sizes_share_hybrid_group_keys_across_pp_sizes(tmp_path, monkeypatch):
+    """KV cache groups are formed over the whole model, so with pp_sizes each
+    group of a PP=1 instance stores the objects the PP=2 stages store for it."""
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        output[:] = [local] * len(output)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_hidden_layers", lambda _: 8)
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+    full = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    gdn = mamba_layer(
+        block_size=16,
+        shapes=((24, 3), (4, 2, 2)),
+        dtypes=(torch.uint8, torch.uint8),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        mamba_cache_mode="align",
+    )
+    # Layers 3 and 7 use full attention; the GDN layers form three groups.
+    groups = [(full, (3, 7)), (gdn, (0, 4)), (gdn, (1, 5)), (gdn, (2, 6))]
+
+    def group_keys(pp_size: int, rank: int) -> list[list[str]]:
+        stage = range(rank * 8 // pp_size, (rank + 1) * 8 // pp_size)
+        kv_config = KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                make_kv_cache_group(
+                    [f"model.layers.{i}.attn" for i in layers if i in stage], spec
+                )
+                for spec, layers in groups
+            ],
+        )
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                rank=rank,
+                pipeline_parallel_size=pp_size,
+                extra_config={"pp_sizes": [1, 2]},
+                prefix_match_unit=16,
+            ),
+            kv_config,
+        )
+        return [
+            [
+                db.store_layout.key_for(shard, BlockHash(b"h"))
+                for shard in db.store_layout.local_shard_ids
+            ]
+            for db in w.token_dbs
+        ]
+
+    pp1 = group_keys(1, 0)
+    stages = [group_keys(2, rank) for rank in (0, 1)]
+
+    for g in range(len(groups)):
+        assert len(pp1[g]) == 2
+        assert pp1[g] == stages[0][g] + stages[1][g]
 
 
 @pytest.mark.parametrize("tp_size", [2, 4])
