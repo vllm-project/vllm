@@ -16,7 +16,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
     MambaManager,
-    SingleTypeKVCacheManager,
     SlidingWindowManager,
     create_single_type_manager,
 )
@@ -466,10 +465,11 @@ class KVCacheCoordinator(ABC):
 
     @staticmethod
     def _session_blocks_kwargs(
-        manager_cls: type[SingleTypeKVCacheManager],
+        manager_cls: type,
         session_blocks: Mapping[int, Sequence[KVCacheBlock]] | None,
     ) -> dict[str, Mapping[int, Sequence[KVCacheBlock]]]:
-        if session_blocks is None or not manager_cls.supports_session_blocks:
+        # Only the full-attention lookup scans from the first block.
+        if session_blocks is None or not issubclass(manager_cls, FullAttentionManager):
             return {}
         return {"session_blocks": session_blocks}
 

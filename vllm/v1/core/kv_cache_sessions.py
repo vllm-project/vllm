@@ -58,19 +58,19 @@ class KVCacheSessions:
 
     Args:
         ttl: Seconds a session outlives its latest request.
-        max_sessions: Sessions tracked before the oldest is dropped.
         hash_block_size: Token granularity of request block hashes.
         lookup_block_sizes: Block size of each KV cache group whose lookup
             scans from the first block and so can start from a session's blocks.
+        max_sessions: Sessions tracked before the oldest is dropped.
 
     """
 
     def __init__(
         self,
         ttl: float,
-        max_sessions: int,
         hash_block_size: int,
         lookup_block_sizes: dict[int, int],
+        max_sessions: int = 65536,
     ) -> None:
         self.ttl = ttl
         self.max_sessions = max_sessions
@@ -119,10 +119,11 @@ class KVCacheSessions:
                 hashes = resolve_block_hashes(
                     block_hashes, self.hash_block_size, block_size
                 )
-                end = min(len(kept), len(hashes))
-                while num_lookup_blocks < end and keys[
-                    num_lookup_blocks
-                ] == make_block_hash_with_group_id(hashes[num_lookup_blocks], group_id):
+                for key, block_hash in zip(
+                    keys[num_lookup_blocks:], hashes[num_lookup_blocks:]
+                ):
+                    if key != make_block_hash_with_group_id(block_hash, group_id):
+                        break
                     num_lookup_blocks += 1
 
             session.blocks.append(kept)

@@ -496,23 +496,6 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
-    def release_retained(self) -> None:
-        """Move every retained block to the front of the normal list."""
-        head = self.fake_retained_list_head
-        tail = self.fake_retained_list_tail
-        first, last = head.next_free_block, tail.prev_free_block
-        if first is tail:
-            return
-        assert first is not None and last is not None
-        old_first = self.fake_free_list_head.next_free_block
-        assert old_first is not None
-        self.fake_free_list_head.next_free_block = first
-        first.prev_free_block = self.fake_free_list_head
-        last.next_free_block = old_first
-        old_first.prev_free_block = last
-        head.next_free_block = tail
-        tail.prev_free_block = head
-
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
 

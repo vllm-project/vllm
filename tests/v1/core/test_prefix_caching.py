@@ -7047,16 +7047,18 @@ def _make_session_manager(
     kv_cache_config: KVCacheConfig,
     hash_block_size: int = 16,
     session_ttl: float = SESSION_TTL,
-    **kwargs,
+    max_sessions: int | None = None,
 ) -> KVCacheManager:
-    return make_kv_cache_manager(
+    manager = make_kv_cache_manager(
         kv_cache_config,
         max_model_len=1 << 16,
         enable_caching=True,
         hash_block_size=hash_block_size,
         session_ttl=session_ttl,
-        **kwargs,
     )
+    if max_sessions is not None and manager.sessions is not None:
+        manager.sessions.max_sessions = max_sessions
+    return manager
 
 
 def _run_turn(manager: KVCacheManager, request: Request) -> tuple[list, int]:

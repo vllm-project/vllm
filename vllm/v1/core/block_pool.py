@@ -900,8 +900,10 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
-            block.session_ref = 0
-        self.free_block_queue.release_retained()
+            if block.session_ref:
+                block.session_ref = 0
+                self.free_block_queue.remove(block)
+                self.free_block_queue.append(block)
 
         if self.metrics_collector:
             self.metrics_collector.reset()

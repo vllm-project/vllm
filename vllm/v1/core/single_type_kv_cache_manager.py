@@ -57,8 +57,6 @@ class SingleTypeKVCacheManager(ABC):
     block_table_token_alignment: ClassVar[int | None] = 128
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
-    # Whether `find_longest_cache_hit` accepts `session_blocks`.
-    supports_session_blocks: ClassVar[bool] = False
 
     # Whether worker-side KV cache zeroing applies to this manager's blocks.
     zeroes_new_blocks: ClassVar[bool] = True
@@ -849,7 +847,6 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
-    supports_session_blocks: ClassVar[bool] = True
 
     @classmethod
     def find_longest_cache_hit(

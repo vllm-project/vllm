@@ -18,6 +18,7 @@ from vllm.v1.core.kv_cache_sessions import KVCacheSessions
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    FullAttentionManager,
     MambaManager,
     get_kv_cache_kind,
 )
@@ -148,7 +149,6 @@ class KVCacheManager:
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
         session_ttl: float = 0,
-        max_sessions: int = 65536,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -206,12 +206,10 @@ class KVCacheManager:
         )
         self.kv_cache_config = kv_cache_config
 
-        # Session retention is a no-op for requests without a session id.
         self.sessions: KVCacheSessions | None = None
         if enable_caching and session_ttl > 0:
             self.sessions = KVCacheSessions(
                 ttl=session_ttl,
-                max_sessions=max_sessions,
                 hash_block_size=hash_block_size,
                 lookup_block_sizes={
                     manager.kv_cache_group_id: manager.block_size
@@ -219,7 +217,8 @@ class KVCacheManager:
                         self.coordinator.single_type_managers,
                         kv_cache_config.kv_cache_groups,
                     )
-                    if manager.supports_session_blocks and group.prefix_cacheable
+                    if isinstance(manager, FullAttentionManager)
+                    and group.prefix_cacheable
                 },
             )
 
