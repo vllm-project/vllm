@@ -36,6 +36,7 @@ def test_recovery_replays_continuously_from_first_hole():
 
     assert plan.required_ranges == ((512, 1024), (768, 1024))
     assert plan.replay_ranges == ((640, 1024),)
+    assert plan.missing_ranges == ((640, 704), (896, 960))
 
 
 def test_recovery_aligns_retained_history_to_block_boundary():
@@ -174,7 +175,62 @@ def test_short_suffix_recovers_window_without_discarding_main_hit():
     assert new_request.replay_start == 28
     assert new_request.draft_recovery_main_cached_end == 44
     assert output.num_scheduled_tokens[consumer.request_id] == 8
+    assert output.draft_projection_ranges == {consumer.request_id: ((28, 36),)}
 
     draft_blocks = manager.get_blocks(consumer.request_id).blocks[1]
+    assert all(block.block_hash is None for block in draft_blocks[7:11])
+
+    manager.complete_draft_projection(consumer, ((28, 32),), completed_end=32)
+    assert manager.get_draft_projection_ranges(consumer, 28, 36) == ((32, 36),)
+    manager.complete_draft_projection(consumer, ((32, 36),), completed_end=36)
+
     assert all(block.block_hash is not None for block in draft_blocks[7:9])
     assert all(block.block_hash is None for block in draft_blocks[9:11])
+
+
+def test_long_prefill_skips_projection_before_final_draft_window():
+    block_size = 4
+    base = create_scheduler(
+        block_size=block_size,
+        enable_prefix_caching=True,
+        max_num_seqs=1,
+        max_num_batched_tokens=8,
+        max_model_len=128,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=128,
+        num_blocks_by_pool=[128, 17],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target"],
+                new_kv_cache_spec(block_size=block_size),
+                block_pool_id=0,
+            ),
+            KVCacheGroupSpec(
+                ["draft"],
+                new_sliding_window_spec(block_size=block_size, sliding_window=16),
+                block_pool_id=1,
+                role=KVCacheGroupRole.DRAFT_WINDOW,
+            ),
+        ],
+    )
+    scheduler = Scheduler(
+        vllm_config=base.vllm_config,
+        kv_cache_config=kv_cache_config,
+        block_size=block_size,
+        log_stats=False,
+        structured_output_manager=StructuredOutputManager(base.vllm_config),
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=64,
+        block_size=block_size,
+        req_ids=["long-prefill"],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[request.request_id] == 8
+    assert output.draft_projection_ranges == {request.request_id: ()}

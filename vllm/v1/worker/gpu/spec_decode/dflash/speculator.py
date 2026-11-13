@@ -3,6 +3,7 @@
 import copy
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -33,6 +34,48 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+def get_draft_projection_indices(
+    req_ids: list[str],
+    query_start_loc: np.ndarray,
+    num_computed_tokens: np.ndarray,
+    projection_ranges: dict[str, tuple[tuple[int, int], ...]] | None,
+) -> np.ndarray | None:
+    """Map request-token projection ranges to packed batch rows."""
+    if projection_ranges is None:
+        return None
+
+    selected: list[np.ndarray] = []
+    for req_idx, req_id in enumerate(req_ids):
+        batch_start = int(query_start_loc[req_idx])
+        batch_end = int(query_start_loc[req_idx + 1])
+        ranges = projection_ranges.get(req_id)
+        if ranges is None:
+            selected.append(np.arange(batch_start, batch_end, dtype=np.int64))
+            continue
+
+        token_start = int(num_computed_tokens[req_idx])
+        token_end = token_start + batch_end - batch_start
+        for start, end in ranges:
+            start = max(start, token_start)
+            end = min(end, token_end)
+            if start < end:
+                selected.append(
+                    np.arange(
+                        batch_start + start - token_start,
+                        batch_start + end - token_start,
+                        dtype=np.int64,
+                    )
+                )
+
+    indices = np.concatenate(selected) if selected else np.empty(0, dtype=np.int64)
+    num_tokens = int(query_start_loc[len(req_ids)])
+    if indices.size == num_tokens and np.array_equal(
+        indices, np.arange(num_tokens, dtype=np.int64)
+    ):
+        return None
+    return indices
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -381,20 +424,43 @@ class DFlashSpeculator(DraftModelSpeculator):
         return min(num_reqs * (self.num_speculative_steps + 1), self.max_num_tokens)
 
     def _precompute_context_kv(
-        self, start: int, end: int, dummy_run: bool = False
+        self,
+        start: int,
+        end: int,
+        dummy_run: bool = False,
+        source_indices: torch.Tensor | None = None,
+        source_end: int | None = None,
     ) -> None:
+        if source_indices is not None:
+            assert start == 0
+            source_end = source_end if source_end is not None else end
+            positions = self.context_positions[:source_end].index_select(
+                0, source_indices
+            )
+        else:
+            positions = self.context_positions[start:end]
+        selected_end = source_end if source_end is not None else end
         if dummy_run:
             context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
         elif self._layer_group_idx is not None:
             context_slots = [
-                self._kernel_context_slots(gidx, start, end)
+                self._kernel_context_slots(gidx, 0, selected_end).index_select(
+                    0, source_indices
+                )
+                if source_indices is not None
+                else self._kernel_context_slots(gidx, start, end)
                 for gidx in self._layer_group_idx
             ]
         else:
-            context_slots = self._kernel_context_slots(0, start, end)
+            context_slots = self._kernel_context_slots(
+                0, 0 if source_indices is not None else start, selected_end
+            )
+            if source_indices is not None:
+                assert isinstance(context_slots, torch.Tensor)
+                context_slots = context_slots.index_select(0, source_indices)
         self.model.precompute_and_store_context_kv(
             self.hidden_states[start:end],
-            self.context_positions[start:end],
+            positions,
             context_slots,
         )
 
@@ -414,7 +480,21 @@ class DFlashSpeculator(DraftModelSpeculator):
         last_hidden_states: torch.Tensor,
         aux_hidden_states: list[torch.Tensor] | None,
         num_graph_tokens: int = 0,
+        source_indices: torch.Tensor | None = None,
     ) -> None:
+        if source_indices is not None:
+            assert num_graph_tokens == 0
+            if aux_hidden_states:
+                hidden_states = self.model.combine_hidden_states(
+                    torch.cat(
+                        [h.index_select(0, source_indices) for h in aux_hidden_states],
+                        dim=-1,
+                    )
+                )
+            else:
+                hidden_states = last_hidden_states.index_select(0, source_indices)
+            self.hidden_states[:num_tokens].copy_(hidden_states)
+            return
         # A FULL graph combines its first num_graph_tokens rows from the staged
         # aux hidden states; the remaining rows are combined here.
         start = 0
@@ -561,13 +641,42 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_reqs,
             )
 
+        projection_indices_np = get_draft_projection_indices(
+            input_batch.req_ids,
+            input_batch.query_start_loc_np,
+            input_batch.num_computed_tokens_np,
+            input_batch.draft_projection_ranges,
+        )
+        projection_indices = (
+            torch.from_numpy(projection_indices_np).to(
+                device=input_batch.positions.device
+            )
+            if projection_indices_np is not None
+            else None
+        )
+        num_projection_tokens = (
+            num_target_tokens
+            if projection_indices is None
+            else projection_indices.shape[0]
+        )
+
         if num_speculative_tokens == 0:
             # No drafts are needed: store the context K/V to keep the drafter in
             # sync, and skip the query pass.
-            self._store_hidden_states(
-                num_target_tokens, last_hidden_states, aux_hidden_states
-            )
-            self._precompute_context_kv(0, num_target_tokens, dummy_run)
+            if num_projection_tokens:
+                self._store_hidden_states(
+                    num_projection_tokens,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    source_indices=projection_indices,
+                )
+                self._precompute_context_kv(
+                    0,
+                    num_projection_tokens,
+                    dummy_run,
+                    source_indices=projection_indices,
+                    source_end=num_target_tokens,
+                )
             return self.draft_tokens[:num_reqs]
 
         batch_sync, num_batch_tokens = (
@@ -604,6 +713,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            assert projection_indices is None
             assert batch_desc.num_reqs is not None
             self._prepare_graph_replay(
                 input_batch,
@@ -614,13 +724,24 @@ class DFlashSpeculator(DraftModelSpeculator):
                 dummy_run,
             )
         else:
-            self._store_hidden_states(
-                num_target_tokens, last_hidden_states, aux_hidden_states
-            )
+            if num_projection_tokens:
+                self._store_hidden_states(
+                    num_projection_tokens,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    source_indices=projection_indices,
+                )
             self.prepare_context_anchor(
                 num_reqs, input_batch.query_start_loc, num_rejected
             )
-            self._precompute_context_kv(0, num_target_tokens, dummy_run)
+            if num_projection_tokens:
+                self._precompute_context_kv(
+                    0,
+                    num_projection_tokens,
+                    dummy_run,
+                    source_indices=projection_indices,
+                    source_end=num_target_tokens,
+                )
 
         is_full_cudagraph = batch_desc.cg_mode == CUDAGraphMode.FULL
         # During FULL cudagraph with a model that supports decode metadata updates,

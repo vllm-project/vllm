@@ -990,11 +990,42 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         for block_index, block in zip(indices, new_blocks, strict=True):
             blocks[block_index] = block
         self.num_cached_block[request_id] = min(
-            self.num_cached_block[request_id], indices[0]
+            self.num_cached_block.get(request_id, 0), indices[0]
         )
         if self._record_new_block_ids:
             self.new_block_ids.extend(block.block_id for block in new_blocks)
         return new_blocks
+
+    def cache_written_ranges(
+        self,
+        request: Request,
+        token_ranges: Sequence[tuple[int, int]],
+    ) -> None:
+        """Cache full pages whose selective Draft writes have completed."""
+        if not self.kv_cache_spec.prefix_cacheable:
+            return
+        blocks = self.req_to_blocks.get(request.request_id)
+        if blocks is None:
+            return
+
+        highest_cached = self.num_cached_block.get(request.request_id, 0)
+        for start, end in token_ranges:
+            first_block = cdiv(start, self.block_size)
+            last_block = min(end // self.block_size, len(blocks))
+            for block_index in range(first_block, last_block):
+                block = blocks[block_index]
+                if block.is_null or block.block_hash is not None:
+                    continue
+                self.block_pool.cache_full_blocks(
+                    request=request,
+                    blocks=blocks,
+                    num_cached_blocks=block_index,
+                    num_full_blocks=block_index + 1,
+                    block_size=self.block_size,
+                    kv_cache_group_id=self.kv_cache_group_id,
+                )
+                highest_cached = max(highest_cached, block_index + 1)
+        self.num_cached_block[request.request_id] = highest_cached
 
     @classmethod
     def _contiguous_blocks_for_hit(

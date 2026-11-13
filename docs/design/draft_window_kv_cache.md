@@ -70,6 +70,26 @@ rewritten.
 This protection is based on the known target hit boundary. It does not maintain
 an endpoint cache or add endpoint-specific eviction state.
 
+## Selective draft projection
+
+Target replay remains continuous because the model must regenerate the hidden
+states consumed by the drafter. Draft context projection and Draft KV writes
+do not need to be continuous, however. For each scheduled prefill or recovery
+chunk, the scheduler intersects its token range with the exact missing pages in
+the retained Draft windows. DFlash and DSpark compact those selected hidden
+state rows before running their context projection.
+
+An early long-prefill chunk that lies entirely before the final Draft window
+therefore performs no Draft context projection. During recovery, non-adjacent
+cached pages remain reusable: target replay starts at the first hole, while
+Draft projection writes only the holes. Decode steps and unsupported layouts
+retain the regular full-projection path.
+
+Selective pages are not published optimistically during allocation. The
+scheduler publishes only fully written pages after the worker completion
+callback, and copy-on-write treats a sparsely published page as valid even when
+no dense cache cursor exists.
+
 ## Prefill/decode transfer
 
 With Mooncake P/D disaggregation, the consumer reports the logical positions

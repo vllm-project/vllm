@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.draft_window_recovery import (
     DraftWindowRecoveryPlan,
+    intersect_token_ranges,
     plan_draft_window_recovery,
 )
 from vllm.v1.core.kv_cache_coordinator import (
@@ -248,6 +249,7 @@ class KVCacheManager:
             for pool_id, num_blocks in enumerate(kv_cache_config.num_blocks_by_pool)
         )
         self.watermark_blocks = self.watermark_blocks_by_pool[0]
+
         self.kv_cache_event_metadata = tuple(
             (
                 get_kv_cache_spec_kind(group.kv_cache_spec).value,
@@ -264,6 +266,10 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+
+    @property
+    def has_draft_window_groups(self) -> bool:
+        return bool(self._draft_window_managers)
 
     @property
     def usage(self) -> float:
@@ -450,6 +456,83 @@ class KVCacheManager:
         """Return the recovery plan produced by the latest prefix lookup."""
         return self._draft_recovery_plans.get(request_id)
 
+    def get_draft_projection_ranges(
+        self,
+        request: Request,
+        scheduled_start: int,
+        scheduled_end: int,
+    ) -> tuple[tuple[int, int], ...] | None:
+        """Select scheduled prompt rows that can populate a Draft window.
+
+        `None` preserves full projection. An empty tuple explicitly skips all
+        Draft context projection for this step.
+        """
+        if not self._draft_window_managers or scheduled_start >= scheduled_end:
+            return None
+
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if scheduled_start >= prefill_end or scheduled_end > prefill_end:
+            return None
+
+        recovery_plan = self._draft_recovery_plans.get(request.request_id)
+        if recovery_plan is not None:
+            ready_ranges = tuple(
+                self._find_draft_ready_blocks(
+                    manager,
+                    request,
+                    required_start,
+                    recovery_plan.main_cached_end,
+                )[1]
+                for manager, (required_start, _) in zip(
+                    self._draft_window_managers,
+                    recovery_plan.required_ranges,
+                    strict=True,
+                )
+            )
+            refreshed_plan = plan_draft_window_recovery(
+                request_id=request.request_id,
+                main_cached_end=recovery_plan.main_cached_end,
+                retained_history_tokens=tuple(
+                    cast(SlidingWindowSpec, manager.kv_cache_spec).num_retained_tokens
+                    for manager in self._draft_window_managers
+                ),
+                block_sizes=tuple(
+                    manager.block_size for manager in self._draft_window_managers
+                ),
+                draft_ready_ranges=ready_ranges,
+            )
+            missing_ranges = refreshed_plan.missing_ranges
+        else:
+            missing_ranges = tuple(
+                (
+                    max(
+                        0,
+                        prefill_end
+                        - cast(
+                            SlidingWindowSpec, manager.kv_cache_spec
+                        ).num_retained_tokens,
+                    )
+                    // manager.block_size
+                    * manager.block_size,
+                    prefill_end,
+                )
+                for manager in self._draft_window_managers
+            )
+        return intersect_token_ranges(missing_ranges, (scheduled_start, scheduled_end))
+
+    def complete_draft_projection(
+        self,
+        request: Request,
+        ranges: tuple[tuple[int, int], ...],
+        completed_end: int,
+    ) -> None:
+        """Publish fully written Draft pages after worker completion."""
+        completed = intersect_token_ranges(ranges, (0, completed_end))
+        if not completed:
+            return
+        for manager in self._draft_window_managers:
+            manager.cache_written_ranges(request, completed)
+
     def _find_draft_ready_blocks(
         self,
         manager: SlidingWindowManager,
@@ -601,6 +684,7 @@ class KVCacheManager:
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
         num_scheduled_draft_recovery_tokens: int = 0,
+        draft_projection_ranges: tuple[tuple[int, int], ...] | None = None,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -637,6 +721,8 @@ class KVCacheManager:
                 written by an async load and must not be zeroed concurrently.
             num_scheduled_draft_recovery_tokens: Tokens scheduled from the
                 draft recovery envelope in this admission step.
+            draft_projection_ranges: Exact request-token ranges whose Draft KV
+                will be written by this step. `None` keeps dense publication.
 
         Blocks layout:
         ```
@@ -873,6 +959,10 @@ class KVCacheManager:
             request.num_tokens,
         )
         token_limits_by_group: dict[int, int] | None = None
+        if draft_projection_ranges is not None:
+            token_limits_by_group = {
+                manager.kv_cache_group_id: 0 for manager in self._draft_window_managers
+            }
         if recovery_plan is not None and recovery_plan.replay_ranges:
             replay_start, replay_end = recovery_plan.replay_ranges[0]
             recovery_end = min(
@@ -880,10 +970,12 @@ class KVCacheManager:
                 replay_end,
             )
             if recovery_end < replay_end:
-                token_limits_by_group = {
-                    manager.kv_cache_group_id: recovery_end
-                    for manager in self._draft_window_managers
-                }
+                if token_limits_by_group is None:
+                    token_limits_by_group = {}
+                for manager in self._draft_window_managers:
+                    token_limits_by_group.setdefault(
+                        manager.kv_cache_group_id, recovery_end
+                    )
         self.coordinator.cache_blocks(
             request,
             num_tokens_to_cache,

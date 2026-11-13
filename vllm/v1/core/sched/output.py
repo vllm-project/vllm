@@ -339,6 +339,10 @@ class SchedulerOutput:
     # drafter can skip proposing them.
     skip_drafts: bool = False
 
+    # Absolute request-token ranges selected for Draft context projection.
+    # Missing requests keep full projection; an empty tuple explicitly skips it.
+    draft_projection_ranges: dict[str, tuple[tuple[int, int], ...]] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

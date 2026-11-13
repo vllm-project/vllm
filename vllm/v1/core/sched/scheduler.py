@@ -367,6 +367,11 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
+        if (
+            self.kv_cache_manager.has_draft_window_groups
+            and self.vllm_config.max_concurrent_batches > 1
+        ):
+            self.defer_block_free = True
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
             1 + self.num_spec_tokens + self.num_lookahead_tokens
@@ -708,6 +713,7 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
+        draft_projection_ranges: dict[str, tuple[tuple[int, int], ...]] = {}
         token_budget = self.max_num_scheduled_tokens
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
@@ -877,12 +883,18 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Schedule newly needed KV blocks for the request.
+            projection_ranges = self.kv_cache_manager.get_draft_projection_ranges(
+                request,
+                request.num_computed_tokens,
+                request.num_computed_tokens + num_new_tokens,
+            )
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        draft_projection_ranges=projection_ranges,
                     )
 
                     if new_blocks is not None:
@@ -922,6 +934,7 @@ class Scheduler(SchedulerInterface):
                             token_budget += restored
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
+                            draft_projection_ranges.pop(preempted_req_id, None)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                                 preempted_req_id, None
@@ -971,6 +984,8 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
+            if projection_ranges is not None:
+                draft_projection_ranges[request_id] = projection_ranges
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
@@ -1474,6 +1489,15 @@ class Scheduler(SchedulerInterface):
                     num_replay_tokens,
                 )
                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
+                projection_ranges = (
+                    self.kv_cache_manager.get_draft_projection_ranges(
+                        request,
+                        num_computed_tokens,
+                        num_computed_tokens + num_new_tokens,
+                    )
+                    if num_new_tokens > 0
+                    else None
+                )
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_tokens_past_hit,
@@ -1496,6 +1520,7 @@ class Scheduler(SchedulerInterface):
                         if request.draft_recovery_main_cached_end
                         else 0
                     ),
+                    draft_projection_ranges=projection_ranges,
                 )
 
                 if new_blocks is None:
@@ -1611,6 +1636,8 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
+                if projection_ranges is not None:
+                    draft_projection_ranges[request_id] = projection_ranges
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
@@ -1780,6 +1807,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
+            draft_projection_ranges=draft_projection_ranges or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -2362,6 +2390,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            num_rejected = 0
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
@@ -2399,6 +2428,22 @@ class Scheduler(SchedulerInterface):
                         num_accepted=num_accepted,
                         detailed=self.spec_decode_metrics_level == "detailed",
                     )
+
+            if (
+                not output_is_stale
+                and scheduler_output.draft_projection_ranges is not None
+                and (
+                    projection_ranges := scheduler_output.draft_projection_ranges.get(
+                        req_id
+                    )
+                )
+                is not None
+            ):
+                self.kv_cache_manager.complete_draft_projection(
+                    request,
+                    projection_ranges,
+                    request.num_computed_tokens,
+                )
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:

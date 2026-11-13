@@ -119,6 +119,9 @@ class InputBatch:
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
     fast_prefill: "FastPrefillBatchMetadata | None" = None
 
+    # Absolute request-token ranges selected for Draft context projection.
+    draft_projection_ranges: dict[str, tuple[tuple[int, int], ...]] | None = None
+
     # Set only on a PCP rank-local batch.
     pcp: "PCPBatchMetadata | None" = None
 
