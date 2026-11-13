@@ -981,7 +981,7 @@ class MiMoOmniProcessor(ProcessorMixin):
                 )
 
         rope_type = "rope"
-        rs = getattr(hf_config, "rope_scaling", None)
+        rs = getattr(hf_config, "rope_parameters", None)
         if rs and rs.get("type") == "default" and rs.get("mrope_section") is not None:
             rope_type = "mrope"
 

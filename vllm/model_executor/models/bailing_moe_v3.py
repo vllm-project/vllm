@@ -166,14 +166,8 @@ def _build_rope_parameters(config: PreTrainedConfig) -> dict | None:
     # Some checkpoints also carry partial_rotary_factor=0.5, but applying it
     # here would shrink the rotary cache to half of the qk_rope_head_dim.
     rope_parameters.pop("partial_rotary_factor", None)
-
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if isinstance(rope_scaling, dict):
-        rope_scaling = copy.deepcopy(rope_scaling)
-        if "type" in rope_scaling and "rope_type" not in rope_scaling:
-            rope_scaling["rope_type"] = rope_scaling.pop("type")
-        rope_scaling.pop("partial_rotary_factor", None)
-        rope_parameters.update(rope_scaling)
+    if "type" in rope_parameters:
+        rope_parameters.setdefault("rope_type", rope_parameters["type"])
 
     return rope_parameters or None
 

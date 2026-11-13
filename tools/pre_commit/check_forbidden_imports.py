@@ -154,6 +154,21 @@ CHECK_IMPORTS = {
             "tokenization_utils_sentencepiece and image_processing_backends."
         ),
     ),
+    "rope_scaling": ForbiddenImport(
+        pattern=r"\brope_scaling\b",
+        tip=(
+            "`rope_scaling` is deprecated in Transformers v5, use `rope_parameters`. "
+            "`PreTrainedConfig.__init__` already converts the legacy checkpoint key."
+        ),
+        allowed_files={
+            "tools/pre_commit/check_forbidden_imports.py",
+            # Flattens `text_config` itself, so the base class never sees the key
+            "vllm/transformers_utils/configs/deepseek_v41.py",
+            # Legacy checkpoint loading tests
+            "tests/model_executor/test_bailing_mrope.py",
+            "tests/transformers_utils/test_bailing_moe_v3_vl_config.py",
+        },
+    ),
 }
 
 
@@ -321,6 +336,23 @@ def test_regex():
         result = matches("transformers legacy names", content)
         assert result == should_match, (
             f"transformers case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
+        )
+
+    rope_cases = [
+        # Should match
+        ('getattr(config, "rope_scaling", None)', True),
+        ("config.rope_scaling", True),
+        ("rope_scaling = None", True),
+        # Should not match
+        ("config.rope_parameters", False),
+        ('getattr(config, "_rope_scaling", None)', False),
+        ("rope_scaling_layers = None", False),
+    ]
+    for i, (content, should_match) in enumerate(rope_cases):
+        result = matches("rope_scaling", content)
+        assert result == should_match, (
+            f"rope_scaling case {i} failed: {content!r} "
             f"(expected {should_match}, got {result})"
         )
 
