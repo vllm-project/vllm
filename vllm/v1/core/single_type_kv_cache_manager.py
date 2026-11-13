@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
+from vllm.utils.gc_utils import untracked_list
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -86,7 +87,7 @@ class SingleTypeKVCacheManager(ABC):
             enable_caching: Whether prefix caching is enabled.
             kv_cache_group_id: The id of the kv cache group of this manager.
             scheduler_block_size: The scheduling granularity (LCM of all group
-                block sizes); a multiple of this manager's ``block_size``.
+                block sizes); a multiple of this manager's `block_size`.
             dcp_world_size: Decode context parallel world size.
             pcp_world_size: Prefill context parallel world size.
             needs_kv_cache_zeroing: Whether worker-side KV cache zeroing needs
@@ -122,8 +123,12 @@ class SingleTypeKVCacheManager(ABC):
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
-        # is finished.
-        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
+        # is finished. Blocks hold no strong reference back to these lists or
+        # their owner, so the lists cannot be part of a cycle and are hidden from
+        # the cyclic GC, which would otherwise visit every block of every request.
+        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(
+            untracked_list
+        )
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -433,7 +438,7 @@ class SingleTypeKVCacheManager(ABC):
     ) -> list[tuple[str, int, KVCacheBlock, int]]:
         """Drain producer boundary-state hand-offs.
 
-        Entries are ``(req_id, group_id, block, boundary_tokens)``.
+        Entries are `(req_id, group_id, block, boundary_tokens)`.
 
         Only mamba "align" populates this. The blocks are not kept alive by
         the request block table for the whole request, so a caller that reads
@@ -462,8 +467,8 @@ class SingleTypeKVCacheManager(ABC):
         """Redirect a partial prefix-cache hit to a private CoW block.
 
         Both copy endpoints stay retained until the copy has run on the worker,
-        so a same-step free cannot recycle them: ``source_block`` keeps its
-        hit-ref, ``cow_block`` takes an extra ref beyond the one handed to the
+        so a same-step free cannot recycle them: `source_block` keeps its
+        hit-ref, `cow_block` takes an extra ref beyond the one handed to the
         request.
         """
         req_blocks = self.req_to_blocks[request_id]
@@ -488,12 +493,12 @@ class SingleTypeKVCacheManager(ABC):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
-            retention_interval: Sparse local-checkpoint granularity. ``None``
-                keeps dense checkpointing; ``0`` keeps only the latest replay
-                boundary; a positive multiple of ``scheduler_block_size`` keeps
+            retention_interval: Sparse local-checkpoint granularity. `None`
+                keeps dense checkpointing; `0` keeps only the latest replay
+                boundary; a positive multiple of `scheduler_block_size` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
             replay_boundaries: Positions a later request replaying this prompt
-                can resume at, from ``replay_boundaries``.
+                can resume at, from `replay_boundaries`.
 
         """
         if not self.kv_cache_spec.prefix_cacheable:
@@ -554,15 +559,15 @@ class SingleTypeKVCacheManager(ABC):
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
     ) -> list[bool] | None:
-        """Per-block mask for ``cache_full_blocks``. ``None`` means cache
+        """Per-block mask for `cache_full_blocks`. `None` means cache
         every (non-null) block — the default for full attention.
 
         Subclasses with sparse hit semantics (SWA / Mamba) override this to skip
         blocks that can never serve a hit at any alignment-aligned prefix length.
-        ``reachable_boundaries`` are token positions whose reachable tail must be
+        `reachable_boundaries` are token positions whose reachable tail must be
         retained; the base (dense) policy ignores them.
-        ``final_segment_end_block`` is the exclusive end of the request's final
-        segment. It may be later than ``end_block`` while prefill is still in
+        `final_segment_end_block` is the exclusive end of the request's final
+        segment. It may be later than `end_block` while prefill is still in
         progress. Non-EAGLE sparse managers may keep its reachable tail. The
         base policy already keeps every block, so it ignores this value.
         """
@@ -658,7 +663,7 @@ class SingleTypeKVCacheManager(ABC):
         first_block: int,
         last_block: int,
     ) -> None:
-        """Free blocks in ``[first_block, last_block)`` and replace with null_block.
+        """Free blocks in `[first_block, last_block)` and replace with null_block.
 
         Iterates backward so newly-evictable tail blocks are reached even after
         earlier blocks in the range were nulled in a prior call.
@@ -900,7 +905,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 class RSWAManager(FullAttentionManager):
     """KV cache manager for Reference Sliding Window Attention (R-SWA).
 
-    When ``num_prompt_tokens`` is supplied to ``remove_skipped_blocks``, frees
+    When `num_prompt_tokens` is supplied to `remove_skipped_blocks`, frees
     gap blocks between the prefill tail and the current decode window.  This
     bounds per-request KV memory at O(prefix_len + rswa_window) instead of
     growing linearly with decode length.
@@ -1164,7 +1169,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         attention computation since they are outside the sliding window.
         Thus, get_num_skipped_tokens(7) == 4.
 
-        The trailing edge of the window is extended by ``extra_retained_tokens``
+        The trailing edge of the window is extended by `extra_retained_tokens`
         so that those extra trailing tokens' blocks are retained (but not
         attended). This is needed for multi-module spec decoding which can
         re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
@@ -1560,13 +1565,13 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
-        ``retention_interval``:
+        `retention_interval`:
 
-          ``None`` -> dense (cache every block; default, unchanged behavior)
-          ``0``    -> keep only the ``reachable_boundaries`` states
-          ``> 0``  -> keep one state per ``retention_interval``-sized segment
+          `None` -> dense (cache every block; default, unchanged behavior)
+          `0`    -> keep only the `reachable_boundaries` states
+          `> 0`  -> keep one state per `retention_interval`-sized segment
 
-        ``reachable_boundaries`` are proven reuse points (the replay boundary and
+        `reachable_boundaries` are proven reuse points (the replay boundary and
         any cross-request shared-prefix junction, Marconi-style APC); their
         boundary state is always kept so sparse retention does not defeat reuse.
         """
@@ -2246,6 +2251,7 @@ class HiSparseSourceManager(FullAttentionManager):
             num_gpu_blocks=num_blocks,
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
+            num_hash_lookahead_tokens=device_pool.num_hash_lookahead_tokens,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
             metrics_collector=(
                 KVCacheMetricsCollector(device_pool.metrics_collector.sample_rate)
@@ -2581,17 +2587,25 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         super().pop_blocks_for_free(request_id)
         return trim_null_head(blocks)
 
-    def adopt_resident_page(
-        self, request_id: str, block_idx: int, block: KVCacheBlock
-    ) -> bool:
-        """Point a null prefix page at a pinned GPU copy of its contents."""
-        blocks = self.req_to_blocks.get(request_id)
-        if blocks is None or block_idx >= len(blocks):
-            return False
-        if self.get_resident_page(request_id, block_idx) is not None:
-            return False
-        self.residency_changes.setdefault(request_id, {})[block_idx] = block
-        return True
+    def adopt_resident_pages(
+        self,
+        request_id: str,
+        block_indices: Sequence[int],
+        blocks: Sequence[KVCacheBlock],
+    ) -> list[tuple[int, KVCacheBlock]]:
+        """Point null prefix pages at pinned GPU copies; return the adopted
+        `(page, block)` pairs."""
+        num_pages = len(self.req_to_blocks.get(request_id, ()))
+        candidates = [
+            (idx, block) for idx, block in zip(block_indices, blocks) if idx < num_pages
+        ]
+        current = self.get_residency_pages(request_id, [idx for idx, _ in candidates])
+        adopted = [
+            candidate for candidate, block in zip(candidates, current) if block.is_null
+        ]
+        if adopted:
+            self.residency_changes.setdefault(request_id, {}).update(adopted)
+        return adopted
 
     def drop_resident_page(
         self, request_id: str, block_idx: int
@@ -2599,9 +2613,19 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         """Stop reading a page from the GPU; return the block it was read from."""
         block = self.get_resident_page(request_id, block_idx)
         if block is not None:
-            changes = self.residency_changes.setdefault(request_id, {})
-            changes[block_idx] = self._null_block
+            self.drop_resident_pages(request_id, (block_idx,))
         return block
+
+    def drop_resident_pages(
+        self, request_id: str, block_indices: Sequence[int]
+    ) -> None:
+        """Stop reading pages from the GPU. Every index must be a resident page
+        within the request's row."""
+        if not block_indices:
+            return
+        changes = self.residency_changes.setdefault(request_id, {})
+        for block_idx in block_indices:
+            changes[block_idx] = self._null_block
 
     def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
         blocks = self.req_to_blocks.get(request_id)
@@ -2613,9 +2637,22 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             block = changes.get(block_idx, block)
         return None if block.is_null else block
 
+    def get_residency_pages(
+        self, request_id: str, block_indices: Sequence[int]
+    ) -> list[KVCacheBlock]:
+        """The request's pages with residency changes applied; host-only pages
+        are the null block. Every index must be within the request's row."""
+        if not block_indices:
+            return []
+        blocks = self.req_to_blocks[request_id]
+        changes = self.residency_changes.get(request_id)
+        if not changes:
+            return [blocks[idx] for idx in block_indices]
+        return [changes.get(idx, blocks[idx]) for idx in block_indices]
+
     def get_residency_row(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
-        """The request's row from ``start`` with residency changes applied. Unlike
-        ``get_resident_page``, host-only pages stay as the null block."""
+        """The request's row from `start` with residency changes applied. Unlike
+        `get_resident_page`, host-only pages stay as the null block."""
         blocks = self.req_to_blocks.get(request_id, [])[start:]
         changes = self.residency_changes.get(request_id)
         if not changes:
