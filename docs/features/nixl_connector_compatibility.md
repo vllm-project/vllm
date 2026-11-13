@@ -85,7 +85,7 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - NIXL transfer mode (push vs pull) — a push (WRITE) connector and a pull (READ)
   connector use incompatible transfer protocols and must never be paired
 - With `"enforce_kv_identity": true` in `kv_connector_extra_config`, the
-  [KV identity](kv_identity.md): checkpoint, KV-relevant configuration
+  [KV identity](kv_identity.md): checkpoint content, KV-relevant configuration
   and code. Compare `GET /kv_identity` on both instances to find a mismatch.
 
 !!! warning

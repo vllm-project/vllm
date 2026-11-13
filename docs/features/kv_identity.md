@@ -6,7 +6,7 @@ The identity covers the target model:
 
 | Component | Content |
 | - | - |
-| `weights` | Digest of the checkpoint the model was loaded from: its path, revision and load format |
+| `weights` | Digest of the checkpoint files the model was loaded from: each file's path in its checkpoint folder and its SHA-256 |
 | `config` | Digest of the model and KV cache configuration that changes the KV: the model's Hugging Face config after `hf_overrides`, dtype, quantization, `max_model_len`, `cache_dtype`, `kv_cache_dtype_skip_layers` and the Mamba cache dtypes, among others |
 | `code` | The vLLM version |
 | `libraries` | The Transformers version |
@@ -15,7 +15,11 @@ Settings that change only placement or rounding order are not part of it, so eng
 
 ## Weights
 
-The weights are identified by the model path, revision and load format, so the `weights_source` component is `path`. This cannot tell two checkpoints at the same path apart, nor match the same files served from different paths.
+For a model in the Hugging Face cache, the SHA-256 of each weight file is known from the cache layout, so identifying the weights costs nothing at startup. A local copy of the same files has the same identity.
+
+Weights outside the Hugging Face cache are identified by their path and revision, which cannot tell two checkpoints at the same path apart. Pass `--kv-identity-hash-local-weights` to hash them instead. One worker hashes them in the background while the weights load, so the hash mostly reads what the load already brought into memory; startup waits only for whatever hashing outlasts the load. The `weights_source` component says which applies: `hf_cache`, `hashed`, `path`, or `dummy` for `--load-format dummy`.
+
+Weights loaded by the Run:ai streamer, Tensorizer, ModelExpress and sharded-state loaders are always identified by path.
 
 ## Reading the identity
 
@@ -31,7 +35,7 @@ The weights are identified by the model path, revision and load format, so the `
       "config": "77b0...",
       "code": "vllm==0.20.0",
       "libraries": "transformers==5.18.0",
-      "weights_source": "path"
+      "weights_source": "hf_cache"
     }
   }
 }
