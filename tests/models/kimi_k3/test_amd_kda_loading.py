@@ -8,7 +8,7 @@ import torch
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="ROCm KDA projection loader"
+    not current_platform.is_cuda_alike(), reason="KDA projection loader on GPU"
 )
 
 
@@ -20,11 +20,13 @@ def test_padded_kda_load_completes_and_clears_padding(
 ):
     from vllm.config import ModelConfig
     from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+        _KimiGDNMergedColumnParallelLinear,
+    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
     from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-    from vllm.models.kimi_k3.amd.kda import _PaddedKimiGDNMergedColumnParallelLinear
 
     default_vllm_config.model_config = ModelConfig(
         model="facebook/opt-125m", dtype="bfloat16"
@@ -38,9 +40,9 @@ def test_padded_kda_load_completes_and_clears_padding(
         else None
     )
     with torch.device("cuda"), torch.no_grad():
-        layer = _PaddedKimiGDNMergedColumnParallelLinear(
+        layer = _KimiGDNMergedColumnParallelLinear(
             256,
-            rows + [padding],
+            rows,
             replicated_shard_id=4,
             tp_size=1,
             padding_size=padding,
@@ -66,3 +68,4 @@ def test_padded_kda_load_completes_and_clears_padding(
                 shards + [torch.zeros(padding, 256, dtype=torch.bfloat16)]
             )
             torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
+        assert layer.pop_missing_shards() == []

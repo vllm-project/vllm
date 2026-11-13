@@ -118,7 +118,6 @@ def test_qwen4_exp_mtp_returns_sample_and_multi_streams(
     )
     multi_hidden = torch.arange(24, dtype=torch.float32).reshape(3, 8)
     expected_sample = multi_hidden.unflatten(-1, (2, 4)).mean(-2)
-    pp_group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
 
     def gather(local):
         """Supply rank 1's last token and padding for a simulated two-rank gather."""
@@ -127,7 +126,6 @@ def test_qwen4_exp_mtp_returns_sample_and_multi_streams(
         return torch.cat([local, remote, torch.full_like(remote, float("nan"))])
 
     with (
-        patch(f"{mtp_module}.get_pp_group", return_value=pp_group),
         patch(f"{mtp_module}.sp_shard", side_effect=lambda x: x[:2]),
         patch(f"{mtp_module}.sp_all_gather", side_effect=gather),
     ):
