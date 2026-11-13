@@ -941,6 +941,23 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_video_processor(self, **kwargs: object) -> Qwen3VLVideoProcessor:
         return self.get_hf_processor(**kwargs).video_processor
 
+    def _get_effective_video_kwargs(self) -> dict[str, Any]:
+        video_processor = self.get_video_processor()
+        video_kwargs = self._merge_and_resolve_mm_processor_kwargs({}).get(
+            "videos_kwargs", {}
+        )
+        return {
+            **{
+                key: getattr(video_processor, key, None)
+                for key in video_processor.valid_kwargs.__annotations__
+            },
+            **video_kwargs,
+            "size": self._get_vision_size(
+                video_kwargs, default_size=video_processor.size
+            ),
+            "max_video_tokens": getattr(video_processor, "max_video_tokens", None),
+        }
+
     def get_data_parser(self):
         return Qwen3VLMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
@@ -1044,20 +1061,12 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         video_processor = self.get_video_processor()
-
-        merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs({})
-        video_mm_kwargs = merged_mm_kwargs.get("videos_kwargs", {})
-        video_size = self._get_vision_size(
-            video_mm_kwargs,
-            default_size=video_processor.size,
-        )
-        temporal_patch_size = video_mm_kwargs.get(
-            "temporal_patch_size", video_processor.temporal_patch_size
-        )
+        video_kwargs = self._get_effective_video_kwargs()
+        temporal_patch_size = video_kwargs["temporal_patch_size"]
 
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
-        video_max_pixels = video_size["longest_edge"]
+        video_max_pixels = video_kwargs["size"]["longest_edge"]
         target_width, target_height = self.get_image_size_with_most_features(
             max_pixels=video_max_pixels // temporal_patch_size
         )
@@ -1180,20 +1189,12 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         target_num_frames = max(target_num_frames, 2)
 
         video_processor = self.info.get_video_processor()
-
-        merged_mm_kwargs = self.info._merge_and_resolve_mm_processor_kwargs({})
-        video_mm_kwargs = merged_mm_kwargs.get("videos_kwargs", {})
-        video_size = self.info._get_vision_size(
-            video_mm_kwargs,
-            default_size=video_processor.size,
-        )
-        temporal_patch_size = video_mm_kwargs.get(
-            "temporal_patch_size", video_processor.temporal_patch_size
-        )
+        video_kwargs = self.info._get_effective_video_kwargs()
+        temporal_patch_size = video_kwargs["temporal_patch_size"]
 
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
-        video_max_pixels = video_size["longest_edge"]
+        video_max_pixels = video_kwargs["size"]["longest_edge"]
 
         # With the HF processor's per-frame pixel cap enabled
         # (cap_pixels_per_frame, huggingface/transformers#48071), a 2-frame
@@ -1203,17 +1204,9 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         # over enough frames that the cap is not binding for the dummy.
         # This takes precedence over a shrinking num_frames override, which
         # would otherwise reintroduce the under-profiling.
-        if video_mm_kwargs.get(
-            "cap_pixels_per_frame",
-            getattr(video_processor, "cap_pixels_per_frame", False),
-        ):
-            max_video_tokens = video_mm_kwargs.get(
-                "max_video_tokens",
-                getattr(video_processor, "max_video_tokens", 768),
-            )
-            patch_size = video_mm_kwargs.get("patch_size", video_processor.patch_size)
-            merge_size = video_mm_kwargs.get("merge_size", video_processor.merge_size)
-            per_frame_cap = max_video_tokens * (patch_size * merge_size) ** 2
+        if video_kwargs.get("cap_pixels_per_frame"):
+            factor = video_kwargs["patch_size"] * video_kwargs["merge_size"]
+            per_frame_cap = video_kwargs["max_video_tokens"] * factor**2
             target_num_frames = max(
                 target_num_frames,
                 min(video_processor.max_frames, cdiv(video_max_pixels, per_frame_cap)),

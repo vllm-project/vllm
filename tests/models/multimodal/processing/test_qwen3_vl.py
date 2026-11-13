@@ -565,7 +565,11 @@ def test_processor_video_embeds_missing_timestamps(model_id: str) -> None:
 
 @pytest.mark.parametrize(
     "mm_processor_kwargs",
-    [None, {"videos_kwargs": {"cap_pixels_per_frame": False}}],
+    [
+        None,
+        {"videos_kwargs": {"cap_pixels_per_frame": False}},
+        {"videos_kwargs": {"max_video_tokens": 256}},
+    ],
 )
 def test_dummy_video_reaches_budget_with_processor_frame_cap(
     mm_processor_kwargs: dict[str, Any] | None,
