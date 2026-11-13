@@ -84,7 +84,7 @@ def _procs() -> dict[int, tuple[str, str, int]]:
 
 
 def _threads(pid: int) -> list[dict]:
-    rows = []
+    rows: list[dict] = []
     try:
         tids = sorted(os.listdir(f"/proc/{pid}/task"), key=int)
     except OSError:
