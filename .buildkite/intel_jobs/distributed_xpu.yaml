@@ -8,7 +8,7 @@ steps:
   timeout_in_minutes: 25
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -50,7 +50,7 @@ steps:
   timeout_in_minutes: 20
   num_devices: 1
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -83,7 +83,7 @@ steps:
   timeout_in_minutes: 90
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -132,7 +132,7 @@ steps:
   timeout_in_minutes: 65
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -174,7 +174,7 @@ steps:
   timeout_in_minutes: 30
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -217,7 +217,7 @@ steps:
   timeout_in_minutes: 45
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -254,14 +254,14 @@ steps:
     TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true'
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true'
 - label: ':nvidia: (L4) [Nightly] Distributed DP Extended'
   key: distributed-dp-tests-4-gpus
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -312,7 +312,7 @@ steps:
   timeout_in_minutes: 70
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -352,7 +352,7 @@ steps:
   timeout_in_minutes: 30
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -386,7 +386,7 @@ steps:
   timeout_in_minutes: 30
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -419,7 +419,7 @@ steps:
   device: intel_gpu
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -452,7 +452,7 @@ steps:
   timeout_in_minutes: 20
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -479,7 +479,7 @@ steps:
   timeout_in_minutes: 55
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -524,7 +524,7 @@ steps:
   timeout_in_minutes: 45
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -566,7 +566,7 @@ steps:
   timeout_in_minutes: 15
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -595,7 +595,7 @@ steps:
   timeout_in_minutes: 20
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -620,5 +620,5 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s model_executor/model_loader/test_weight_cache.py::test_mooncake_warmup_cache_store_e2e || true'

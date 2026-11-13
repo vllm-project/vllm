@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 20
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -40,7 +40,7 @@ steps:
   timeout_in_minutes: 25
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -69,7 +69,7 @@ steps:
   timeout_in_minutes: 20
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -98,7 +98,7 @@ steps:
   timeout_in_minutes: 40
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -122,5 +122,5 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_elastic_ep.py || true'

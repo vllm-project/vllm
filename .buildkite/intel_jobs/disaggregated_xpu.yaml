@@ -8,7 +8,7 @@ steps:
   timeout_in_minutes: 55
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -30,7 +30,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py || true'
 - label: ':nvidia: (L4) [Nightly] Distributed FlashInfer NixlConnector PD accuracy'
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
@@ -38,7 +38,7 @@ steps:
   timeout_in_minutes: 55
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -60,7 +60,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     FLASHINFER=1 pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py || true'
 - label: ':nvidia: (L4) [Nightly] Push NixlConnector PP prefill PD accuracy'
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
@@ -68,7 +68,7 @@ steps:
   timeout_in_minutes: 30
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -91,7 +91,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_push_integration/test_push_accuracy_sweep.py || true'
 - label: ':nvidia: (L4) [Nightly] DP EP Distributed NixlConnector PD accuracy'
   key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
@@ -99,7 +99,7 @@ steps:
   timeout_in_minutes: 30
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -121,7 +121,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     DP_EP=1 pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py || true'
 - label: ':nvidia: (L4) [Nightly] CrossLayer KV layout Distributed NixlConnector PD accuracy'
   key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
@@ -129,7 +129,7 @@ steps:
   timeout_in_minutes: 55
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -151,7 +151,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     CROSS_LAYERS_BLOCKS=True pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py || true'
 - label: ':nvidia: (L4) [Nightly] Hybrid SSM NixlConnector PD accuracy'
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
@@ -159,7 +159,7 @@ steps:
   timeout_in_minutes: 60
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -181,7 +181,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     HYBRID_SSM=1 pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py || true'
 - label: ':nvidia: (L4) NixlConnector PD accuracy core'
   key: nixlconnector-pd-accuracy-core-2-gpus
@@ -189,7 +189,7 @@ steps:
   timeout_in_minutes: 90
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -212,7 +212,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_accuracy_core_sweep.py || true'
 - label: ':nvidia: (L4) NixlConnector PD edge case'
   key: nixlconnector-pd-edge-cases-2-gpus
@@ -220,7 +220,7 @@ steps:
   timeout_in_minutes: 40
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -242,7 +242,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_edge_cases || true'
 - label: ':nvidia: (L4) Hybrid SSM NixlConnector PD prefix cache'
   key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
@@ -250,7 +250,7 @@ steps:
   timeout_in_minutes: 25
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -273,7 +273,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_mamba_prefix_cache || true'
 - label: ':nvidia: (L4) MultiConnector (Nixl+Offloading) PD accuracy'
   key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
@@ -281,7 +281,7 @@ steps:
   timeout_in_minutes: 40
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -305,7 +305,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_multi_connector_accuracy || true'
 - label: ':nvidia: (L4) MultiConnector (Nixl+Offloading) PD edge cases'
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
@@ -313,7 +313,7 @@ steps:
   timeout_in_minutes: 25
   num_devices: 2
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -337,7 +337,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_multi_connector_edge_cases || true'
 - label: ':nvidia: (H200) [Nightly] Kimi-Linear-48B-A3B Disaggregated DP EP'
   key: kimi-linear-disaggregated
@@ -345,7 +345,7 @@ steps:
   timeout_in_minutes: 60
   num_devices: 4
   optional: true
-  working_dir: .
+  working_dir: "/vllm-workspace/"
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -363,5 +363,5 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/check-kv-connectors.sh || true &&
+    bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh || true &&
     pytest --continue-on-collection-errors -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy || true'
