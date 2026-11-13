@@ -53,8 +53,11 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Add pull-mode lease slots: NixlAgentMetadata lease region,
+#      remote_lease_slot/remote_lease_nonce in kv_transfer_params and the
+#      lease nonce in read-completion notifications
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass
@@ -85,6 +88,9 @@ class NixlAgentMetadata:
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Pull-mode lease slots (DRAM, int64 per slot); None when not exported.
+    lease_slots_addr: int | None = None
+    lease_num_slots: int = 0
 
 
 @dataclass
@@ -242,6 +248,9 @@ class RemoteMeta:
     num_tokens: int | None = None
     # Bumped each time the remote publishes a changed KV cache registration.
     registration_generation: int = 0
+    lease_slot: int | None = None
+    lease_nonce: int | None = None
+    is_turn2: bool = False
 
 
 @dataclass
@@ -285,6 +294,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.scheduler_clock: float = 0.0
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
+        # Pull mode (P side): lease slots to write (req -> (slot, nonce)) and
+        # requests whose slots to zero. Workers zero before writing, so a
+        # cleared slot may be reused in the same step.
+        self.lease_slots_to_arm: dict[ReqId, tuple[int, int]] = {}
+        self.lease_slots_to_clear: set[ReqId] = set()
         # Heartbeat data grouped by remote engine, sent by D worker to P.
         self.heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
         # Push mode (D side): registration data the D worker should send to
@@ -348,5 +362,22 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             registration_generation=kv_transfer_params.get(
                 "remote_registration_generation", 0
             ),
+            lease_slot=kv_transfer_params.get("remote_lease_slot"),
+            lease_nonce=kv_transfer_params.get("remote_lease_nonce"),
+            is_turn2=bool(kv_transfer_params.get("do_remote_decode")),
         )
         self.reqs_to_recv[request_id] = req
+
+
+def make_read_notif(
+    remote_request_id: str, expected_consumers: int, lease_nonce: int | None
+) -> bytes:
+    """Encode a pull read-completion notification for the producer."""
+    nonce = "" if lease_nonce is None else str(lease_nonce)
+    return f"{remote_request_id}:{expected_consumers}:{nonce}".encode()
+
+
+def parse_read_notif(msg: str) -> tuple[str, int, int | None]:
+    """Decode `make_read_notif` output; request ids may contain ':'."""
+    req_id, expected_consumers, nonce = msg.rsplit(":", 2)
+    return req_id, int(expected_consumers), int(nonce) if nonce else None
