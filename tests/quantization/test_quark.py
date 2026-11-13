@@ -3064,7 +3064,7 @@ def test_quark_override_delegates_to_quark_config(
 
 
 def test_quark_dict_algo_config_engine_config():
-    """Older Quark exports store a single ``algo_config`` dict, not a list."""
+    """Older Quark exports store a single `algo_config` dict, not a list."""
     vllm_config = EngineArgs(
         model="amd-quark/llama-small-int4-per-group-sym-awq"
     ).create_engine_config()
