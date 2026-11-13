@@ -715,7 +715,6 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         with self._mark_language_model(vllm_config):
-            # `Qwen2_5OmniTextConfig` has no Transformers base model
             use_qwen2_attention(config.text_config)
             self.decoder = initialize_model(
                 vllm_config=vllm_config.with_hf_config(

@@ -1263,7 +1263,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             )
 
         with self._mark_language_model(vllm_config):
-            # `Qwen2_5OmniTextConfig` has no Transformers base model
             use_qwen2_attention(thinker_config.text_config)
             self.language_model = initialize_model(
                 vllm_config=vllm_config.with_hf_config(
