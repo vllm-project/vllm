@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
@@ -316,7 +317,12 @@ class KimiK25ForConditionalGeneration(
             # mm projector
             "mm_projector.proj.0": "mm_projector.linear_1",
             "mm_projector.proj.2": "mm_projector.linear_2",
-        }
+        },
+        orig_to_new_suffix={
+            ".self_attn.attn.q_scale": ".self_attn.mla_attn.mla_attn.q_scale",
+            ".self_attn.attn.k_scale": ".self_attn.mla_attn.mla_attn.k_scale",
+            ".self_attn.attn.v_scale": ".self_attn.mla_attn.mla_attn.v_scale",
+        },
     )
 
     @classmethod
@@ -697,5 +703,31 @@ class KimiK25ForConditionalGeneration(
         return torch.cat(embeddings, dim=0)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        scale_mapper = self.hf_to_vllm_mapper
+        if self.quant_config is not None:
+            scale_mapper |= self.quant_config.get_cache_scale_mapper()
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        def non_scale_weights():
+            for name, weight in weights:
+                if ".self_attn." in name and name.endswith(
+                    (".q_scale", ".k_scale", ".v_scale")
+                ):
+                    mapped_name = scale_mapper.map_name(name)
+                    if mapped_name is not None and mapped_name in params_dict:
+                        param = params_dict[mapped_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, weight)
+                        loaded_params.add(mapped_name)
+                        continue
+                yield name, weight
+
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params |= loader.load_weights(
+            non_scale_weights(), mapper=self.hf_to_vllm_mapper
+        )
+        return loaded_params
