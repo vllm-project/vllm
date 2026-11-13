@@ -62,6 +62,11 @@ from .interfaces import (
     SupportsEagle3,
     SupportsPP,
 )
+from .mimo_v2_mega_moe import (
+    MiMoV2TPMegaMoEExperts,
+    MiMoV2TPMegaMoERunner,
+    validate_mimo_tp_mega_moe,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -126,6 +131,11 @@ class MiMoV2MoE(nn.Module):
         config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
+        self.use_tp_mega_moe = (
+            vllm_config.kernel_config.moe_backend == "aiter_mimo_mega_moe_tp"
+        )
+        if self.use_tp_mega_moe:
+            validate_mimo_tp_mega_moe(vllm_config)
 
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -187,6 +197,10 @@ class MiMoV2MoE(nn.Module):
             topk_group=config.topk_group,
             scoring_func="sigmoid",
             router_logits_dtype=self.gate.out_dtype,
+            routed_experts_cls=(
+                MiMoV2TPMegaMoEExperts if self.use_tp_mega_moe else None
+            ),
+            runner_cls=(MiMoV2TPMegaMoERunner if self.use_tp_mega_moe else None),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
