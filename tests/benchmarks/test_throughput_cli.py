@@ -510,3 +510,17 @@ def test_custom_audio_output_len_follows_flag_precedence(argv, expected) -> None
     args = _parse_throughput_args("--dataset-name", "custom_audio", *argv)
 
     assert _to_serve_args(args).custom_output_len == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--output-len", "64"], 64),
+        (["--output-len", "64", "--prefix-repetition-output-len", "32"], 32),
+    ],
+)
+def test_prefix_repetition_output_len_follows_flag_precedence(argv, expected) -> None:
+    """--prefix-repetition-output-len > --output-len > the dataset default."""
+    args = _parse_throughput_args("--dataset-name", "prefix_repetition", *argv)
+
+    assert _to_serve_args(args).prefix_repetition_output_len == expected

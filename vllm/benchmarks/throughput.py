@@ -568,6 +568,14 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     d["custom_output_len"] = (
         output_len if custom_output_len is None else custom_output_len
     )
+    prefix_output_len = getattr(args, "prefix_repetition_output_len", None)
+    if prefix_output_len is None:
+        prefix_output_len = output_len
+    d["prefix_repetition_output_len"] = (
+        PrefixRepetitionRandomDataset.DEFAULT_OUTPUT_LEN
+        if prefix_output_len is None
+        else prefix_output_len
+    )
     # Explicit --enable-multimodal-chat wins; otherwise auto-enable for the
     # multimodal chat backend (preserves today's vllm-chat handling). Callers
     # without a --backend flag (e.g. bench mm-processor) drive every request
@@ -984,7 +992,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--prefix-repetition-output-len",
         type=int,
-        default=PrefixRepetitionRandomDataset.DEFAULT_OUTPUT_LEN,
+        default=None,
         help="Number of output tokens per request, used only for prefix "
         "repetition dataset.",
     )
