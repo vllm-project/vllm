@@ -167,13 +167,21 @@ class EngineCore:
 
         self.available_gpu_memory_for_kv_cache = -1
 
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self._eep_scale_up_before_kv_init()
+        try:
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                self._eep_scale_up_before_kv_init()
 
-        measure_encoder_output_widths(vllm_config, self.collective_rpc)
+            measure_encoder_output_widths(vllm_config, self.collective_rpc)
 
-        # Setup KV Caches and update CacheConfig after profiling.
-        kv_cache_config = self._initialize_kv_caches(vllm_config)
+            # Setup KV Caches and update CacheConfig after profiling.
+            kv_cache_config = self._initialize_kv_caches(vllm_config)
+        except BaseException:
+            # Otherwise module-level state keeps an in-process model alive.
+            try:
+                self.model_executor.shutdown()
+            except Exception:
+                logger.exception("Executor shutdown after failed startup failed")
+            raise
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -1466,6 +1474,13 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
+            # Send initial scheduler stats so that the scheduler-state gauges
+            # are exported before the first request.
+            if (stats := self.scheduler.make_stats()) is not None:
+                self.output_queue.put_nowait(
+                    (0, EngineCoreOutputs(scheduler_stats=stats))
+                )
+
             # Completes once the drain does, which for DP happens in the busy loop.
             if vllm_config.model_config.checkpoint_prepare_on_startup and (
                 refusal := self.checkpoint_prepare()
@@ -2680,7 +2695,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 "flight. Wait for the pause future to resolve before "
                 "resuming."
             )
-        if self.engines_running:
+        # Set at pause consensus, so all ranks take the same branch.
+        if not self.ignore_start_dp_wave:
             logger.debug("Resume called while engines are not paused, ignoring.")
             return
 
