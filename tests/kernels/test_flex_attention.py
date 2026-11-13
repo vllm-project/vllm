@@ -15,6 +15,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention import Attention
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.flex_attention import (
     BlockSparsityHint,
     FlexAttentionMetadataBuilder,
@@ -62,6 +63,17 @@ def test_flex_attention_explicit_block_sizes_override_encoder_defaults():
         uses_paged_kv=False,
     )
     assert block_sizes == (64, 32)
+
+
+def test_flex_attention_encoder_span_builder_uses_64_token_blocks():
+    block_sizes = FlexAttentionMetadataBuilder._get_block_sizes(
+        AttentionConfig(),
+        supports_small_blocks=True,
+        cache_block_size=16,
+        uses_paged_kv=False,
+        supports_small_encoder_blocks=True,
+    )
+    assert block_sizes == (64, 64)
 
 
 @pytest.mark.skipif(
@@ -355,6 +367,95 @@ def test_block_mask_direct_vs_slow_path():
         "Direct path is missing blocks required by slow path:\n"
         + "\n".join(missing_details)
     )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not HAS_TRITON,
+    reason="Triton encoder span masks require a supported GPU",
+)
+@pytest.mark.parametrize(
+    "offsets",
+    [
+        pytest.param([0, 31, 128, 191], id="irregular-spans"),
+        pytest.param([0, 192, 384], id="aligned-spans"),
+        pytest.param(list(range(65)), id="64-single-token-requests"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("q_block_size", "kv_block_size"),
+    [(64, 64), (128, 128), (64, 128), (128, 64)],
+)
+def test_encoder_span_block_mask_matches_token_reference(
+    offsets: list[int],
+    q_block_size: int,
+    kv_block_size: int,
+):
+    """Span rows preserve packed-request visibility for global attention."""
+    from vllm.v1.attention.backends.flex_attention_encoder import (
+        build_encoder_span_block_mask,
+    )
+
+    device = torch.device("cuda")
+    query_start_loc = torch.tensor(offsets, dtype=torch.int32, device=device)
+    lengths = query_start_loc[1:] - query_start_loc[:-1]
+    doc_ids = torch.repeat_interleave(
+        torch.arange(len(lengths), dtype=torch.int32, device=device), lengths
+    )
+    num_tokens = offsets[-1]
+
+    def mask_mod(_b, _h, q_idx, kv_idx):
+        return doc_ids[q_idx] == doc_ids[kv_idx]
+
+    block_mask = build_encoder_span_block_mask(
+        query_start_loc=query_start_loc,
+        doc_ids=doc_ids,
+        num_tokens=num_tokens,
+        max_model_len=512,
+        q_block_size=q_block_size,
+        kv_block_size=kv_block_size,
+        mask_mod=mask_mod,
+    )
+
+    q_block_rows = torch.arange(
+        block_mask.kv_num_blocks.shape[-1], dtype=torch.long, device=device
+    )
+    assert torch.all(
+        block_mask.kv_indices[0, 0, q_block_rows, block_mask.kv_num_blocks[0, 0]] == -1
+    )
+    assert torch.all(
+        block_mask.full_kv_indices[
+            0, 0, q_block_rows, block_mask.full_kv_num_blocks[0, 0]
+        ]
+        == -1
+    )
+
+    q_idx = torch.arange(num_tokens, device=device)
+    kv_idx = torch.arange(num_tokens, device=device)
+    q_blocks = q_idx // q_block_size
+    kv_blocks = kv_idx // kv_block_size
+
+    def selected_blocks(indices, counts):
+        rows = indices[q_blocks]
+        row_counts = counts[q_blocks]
+        slots = torch.arange(indices.shape[-1], device=device)
+        return (
+            (rows[:, :, None] == kv_blocks[None, None, :])
+            & (slots[None, :, None] < row_counts[:, None, None])
+        ).any(dim=1)
+
+    partial = selected_blocks(
+        block_mask.kv_indices[0, 0], block_mask.kv_num_blocks[0, 0]
+    )
+    full = selected_blocks(
+        block_mask.full_kv_indices[0, 0], block_mask.full_kv_num_blocks[0, 0]
+    )
+    scalar = torch.zeros((), dtype=torch.int32, device=device)
+    actual = full | (
+        partial & block_mask.mask_mod(scalar, scalar, q_idx[:, None], kv_idx[None, :])
+    )
+
+    expected = doc_ids[:, None] == doc_ids[None, :]
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(
