@@ -38,7 +38,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 
 
 def _metadata(rows, *, decode_tokens=None, prefills=0, query_len=1, padded=0):
-    """A decode-first step: ``decode_tokens`` rows of requests ``query_len``
+    """A decode-first step: `decode_tokens` rows of requests `query_len`
     rows each (an EAGLE3 verify step: 1 + num_speculative_tokens)."""
     decode_tokens = rows if decode_tokens is None else decode_tokens
     requests = decode_tokens // query_len
@@ -126,13 +126,12 @@ def _vllm_config(layers=60, **parallel):
             uva=SimpleNamespace(cpu_offload_gb=0),
             prefetch=SimpleNamespace(offload_group_size=0),
         ),
-        use_v2_model_runner=True,
         model_config=SimpleNamespace(
             enable_sleep_mode=False,
             hf_text_config=SimpleNamespace(
                 use_index_cache=False,
                 num_hidden_layers=layers,
-                sparse_attention_config={"sparse_attention_freq": [0] * 3 + [1] * 57},
+                layer_types=["full_attention"] * 3 + ["minimax_m3_sparse"] * 57,
             ),
         ),
     )
@@ -150,9 +149,7 @@ def test_config_refusals_report_every_reason():
     config = _vllm_config(tensor_parallel_size=2, enable_expert_parallel=True)
     config.cache_config.block_size = 64
     config.aux_output_config.enable_return_routed_experts = True
-    config.model_config.hf_text_config.sparse_attention_config["sparse_attention_freq"][
-        2
-    ] = 1
+    config.model_config.hf_text_config.layer_types[2] = "minimax_m3_sparse"
     with pytest.raises(ValueError) as error:
         specialized_decode_config(config)
     for reason in (
@@ -189,7 +186,7 @@ def _layer():
     w2.is_shuffled = True
     fused_experts = object.__new__(AiterMxfp4Experts)
     fused_experts.moe_config = SimpleNamespace(
-        use_mori_kernels=False,
+        use_mori_epv1_kernels=False,
         use_mxfp4_w4a4_dsv4=False,
     )
     experts = SimpleNamespace(
@@ -267,7 +264,7 @@ WEIGHT_REFUSALS = {
     ),
     "effective BF16": lambda x: setattr(
         _experts(x).quant_method.moe_kernel.fused_experts.moe_config,
-        "use_mori_kernels",
+        "use_mori_epv1_kernels",
         True,
     ),
     "router": lambda x: setattr(

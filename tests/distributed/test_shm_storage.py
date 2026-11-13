@@ -118,8 +118,8 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
 
         # Verify that some items are still accessible
         accessible_count = 0
-        for key, original_value, address, monotonic_id in stored_items:
-            for i in range(self.storage.n_readers):
+        for _, original_value, address, monotonic_id in stored_items:
+            for _ in range(self.storage.n_readers):
                 retrieved = self.storage.get(address, monotonic_id)
             if retrieved == original_value:
                 accessible_count += 1
@@ -138,7 +138,7 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
         # Verify that some items are still accessibles
         for key, original_value, address, monotonic_id in stored_items:
             try:
-                for i in range(self.storage.n_readers):
+                for _ in range(self.storage.n_readers):
                     retrieved = self.storage.get(address, monotonic_id)
                 if retrieved == original_value:
                     accessible_count += 1
@@ -165,8 +165,8 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
         # read all items except the first one
         # to simulate a blocking situation
         accessible_count = 0
-        for key, original_value, address, monotonic_id in stored_items[1:]:
-            for i in range(self.storage.n_readers):
+        for _, original_value, address, monotonic_id in stored_items[1:]:
+            for _ in range(self.storage.n_readers):
                 retrieved = self.storage.get(address, monotonic_id)
             if retrieved == original_value:
                 accessible_count += 1
@@ -181,7 +181,7 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
             print(f"Buffer filled after {len(stored_items)} items")
 
         # read the first item
-        for i in range(self.storage.n_readers):
+        for _ in range(self.storage.n_readers):
             key, original_value, address, monotonic_id = stored_items[0]
             retrieved = self.storage.get(address, monotonic_id)
             self.assertEqual(retrieved, original_value)

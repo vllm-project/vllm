@@ -23,6 +23,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding, "
       "Tensor? bias_vl=None, int image_sentinel_lo=0) -> ()");
 
+#ifdef USE_CUDA
+  m.def(
+      "muse_spark_routing(Tensor! topk_weights, Tensor! topk_ids, "
+      "Tensor logits, Tensor bias, float multiplier, float route_scale, "
+      "float division_eps, Tensor? is_padding) -> ()");
+#endif
+
   // Calculate the result of moe by summing up the partial results
   // from all selected experts. topk_ids/expert_map are optional and, when
   // both given, enable pad-aware reduce that skips (token, expert)
@@ -86,11 +93,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "Tensor expert_ids, Tensor num_tokens_post_pad, "
       "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
       "int bit) -> Tensor");
+  #ifdef VLLM_ENABLE_LUT_B_MOE
+  // Rubin LUT-B weight x MXFP8 activation grouped GEMM.
+  m.def(
+      "lut_b_moe_gemm(Tensor a, Tensor a_scales, Tensor b, Tensor! c, "
+      "Tensor? topk_weights, Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, int top_k) -> ()");
+  #endif
 
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
       "Tensor! b_q_weight, Tensor? b_bias_or_none,"
-      "Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? "
+      "Tensor! b_scales, Tensor? global_scale, Tensor? "
       "b_zeros_or_none,"
       "Tensor! workspace,"
       "Tensor sorted_token_ids,"
@@ -144,7 +158,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   m.def(
       "grouped_topk(Tensor scores, int n_group, int "
       "topk_group, int topk, bool renormalize, float "
-      "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
+      "routed_scaling_factor, Tensor bias, int scoring_func, Tensor? "
+      "is_padding=None) -> (Tensor, "
       "Tensor)");
 #endif
 }
@@ -152,6 +167,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
 STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("topk_softmax", TORCH_BOX(&topk_softmax));
   m.impl("topk_sigmoid", TORCH_BOX(&topk_sigmoid));
+#ifdef USE_CUDA
+  m.impl("muse_spark_routing", TORCH_BOX(&muse_spark_routing));
+#endif
   m.impl("topk_softplus_sqrt", TORCH_BOX(&topk_softplus_sqrt));
   m.impl("moe_sum", TORCH_BOX(&moe_sum));
   m.impl("moe_align_block_size", TORCH_BOX(&moe_align_block_size));
@@ -164,6 +182,9 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));
 #ifndef USE_ROCM
   m.impl("moe_wna16_gemm", TORCH_BOX(&moe_wna16_gemm));
+  #ifdef VLLM_ENABLE_LUT_B_MOE
+  m.impl("lut_b_moe_gemm", TORCH_BOX(&lut_b_moe_gemm));
+  #endif
   m.impl("shuffle_rows", TORCH_BOX(&shuffle_rows));
   m.impl("grouped_topk", TORCH_BOX(&grouped_topk));
 #endif

@@ -11,7 +11,8 @@ import zmq
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVCacheAccess
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -59,7 +60,6 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.kv_cache_utils import BlockHash
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -189,9 +189,8 @@ class LMCacheMPRequestTracker:
 
     request_id: str
 
-    # Read-only lists to track the token ids and block hashes
+    # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
-    block_hashes: ConstantList["BlockHash"]
 
     # Block ids and hashes will be updated at update_states_after_alloc and
     # during the generation
@@ -219,7 +218,6 @@ class LMCacheMPRequestTracker:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.all_token_ids = request.all_token_ids
-        self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
         self.num_stored_blocks = 0
         self.num_vllm_hit_blocks = 0
@@ -273,7 +271,6 @@ class LMCacheMPRequestTracker:
         return (
             f"LMCacheMPRequestTracker(request_id={self.request_id}, "
             f"num_tokens={len(self.all_token_ids)}, "
-            f"num_block_hashes={len(self.block_hashes)}, "
             f"num_allocated_blocks={len(self.allocated_block_ids)}, "
             f"num_stored_blocks={self.num_stored_blocks}, "
             f"vllm_hit_blocks={self.num_vllm_hit_blocks}, "
@@ -306,7 +303,7 @@ class LMCacheMPRequestMetadata:
             vllm_block_size: the block size used in vLLM
 
         """
-        # Store the blocks that has block hashes
+        # Store full blocks
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
@@ -332,7 +329,7 @@ class LMCacheMPRequestMetadata:
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
         min_available_blocks = min(
-            len(tracker.block_hashes),
+            len(tracker.all_token_ids) // vllm_block_size,
             len(tracker.allocated_block_ids),
             computed_blocks,
         )
@@ -394,8 +391,8 @@ class LMCacheMPRequestMetadata:
             "The number of LMCache hit blocks should be a multiple of the "
             "number of blocks in a lmcache chunk. "
         )
-        assert len(tracker.block_hashes) >= end, (
-            "The number of block hashes should be greater than or equal to the "
+        assert len(tracker.all_token_ids) // vllm_block_size >= end, (
+            "The number of full blocks should be greater than or equal to the "
             "number of LMCache hit blocks. "
         )
         if end > start:
@@ -468,6 +465,11 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     """
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        # Shares the KV cache with the LMCache server via cudaIpcGetMemHandle.
+        return KVCacheAccess.LEGACY_IPC
 
     def __init__(
         self,
@@ -1067,8 +1069,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 
             # Update block ids
             new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
-            if request_id not in cached_reqs.resumed_req_ids:
-                request_tracker.append_block_ids(new_block_ids)
+            request_tracker.append_block_ids(new_block_ids)
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.

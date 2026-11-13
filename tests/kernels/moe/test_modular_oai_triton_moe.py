@@ -57,7 +57,7 @@ MNK = [
 def deepseek_v4_flash_moe_topology():
     """MoE sizes for the DeepSeek-V4-Flash`.
     Default weights from: ``deepseek-ai/DeepSeek-V4-Flash`.
-    ``moe_intermediate_size``, ``n_routed_experts``, and ``num_experts_per_tok``.
+    `moe_intermediate_size`, `n_routed_experts`, and `num_experts_per_tok`.
     """
     defaults = {
         "hidden_size": 4096,
@@ -328,9 +328,9 @@ def test_oai_triton_moe(
     reason="Unfused OAI Triton MoE is not supported on this device.",
 )
 def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_init):
-    """Exercise ``UnfusedOAITritonExperts.apply`` with explicit workspaces.
+    """Exercise `UnfusedOAITritonExperts.apply` with explicit workspaces.
 
-    Same MoE topology as ``launch_dsv4.sh`` / DeepSeek-V4-Flash ``config.json``,
+    Same MoE topology as `launch_dsv4.sh` / DeepSeek-V4-Flash `config.json`,
     with linear dimensions and expert count scaled down for test GPU memory.
     """
     wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)

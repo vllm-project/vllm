@@ -49,8 +49,8 @@ class ParseOutput:
 class MockTokenizer:
     """Lightweight tokenizer mock that avoids unittest.mock overhead.
 
-    Used by ``benchmarks/benchmark_parsers.py`` in tight timing loops,
-    so hot-path methods (``decode``, ``get_vocab``) must be cheap.
+    Used by `benchmarks/benchmark_parsers.py` in tight timing loops,
+    so hot-path methods (`decode`, `get_vocab`) must be cheap.
     MagicMock's call-recording machinery added ~40% overhead to small-
     sample benchmarks, inflating the per-token cost of the parser engine.
     """
@@ -141,7 +141,7 @@ def parse_non_streaming(
     sample: Sample,
     request: ChatCompletionRequest,
 ) -> ParseOutput:
-    """Run ``parser.parse()`` and return a :class:`ParseOutput`."""
+    """Run `parser.parse()` and return a `ParseOutput`."""
     full_text = "".join(text for _, text in sample.tokens)
     reasoning, content, tool_calls = parser.parse(
         full_text,
@@ -168,22 +168,22 @@ def replay_streaming(
     tools: list[dict] | None = None,
     prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
-    """Feed tokens through ``parser.parse_delta()`` at a given chunk size.
+    """Feed tokens through `parser.parse_delta()` at a given chunk size.
 
     Args:
-        parser: A :class:`Parser` instance with ``parse_delta()`` method.
-        tokens: List of ``(token_id, decoded_text)`` pairs.
-        chunk_size: Number of tokens per batch. ``None`` means all at once.
+        parser: A `Parser` instance with `parse_delta()` method.
+        tokens: List of `(token_id, decoded_text)` pairs.
+        chunk_size: Number of tokens per batch. `None` means all at once.
         holdback_chars: Simulate detokenizer holdback by holding back
             this many characters of decoded text between batches.
-        finished_on_last: When True, pass ``finished=True`` on the last
-            ``parse_delta()`` call, matching real server behavior.
+        finished_on_last: When True, pass `finished=True` on the last
+            `parse_delta()` call, matching real server behavior.
         tools: Optional tool definitions to include on the request,
             matching the serving layer where tools set
-            ``tool_choice`` to ``"auto"``.
+            `tool_choice` to `"auto"`.
 
     Returns:
-        List of ``DeltaMessage`` results from each ``parse_delta()`` call.
+        List of `DeltaMessage` results from each `parse_delta()` call.
 
     """
     if chunk_size is None:
@@ -281,7 +281,7 @@ def replay_with_text_holdback(
         step N-1: ids=[tokN-1], text=remaining_texts (flush all)
 
     This exercises the TokenIDScanner deferred-terminal path that
-    ``replay_streaming`` (which keeps text and IDs aligned) does not.
+    `replay_streaming` (which keeps text and IDs aligned) does not.
     """
     results: list[DeltaMessage | None] = []
     request = _test_request(tools=tools)
@@ -356,7 +356,7 @@ def accumulate_deltas(
 
 
 def collect_output(results: list[DeltaMessage | None]) -> ParseOutput:
-    """Accumulate ``DeltaMessage`` results into a :class:`ParseOutput`."""
+    """Accumulate `DeltaMessage` results into a `ParseOutput`."""
     result = accumulate_deltas(results)
     return ParseOutput(
         reasoning=result["reasoning"],

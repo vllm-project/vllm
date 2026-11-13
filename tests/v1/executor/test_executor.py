@@ -203,7 +203,7 @@ def test_custom_executor_async(distributed_executor_backend, tmp_path):
             stream = engine.generate(
                 request_id="0", prompt="foo", sampling_params=sampling_params
             )
-            async for x in stream:
+            async for _ in stream:
                 ...
 
         asyncio.run(t())
@@ -245,7 +245,6 @@ def _make_failed_step_executor(enable_ft: bool) -> MultiprocExecutor:
                     WorkerProc.ResponseStatus.SUCCESS,
                     ModelRunnerOutput(
                         req_ids=[],
-                        req_id_to_index={},
                         kv_connector_output=KVConnectorOutput(
                             finished_recving={"req1"}
                         ),
@@ -274,8 +273,8 @@ def test_collective_rpc_worker_failure_merges_kv_output(enable_ft):
         assert len(aggregator._salvaged_outputs) == 2
         aggregated = aggregator.aggregate(
             [
-                ModelRunnerOutput(req_ids=[], req_id_to_index={}),
-                ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+                ModelRunnerOutput(req_ids=[]),
+                ModelRunnerOutput(req_ids=[]),
             ]
         )
         assert aggregated is not None

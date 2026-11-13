@@ -27,6 +27,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import (
@@ -229,6 +230,18 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
+
+
+def test_store_marks_a_cached_miss_present(fs_tier):
+    tier, _ = fs_tier
+    block_key = key(1)
+    assert lookup_and_wait(tier, [block_key]) == [LookupResult.MISS]
+
+    tier.submit_store(make_job(1, [block_key], [0]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert lookup_and_wait(tier, [block_key]) == [LookupResult.HIT]
 
 
 def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
@@ -824,6 +837,7 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     assert events[0].medium == Medium.STORAGE
     assert events[0].locality is Locality.LOCAL
     assert not events[0].removed
+    assert events[0].req_context is _CTX
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
 
@@ -920,7 +934,7 @@ def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch)
     assert len(results) == 1
     assert not results[0].success
     assert list(tier.take_events()) == []
-    assert tier._store_job_keys == {}
+    assert tier._store_jobs == {}
 
 
 def test_events_disabled_by_default(fs_tier):
@@ -930,7 +944,7 @@ def test_events_disabled_by_default(fs_tier):
     assert len(results) == 1
     assert results[0].success
     assert tier.events is None
-    assert tier._store_job_keys == {}
+    assert tier._store_jobs == {}
     assert list(tier.take_events()) == []
 
 
@@ -951,7 +965,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
         assert len(results) == 1
         assert results[0].success
         assert list(tier.take_events()) == []
-        assert tier._store_job_keys == {}
+        assert tier._store_jobs == {}
     finally:
         tier.shutdown()
 
@@ -980,8 +994,13 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     try:
         keys = [key(1), key(2)]
         manager.on_new_request(_CTX)
-        assert manager.prepare_store(keys, _CTX) is not None
-        manager.complete_store(keys, _CTX)  # cascades to the fs tier
+        assert (
+            manager.prepare_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store(
+            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )  # cascades to the fs tier
 
         events: list[OffloadingEvent] = []
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
@@ -995,6 +1014,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         assert len(fs_events) == 1
         assert set(fs_events[0].keys) == set(keys)
         assert not fs_events[0].removed
+        assert fs_events[0].req_context is _CTX
     finally:
         tier.shutdown()
 

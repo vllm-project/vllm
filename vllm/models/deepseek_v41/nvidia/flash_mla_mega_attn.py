@@ -3,16 +3,19 @@
 """DeepSeek V4.1 attention on FlashMLA's mega-attention kernel (SM100).
 
 One kernel does Q RoPE, sparse attention, the inverse RoPE of the output and
-its FP8 cast, and writes straight into the buffer ``wo_a`` consumes. So the
-layer declares ``accepts_unnormed_unroped_query`` -- the kernel RoPEs Q itself,
-leaving the fused KV insert only the zero-pad to the kernel's head count -- and
-its ``_alloc_attn_out`` / ``_o_proj`` pair speaks QuantizedActivation instead
+its FP8 cast, and writes straight into the buffer `wo_a` consumes. So the
+layer declares `accepts_unnormed_unroped_query` -- the kernel RoPEs Q itself,
+leaving Q only the zero-pad to the kernel's head count -- and
+its `_alloc_attn_out` / `_o_proj` pair speaks QuantizedActivation instead
 of bf16, since the output needs no rotation or quantization here.
 
-``wq_b`` rows and ``wo_a`` columns are permuted once at load so the surrounding
+`wq_b` rows and `wo_a` columns are permuted once at load so the surrounding
 GEMMs speak the kernel's chunk-interleaved layouts directly. A step's prefill
 and decode segments write disjoint token ranges of one output buffer pair, so
-a single ``wo_a`` einsum covers the whole step.
+a single `wo_a` einsum covers the whole step.
+
+Small decode steps with 16 or 32 live heads run a swap-AB kernel with the same
+inputs and output instead (see `_swapab_decode_supported`).
 """
 
 from dataclasses import replace
@@ -21,6 +24,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
@@ -46,6 +50,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
+from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -63,10 +68,10 @@ _QUANT_GROUP = 32
 _ROPE_ARGS = (False, _ROPE_DIM)
 _SF_ARGS = (_QUANT_GROUP, True, True, True)
 
-# Decode always goes through the mega kernel: there is no batch size at which
-# falling back to the split-KV decode pays, so there is no minimum-token
-# threshold and no fallback path to maintain. What decides whether this layer
-# is worth selecting at all is TP, not the batch size.
+# Decode never falls back to the split-KV decode: there is no batch size at
+# which that pays, so there is no minimum-token threshold and no fallback path
+# to maintain. What decides whether this layer is worth selecting at all is TP,
+# not the batch size.
 #
 # Measured on one GB300 with benchmarks/kernels/benchmark_dsv41_mega_attn.py,
 # CUDA graphs on, counting every per-step op each path runs (64-head model,
@@ -104,6 +109,39 @@ def is_flashmla_mega_attn_supported() -> tuple[bool, str | None]:
     return True, None
 
 
+# Decode steps of up to this many tokens take the swap-AB kernel where the layer
+# supports it. Each token gets a cluster of up to 8 CTAs, one per SM, so its cost
+# grows with the token count sooner than the mega kernel's.
+_SWAPAB_MAX_TOKENS = 16
+
+
+def _swapab_decode_supported(layer: "DeepseekV4MegaAttnAttention") -> bool:
+    """Whether the layer's small decode steps take the swap-AB kernel.
+
+    The mega kernel pads the query heads to 64, so at 32 or 16 live heads half
+    or three quarters of its MMA work is padding. Batch-invariant runs keep the
+    mega kernel at every step size, as the two kernels round the FP8 output
+    differently.
+    """
+    if (
+        layer.compress_ratio == 0
+        or layer.n_local_heads not in (16, 32)
+        or envs.VLLM_BATCH_INVARIANT
+        or not current_platform.is_device_capability_family(100)
+        # The kernel's module imports the CuTe DSL when it loads.
+        or not has_cutedsl()
+    ):
+        return False
+    from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
+        swapab_decode_supported,
+    )
+
+    assert layer.topk_indices_buffer is not None
+    return swapab_decode_supported(
+        layer.n_local_heads, layer.window_size, layer.topk_indices_buffer.shape[-1]
+    )
+
+
 def alloc_mega_attn_output(
     num_tokens: int,
     n_wv_group: int,
@@ -112,11 +150,11 @@ def alloc_mega_attn_output(
     """Allocate the output buffer pair the mega-attention kernels write into.
 
     One pair per forward step: the prefill and decode segments fill disjoint
-    token ranges, so a single ``fp8_einsum`` over all ``num_tokens`` can
+    token ranges, so a single `fp8_einsum` over all `num_tokens` can
     consume the result instead of one call per segment.
 
     The scale buffer is MN-major -- stride 1 along tokens, head-dim stride
-    ``ceil4(num_tokens)`` -- which is both what the kernel requires of a
+    `ceil4(num_tokens)` -- which is both what the kernel requires of a
     caller-provided buffer and what DeepGEMM expects for this N.
     """
     d = WV_GROUP_SIZE * _HEAD_DIM_V
@@ -139,7 +177,7 @@ def alloc_mega_attn_output(
 
 
 def _token_slice(out: QuantizedActivation, start: int, end: int) -> QuantizedActivation:
-    """The ``[start, end)`` token slice of a mega-attention output buffer."""
+    """The `[start, end)` token slice of a mega-attention output buffer."""
     data = out.data[start:end]
     return replace(out, data=data, scale=out.scale[start:end], orig_shape=data.shape)
 
@@ -153,9 +191,9 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def is_available_for(cls, vllm_config: VllmConfig) -> bool:
         """Whether this layer can serve the configured model on this device.
 
-        The kernel is SM100-only and wants ``WV_GROUP_SIZE`` heads per ``wo_a``
+        The kernel is SM100-only and wants `WV_GROUP_SIZE` heads per `wo_a`
         group, which stops holding once TP divides the head count far enough
-        (TP16 on a 64-head model leaves 4). ``__init__`` raises on both, so the
+        (TP16 on a 64-head model leaves 4). `__init__` raises on both, so the
         default-backend selector asks here first rather than turning an
         unsupported topology into a startup crash.
         """
@@ -193,6 +231,9 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         permute_on_load(self.wo_a.weight, o_perm, dim=1)
         o_chunk_perm = o_fused_chunk_permutation(WV_GROUP_SIZE, self.head_dim)
         permute_on_load(self.wo_a.weight_scale, o_chunk_perm, dim=1)
+        self._use_swapab = _swapab_decode_supported(self)
+        if self._use_swapab and vllm_config.kernel_config.enable_jit_warmup:
+            self._register_swapab_warmup()
 
     # ---- interface contract ------------------------------------------------
 
@@ -206,6 +247,31 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         # it is what an unspecific --kv-cache-dtype resolves to here.
         return "nvfp4_ds_mla"
 
+    def _register_swapab_warmup(self) -> None:
+        """Register the compile key this layer's swap-AB decode steps launch.
+
+        Every field is fixed at construction. The compressed cache is read in
+        kernel blocks of this backend's single size, which hold
+        `kernel_block // compress_ratio` compressed slots each, whatever the
+        KV cache manager's block size is. Layers sharing a key register it
+        once.
+        """
+        from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
+            _SWAPAB_DECODE_KERNEL,
+        )
+
+        (kernel_block,) = self.backend_cls.get_supported_kernel_block_sizes()
+        assert isinstance(kernel_block, int)
+        assert self.topk_indices_buffer is not None
+        _SWAPAB_DECODE_KERNEL.register_warmup(
+            heads=self.n_local_heads,
+            swa_width=self.window_size,
+            extra_width=self.topk_indices_buffer.shape[-1],
+            extra_record=self.compressed_bytes_per_token,
+            swa_page=self.swa_cache_layer.block_size,
+            extra_page=kernel_block // self.compress_ratio,
+        )
+
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
     ) -> QuantizedActivation:
@@ -214,11 +280,11 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _o_proj(
         self, attn_out: QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
-        """Grouped ``wo_a`` then ``wo_b`` over the kernel's quantized output.
+        """Grouped `wo_a` then `wo_b` over the kernel's quantized output.
 
         The inverse RoPE and the FP8 cast happened inside the attention
-        kernel, and ``wo_a`` is permuted for its output layout, so there is
-        nothing to rotate or quantize here and ``positions`` is unused. The
+        kernel, and `wo_a` is permuted for its output layout, so there is
+        nothing to rotate or quantize here and `positions` is unused. The
         scale already is DeepGEMM's packed-ue8m0 MN-major layout, so the
         einsum consumes the kernel's output with no repacking.
         """
@@ -282,7 +348,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             return
 
         assert isinstance(attn_metadata, dict)
-        # q was zero-padded to the kernel's head count by the fused KV insert.
+        # _fused_qnorm_rope_kv_insert zero-padded q to the kernel's head count.
         assert q.shape[1] == self.padded_heads
         flashmla_metadata = cast(
             DeepseekV4FlashMLAMetadata | None,
@@ -293,14 +359,12 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
-        # The kernel takes int32 RoPE positions.
-        positions_int32 = positions.to(torch.int32)
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         if swa_metadata.num_prefills > 0:
             self._forward_prefill_mega(
                 q[num_decode_tokens:],
-                positions_int32[num_decode_tokens:],
+                positions[num_decode_tokens:],
                 flashmla_metadata,
                 swa_metadata,
                 output,
@@ -309,7 +373,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         if swa_metadata.num_decodes > 0:
             self._forward_decode_mega(
                 q[:num_decode_tokens],
-                positions_int32[:num_decode_tokens],
+                positions[:num_decode_tokens],
                 flashmla_metadata,
                 swa_metadata,
                 _token_slice(output, 0, num_decode_tokens),
@@ -345,7 +409,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        """The compressed cache and its ``[n, topk]`` slot indices / lengths."""
+        """The compressed cache and its `[n, topk]` slot indices / lengths."""
         if self.compress_ratio == 0:
             return None, None, None
         assert flashmla_metadata is not None
@@ -364,26 +428,59 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _forward_decode_mega(
         self,
         q: torch.Tensor,
-        positions_int32: torch.Tensor,
+        positions: torch.Tensor,
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         out: QuantizedActivation,
     ) -> None:
-        """Mega attention over the paged quantized caches, in place into ``out``.
+        """Mega attention over the paged quantized caches, in place into `out`.
 
-        The caches are ``[num_blocks, page, 1, bytes]``, the record taken from
-        ``bytes`` (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed
-        cache beside an fp8 SWA one), and the indices ``[s_q, topk]`` int32
-        slot ids (``block * page + offset``, ``-1`` invalid).
+        The caches are `[num_blocks, page, 1, bytes]`, the record taken from
+        `bytes` (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed
+        cache beside an fp8 SWA one), and the indices `[s_q, topk]` int32
+        slot ids (`block * page + offset`, `-1` invalid). Where
+        `_use_swapab` holds, steps of at most `_SWAPAB_MAX_TOKENS` tokens
+        take the swap-AB kernel instead, which reads the same inputs and
+        writes the same output layout.
         """
         extra_cache, extra_idx, extra_len = self._decode_compressed_kv_and_topk(
             flashmla_metadata, swa_metadata
         )
         assert swa_metadata.decode_swa_indices is not None
+        swa_idx = swa_metadata.decode_swa_indices.view(q.shape[0], -1)
+        if (
+            self._use_swapab
+            and q.shape[0] <= _SWAPAB_MAX_TOKENS
+            and extra_cache is not None
+            # The cluster and the warmed-up compile key are sized for the
+            # window; DSpark's non-causal draft steps widen the SWA list past it.
+            and swa_idx.shape[-1] == self.window_size
+        ):
+            from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
+                _SWAPAB_DECODE_KERNEL,
+            )
+
+            _SWAPAB_DECODE_KERNEL(
+                q=q,
+                swa_cache=self.swa_cache_layer.kv_cache,
+                swa_idx=swa_idx,
+                swa_len=swa_metadata.decode_swa_lens,
+                extra_cache=extra_cache.squeeze(-2),
+                extra_idx=extra_idx,
+                extra_len=extra_len,
+                positions=positions,
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                sink=self.attn_sink,
+                heads=self.n_local_heads,
+                softmax_scale=self.scale,
+                out_data=out.data,
+                out_scale=out.scale,
+            )
+            return
         torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
             q,
             self.swa_cache_layer.kv_cache.unsqueeze(-2),
-            swa_metadata.decode_swa_indices.view(q.shape[0], -1),
+            swa_idx,
             self.scale,
             _HEAD_DIM_V,
             self.attn_sink,
@@ -393,7 +490,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             extra_len,
             False,  # enable_q_norm
             0.0,  # rms_norm_eps
-            positions_int32,
+            positions,
             *_ROPE_ARGS,
             self.rotary_emb.cos_sin_cache,
             self.n_wv_group,
@@ -405,7 +502,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _forward_prefill_mega(
         self,
         q: torch.Tensor,
-        positions_int32: torch.Tensor,
+        positions: torch.Tensor,
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         out: QuantizedActivation,
@@ -506,7 +603,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 combined_lens,
                 False,  # enable_q_norm
                 0.0,  # rms_norm_eps
-                positions_int32[qs:qe],
+                positions[qs:qe],
                 *_ROPE_ARGS,
                 self.rotary_emb.cos_sin_cache,
                 self.n_wv_group,

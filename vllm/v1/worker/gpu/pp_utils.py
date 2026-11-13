@@ -10,10 +10,13 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -33,6 +36,48 @@ class PendingRecv:
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
+
+
+def check_received_tensors(
+    received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
+) -> None:
+    """Check tensors received from the previous PP stage against the persistent
+    buffers they are copied into. The per-step copy drops tensors without a
+    buffer, broadcasts mismatched trailing dimensions and rounds to the buffer's
+    dtype without an error."""
+    if missing := buffers.keys() - received.keys():
+        raise ValueError(
+            f"The previous pipeline stage does not send the intermediate tensors "
+            f"{sorted(missing)} that this stage expects."
+        )
+    if unexpected := received.keys() - buffers.keys():
+        logger.warning(
+            "PP intermediate tensors %s from the previous stage have no buffer on "
+            "this stage and are dropped. Declare them in the model's "
+            "make_empty_intermediate_tensors.",
+            sorted(unexpected),
+        )
+    for name, buffer in buffers.items():
+        tensor = received[name]
+        if tensor.shape[1:] != buffer.shape[1:]:
+            raise ValueError(
+                f"PP intermediate tensor {name!r} has per-token shape "
+                f"{tuple(tensor.shape[1:])}, but its buffer on this stage has "
+                f"{tuple(buffer.shape[1:])}."
+            )
+        src, dst = tensor.dtype, buffer.dtype
+        if src == dst or not (src.is_floating_point and dst.is_floating_point):
+            continue
+        src_info, dst_info = torch.finfo(src), torch.finfo(dst)
+        if dst_info.eps > src_info.eps or dst_info.max < src_info.max:
+            logger.warning(
+                "PP intermediate tensor %r arrives as %s but its buffer is %s, so "
+                "it loses precision at every stage boundary. Declare the dtype in "
+                "the model's make_empty_intermediate_tensors.",
+                name,
+                src,
+                dst,
+            )
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -96,37 +141,85 @@ class PPHandler:
         )
         # Whether sampled tokens were broadcast this step.
         self.sampled_tokens_broadcast = False
-        self.aux_hidden_state_relay_keys: tuple[str, ...] = ()
+        # Aux hidden states taken by earlier stages, and by this non-last stage.
+        self.upstream_aux_keys: tuple[str, ...] = ()
+        self.local_aux_keys: tuple[str, ...] = ()
+        self.num_aux_hidden_states = 0
+        self.checked_received_tensors = False
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
+
+    def check_received_tensors(
+        self, received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
+    ) -> None:
+        if not self.checked_received_tensors:
+            check_received_tensors(received, buffers)
+            self.checked_received_tensors = True
 
     def _sample_len(self, input_batch: InputBatch) -> int:
         # Width of the sampled-token broadcast. Must be the same on all ranks.
         return self.max_sample_len if input_batch.num_draft_tokens > 0 else 1
 
     def configure_aux_hidden_state_relay(self, model: torch.nn.Module) -> None:
-        from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-            aux_hidden_state_relay_keys,
-        )
+        from vllm.model_executor.models.interfaces import get_eagle_decoder
 
-        self.aux_hidden_state_relay_keys = aux_hidden_state_relay_keys(model)
+        decoder = get_eagle_decoder(model)
+        assert decoder is not None
+        self.upstream_aux_keys, self.local_aux_keys = (
+            decoder.aux_hidden_state_slot_keys()
+        )
+        self.num_aux_hidden_states = len(decoder.aux_hidden_state_layers)
 
     def relay_aux_hidden_states(
         self,
         intermediate_tensors: IntermediateTensors | None,
         output_intermediate_tensors: IntermediateTensors,
     ) -> IntermediateTensors:
-        if not self.aux_hidden_state_relay_keys:
+        """Forward earlier stages' aux hidden states next to this stage's."""
+        missing = [
+            key
+            for key in self.local_aux_keys
+            if key not in output_intermediate_tensors.tensors
+        ]
+        if missing:
+            raise RuntimeError(
+                f"The model did not send aux hidden states {missing} to the next "
+                "PP stage; its forward must add pack_local_aux_hidden_states() "
+                "to the IntermediateTensors it returns."
+            )
+        if not self.upstream_aux_keys:
             return output_intermediate_tensors
         assert intermediate_tensors is not None
         return IntermediateTensors(
             output_intermediate_tensors.tensors
-            | {
-                key: intermediate_tensors[key]
-                for key in self.aux_hidden_state_relay_keys
-            }
+            | {key: intermediate_tensors[key] for key in self.upstream_aux_keys}
         )
+
+    def add_upstream_aux_hidden_states(
+        self,
+        intermediate_tensors: IntermediateTensors | None,
+        model_output: torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]],
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Turn the last stage's model output, which carries only the aux hidden
+        states this stage took, into the full list the speculator reads. Call it
+        once per forward."""
+        if isinstance(model_output, tuple):
+            hidden_states, aux_hidden_states = model_output
+        else:
+            hidden_states, aux_hidden_states = model_output, []
+        if self.upstream_aux_keys:
+            assert intermediate_tensors is not None
+            aux_hidden_states = [
+                intermediate_tensors[key] for key in self.upstream_aux_keys
+            ] + aux_hidden_states
+        if len(aux_hidden_states) != self.num_aux_hidden_states:
+            raise RuntimeError(
+                f"The last PP stage has {len(aux_hidden_states)} aux hidden states "
+                f"for {self.num_aux_hidden_states} requested layers; the model's "
+                "forward must take them at global layer indices."
+            )
+        return hidden_states, aux_hidden_states
 
     def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor | None] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,

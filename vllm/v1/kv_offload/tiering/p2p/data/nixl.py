@@ -8,7 +8,7 @@ them strictly -- one Python thread inside any agent call at a time, with a full
 memory barrier between.
 
 That lock is the only protection, not a belt over NIXL's own. nixl_agent picks
-NIXL_THREAD_SYNC_STRICT only when ``enable_listen`` is set, which this transport
+NIXL_THREAD_SYNC_STRICT only when `enable_listen` is set, which this transport
 does not set, so the agent runs with NIXL_THREAD_SYNC_NONE -- under which NIXL's
 internal agent lock compiles down to no-ops, leaving every agent entry point
 unguarded. So the manager lock must cover all of them, and the lifetime of every
@@ -20,17 +20,17 @@ Serialized use from a second thread is supported (checked against NIXL 1.4.1
 sources): NIXL never creates its UCX worker in UCS_THREAD_MODE_SINGLE, the only
 creator-thread-affine mode. The weakest mode it ever requests is
 UCS_THREAD_MODE_SERIALIZED, documented as "multiple threads can access, but only
-one at a time", and because ``enable_prog_thread`` defaults on here it actually
+one at a time", and because `enable_prog_thread` defaults on here it actually
 requests UCS_THREAD_MODE_MULTI and fails construction if the UCX build cannot
 provide it.
 
 Two caveats. NIXL binds a shared UCX worker per calling thread
-(``tlsSharedWorkerMap``), which is harmless only while there is exactly one
-shared worker -- true here, but it would stop being true if a ``num_workers``
+(`tlsSharedWorkerMap`), which is harmless only while there is exactly one
+shared worker -- true here, but it would stop being true if a `num_workers`
 UCX backend param were ever set. And NIXL 1.4.1 does accept an explicit
-``sync_mode`` (including NIXL_THREAD_SYNC_RW), which would make its own locking
+`sync_mode` (including NIXL_THREAD_SYNC_RW), which would make its own locking
 real; that parameter does not exist before 1.x, so passing it would need a
-version gate, the way ``capture_telemetry`` does.
+version gate, the way `capture_telemetry` does.
 """
 
 from __future__ import annotations
@@ -87,13 +87,13 @@ def _peer_fault_status(exc: Exception) -> str | None:
 def _is_terminal_state_error(exc: Exception) -> bool:
     """True if a failed NIXL state check ends the transfer.
 
-    Only ``nixlRemoteDisconnectError`` does: NIXL raises it once the target
+    Only `nixlRemoteDisconnectError` does: NIXL raises it once the target
     endpoint is gone, so nothing more can land. Any other raise says nothing
     about the WRITE itself; #59790 measured a WRITE that kept landing after
-    ``remove_remote_agent`` while its handle raised ``nixlNotFoundError``.
+    `remove_remote_agent` while its handle raised `nixlNotFoundError`.
     Such a transfer stays inflight, so its pins and the peer's destination
     blocks are not reused under it. The raise still faults its peer (see
-    ``_record_state_check_failure``), which bounds how long it stays.
+    `_record_state_check_failure`), which bounds how long it stays.
     """
     return _peer_fault_status(exc) == "NIXL_ERR_REMOTE_DISCONNECT"
 
@@ -101,11 +101,11 @@ def _is_terminal_state_error(exc: Exception) -> bool:
 class _Inflight(NamedTuple):
     """A submitted-but-not-yet-drained transfer.
 
-    ``peer_id`` lets poll() scope to a single owning session, since the
+    `peer_id` lets poll() scope to a single owning session, since the
     transport is shared across all peer sessions of the engine.
-    ``struck`` is set once the transfer has counted against its peer, so a
+    `struck` is set once the transfer has counted against its peer, so a
     state check that keeps raising charges it once, not once per poll.
-    ``retired`` is set once its peer is removed while it still runs; only
+    `retired` is set once its peer is removed while it still runs; only
     poll_retired() sees it from then on.
     """
 
@@ -360,8 +360,8 @@ class NixlTransport(DataTransport):
         """Release a peer's descriptor list and remote agent independently.
 
         The two teardown operations are independent: NIXL may reject one
-        after a transport failure, and a ``release_dlist_handle`` that
-        raises must not skip ``remove_remote_agent``. Skipping it would
+        after a transport failure, and a `release_dlist_handle` that
+        raises must not skip `remove_remote_agent`. Skipping it would
         leave a stale remote registration behind after the peer is gone
         (peer removal) or after its registration was superseded.
         """
@@ -453,7 +453,7 @@ class NixlTransport(DataTransport):
 
         Returns PollResult(done=..., failed=..., peer_fault=...) with
         transfer IDs. Completed handles are released automatically.
-        ``peer_fault`` is set on a scoped poll once *peer_id* is faulted.
+        `peer_fault` is set on a scoped poll once *peer_id* is faulted.
         """
         if not self._inflight:
             return self._poll_result(peer_id, None, None)
@@ -540,7 +540,7 @@ class NixlTransport(DataTransport):
         """Release retired transfers that have stopped; return their ids.
 
         A transfer stopped once NIXL reports it terminal, by the same rule
-        as ``cancel(mode="wait")``, but without charging its peer: the
+        as `cancel(mode="wait")`, but without charging its peer: the
         peer is gone, and a reconnected one under the same id is not at
         fault. A removed peer's remote handles are released once none of
         its retired transfers remain.
@@ -585,15 +585,15 @@ class NixlTransport(DataTransport):
     ) -> list[int]:
         """Cancel inflight transfers by their IDs.
 
-        See ``DataTransport.cancel`` for the contract. In "wait" mode, a
+        See `DataTransport.cancel` for the contract. In "wait" mode, a
         transfer is released only once NIXL reports it terminal. Releasing
         a PROC/PEND handle does not stop the WRITE: the UCX backend frees
         the request without cancelling RMA, and the bytes keep landing. So
         PROC/PEND transfers, and those whose state check or
-        ``release_xfer_handle`` raises, stay in ``self._inflight`` for a
-        later ``poll()`` to observe. A state check that raises faults the
+        `release_xfer_handle` raises, stay in `self._inflight` for a
+        later `poll()` to observe. A state check that raises faults the
         peer; only a remote disconnect also counts as terminal (see
-        ``_is_terminal_state_error``).
+        `_is_terminal_state_error`).
         """
         if mode == "immediate":
             handles = [
@@ -681,7 +681,7 @@ class NixlTransport(DataTransport):
             self._record_transfer_failure(peer_id, f"{type(exc).__name__}: {exc}")
 
     def _record_state_check_failure(self, peer_id: str, exc: Exception) -> None:
-        """Fault *peer_id* for a ``check_xfer_state`` that raised.
+        """Fault *peer_id* for a `check_xfer_state` that raised.
 
         The bindings raise for every NIXL error status (only success and
         in-progress are returned), so a raise is a failure NIXL reported,

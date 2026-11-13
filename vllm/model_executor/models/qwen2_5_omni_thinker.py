@@ -40,15 +40,18 @@ from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
 )
 from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
     Qwen2_5OmniProcessor,
+    Qwen2_5OmniProcessorKwargs,
 )
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
@@ -79,6 +82,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     DictEmbeddingItems,
+    ImageSize,
     ModalityDataItems,
     MultiModalDataItems,
 )
@@ -206,7 +210,7 @@ def merge_interleaved_embeddings(
 
     When use_audio_in_video=True, video and audio tokens are interleaved in
     the token sequence, but embeddings are provided as separate contiguous
-    tensors. This function scatters each modality by the ``modality`` attribute
+    tensors. This function scatters each modality by the `modality` attribute
     attached to each embedding tensor (set during encoder gather) and also
     supports image embeddings in the same interleaved request.
 
@@ -412,6 +416,8 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
 class Qwen2_5OmniThinkerProcessingInfo(
     Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo
 ):
+    processor_kwargs_cls: type = Qwen2_5OmniProcessorKwargs
+
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5OmniConfig).thinker_config
 
@@ -444,6 +450,73 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
+
+    def _get_videos_kwargs(self) -> dict[str, Any]:
+        processor = self.get_hf_processor()
+        return processor._merge_kwargs(
+            self.processor_kwargs_cls,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs({}),
+        )["videos_kwargs"]
+
+    def _get_video_size(self) -> dict[str, int]:
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if merged_kwargs.keys() & {"size", "min_pixels", "max_pixels"}:
+            return self._get_vision_size(
+                merged_kwargs,
+                default_size=self.get_hf_processor().video_processor.size,
+            )
+        return self._get_videos_kwargs()["size"]
+
+    def get_video_size_with_most_features(self) -> ImageSize:
+        return self.get_image_size_with_most_features(
+            max_pixels=self._get_video_size()["longest_edge"]
+        )
+
+    def get_video_frame_size(self, width: int, height: int) -> ImageSize:
+        video_processor = self.get_hf_processor().video_processor
+        if not self._get_videos_kwargs().get("do_resize", video_processor.do_resize):
+            return ImageSize(width=width, height=height)
+        vision_config = self.get_hf_config().vision_config
+        video_size = self._get_video_size()
+        resized_height, resized_width = smart_resize(
+            height=height,
+            width=width,
+            factor=vision_config.patch_size * vision_config.spatial_merge_size,
+            min_pixels=video_size["shortest_edge"],
+            max_pixels=video_size["longest_edge"],
+        )
+        return ImageSize(width=resized_width, height=resized_height)
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        num_videos: int,
+        max_frames_per_video: int | None = None,
+    ) -> int:
+        video_processor = self.get_hf_processor().video_processor
+        temporal_patch_size = video_processor.temporal_patch_size
+        target_size = self.get_video_size_with_most_features()
+        tokens_per_step = self.get_num_video_tokens(
+            image_width=target_size.width,
+            image_height=target_size.height,
+            num_frames=temporal_patch_size,
+            image_processor=video_processor,
+            mm_kwargs={},
+        )
+        num_videos = max(num_videos, 1)
+        num_steps = max(seq_len // num_videos // tokens_per_step, 1)
+        num_frames = num_steps * temporal_patch_size
+        if max_frames_per_video is not None:
+            num_frames = min(num_frames, max_frames_per_video)
+        return num_frames
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        return seq_len
 
     def get_mm_max_tokens_per_item(
         self,
@@ -481,7 +554,9 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
 _I = TypeVar("_I", bound=BaseProcessingInfo, default=Qwen2_5OmniThinkerProcessingInfo)
 _VI = TypeVar(
-    "_VI", bound=Qwen2VLProcessingInfo, default=Qwen2_5OmniThinkerProcessingInfo
+    "_VI",
+    bound=Qwen2_5OmniThinkerProcessingInfo,
+    default=Qwen2_5OmniThinkerProcessingInfo,
 )
 
 
@@ -520,9 +595,16 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
         )
 
         target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
-        )
+        video_size = self.info.get_video_size_with_most_features()
+        video_overrides = mm_options.get("video")
+        if video_overrides and (video_overrides.width or video_overrides.height):
+            video_size = self.info.get_video_frame_size(
+                video_overrides.width or video_size.width,
+                video_overrides.height or video_size.height,
+            )
+            video_overrides = VideoDummyOptions(
+                count=video_overrides.count, num_frames=video_overrides.num_frames
+            )
 
         mm_data = {
             "audio": self._get_dummy_audios(
@@ -537,11 +619,13 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=target_num_frames,
+                width=video_size.width,
+                height=video_size.height,
+                num_frames=self.info.get_num_frames_with_most_features(
+                    seq_len, mm_counts.get("video", 0)
+                ),
                 num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
+                overrides=video_overrides,
             ),
         }
 
@@ -908,8 +992,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
         input_features = processed_data.pop("input_features", None)
@@ -930,7 +1014,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if video_second_per_grid is not None:
             processed_data["second_per_grid_ts"] = video_second_per_grid
 
-        use_audio_in_video = hf_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         processed_data["use_audio_in_video"] = torch.tensor(use_audio_in_video)
         processed_data.pop("input_ids", None)
 
@@ -1059,7 +1143,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = image_input["pixel_values"]
             with set_forward_context(None, self.vllm_config):
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         # Split concatenated embeddings for each image item.
@@ -1078,9 +1162,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype
-            )
+            pixel_values_videos = video_input["pixel_values_videos"]
             with set_forward_context(None, self.vllm_config):
                 video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
         # Split concatenated embeddings for each video item.
@@ -1103,6 +1185,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen2_5OmniConditionalGenerationMixin,
 ):
+    supports_mm_device_do_normalize = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -1173,6 +1257,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
