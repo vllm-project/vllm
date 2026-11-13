@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 20
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -40,7 +40,7 @@ steps:
   timeout_in_minutes: 25
   num_devices: 4
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -69,7 +69,7 @@ steps:
   timeout_in_minutes: 20
   num_devices: 2
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -98,7 +98,7 @@ steps:
   timeout_in_minutes: 40
   num_devices: 4
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
