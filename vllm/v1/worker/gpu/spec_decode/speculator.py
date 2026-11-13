@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import replace as replace_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -141,6 +142,11 @@ class BaseSpeculator(ABC):
         requests have finished. No-op by default."""
         return
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Apply a reduced max_model_len. Auto-fit can call this after capture,
+        when CUDA graphs no longer see Python values. No-op by default."""
+        return
+
 
 class DraftModelSpeculator(BaseSpeculator):
     # Draft prefill runs on the target's batch, so it can reuse the target
@@ -148,6 +154,14 @@ class DraftModelSpeculator(BaseSpeculator):
     can_reuse_target_attn_metadata: bool = True
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        assert vllm_config.speculative_config is not None
+        parallel_config = vllm_config.parallel_config
+        dcp = vllm_config.speculative_config.draft_decode_context_parallel_size
+        if dcp and dcp != parallel_config.decode_context_parallel_size:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.parallel_config = replace_config(
+                parallel_config, decode_context_parallel_size=dcp
+            )
         self.vllm_config = vllm_config
         self.device = device
 
@@ -161,6 +175,12 @@ class DraftModelSpeculator(BaseSpeculator):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.draft_max_seq_len = self.max_model_len
+        # Draft steps in CUDA graphs read the length limit from here rather
+        # than a constant baked at capture, so an auto-fit reduction after
+        # capture (`update_max_model_len`) also applies to graph replays.
+        self.max_model_len_gpu = torch.tensor(
+            self.max_model_len, dtype=torch.int32, device=device
+        )
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -254,6 +274,9 @@ class DraftModelSpeculator(BaseSpeculator):
         # Auto-fit can reduce the limit after the speculator is built.
         return self.vllm_config.model_config.max_model_len
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        self.max_model_len_gpu.fill_(max_model_len)
+
     @abstractmethod
     def load_draft_model(
         self, target_model: nn.Module, target_attn_layer_names: set[str]
@@ -305,6 +328,11 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.num_speculative_steps,
                 self.device,
             )
+
+    def free_unused_weights(self, target_model: nn.Module) -> None:
+        """Free the draft weights this instance never reads. The model runner
+        calls this after `load_model` (and its overrides) and EPLB setup."""
+        return
 
     def supports_batch_sharded_draft_logits(self) -> bool:
         """Whether every draft logits write on this speculator's path honors

@@ -3,35 +3,35 @@
 """Expert tensor parallelism for the routed NVFP4 experts, built from the
 stock expert-parallel weights (pure torch and torch.distributed).
 
-The stock layer under TP x EP with EP equal to TP holds ``E / tp`` whole experts
-per rank, placed linearly (rank ``r`` owns experts ``[r Er, (r + 1) Er)``), in
+The stock layer under TP x EP with EP equal to TP holds `E / tp` whole experts
+per rank, placed linearly (rank `r` owns experts `[r Er, (r + 1) Er)`), in
 the trtllm-gen layout the stock conversion leaves. Expert tensor parallelism
-gives every rank all ``E`` experts at ``1 / tp`` of the intermediate width
-``I``: rank ``r`` holds intermediate slice ``[r I', (r + 1) I')``, ``I' = I /
-tp``, as the stock TP loader would cut it before that conversion.
+gives every rank all `E` experts at `1 / tp` of the intermediate width
+`I`: rank `r` holds intermediate slice `[r I', (r + 1) I')`, `I' = I /
+tp`, as the stock TP loader would cut it before that conversion.
 
 The cut is free. A TP slice of the converted layout is, byte for byte, the
 converted layout of the TP slice:
 
 - w13 weight and w13 block scales ([E, 2I, H/2] and [E, 2I, H/16]): the gated
-  interleave puts slice ``r``'s ``2 I'`` rows on the contiguous rows
-  ``[2 r I', 2 (r + 1) I')`` and the 32-row shuffle stays inside them; the
+  interleave puts slice `r`'s `2 I'` rows on the contiguous rows
+  `[2 r I', 2 (r + 1) I')` and the 32-row shuffle stays inside them; the
   scales' 128x4 interleave keeps whole 128-row tiles contiguous.
-- w2 weight ([E, H, I/2]): columns ``[r I'/2, (r + 1) I'/2)`` of every row.
+- w2 weight ([E, H, I/2]): columns `[r I'/2, (r + 1) I'/2)` of every row.
 - w2 block scales ([E, H, I/16], interleaved as [H/128, I/64, 512] bytes per
-  expert): the k-tiles ``[r I'/64, (r + 1) I'/64)`` of every 128-row m-tile,
+  expert): the k-tiles `[r I'/64, (r + 1) I'/64)` of every 128-row m-tile,
   which is already the slice's own interleave.
 
-This needs ``I' % 64 == 0`` and ``H % 128 == 0``. The per-expert scalars
+This needs `I' % 64 == 0` and `H % 128 == 0`. The per-expert scalars
 (g1_alphas, g1_scale_c, g2_alphas) do not depend on the slice: their global
 input scales are one value for all experts, the same on every rank.
 
-``reshard_nvfp4`` builds a rank's TP experts with one NCCL all-to-all per
-tensor kind over the TP group (source ``s`` sends slice ``d`` of its experts to
-rank ``d``; the receive buffer is the final tensor, experts in global order) and
+`reshard_nvfp4` builds a rank's TP experts with one NCCL all-to-all per
+tensor kind over the TP group (source `s` sends slice `d` of its experts to
+rank `d`; the receive buffer is the final tensor, experts in global order) and
 three all-gathers of the scalars. It runs once per layer at build, before
 capture, and keeps the stock tensors: the stock layer still serves every step
-the executor does not take. ``probe_rel_l2`` compares one layer's TP route rows,
+the executor does not take. `probe_rel_l2` compares one layer's TP route rows,
 summed across ranks, with its EP rows.
 
 Every check runs on every rank and is agreed across the group before any rank
@@ -54,7 +54,7 @@ SF_TILE_K = 4 * SF_VEC
 
 class StockNvfp4(NamedTuple):
     """One rank's stock NVFP4 experts of one layer in the converted layout,
-    as the stock layer holds them (``first_expert`` = its linear placement)."""
+    as the stock layer holds them (`first_expert` = its linear placement)."""
 
     w13: torch.Tensor  # uint8 [Er, 2I, H/2]
     w13_sf: torch.Tensor  # e4m3 [Er, 2I, H/16], interleaved
@@ -69,8 +69,8 @@ class StockNvfp4(NamedTuple):
 
 
 class TpExperts(NamedTuple):
-    """One rank's TP experts of one layer: all ``num_experts`` experts at
-    intermediate slice ``rank`` of ``tp``, in the converted layout (the block
+    """One rank's TP experts of one layer: all `num_experts` experts at
+    intermediate slice `rank` of `tp`, in the converted layout (the block
     scales as bytes; view them as e4m3 for the op)."""
 
     w13: torch.Tensor  # uint8 [E, 2I', H/2]
@@ -96,7 +96,7 @@ class Shape(NamedTuple):
 
 
 def shape_of(stock: StockNvfp4, tp: int) -> Shape:
-    """The shape the stock w13 implies (checked by ``unsupported``)."""
+    """The shape the stock w13 implies (checked by `unsupported`)."""
     if stock.w13.dim() != 3:
         raise ValueError("the w13 weight must be [experts, rows, columns]")
     er, rows, half_h = stock.w13.shape
@@ -104,7 +104,7 @@ def shape_of(stock: StockNvfp4, tp: int) -> Shape:
 
 
 def unsupported(stock: StockNvfp4, tp: int) -> str | None:
-    """Why ``stock`` cannot be cut ``tp`` ways, or None."""
+    """Why `stock` cannot be cut `tp` ways, or None."""
     shape = shape_of(stock, tp)
     er, h, inter = shape.experts, shape.hidden, shape.intermediate
     expected = {
@@ -137,10 +137,10 @@ def unsupported(stock: StockNvfp4, tp: int) -> str | None:
 
 
 def slice_views(stock: StockNvfp4, shape: Shape) -> tuple[torch.Tensor, ...]:
-    """(w13, w13_sf, w2, w2_sf) as byte views ``[tp, Er, ...]``: entry ``d``
-    is intermediate slice ``d`` of this rank's experts, in the slice's own
-    converted layout (no copy; not contiguous). ``shape`` is
-    ``shape_of(stock, tp)`` for a ``tp`` that ``unsupported`` accepts."""
+    """(w13, w13_sf, w2, w2_sf) as byte views `[tp, Er, ...]`: entry `d`
+    is intermediate slice `d` of this rank's experts, in the slice's own
+    converted layout (no copy; not contiguous). `shape` is
+    `shape_of(stock, tp)` for a `tp` that `unsupported` accepts."""
     er, h, s, tp = shape.experts, shape.hidden, shape.slice, shape.tp
     w13 = stock.w13.view(er, tp, 2 * s, h // 2).transpose(0, 1)
     w13_sf = (
@@ -167,7 +167,7 @@ def final_shapes(shape: Shape, num_experts: int) -> tuple[tuple[int, ...], ...]:
 
 
 def agree(group: dist.ProcessGroup, reason: str | None, device) -> str | None:
-    """None when no rank of ``group`` has a reason; else this rank's reason, or
+    """None when no rank of `group` has a reason; else this rank's reason, or
     that another rank refused. Collective."""
     flag = torch.tensor([0 if reason is None else 1], dtype=torch.int32, device=device)
     dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
@@ -191,8 +191,8 @@ def check_global_scales(stock: StockNvfp4, group: dist.ProcessGroup) -> str | No
 def reshard_nvfp4(
     stock: StockNvfp4, group: dist.ProcessGroup, num_experts: int
 ) -> TpExperts:
-    """This rank's TP experts of one layer, from every rank's ``stock`` (EP over
-    ``group`` with linear placement). Collective over ``group`` (NCCL); run it
+    """This rank's TP experts of one layer, from every rank's `stock` (EP over
+    `group` with linear placement). Collective over `group` (NCCL); run it
     on every rank, before capture, outside any stream other than the current."""
     world = dist.get_world_size(group)
     rank = dist.get_rank(group)
@@ -261,7 +261,7 @@ def probe_rel_l2(
 ) -> float:
     """Rel L2 over all routes of one layer's EP route rows against its TP route
     rows summed across ranks (FP32 sum, one BF16 rounding, as the TP finalize
-    sums them). ``ep`` and ``tp`` are (gemm2 rows, permute map) of the two ops
+    sums them). `ep` and `tp` are (gemm2 rows, permute map) of the two ops
     on the same input and routing; the TP map must cover every route (else
     every rank raises). Collective; every rank returns the same value."""
     ep_rows, ep_local = route_rows(*ep)

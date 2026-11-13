@@ -19,11 +19,11 @@ class UnlimitedOCRProcessor(DeepseekOCRProcessor):
 
     Because the effective crop flag then depends on *how many* images are in the
     request, the per-item processing output is no longer invariant of sibling
-    images. ``UnlimitedOCRMultiModalProcessor`` accounts for this by bypassing
+    images. `UnlimitedOCRMultiModalProcessor` accounts for this by bypassing
     the multimodal processing cache for multi-image requests (see its
-    ``_cached_apply_hf_processor``), so the two paths stay consistent.
+    `_cached_apply_hf_processor`), so the two paths stay consistent.
 
-    DeepSeek-OCR does *not* have this restriction because its ``max_crops=6`` is
+    DeepSeek-OCR does *not* have this restriction because its `max_crops=6` is
     small enough to be safe for multi-image use.
     """
 

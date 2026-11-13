@@ -4,11 +4,11 @@
 
 The dummy loader fills float weights in +-1e-3, which keeps every activation so
 small that outputs barely depend on the input, so a wrong KV prefix would go
-unnoticed. The P/D test names ``WideDummyWeights`` as each server's
-``--worker-extension-cls``. Workers import it before they load the model, which
-re-registers the ``dummy`` load format in every worker process with a loader
-that fills 16/32-bit float weights in +-``MORIIO_DUMMY_WEIGHT_RANGE``; 8-bit
-weights and scales keep the default init. The format keeps the name ``dummy``
+unnoticed. The P/D test names `WideDummyWeights` as each server's
+`--worker-extension-cls`. Workers import it before they load the model, which
+re-registers the `dummy` load format in every worker process with a loader
+that fills 16/32-bit float weights in +-`MORIIO_DUMMY_WEIGHT_RANGE`; 8-bit
+weights and scales keep the default init. The format keeps the name `dummy`
 so every config path that special-cases dummy weights still applies.
 
 The test process itself never imports this module.

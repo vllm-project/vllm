@@ -88,7 +88,7 @@ def test_window_restriction_is_a_superset_of_the_true_window(query_len):
 
 def test_impl_accepts_the_arguments_the_attention_layer_passes():
     """Attention() calls impl_cls positionally and forwards extra_impl_args
-    (``sinks`` among them); a signature that only matches AttentionImpl's
+    (`sinks` among them); a signature that only matches AttentionImpl's
     abstract __init__ raises TypeError at engine init, not at import.
     """
     from vllm.v1.attention.backends.flashinfer_ts import FlashInferTSImpl
@@ -177,11 +177,11 @@ def test_dense_plan_matches_flash_attention_non_causal():
         head_dim=HEAD_DIM,
         page_size=PAGE,
         max_kv_len=kv,
-        max_seq_len_q=sq,
+        max_q_len=sq,
         packed_query=False,
-        q_data_type=torch.bfloat16,
-        kv_data_type=torch.bfloat16,
-        o_data_type=torch.bfloat16,
+        q_dtype=torch.bfloat16,
+        kv_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
         mask_type="dense",
         window_left=-1,
     )
@@ -189,10 +189,10 @@ def test_dense_plan_matches_flash_attention_non_causal():
     wrapper.run(
         q=q.view(b, sq, hq, HEAD_DIM),
         paged_kv_cache=(k_plane, v_plane),
-        seq_lens=lens,
+        seq_lens_kv=lens,
         block_tables=bt,
-        bmm1_scale=scale,
-        bmm2_scale=1.0,
+        softmax_scale=scale,
+        output_scale=1.0,
         out=out,
     )
 

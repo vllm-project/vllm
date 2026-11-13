@@ -106,7 +106,7 @@ class XPUPlatform(Platform):
     device_type: str = "xpu"
     dispatch_key: str = "XPU"
     # Intel XPU's device key is "GPU" for Ray.
-    # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
+    # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
@@ -139,6 +139,27 @@ class XPUPlatform(Platform):
     @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
         pass
+
+    @classmethod
+    def _get_flash_attn_path(cls, block_size: int | None) -> str:
+        # block_size is set only when the user passed --block-size. Reject
+        # sizes Flash Attention cannot run here rather than at KV cache setup.
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+        if not FlashAttentionBackend.supports_block_size(block_size):
+            raise ValueError(
+                f"Flash Attention on {cls.device_name} does not support "
+                f"block_size={block_size}. Supported: "
+                f"{FlashAttentionBackend.get_supported_kernel_block_sizes()}."
+            )
+        if block_size is not None and block_size % 64 != 0:
+            logger.warning_once(
+                "block_size=%d is supported by Flash Attention on XPU but is not "
+                "a multiple of 64, performance may be lower.",
+                block_size,
+            )
+        logger.info_once("Using Flash Attention backend.")
+        return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
     def get_attn_backend_cls(
@@ -204,7 +225,7 @@ class XPUPlatform(Platform):
                     "on XPU and may produce non-deterministic results "
                     "across batch sizes."
                 )
-                return AttentionBackendEnum.FLASH_ATTN.get_path()
+                return cls._get_flash_attn_path(attn_selector_config.block_size)
             logger.info_once(
                 "VLLM_BATCH_INVARIANT is enabled. Using Triton Attention "
                 "backend on XPU, which implements batch-invariant kernels."
@@ -223,7 +244,7 @@ class XPUPlatform(Platform):
                     "inputs will produce incorrect results; only use this for "
                     "text-only workloads."
                 )
-                return AttentionBackendEnum.FLASH_ATTN.get_path()
+                return cls._get_flash_attn_path(attn_selector_config.block_size)
             if (
                 selected_backend in (None, AttentionBackendEnum.TRITON_FLASH_ATTN)
                 and dtype != torch.float32
@@ -259,16 +280,14 @@ class XPUPlatform(Platform):
             )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
-            logger.info_once("Using Flash Attention backend.")
-            return AttentionBackendEnum.FLASH_ATTN.get_path()
+            return cls._get_flash_attn_path(attn_selector_config.block_size)
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
-        logger.info_once("Using Flash Attention backend.")
-        return AttentionBackendEnum.FLASH_ATTN.get_path()
+        return cls._get_flash_attn_path(attn_selector_config.block_size)
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
@@ -449,6 +468,25 @@ class XPUPlatform(Platform):
         # This allows custom workers (like vllm-omni workers) to be used on XPU
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+
+        # Batched experts can only be fed by a batched dispatch.
+        if (
+            parallel_config.enable_expert_parallel
+            and vllm_config.kernel_config.moe_backend == "batched_triton"
+            and parallel_config.all2all_backend == "allgather_reducescatter"
+        ):
+            parallel_config.all2all_backend = "alltoall_batched"
+            # The token budget was already sized for a non-batched dispatch.
+            sched = vllm_config.scheduler_config
+            sched.max_num_batched_tokens = min(
+                sched.max_num_batched_tokens,
+                sched.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP,
+            )
+            logger.info_once(
+                "XPU MoE: using alltoall_batched dispatch, max_num_batched_tokens=%d",
+                sched.max_num_batched_tokens,
+            )
+
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 

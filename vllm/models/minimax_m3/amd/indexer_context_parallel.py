@@ -6,17 +6,17 @@ M3's index heads shard like its KV heads, so at TP=4 each rank owns one of
 the four index heads. Partitioning the *blocks* across ranks therefore needs
 every rank to score every head:
 
-1. all-gather the index queries (``heads * 128`` bf16 per token),
+1. all-gather the index queries (`heads * 128` bf16 per token),
 2. score all global heads on this rank's round-robin block shard (1/P of the
    index cache),
-3. pack each head's shard top-k as ``(score, global block id)`` keys and
+3. pack each head's shard top-k as `(score, global block id)` keys and
    all-gather them,
 4. merge per global head, keeping only the heads this rank owns.
 
 Each head's merge sees every shard's top-k *for that head*, so it is exact: a
 global winner is in its own shard's top-k. Prefill is unchanged.
 
-Enabled by ``--attention-config '{"minimax_m3_indexer_cp": true}'`` (ROCm,
+Enabled by `--attention-config '{"minimax_m3_indexer_cp": true}'` (ROCm,
 TP>1, bf16 index cache).
 """
 
@@ -50,7 +50,7 @@ from vllm.triton_utils import triton
 
 
 def _packed(buf: torch.Tensor, dim: int, n: int) -> torch.Tensor:
-    """Contiguous view of ``buf`` with ``shape[dim]`` cut to ``n``.
+    """Contiguous view of `buf` with `shape[dim]` cut to `n`.
 
     Uses the buffer's leading storage rather than slicing, so collectives and
     kernels that need contiguous memory get it at a stable address.
@@ -64,12 +64,12 @@ class IndexerCPDecode:
     """Decode top-k for this rank's index heads, scored context-parallel.
 
     Holds the persistent buffers so the path is allocation-free under CUDA
-    graph capture. Every shape is sized from ``max_seq_len`` (pass
-    ``max_model_len``): capture runs ``_dummy_run`` with a one-block context,
+    graph capture. Every shape is sized from `max_seq_len` (pass
+    `max_model_len`): capture runs `_dummy_run` with a one-block context,
     and shapes derived from the batch would be baked into the graph.
 
     The buffers are scratch for a single call, so one instance serves every
-    indexer layer on a rank (see :func:`get_shared_cp_decode`).
+    indexer layer on a rank (see `get_shared_cp_decode`).
     """
 
     def __init__(
@@ -122,7 +122,7 @@ class IndexerCPDecode:
         self._checked = False
 
     def _full_queries(self, local_q: torch.Tensor) -> torch.Tensor:
-        """All-gather ``[n, local_heads, D]`` queries to ``[n, total_heads, D]``."""
+        """All-gather `[n, local_heads, D]` queries to `[n, total_heads, D]`."""
         n = local_q.shape[0]
         q = _packed(self._q_local, 0, n)
         q.copy_(local_q)
@@ -150,7 +150,7 @@ class IndexerCPDecode:
         sparse_context_lens_out: torch.Tensor | None = None,
         block_page_stride: int | None = None,
     ) -> torch.Tensor:
-        """Write ``[local_heads, n, topk]`` block ids for this rank's heads."""
+        """Write `[local_heads, n, topk]` block ids for this rank's heads."""
         n = local_q.shape[0]
         if not self._checked:
             check_context_score_inputs(local_q, kv_cache, block_table, seq_lens)
@@ -200,12 +200,12 @@ _SHARED_CP_DECODE: dict[tuple, IndexerCPDecode] = {}
 
 
 def get_shared_cp_decode(**kwargs) -> IndexerCPDecode:
-    """One :class:`IndexerCPDecode` per rank and geometry, shared by all layers.
+    """One `IndexerCPDecode` per rank and geometry, shared by all layers.
 
     Each of M3's sparse layers has its own indexer, and a private buffer set
     per layer would hold ~57 idle copies. The buffers are written and consumed
     within one indexer call and layers run in order on one stream (as the
-    model's shared ``topk_indices_buffer`` already assumes), so all layers can
+    model's shared `topk_indices_buffer` already assumes), so all layers can
     reuse one set.
     """
     group = kwargs["group"]
@@ -221,12 +221,12 @@ def get_shared_cp_decode(**kwargs) -> IndexerCPDecode:
 class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
     """Triton indexer with context-parallel decode scoring for ROCm.
 
-    Decode runs through :class:`IndexerCPDecode`. Prefill uses the base Triton
+    Decode runs through `IndexerCPDecode`. Prefill uses the base Triton
     kernels.
 
     CUDAGraph: v2 FULL capture records the model with
-    ``cudagraph_runtime_mode=NONE`` (see ``ModelCudaGraphManager.capture``), so
-    a ``CUDAGraphMode.FULL`` guard never fires and a stream-capturing skip
+    `cudagraph_runtime_mode=NONE` (see `ModelCudaGraphManager.capture`), so
+    a `CUDAGraphMode.FULL` guard never fires and a stream-capturing skip
     would bake the non-CP indexer into decode graphs. Persistent buffers keep
     this path allocation-free so CP is what gets captured.
     """
@@ -236,7 +236,7 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
         vllm_config = get_current_vllm_config()
         hf_config = vllm_config.model_config.hf_config
         text_config = getattr(hf_config, "text_config", hf_config)
-        total_heads = text_config.sparse_attention_config["sparse_num_index_heads"]
+        total_heads = text_config.index_n_heads
         comp = vllm_config.compilation_config
         max_cg = getattr(comp, "max_cudagraph_capture_size", 0) or 0
         spec = getattr(vllm_config, "speculative_config", None)

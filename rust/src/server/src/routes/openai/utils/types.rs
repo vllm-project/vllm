@@ -246,6 +246,10 @@ pub enum ContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
+    /// A vLLM extension naming a tool, as tool search returns it in a tool
+    /// result (Anthropic's `tool_reference` block).
+    #[serde(rename = "tool_reference")]
+    ToolReference { name: String },
 }
 
 #[serde_with::skip_serializing_none]

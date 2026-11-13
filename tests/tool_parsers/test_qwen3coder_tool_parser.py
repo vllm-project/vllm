@@ -1277,9 +1277,11 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
         "\n<function=get_current_weather>",
         "\n",  # triggers json_started -> sends "{"
         # This single delta delivers all three parameters at once
-        "<parameter=city>\nDallas\n</parameter>"
-        "\n<parameter=state>\nTX\n</parameter>"
-        "\n<parameter=unit>\nfahrenheit\n</parameter>",
+        (
+            "<parameter=city>\nDallas\n</parameter>"
+            "\n<parameter=state>\nTX\n</parameter>"
+            "\n<parameter=unit>\nfahrenheit\n</parameter>"
+        ),
         "\n</function>",
         "\n</tool_call>",
     ]

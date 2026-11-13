@@ -50,7 +50,6 @@ def test_v2_sampler_warmup_rocm(monkeypatch, tmp_path):
     A fresh cache and child process prevent previous model executions from
     hiding a missing warmup specialization.
     """
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "0")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

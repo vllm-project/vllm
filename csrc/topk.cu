@@ -7,14 +7,11 @@
 #include "ops.h"
 #include "torch_utils.h"
 
-#ifndef USE_ROCM
-  #include "persistent_topk.cuh"
-  #include "sampled_topk.cuh"
-#endif
+#include "persistent_topk.cuh"
+#include "sampled_topk.cuh"
 
 namespace {
 
-#ifndef USE_ROCM
 template <int TopK, typename InT>
 void launch_persistent_topk(const torch::stable::Tensor& logits,
                             const torch::stable::Tensor& lengths,
@@ -43,14 +40,23 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
       "bfloat16 persistent_topk requires 128 KiB shared memory");
 
   // Allow static fallback storage in addition to the 128 KiB dynamic buffer.
-  if (num_rows > 64 &&
-      max_seq_len >= vllm::sampled_topk::kMinSampledLength<TopK> &&
-      max_smem_per_block >= 144 * 1024) {
+#ifdef USE_ROCM
+  // On gfx950 one workgroup per row beats the multi-CTA kernel at nearly
+  // every batch size and length, and needs no workspace reset.
+  if (num_rows == 0) return;
+  const bool use_sampled = true;
+#else
+  const bool use_sampled =
+      num_rows > 64 &&
+      max_seq_len >= vllm::sampled_topk::kMinSampledLength<TopK>;
+#endif
+  if (use_sampled && max_smem_per_block >= 144 * 1024) {
     auto kernel = vllm::sampled_topk::sampled_topk_kernel<TopK, InT>;
     constexpr size_t smem_size =
         vllm::filtered_topk::FILTERED_TOPK_SMEM_DYNAMIC;
     cudaError_t status = cudaFuncSetAttribute(
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+        reinterpret_cast<const void*>(kernel),
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
     STD_TORCH_CHECK(status == cudaSuccess,
                     "sampled_topk smem failed: ", cudaGetErrorString(status));
     kernel<<<num_rows, vllm::sampled_topk::kThreads, smem_size, stream>>>(
@@ -224,15 +230,16 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     params.ctas_per_group = ctas_per_group;
     params.max_seq_len = static_cast<uint32_t>(max_seq_len);
 
-  #define LAUNCH_PERSISTENT(TOPK_VAL, VS)                                     \
-    do {                                                                      \
-      auto kernel = &P::persistent_topk_kernel<TOPK_VAL, VS, InT>;            \
-      cudaError_t err = cudaFuncSetAttribute(                                 \
-          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);    \
-      STD_TORCH_CHECK(err == cudaSuccess,                                     \
-                      "Failed to set smem: ", cudaGetErrorString(err));       \
-      kernel<<<total_ctas, P::kThreadsPerBlock, smem_size, stream>>>(params); \
-    } while (0)
+#define LAUNCH_PERSISTENT(TOPK_VAL, VS)                                     \
+  do {                                                                      \
+    auto kernel = &P::persistent_topk_kernel<TOPK_VAL, VS, InT>;            \
+    cudaError_t err = cudaFuncSetAttribute(                                 \
+        reinterpret_cast<const void*>(kernel),                              \
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);            \
+    STD_TORCH_CHECK(err == cudaSuccess,                                     \
+                    "Failed to set smem: ", cudaGetErrorString(err));       \
+    kernel<<<total_ctas, P::kThreadsPerBlock, smem_size, stream>>>(params); \
+  } while (0)
 
     if (vec_size == 4) {
       LAUNCH_PERSISTENT(TopK, 4);
@@ -241,7 +248,7 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     } else {
       LAUNCH_PERSISTENT(TopK, 1);
     }
-  #undef LAUNCH_PERSISTENT
+#undef LAUNCH_PERSISTENT
   }
 
   cudaError_t err = cudaGetLastError();
@@ -263,7 +270,6 @@ void launch_persistent_topk_dtype(const torch::stable::Tensor& logits,
                                         max_seq_len);
   }
 }
-#endif
 
 }  // anonymous namespace
 
@@ -272,7 +278,6 @@ void persistent_topk(const torch::stable::Tensor& logits,
                      torch::stable::Tensor& output,
                      torch::stable::Tensor& workspace, int64_t k,
                      int64_t max_seq_len) {
-#ifndef USE_ROCM
   STD_TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   STD_TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
   STD_TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
@@ -316,7 +321,4 @@ void persistent_topk(const torch::stable::Tensor& logits,
     launch_persistent_topk_dtype<2048>(logits, lengths, output, workspace,
                                        max_seq_len);
   }
-#else
-  STD_TORCH_CHECK(false, "persistent_topk is not supported on ROCm");
-#endif
 }

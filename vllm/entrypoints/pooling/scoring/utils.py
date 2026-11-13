@@ -19,7 +19,7 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from .typing import (
+from .types import (
     ScoreContentPartParam,
     ScoreData,
     ScoreInput,
@@ -164,8 +164,8 @@ def score_data_to_prompts(
 
     For plain text inputs, returns the string directly.
     For multimodal inputs (list of content parts), parses them into
-    a :class:`TextPrompt` with attached ``multi_modal_data`` /
-    ``multi_modal_uuids``.
+    a `TextPrompt` with attached `multi_modal_data` /
+    `multi_modal_uuids`.
 
     This is used by late-interaction scoring where each query/document
     is encoded independently.
@@ -205,9 +205,7 @@ def _parse_score_content(
     else:
         parts = cast(Iterable[ChatCompletionContentPartParam], data)
 
-    mm_parser = mm_tracker.create_parser()
-
-    parse_res = parse_chat_message_content_parts(
+    return parse_chat_message_content_parts(
         role=role,
         parts=parts,
         mm_tracker=mm_tracker,
@@ -215,19 +213,6 @@ def _parse_score_content(
         interleave_strings=False,
         multimodal_content_part_separator="",
     )
-
-    if parse_res:
-        return parse_res
-
-    mm_placeholder_storage = mm_parser.mm_placeholder_storage()
-
-    if (
-        len(mm_placeholder_storage) != 1
-        or len(next(iter(mm_placeholder_storage.values()))) != 1
-    ):
-        raise ValueError("Only one multi-modal item is supported")
-
-    return next(iter(mm_placeholder_storage.values()))[0]
 
 
 def parse_score_data_single(
@@ -238,8 +223,8 @@ def parse_score_data_single(
     """Parse **one** ScoreData into a text prompt and its own multi-modal
     data.
 
-    Unlike :func:`parse_score_data`, each call creates an **independent**
-    :class:`MultiModalItemTracker` so multi-modal items are kept separate.
+    Unlike `parse_score_data`, each call creates an **independent**
+    `MultiModalItemTracker` so multi-modal items are kept separate.
     This is the correct behaviour for late-interaction scoring, where
     query and document are encoded independently.
     """
@@ -259,8 +244,8 @@ def parse_score_data(
     """Parse a query-document pair into text prompts and shared multi-modal
     data.
 
-    Uses a **single** :class:`MultiModalItemTracker` so that multi-modal
-    items from both inputs are merged into one ``mm_data`` dict.  This is
+    Uses a **single** `MultiModalItemTracker` so that multi-modal
+    items from both inputs are merged into one `mm_data` dict.  This is
     the correct behaviour for cross-encoder scoring, where query and
     document are concatenated into a single model prompt.
     """

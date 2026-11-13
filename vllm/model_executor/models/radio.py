@@ -8,18 +8,18 @@
 # Copyright (c) 2023-2026, NVIDIA CORPORATION.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # --------------------------------------------------------
-"""RADIO vision encoder, matching the ``RadioModel`` in the Transformers library.
+"""RADIO vision encoder, matching the `RadioModel` in the Transformers library.
 
-The module tree mirrors the Transformers ``RadioModel`` (``embeddings`` and an
-``encoder.layer`` stack of ``norm1``/``attention``/``layer_scale1``/``norm2``/
-``mlp``/``layer_scale2`` blocks). The vLLM-specific deviations are the fused
-``attention.qkv`` (a :class:`~vllm.model_executor.layers.linear.QKVParallelLinear`
-for TP/quantization, vs the split ``query``/``key``/``value`` in HF) and running
-input normalization in the processor instead of an ``input_conditioner`` module;
-the attention backend and MLP reuse vLLM's :class:`MMEncoderAttention` and
-:class:`~vllm.model_executor.models.intern_vit.InternMLP`. ``load_weights`` maps
+The module tree mirrors the Transformers `RadioModel` (`embeddings` and an
+`encoder.layer` stack of `norm1`/`attention`/`layer_scale1`/`norm2`/
+`mlp`/`layer_scale2` blocks). The vLLM-specific deviations are the fused
+`attention.qkv` (a `QKVParallelLinear`
+for TP/quantization, vs the split `query`/`key`/`value` in HF) and running
+input normalization in the processor instead of an `input_conditioner` module;
+the attention backend and MLP reuse vLLM's `MMEncoderAttention` and
+`InternMLP`. `load_weights` maps
 both native Transformers and legacy remote-code checkpoint keys onto this tree
-via :data:`hf_to_vllm_mapper`.
+via `hf_to_vllm_mapper`.
 """
 
 import math
@@ -89,7 +89,7 @@ def calc_seq_lens(sizes: list[tuple[int, int]], patch_size: int) -> list[int]:
 
 class RadioPatchEmbeddings(nn.Module):
     """Cropped Position Embedding (CPE) patch generator, matching Transformers'
-    ``RadioPatchEmbeddings``, with additional support for dynamic multi-resolution
+    `RadioPatchEmbeddings`, with additional support for dynamic multi-resolution
     packing and video temporal compression.
     """
 
@@ -354,11 +354,11 @@ class MaskMetadata:
 
 
 class RadioAttention(nn.Module):
-    """RADIO self-attention: a fused ``qkv`` projection feeding the vLLM
+    """RADIO self-attention: a fused `qkv` projection feeding the vLLM
     attention backend, with optional QK-normalization and dynamic-resolution
-    packed attention (via ``mask_meta``). The fused counterpart of the
-    Transformers ``RadioAttention`` (which keeps ``query``/``key``/``value`` and
-    ``output.dense`` split); ``load_weights`` bridges the two."""
+    packed attention (via `mask_meta`). The fused counterpart of the
+    Transformers `RadioAttention` (which keeps `query`/`key`/`value` and
+    `output.dense` split); `load_weights` bridges the two."""
 
     def __init__(
         self,
@@ -461,7 +461,7 @@ class RadioAttention(nn.Module):
 
 
 class RadioLayerScale(nn.Module):
-    """LayerScale matching the Transformers ``RadioLayerScale``: a ``lambda1``
+    """LayerScale matching the Transformers `RadioLayerScale`: a `lambda1`
     parameter scaling the residual branch."""
 
     def __init__(self, config: PreTrainedConfig) -> None:
@@ -481,10 +481,10 @@ class RadioLayerScale(nn.Module):
     is_encoder=True,
 )
 class RadioLayer(nn.Module):
-    """RADIO transformer block, mirroring the Transformers ``RadioLayer``
-    (``norm1`` / ``attention`` / ``layer_scale1`` / ``norm2`` / ``mlp`` /
-    ``layer_scale2``). ``drop_path`` is an inference-time ``Identity``; the MLP
-    reuses :class:`InternMLP` (``fc1``/``fc2``, matching ``RadioMLP``)."""
+    """RADIO transformer block, mirroring the Transformers `RadioLayer`
+    (`norm1` / `attention` / `layer_scale1` / `norm2` / `mlp` /
+    `layer_scale2`). `drop_path` is an inference-time `Identity`; the MLP
+    reuses `InternMLP` (`fc1`/`fc2`, matching `RadioMLP`)."""
 
     def __init__(
         self,
@@ -524,8 +524,8 @@ class RadioLayer(nn.Module):
 
 
 class RadioVisionEncoder(nn.Module):
-    """RADIO encoder stack, mirroring the Transformers ``RadioEncoder`` module
-    tree (a ``layer`` ModuleList of :class:`RadioLayer`)."""
+    """RADIO encoder stack, mirroring the Transformers `RadioEncoder` module
+    tree (a `layer` ModuleList of `RadioLayer`)."""
 
     def __init__(
         self,
@@ -712,7 +712,7 @@ class RadioModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load RADIO checkpoint weights, remapping legacy remote-code and
         native Transformers keys onto this module tree via
-        :data:`hf_to_vllm_mapper`."""
+        `hf_to_vllm_mapper`."""
         if isinstance(weights, dict):
             weights = weights.items()
         # Keep only tensors belonging to the RADIO tower (legacy ``radio_model.*``
@@ -797,7 +797,7 @@ class RadioModel(nn.Module):
     def _inter_image_mask_metadata(
         self, imgs_sizes: list[tuple[int, int]], device: torch.device
     ) -> MaskMetadata:
-        """Build mask metadata from image pixel sizes. Adds ``num_skip`` to each
+        """Build mask metadata from image pixel sizes. Adds `num_skip` to each
         sequence length (cls/register tokens) to match patch generator output."""
         patch_size = self.embeddings.patch_size
         num_skip = self.embeddings.num_skip
@@ -809,7 +809,7 @@ class RadioModel(nn.Module):
         self, seq_lens: list[int], device: torch.device
     ) -> MaskMetadata:
         """Build mask metadata from sequence lengths (already including
-        cls/register tokens, i.e. ``patch_count + num_skip`` per item)."""
+        cls/register tokens, i.e. `patch_count + num_skip` per item)."""
         assert len(seq_lens) > 0
         # torch.tensor(list, device=cuda) here is a blocking host copy per forward.
         cu_seqlens = async_tensor_h2d(

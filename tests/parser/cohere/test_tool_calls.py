@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tool-call parsing for the unified Cohere Command parser.
 
-The ``cohere_command3`` / ``cohere_command4`` tool parsers are registry shims;
-``CohereCommandParser`` (resolved through ``ParserManager``) does the parsing.
+The `cohere_command3` / `cohere_command4` tool parsers are registry shims;
+`CohereCommandParser` (resolved through `ParserManager`) does the parsing.
 """
 
 from __future__ import annotations
