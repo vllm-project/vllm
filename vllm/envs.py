@@ -177,6 +177,8 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_SNAPSHOT_DIR: str | None = None
     VLLM_WEIGHT_SNAPSHOT_AUDIT: bool = False
     VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS: str = ""
+    VLLM_WEIGHT_SNAPSHOT_CLEAR: bool = False
+    VLLM_WEIGHT_SNAPSHOT_REBUILD: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
@@ -1566,6 +1568,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS": lambda: os.getenv(
         "VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS", ""
     ),
+    # Delete this rank's weight snapshot files in VLLM_WEIGHT_SNAPSHOT_DIR (all
+    # keys) and load normally without saving. Applies on every start while set.
+    "VLLM_WEIGHT_SNAPSHOT_CLEAR": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_SNAPSHOT_CLEAR", "0"))
+    ),
+    # Delete this rank's snapshot for the current key, load normally and save
+    # a fresh one. Applies on every start while set.
+    "VLLM_WEIGHT_SNAPSHOT_REBUILD": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_SNAPSHOT_REBUILD", "0"))
+    ),
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the
     # V1 AsyncLLM interface. It is applicable when handling a high
@@ -2534,6 +2546,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_WEIGHT_SNAPSHOT_DIR",
         "VLLM_WEIGHT_SNAPSHOT_AUDIT",
         "VLLM_WEIGHT_SNAPSHOT_SKIP_FUNCS",
+        "VLLM_WEIGHT_SNAPSHOT_CLEAR",
+        "VLLM_WEIGHT_SNAPSHOT_REBUILD",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",

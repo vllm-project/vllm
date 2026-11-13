@@ -38,6 +38,40 @@ def snapshot_path(root: str, config_hash: str, rank: int) -> Path:
     return Path(root) / f"{config_hash}-rank{rank}.bin"
 
 
+def resolve(root: str, config_hash: str, rank: int, clear: bool, rebuild: bool):
+    """Snapshot path to use, after the one-shot CLEAR / REBUILD requests.
+
+    CLEAR deletes every snapshot file of this rank in `root` (all keys) and
+    returns None, so the model loads normally without saving. REBUILD deletes
+    this rank's file for the current key and returns its path, so the model
+    loads normally and saves a fresh snapshot. Both flags apply on every start
+    while set."""
+    if clear and rebuild:
+        raise ValueError(
+            "VLLM_WEIGHT_SNAPSHOT_CLEAR and VLLM_WEIGHT_SNAPSHOT_REBUILD are "
+            "mutually exclusive"
+        )
+    path = snapshot_path(root, config_hash, rank)
+    if clear:
+        stale = [
+            *Path(root).glob(f"*-rank{rank}.bin"),
+            *Path(root).glob(f"*-rank{rank}.tmp*"),
+        ]
+        for f in stale:
+            f.unlink(missing_ok=True)
+        logger.info(
+            "Weight snapshot: cleared %d file(s) of rank %d in %s",
+            len(stale),
+            rank,
+            root,
+        )
+        return None
+    if rebuild:
+        path.unlink(missing_ok=True)
+        logger.info("Weight snapshot: rebuilding %s", path)
+    return path
+
+
 def _checkpoint_id(path) -> object:
     """Location-independent identity of a checkpoint.
 

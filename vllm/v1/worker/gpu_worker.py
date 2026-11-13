@@ -650,10 +650,12 @@ class Worker(WorkerBase):
             return None
         from vllm.device_allocator import weight_snapshot
 
-        return weight_snapshot.snapshot_path(
+        return weight_snapshot.resolve(
             envs.VLLM_WEIGHT_SNAPSHOT_DIR,
             weight_snapshot.weights_key(self.vllm_config),
             self.rank,
+            clear=envs.VLLM_WEIGHT_SNAPSHOT_CLEAR,
+            rebuild=envs.VLLM_WEIGHT_SNAPSHOT_REBUILD,
         )
 
     def update_config(self, overrides: dict[str, Any]) -> None:

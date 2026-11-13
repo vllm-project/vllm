@@ -256,3 +256,34 @@ def test_key_of_local_dir_tracks_weight_files(tmp_path):
 def test_snapshot_path_is_per_rank(tmp_path):
     root = str(tmp_path)
     assert ws.snapshot_path(root, "k", 0) != ws.snapshot_path(root, "k", 1)
+
+
+def _files(root, *names):
+    for n in names:
+        (root / n).write_bytes(b"x")
+
+
+def test_clear_removes_this_ranks_files_and_disables_snapshot(tmp_path):
+    _files(
+        tmp_path, "aaa-rank0.bin", "bbb-rank0.bin", "aaa-rank0.tmp123", "aaa-rank1.bin"
+    )
+    assert ws.resolve(str(tmp_path), "aaa", 0, clear=True, rebuild=False) is None
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["aaa-rank1.bin"]
+
+
+def test_rebuild_removes_only_the_current_key(tmp_path):
+    _files(tmp_path, "aaa-rank0.bin", "bbb-rank0.bin")
+    path = ws.resolve(str(tmp_path), "aaa", 0, clear=False, rebuild=True)
+    assert path == tmp_path / "aaa-rank0.bin" and not path.exists()
+    assert (tmp_path / "bbb-rank0.bin").exists()
+
+
+def test_default_keeps_the_snapshot(tmp_path):
+    _files(tmp_path, "aaa-rank0.bin")
+    path = ws.resolve(str(tmp_path), "aaa", 0, clear=False, rebuild=False)
+    assert path == tmp_path / "aaa-rank0.bin" and path.exists()
+
+
+def test_clear_and_rebuild_are_exclusive(tmp_path):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ws.resolve(str(tmp_path), "aaa", 0, clear=True, rebuild=True)
