@@ -224,6 +224,15 @@ pub struct BenchConfig {
 }
 
 impl BenchConfig {
+    /// This config with saving turned off, for a run whose result the caller
+    /// saves itself (sweep points, `--num-runs`).
+    pub(crate) fn without_save(&self) -> Self {
+        let mut config = self.clone();
+        config.save_result = false;
+        config.append_result = false;
+        config
+    }
+
     pub fn from_args(args: &BenchServeArgs) -> Result<Self> {
         if args.burstiness <= 0.0 {
             return Err(BenchError::Config("Burstiness must be positive".into()));
