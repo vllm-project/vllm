@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import logging
+import types
+import typing
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from typing import Any
 
 import pydantic
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
 from vllm.config import ModelConfig
@@ -18,6 +21,7 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.instrumentator.basic import base
 from vllm.entrypoints.serve.instrumentator.health import health
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
+from vllm.exceptions import VLLMValidationError
 from vllm.tasks import SupportedTask
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
@@ -25,6 +29,24 @@ from vllm.tasks import SupportedTask
 RequestType = Any
 GetHandlerFn = Callable[[Request], BaseServing | None]
 EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
+
+
+def _required_fields(request_type: RequestType) -> list[frozenset[str]]:
+    """The required top-level fields of each model that `request_type`
+    accepts. A union contributes one set per member."""
+    origin = typing.get_origin(request_type)
+    if origin is typing.Annotated:
+        return _required_fields(typing.get_args(request_type)[0])
+    if origin in (typing.Union, types.UnionType):
+        return [
+            fields
+            for member in typing.get_args(request_type)
+            for fields in _required_fields(member)
+        ]
+    model_fields = getattr(request_type, "model_fields", {})
+    return [
+        frozenset(name for name, field in model_fields.items() if field.is_required())
+    ]
 
 
 def _snapshot_handler_levels() -> list[tuple[logging.Handler, int]]:
@@ -84,7 +106,11 @@ def _attach_router(
     ) + get_pooling_invocation_types(supported_tasks, model_config)
 
     INVOCATION_VALIDATORS = [
-        (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
+        (
+            pydantic.TypeAdapter(request_type),
+            _required_fields(request_type),
+            (get_handler, endpoint),
+        )
         for request_type, (get_handler, endpoint) in INVOCATION_TYPES
     ]
 
@@ -118,22 +144,46 @@ def _attach_router(
             ) from e
 
         valid_endpoints = [
-            (validator, endpoint)
-            for validator, (get_handler, endpoint) in INVOCATION_VALIDATORS
+            (validator, required_fields, endpoint)
+            for validator, required_fields, (get_handler, endpoint) in (
+                INVOCATION_VALIDATORS
+            )
             if get_handler(raw_request) is not None
         ]
 
-        for request_validator, endpoint in valid_endpoints:
+        # The error of the first request type that the body has all the
+        # required fields of, i.e. the type the client most likely meant.
+        error: Exception | None = None
+        for request_validator, required_fields, endpoint in valid_endpoints:
             try:
                 request = request_validator.validate_python(body)
-            except pydantic.ValidationError:
+            except (pydantic.ValidationError, VLLMValidationError) as e:
+                # Pydantic does not wrap a `VLLMValidationError` raised by a
+                # request type's validators, so it must be caught as well.
+                if (
+                    error is None
+                    and isinstance(body, dict)
+                    and any(fields.issubset(body) for fields in required_fields)
+                ):
+                    error = e
                 continue
 
             return await endpoint(request, raw_request)
 
+        # Report the error in the same form as that type's own endpoint.
+        if isinstance(error, pydantic.ValidationError):
+            raise RequestValidationError(
+                [
+                    {**err, "loc": ("body", *err["loc"])}
+                    for err in error.errors(include_url=False)
+                ]
+            )
+        if error is not None:
+            raise error
+
         type_names = [
             t.__name__ if isinstance(t := validator._type, type) else str(t)
-            for validator, _ in valid_endpoints
+            for validator, _, _ in valid_endpoints
         ]
         msg = f"Cannot find suitable handler for request. Expected one of: {type_names}"
         res = base(raw_request).create_error_response(message=msg)

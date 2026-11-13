@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.request import RequestStatus
 
 
 def _make_bare_scheduler(
@@ -229,6 +230,11 @@ def _make_preemption_scheduler_output():
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
     )
+
+
+def _preempt(scheduler: MooncakeStoreScheduler):
+    scheduler._unfinished_requests["req-0"][0].status = RequestStatus.PREEMPTED
+    return scheduler.build_connector_meta(_make_preemption_scheduler_output())
 
 
 def _make_worker_output(completed_saves: dict[int, int]) -> SimpleNamespace:
@@ -539,7 +545,7 @@ def test_preemption_removes_tracker():
     )
     scheduler._request_trackers["req-0"].has_pending_offload = True
 
-    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    _preempt(scheduler)
 
     assert "req-0" not in scheduler._request_trackers
 
@@ -558,7 +564,7 @@ def test_preemption_clears_stale_load_state():
         can_load=True,
     )
 
-    meta = scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    meta = _preempt(scheduler)
 
     assert meta.requests == []
     assert "req-0" not in scheduler.load_specs
@@ -1795,7 +1801,7 @@ def test_preemption_and_request_id_reuse_do_not_release_inflight_job():
     first = scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
     first_job_id = first.requests[0].store_job_id
 
-    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+    _preempt(scheduler)
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     assert first_job_id in scheduler._pinned_saves
 
