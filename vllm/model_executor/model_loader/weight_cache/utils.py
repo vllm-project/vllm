@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers shared by the weight cache daemon, the IPC loader and the engine.
 
-These live outside ``protocol`` so callers that only need to know whether a
+These live outside `protocol` so callers that only need to know whether a
 draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
@@ -11,7 +11,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
 @dataclass
@@ -112,11 +112,6 @@ def build_warmup_runner(
         )
     device = torch.device(current_platform.device_type, local_rank)
     with set_current_vllm_config(vllm_config):
-        if vllm_config.use_v2_model_runner:
-            from vllm.v1.worker.gpu.model_runner import GPUModelRunner as Runner
-        else:
-            from vllm.v1.worker.gpu_model_runner import GPUModelRunner as Runner
-        runner = Runner(vllm_config, device)
-    # The two runner classes share the warmup surface; the nominal type
-    # stays V1's GPUModelRunner.
-    return cast("GPUModelRunner", runner)
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+        return GPUModelRunner(vllm_config, device)

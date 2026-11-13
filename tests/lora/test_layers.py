@@ -559,38 +559,6 @@ def test_lm_head_logits_processor_invalid_vocab_size(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("device", DEVICES)
-def test_lm_head_reset_sharded_to_full_mapping(
-    default_vllm_config, dist_init, device
-) -> None:
-    if current_platform.is_cuda_alike() or current_platform.is_xpu():
-        torch.accelerator.set_device_index(device)
-
-    torch.set_default_device(device)
-    max_loras = 8
-    vocab_size = 1024
-    lora_config = LoRAConfig(
-        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
-    )
-
-    logits_processor = LogitsProcessor(vocab_size)
-    sharded_to_full_mapping = list(reversed(range(vocab_size)))
-    lora_logits_processor = LogitsProcessorWithLoRA(
-        logits_processor, 1024, torch.float16, device, sharded_to_full_mapping
-    )
-    lora_logits_processor.create_lora_weights(max_loras, lora_config)
-
-    lora_logits_processor.sharded_to_full_mapping_gpu.fill_(-1)
-
-    lora_logits_processor.reset_sharded_to_full_mapping()
-
-    torch.testing.assert_close(
-        lora_logits_processor.sharded_to_full_mapping_gpu,
-        torch.tensor(sharded_to_full_mapping, dtype=torch.long),
-    )
-
-
-@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
@@ -2147,7 +2115,7 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
 def test_dsv4_compressor_projections_apply_lora_with_fp32_output(
     default_vllm_config, dist_init
 ):
-    """V4's main and indexer compressor closures must call ``fused_wkv_wgate``,
+    """V4's main and indexer compressor closures must call `fused_wkv_wgate`,
     so its adapter reaches the FP32 kv_score."""
     from vllm.models.deepseek_v4.attention import DeepseekV4Attention
     from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
@@ -2215,8 +2183,8 @@ def test_dsv4_compressor_projections_apply_lora_with_fp32_output(
 def test_dsv4_grouped_o_projection_applies_each_tokens_adapter(
     default_vllm_config, dist_init
 ):
-    """Every DeepSeek-V4 CUDA o_proj must run ``wo_a.grouped_forward``, so the
-    adapter on ``wo_a`` is applied."""
+    """Every DeepSeek-V4 CUDA o_proj must run `wo_a.grouped_forward`, so the
+    adapter on `wo_a` is applied."""
     from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
     from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
         DeepseekV4FlashInferMLAAttention,

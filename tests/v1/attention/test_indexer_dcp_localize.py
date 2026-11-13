@@ -120,11 +120,11 @@ def _dcp_lse_merge(
 
 
 class _FakeDCPGroup(GroupCoordinator):
-    """Single-process stand-in: ``all_gather`` returns the pre-built dim-0
-    concatenation of every rank's packed ``(score, global_id)`` candidates,
+    """Single-process stand-in: `all_gather` returns the pre-built dim-0
+    concatenation of every rank's packed `(score, global_id)` candidates,
     mirroring the one packed all-gather the merge issues.
 
-    ``GroupCoordinator.__init__`` is never run, so no process group exists."""
+    `GroupCoordinator.__init__` is never run, so no process group exists."""
 
     def __init__(self, gathered_packed: torch.Tensor) -> None:
         self.gathered_packed = gathered_packed
@@ -207,10 +207,10 @@ def _merge_local_topks_global_with_fake_dcp(
     interleave: int,
     row_starts: list[torch.Tensor | None] | None = None,
 ) -> list[torch.Tensor]:
-    """Run ``_merge_dcp_topk_global`` for every rank against a faked
+    """Run `_merge_dcp_topk_global` for every rank against a faked
     all-gather and return each rank's global-index result (all ranks should
     agree). The fake pre-builds the packed candidate concatenation the merge's
-    single ``all_gather`` would return."""
+    single `all_gather` would return."""
     # The merge is now CuteDSL-only (no PyTorch fallback), so it runs the real
     # Triton pack + CuteDSL selector kernels even behind the faked all-gather.
     if not current_platform.is_cuda() or not has_cutedsl():
@@ -601,7 +601,7 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(
 ):
     """Scores at the logits dtype (upcast BF16 SM100 MQA logits tie at the
     top-k boundary) keyed only by their high score bits and the id bits below
-    ``num_positions`` must select the same set as the full 64-bit key."""
+    `num_positions` must select the same set as the full 64-bit key."""
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
         dcp_topk_id_bits,
         dcp_topk_score_bits,
@@ -655,6 +655,84 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(
         want = sorted(expected[row].tolist())
         assert sorted(full[row].tolist()) == want
         assert sorted(compact[row].tolist()) == want
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_cutedsl(),
+    reason="This test requires CUDA and CuteDSL",
+)
+@pytest.mark.parametrize("epoch", [1, 2])
+# 14 id bits fit the spare score bits; 20 leave 4 for the token-id passes.
+@pytest.mark.parametrize("score_bits,id_bits", [(32, 32), (16, 14), (16, 20)])
+def test_cutedsl_pingpong_select_matches_gathered_select(
+    epoch: int, score_bits: int, id_bits: int
+):
+    """The direct-exchange selector (32-bit score keys, token-id pass only for
+    boundary ties, no radix when the valid candidates fit) selects the same set
+    as the all-gather selector, reading the inbox slot of the published epoch.
+    Upcast BF16 scores rank on their high 16 bits and the ids on the bits they
+    need, in both selectors."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+    from vllm.model_executor.kernels.attention.dsa.dcp_topk_pingpong_cutedsl import (  # noqa: E501
+        stable_topk_from_pingpong_candidates_cutedsl,
+    )
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    world, topk, max_rows = 8, 2048, 8
+    num_candidates = world * topk
+    gathered = torch.empty((max_rows, num_candidates, 2), device=device)
+    gathered[..., 0] = torch.randn((max_rows, num_candidates), device=device)
+    gathered[..., 1] = torch.randperm(num_candidates, device=device).float()
+    # Row 1: coarse scores, so ties straddle the top-k boundary.
+    gathered[1, :, 0] = torch.randint(0, 64, (num_candidates,), device=device).float()
+    # Row 2: fewer valid candidates than topk.
+    gathered[2, 1000:, 1] = -1
+    # Row 3: no valid candidate.
+    gathered[3, :, 1] = -1
+    # Row 4: negative scores and padding mixed in.
+    gathered[4, :, 0] = -gathered[4, :, 0].abs()
+    gathered[4, ::3, 1] = -1
+    if score_bits == 16:
+        gathered[..., 0] = gathered[..., 0].bfloat16().float()
+
+    inboxes = torch.full((2, max_rows, num_candidates, 2), float("nan"), device=device)
+    inboxes[(epoch - 1) & 1] = gathered
+    write_seq = torch.tensor([epoch], device=device, dtype=torch.int64)
+
+    rows = 6
+    # The all-gather selector reads the rank-major [world, rows, topk, 2]
+    # layout; the ping-pong inbox is row-major.
+    rank_major = gathered[:rows].view(rows, world, topk, 2).transpose(0, 1).contiguous()
+    expected = torch.empty((rows, topk), device=device, dtype=torch.int32)
+    stable_topk_from_gathered_candidates_cutedsl(rank_major, topk, out=expected)
+    compact = torch.empty_like(expected)
+    stable_topk_from_gathered_candidates_cutedsl(
+        rank_major,
+        topk,
+        out=compact,
+        score_bits=score_bits,
+        id_bits=id_bits,
+    )
+    for row in range(rows):
+        assert sorted(compact[row].tolist()) == sorted(expected[row].tolist())
+    for use_pdl in (False, True):
+        actual = torch.full((rows, topk), -7, device=device, dtype=torch.int32)
+        stable_topk_from_pingpong_candidates_cutedsl(
+            inboxes,
+            write_seq,
+            topk,
+            out=actual,
+            use_pdl=use_pdl,
+            score_bits=score_bits,
+            id_bits=id_bits,
+        )
+        for row in range(rows):
+            got = actual[row].cpu().tolist()
+            want = expected[row].cpu().tolist()
+            assert sorted(got) == sorted(want), f"row {row}"
 
 
 @pytest.mark.skipif(

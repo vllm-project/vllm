@@ -57,7 +57,7 @@ def flashinfer_bf16_mm(
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
-# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35
 FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
@@ -69,7 +69,7 @@ _DEFAULT_CUDA_HOME = "/usr/local/cuda"
 def _flashinfer_nvcc_path() -> str | None:
     """Return the nvcc FlashInfer's JIT would run, or None if it is missing.
 
-    Mirrors ``flashinfer.jit.cpp_ext.get_cuda_path()`` without importing
+    Mirrors `flashinfer.jit.cpp_ext.get_cuda_path()` without importing
     FlashInfer, whose import initializes CUDA.
     """
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
@@ -377,8 +377,8 @@ autotune = _lazy_import_wrapper(
 
 @functools.cache
 def has_flashinfer_autotune_v2() -> bool:
-    """Return ``True`` if FlashInfer ships the managed-cache autotuner
-    (``flashinfer.autotune_v2``, flashinfer-ai/flashinfer#3861)."""
+    """Return `True` if FlashInfer ships the managed-cache autotuner
+    (`flashinfer.autotune_v2`, flashinfer-ai/flashinfer#3861)."""
     if not has_flashinfer():
         return False
     mod = _get_submodule("flashinfer")
@@ -456,7 +456,7 @@ def has_flashinfer_moe() -> bool:
 def has_flashinfer_sm90_nope_mla() -> bool:
     """FlashInfer SM90 NoPE MLA (FP8 KV with in-kernel dequant, kpe=0).
 
-    Feature-detected via the ``ckv_scale_arr`` run() kwarg introduced with
+    Feature-detected via the `ckv_scale_arr` run() kwarg introduced with
     the SM90 NoPE support (FlashInfer >= 0.6.18), so dev builds carry the
     gate without a version parse.
     """
@@ -480,7 +480,7 @@ def has_flashinfer_sm90_nope_mla() -> bool:
 
 @functools.cache
 def has_flashinfer_sparse_mla_sm120() -> bool:
-    """Return ``True`` if FlashInfer sparse MLA decode support is available."""
+    """Return `True` if FlashInfer sparse MLA decode support is available."""
     if not has_flashinfer():
         return False
     try:
@@ -496,6 +496,59 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
         and callable(trtllm_batch_decode_with_kv_cache_mla)
         and callable(autotune)
     )
+
+
+@functools.cache
+def has_flashinfer_prims_ts_sparse_mla() -> bool:
+    """Return `True` if FlashInfer ships the task-scheduled (prims_ts) sparse
+    MLA decode wrapper with the plan API vLLM calls. Its quantized formats are
+    probed separately by `prims_ts_sparse_mla_format_error` once a device is
+    available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.attention.prims_ts import (
+            BatchSparseMLADecodePagedTSWrapper,
+            get_prims_ts_sparse_mla_decode_workspace_size,
+        )
+    except ImportError:
+        return False
+    if not callable(get_prims_ts_sparse_mla_decode_workspace_size):
+        return False
+    # vLLM passes the plan arguments of FlashInfer after 0.7.3 (max_q_len,
+    # q_dtype); 0.7.3's prims_ts still names them max_seq_len_q, q_data_type.
+    plan_args = inspect.signature(BatchSparseMLADecodePagedTSWrapper.plan).parameters
+    return "max_q_len" in plan_args
+
+
+@functools.cache
+def prims_ts_sparse_mla_format_error(kv_cache_format: str) -> str | None:
+    """Why the installed FlashInfer cannot plan prims_ts sparse MLA (D576, 128
+    E4M3 query heads, LSE) over `kv_cache_format` on this GPU, else None.
+
+    Asks the public workspace-size query, which resolves the plan without
+    allocating or compiling (FlashInfer >= the nightly with PR 7410 for
+    "nvfp4.fp8rope")."""
+    if not has_flashinfer_prims_ts_sparse_mla():
+        return "FlashInfer has no prims_ts sparse MLA decode"
+    from flashinfer.attention.prims_ts import (
+        get_prims_ts_sparse_mla_decode_workspace_size,
+    )
+
+    try:
+        get_prims_ts_sparse_mla_decode_workspace_size(
+            torch.device("cuda", torch.accelerator.current_device_index()),
+            1,
+            128,
+            max_topk=2048,
+            q_dtype=torch.float8_e4m3fn,
+            qk_rope_head_dim=64,
+            kv_cache_format=kv_cache_format,
+            return_lse=True,
+        )
+    except (ValueError, NotImplementedError, KeyError, TypeError) as e:
+        return f"FlashInfer prims_ts sparse MLA rejects {kv_cache_format!r}: {e}"
+    return None
 
 
 @functools.cache
@@ -515,8 +568,107 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 
 @functools.cache
+def has_flashinfer_topk_varlen_gvr2() -> bool:
+    """Return `True` if FlashInfer ships the `gvr_2` varlen top-k backend
+    (self-sampling GVR V2, `flashinfer.top_k_varlen(backend="gvr_2")`).
+
+    Feature-detected on the production entry `run_varlen` (FlashInfer >=
+    0.7.2: per-row `kv_lens`, a capture-stable `max_seq_len` and the
+    hint-free `top_k`) and the band-aware `warmup_varlen` (`row_stride`)
+    that the dispatcher calls.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.topk_varlen.kernels import gvr2_topk_host
+
+        run_params = inspect.signature(gvr2_topk_host.run_varlen).parameters
+        warmup_params = inspect.signature(gvr2_topk_host.warmup_varlen).parameters
+    except Exception:
+        # The module imports the CuTe DSL; anything it raises means unusable.
+        return False
+    return {"kv_lens", "max_seq_len", "top_k"} <= set(run_params) and {
+        "num_rows_list",
+        "row_stride",
+    } <= set(warmup_params)
+
+
+@functools.cache
+def has_flashinfer_msa() -> bool:
+    """Return `True` if FlashInfer MiniMax Sparse Attention (MSA) ops are
+    available. Which architectures they serve depends on the build."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.msa_ops import (
+            msa_proxy_score,
+            msa_sparse_attention,
+            msa_sparse_decode_attention,
+            msa_topk_select,
+        )
+    except ImportError:
+        return False
+    return all(
+        callable(fn)
+        for fn in (
+            msa_proxy_score,
+            msa_topk_select,
+            msa_sparse_attention,
+            msa_sparse_decode_attention,
+        )
+    )
+
+
+@functools.cache
+def has_flashinfer_msa_packed_kv() -> bool:
+    """Return `True` if the FlashInfer MSA attention kernels accept K/V
+    views split from vLLM's packed-content KV cache, advertised by the
+    `SUPPORTS_PACKED_KV` flag on `flashinfer.msa_ops`."""
+    if not has_flashinfer_msa():
+        return False
+    import flashinfer.msa_ops as msa_ops
+
+    return bool(getattr(msa_ops, "SUPPORTS_PACKED_KV", False))
+
+
+@functools.cache
+def has_flashinfer_msa_sm90() -> bool:
+    """Return `True` if the FlashInfer MSA attention kernels serve SM90
+    (Hopper). Detected from the `out` parameter both attention ops gained
+    with their SM90 backend, since flashinfer exposes no capability flag for
+    it."""
+    if not has_flashinfer_msa():
+        return False
+    import inspect
+
+    from flashinfer.msa_ops import msa_sparse_attention, msa_sparse_decode_attention
+
+    return all(
+        "out" in inspect.signature(fn).parameters
+        for fn in (msa_sparse_attention, msa_sparse_decode_attention)
+    )
+
+
+@functools.cache
+def has_flashinfer_msa_per_token_topk() -> bool:
+    """Return `True` if `flashinfer.msa_ops.msa_topk_select` accepts a
+    per-token `num_valid_pages` tensor. Detected from the parameter's type
+    annotation, since flashinfer exposes no capability flag for it."""
+    if not has_flashinfer_msa():
+        return False
+    import inspect
+
+    from flashinfer.msa_ops import msa_topk_select
+
+    ann = inspect.signature(msa_topk_select).parameters["num_valid_pages"].annotation
+    return "Tensor" in str(ann)
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
-    """Return ``True`` if FlashInfer cutedsl module is available."""
+    """Return `True` if FlashInfer cutedsl module is available."""
     return (
         has_flashinfer() and importlib.util.find_spec("flashinfer.cute_dsl") is not None
     )
@@ -524,7 +676,7 @@ def has_flashinfer_cutedsl() -> bool:
 
 @functools.cache
 def has_flashinfer_bf16_fp4() -> bool:
-    """Return ``True`` if FlashInfer's CuTe-DSL W4A16 GEMM is available."""
+    """Return `True` if FlashInfer's CuTe-DSL W4A16 GEMM is available."""
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer.gemm")
@@ -597,7 +749,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 @functools.cache
 def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
-    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_cutedsl():
         return False
 
@@ -617,7 +769,7 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
 
 @functools.cache
 def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
-    """Return ``True`` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
+    """Return `True` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer")
@@ -626,10 +778,10 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
 
 @functools.cache
 def has_flashinfer_localized_moe() -> bool:
-    """Return ``True`` if cute_dsl_fused_moe_nvfp4 accepts the ``localized_*`` args.
+    """Return `True` if cute_dsl_fused_moe_nvfp4 accepts the `localized_*` args.
 
     Locality-domain execution landed in flashinfer-ai/flashinfer#5276 and was
-    adapted to ``torch.cuda.execute_on_streams`` in #6488. Neither is in a
+    adapted to `torch.cuda.execute_on_streams` in #6488. Neither is in a
     FlashInfer 0.7.x release, so probe the signature rather than the version.
     """
     if not has_flashinfer_cutedsl_moe_nvfp4():
@@ -668,7 +820,7 @@ def has_flashinfer_b12x_gemm() -> bool:
 
 @functools.cache
 def has_flashinfer_b12x_moe() -> bool:
-    """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
+    """Return `True` if FlashInfer CuteDSL SM12x fused MoE is available."""
     if not has_flashinfer_moe():
         return False
 
@@ -1290,9 +1442,9 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     and cuDNN >= 9.17.1.
 
     cuDNN's FP8 SDPA forward path with bf16/fp16 output (used by
-    ``MMEncoderAttention._forward_flashinfer``) gates internally on
-    ``prop.major >= 10``; on Hopper it raises a misleading
-    ``cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer``
+    `MMEncoderAttention._forward_flashinfer`) gates internally on
+    `prop.major >= 10`; on Hopper it raises a misleading
+    `cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer`
     even when the installed cuDNN is new enough. See PR #38065 for the
     original Blackwell-only design intent.
     """

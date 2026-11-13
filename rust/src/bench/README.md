@@ -770,7 +770,13 @@ JSON output is compatible with the `vllm bench serve` Python schema. Result file
 {label}-{rate}qps-concurrency{max_concurrency}-{model}-{timestamp}.json
 ```
 
-Use `--append-result` to append multiple runs to the same file in JSONL format. `--save-detailed` adds per-request arrays (input/output lengths, ITLs, generated text).
+`{rate}` is written as Python does (`10.0qps`, `infqps`), and `{model}` is the server's first model when `--model` is not given.
+
+The `date` field uses the same local `{timestamp}` (`%Y%m%d-%H%M%S`) as Python.
+
+Use `--append-result` to append multiple runs to the same file in JSONL format. `latencies` and `queue_times` are always included; `--save-detailed` adds the other per-request arrays (input/output lengths, ITLs, generated text, errors).
+
+Sweeps and `--num-runs` save one result per point or run. With an explicit `--result-filename`, each file gets a `-<point>` suffix (`out-concurrency8.json`, `out-run2.json`); with `--append-result`, all points go to the same file.
 
 ## Architecture
 

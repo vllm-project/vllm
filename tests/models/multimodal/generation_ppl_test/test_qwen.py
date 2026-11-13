@@ -19,6 +19,13 @@ MODELS = [
         {},
     ),
     (
+        GenerateModelInfo(
+            "Qwen/Qwen2.5-Omni-3B", image_token_id=151655, hf_ppl=10.976678848266602
+        ),
+        28,
+        {},
+    ),
+    (
         GenerateModelInfo("Qwen/Qwen3-VL-4B-Instruct", hf_ppl=11.916606903076172),
         32,
         {},
@@ -45,7 +52,17 @@ def test_ppl(
     factor: int,
     extra_kwargs: dict,
     mm_device_do_normalize: bool,
+    aiter_config: str,
 ):
+    if aiter_config == "aiter_on":
+        # AITER RMSNorm rounds once, unlike HF; keep Inductor's bf16 casts so
+        # the surrounding ops round like HF (see ROCm/aiter#2236).
+        extra_kwargs = {
+            **extra_kwargs,
+            "compilation_config": {
+                "inductor_compile_config": {"emulate_precision_casts": True}
+            },
+        }
     vqa_ppl_test(
         hf_runner,
         vllm_runner,

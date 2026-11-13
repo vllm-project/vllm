@@ -220,7 +220,7 @@ def strip_covered_mm_data(
     so the workers never consume the payload fields. M-RoPE models keep
     CPU-side metadata fields used to compute positions. SHM address items
     are also kept so workers can balance the sender's reference count. The
-    scheduler-side ``Request`` keeps the full features."""
+    scheduler-side `Request` keeps the full features."""
     if not mm_features or num_computed_tokens == 0:
         return mm_features
 
@@ -395,7 +395,7 @@ def set_mm_embedding_modality(embed: "torch.Tensor", modality: str) -> "torch.Te
 
     Used by interleaved Omni merge paths that need to group embeddings by
     modality without threading a parallel modalities list through
-    ``embed_input_ids``.
+    `embed_input_ids`.
     """
     embed.modality = modality  # type: ignore[attr-defined]
     return embed
@@ -404,7 +404,7 @@ def set_mm_embedding_modality(embed: "torch.Tensor", modality: str) -> "torch.Te
 def copy_mm_embedding_modality(
     src: "torch.Tensor", dst: "torch.Tensor"
 ) -> "torch.Tensor":
-    """Copy ``modality`` from ``src`` onto ``dst`` if present."""
+    """Copy `modality` from `src` onto `dst` if present."""
     modality = getattr(src, "modality", None)
     if modality is not None:
         dst.modality = modality  # type: ignore[attr-defined]

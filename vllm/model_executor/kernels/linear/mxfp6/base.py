@@ -33,7 +33,7 @@ class MxFp6LinearKernel(ABC):
 
     Each subclass implements a specific GEMM backend (CUTLASS, Marlin, etc).
     The kernel selection mechanism iterates over registered subclasses in
-    priority order,calling ``is_supported`` and ``can_implement`` to find the best
+    priority order,calling `is_supported` and `can_implement` to find the best
     match for the current hardware.
     """
 
@@ -49,6 +49,16 @@ class MxFp6LinearKernel(ABC):
     ) -> tuple[bool, str | None]:
         """Return whether this kernel can run on the current platform."""
         raise NotImplementedError
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_quant_key`. Weight-only kernels return None; kernel
+        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
+        the fallback."""
+        return activation_quant_key
 
     @classmethod
     @abstractmethod

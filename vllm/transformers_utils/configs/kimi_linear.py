@@ -18,7 +18,7 @@ class KimiLinearDSAConfig:
 
     Kimi-K3.1 puts DSA on every full-attention (MLA) layer; KDA layers
     are unaffected. The converted checkpoint exports this as a nested
-    ``dsa_config`` sub-structure.
+    `dsa_config` sub-structure.
     """
 
     dsa_layers: list[int]
@@ -130,12 +130,6 @@ class KimiLinearConfig(PreTrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
-        rope_scaling = kwargs.pop("rope_scaling", None)
-        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
-        rope_theta = kwargs.pop("rope_theta", 10000.0)
-        if "rope_theta" not in rope_parameters:
-            rope_parameters["rope_theta"] = rope_theta
         self.rope_parameters = rope_parameters
 
         self.q_lora_rank = q_lora_rank
