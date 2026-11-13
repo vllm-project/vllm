@@ -55,6 +55,12 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+#### Token log probabilities
+
+Set `SamplingParams(logprobs=k)` to return token log probabilities alongside generated text. The values in each generated output's `logprobs` are natural logarithms of normalized token probabilities.
+
+On the standalone CPU runner, normalization remains stable when logits share a large finite offset. For example, `N` equal logits produce `-log(N)` for every token, including when their common value is large. Normalization cannot recover differences already lost when logits were rounded to their storage dtype.
+
 !!! important
     By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the huggingface model repository if it exists. In most cases, this will provide you with the best results by default if [SamplingParams][vllm.SamplingParams] is not specified.
 
