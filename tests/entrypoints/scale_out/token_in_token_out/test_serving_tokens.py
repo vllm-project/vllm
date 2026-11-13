@@ -513,7 +513,7 @@ async def test_stop_strings_rejected_when_tokens_only(client):
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
-    reason="--tokens-only is not supported by the Rust frontend",
+    reason="the Rust frontend has no --tokens-only and words this error differently",
 )
 @pytest.mark.parametrize(
     "server", [["--tokens-only"], ["--skip-tokenizer-init"]], indirect=True
