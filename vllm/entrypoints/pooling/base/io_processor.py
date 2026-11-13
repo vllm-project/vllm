@@ -266,7 +266,7 @@ class PoolingIOProcessor:
                         priorities=seq_priority[i],
                     )
                 else:
-                    prompt: PromptType = prompt_or_conversations
+                    prompt: PromptType = cast(PromptType, prompt_or_conversations)
                     parsed_prompt = (
                         prompt
                         if isinstance(prompt, bytes)

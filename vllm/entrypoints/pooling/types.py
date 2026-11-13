@@ -3,7 +3,16 @@
 import time
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeGuard, TypeVar
+from typing import (
+    Any,
+    Generic,
+    NotRequired,
+    TypeAlias,
+    TypedDict,
+    TypeGuard,
+    TypeVar,
+    cast,
+)
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -249,8 +258,6 @@ class OfflineScoringInputsContext(OfflineInputsContext):
         inputs_seq: Sequence[PoolingInput],
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
     ) -> "OfflineEncodeInputsContext":
-        # Default to the scoring ctx's own `pooling_params` so callers do not
-        # have to pass it explicitly.
         return super().to_encode_context(
             inputs_seq=inputs_seq,
             pooling_params=(
@@ -346,7 +353,7 @@ def input_to_seq(
 ) -> Sequence[PoolingInput]:
     # Non-list input is a single prompt (str / prompt dict / embeds prompt).
     if not isinstance(input_or_inputs, (list, tuple)):
-        return [input_or_inputs]
+        return [cast(PoolingInput, input_or_inputs)]
 
     # Empty list: nothing to normalize.
     if len(input_or_inputs) == 0:
