@@ -76,4 +76,4 @@ def test_nixl_and_nixl_ep_imports() -> None:
     assert nixl_ep.__file__ is not None
 
     # Check that the NIXL EP extension is loaded.
-    assert nixl_ep.Config is not None
+    assert nixl_ep.Buffer is not None
