@@ -20,18 +20,17 @@ from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
 )
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     KVCacheConfig,
+    KVCacheLayerConfig,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
     bind_kv_cache_to_layers,
-    customize_attention_spec,
+    customize_layer_config,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
 )
@@ -71,8 +70,10 @@ class FastPrefillHelper:
         )
 
 
-def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
-    kv_cache_spec: dict[str, KVCacheSpec] = {}
+def get_kv_cache_layer_configs(
+    vllm_config: VllmConfig,
+) -> dict[str, KVCacheLayerConfig]:
+    layer_configs: dict[str, KVCacheLayerConfig] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
@@ -80,11 +81,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # This layer will use KV cache of the sharing target layer.
             continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
-        if spec := attn_module.get_kv_cache_spec(vllm_config):
-            if isinstance(spec, AttentionSpec):
-                spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
-            kv_cache_spec[layer_name] = spec
-    return kv_cache_spec
+        if layer_config := attn_module.get_kv_cache_config(vllm_config):
+            layer_configs[layer_name] = customize_layer_config(
+                attn_module.get_attn_backend(), layer_config
+            )
+    return layer_configs
 
 
 def get_shared_kv_cache_layers(vllm_config: VllmConfig):
@@ -142,7 +143,9 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
-        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
+        if not all(
+            spec.has_layer_views for spec in kv_cache_group_spec.kv_cache_specs.values()
+        ):
             attn_groups.append([])
             continue
 
@@ -166,9 +169,7 @@ def init_attn_backend(
                     "FastPrefill", attn_backend
                 )
 
-            layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
-            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+            layer_kv_cache_spec = kv_cache_group_spec.kv_cache_specs[layer_name]
 
             # Split on per-rank num_heads_q so layers with different Q-head
             # counts get separate metadata builders.
@@ -198,6 +199,7 @@ def init_attn_backend(
                 vllm_config=vllm_config,
                 device=device,
                 kernel_block_size=kernel_block_size,
+                kv_cache_group=kv_cache_config.kv_cache_groups[kv_cache_group_id],
             )
 
     return attn_groups, kernel_block_sizes

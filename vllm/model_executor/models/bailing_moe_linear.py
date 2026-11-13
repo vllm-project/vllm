@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedScaleMode,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -325,7 +326,7 @@ class BailingMoeV25(nn.Module):
             use_grouped_topk=self.use_grouped_topk,
             router_logits_dtype=self.router_dtype,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

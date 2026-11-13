@@ -91,7 +91,7 @@ def test_validate_config_dcp_for_dspark(draft_uses_mla, dcp_size):
     config.model_config.hf_text_config.index_topk = 1
     config.speculative_config = fake_speculative_config(
         DSparkSpeculatorConfig,
-        draft_model_config=SimpleNamespace(use_mla=draft_uses_mla),
+        draft_decode_context_parallel_size=dcp_size if draft_uses_mla else 1,
     )
     if draft_uses_mla and dcp_size == 2:
         with pytest.raises(NotImplementedError, match="requires DCP=1 or DCP=PCP"):
