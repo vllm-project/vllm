@@ -4018,6 +4018,7 @@ def test_kv_cache_events(blocks_to_cache: int):
     events = manager.take_events()
 
     block = events[-1]
+    assert isinstance(block, BlockStored)
     assert (
         len(block.block_hashes)
         == blocks_to_cache
@@ -4042,6 +4043,7 @@ def test_kv_cache_events(blocks_to_cache: int):
         assert blocks.block_hashes[0] in stored_block_hash
     assert len(events) == blocks_to_cache + 1
     assert isinstance(events[-2], BlockRemoved)
+    assert isinstance(events[-1], BlockStored)
     assert (
         len(events[-1].block_hashes)
         == blocks_to_cache

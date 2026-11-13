@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 import torch
 
-import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConnectorMetadata
 from vllm.config import (
     CacheConfig,
@@ -3116,7 +3115,10 @@ def test_spec_decode_stats_keep_batch_after_empty_draft():
     model_output = _mk_output([[1, 9], [5]], num_drafted=[2, 0])
     engine_outputs = scheduler.update_from_output(output, model_output)
 
-    stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
+    scheduler_stats = engine_outputs[0].scheduler_stats
+    assert scheduler_stats is not None
+    stats = scheduler_stats.spec_decoding_stats
+    assert stats is not None
     assert stats.num_drafts == 2
     assert stats.num_draft_tokens == 2
     assert stats.num_verified_tokens == 2
@@ -8228,7 +8230,10 @@ def test_failed_load_reservation_keeps_new_async_loads_out():
 
     # The retry waits on a deferred lookup, so the promoted load holds no blocks.
     lookups = {"failed": (None, False), "new": (96, True)}
-    scheduler.connector.get_num_new_matched_tokens = lambda r, _: lookups[r.request_id]
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = (  # type: ignore[method-assign]
+        lambda r, _: lookups[r.request_id]
+    )
     scheduler.schedule()
     assert failed.status == RequestStatus.WAITING
     scheduler.add_request(new)
@@ -8254,8 +8259,8 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
     )
     s.recompute_kv_load_failures = True
     if on_demand:
-        s._reserve_parked = s._inflight_prefills.add
-        s._unreserve_parked = lambda _: None
+        s._reserve_parked = s._inflight_prefills.add  # type: ignore[method-assign]
+        s._unreserve_parked = lambda _: None  # type: ignore[method-assign]
 
     def match(request, computed):
         if rng.random() < 0.1:
@@ -8270,7 +8275,8 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
         if any(r.status != RequestStatus.WAITING_FOR_REMOTE_KVS for r in parked):
             events.add("promoted_load_held")
 
-    s.connector.get_num_new_matched_tokens = match
+    assert s.connector is not None
+    s.connector.get_num_new_matched_tokens = match  # type: ignore[method-assign]
     group = s.kv_cache_manager.coordinator.single_type_managers[0]
     decisions, events = [], set()
     for step in range(60):
