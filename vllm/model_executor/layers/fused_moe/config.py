@@ -1358,9 +1358,6 @@ class FusedMoEConfig:
     hidden_dim_unpadded: int | None = None
     # Defaults to intermediate_size_per_partition if not specified.
     intermediate_size_per_partition_unpadded: int | None = None
-    # Global size the checkpoint holds when intermediate_size is padded; sets
-    # intermediate_size_per_partition_unpadded with the same MoE TP divisor.
-    intermediate_size_unpadded: int | None = None
     # Model specific override
     intermediate_pad: int | None = None
 
@@ -1441,8 +1438,6 @@ class FusedMoEConfig:
         if self.intermediate_size_per_partition_unpadded is None:
             self.intermediate_size_per_partition_unpadded = (
                 self.intermediate_size_per_partition
-                if self.intermediate_size_unpadded is None
-                else self.intermediate_size_unpadded // tp_size
             )
 
         if self.is_act_and_mul:

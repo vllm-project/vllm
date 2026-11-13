@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -8,13 +7,12 @@ import torch
 
 import vllm.distributed as distributed
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe import (
     unquantized_fused_moe_method as unquantized_module,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEParallelConfig,
-    RoutingMethodType,
-)
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import fp8 as fp8_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
@@ -32,7 +30,6 @@ def _make_fp8_tp_experts(
     intermediate_size=640,
     quant_config=None,
     config_overrides=None,
-    intermediate_size_unpadded=None,
 ):
     # Exercise allocation and the public weight loader without selecting a GPU kernel.
     if mock_backend:
@@ -65,12 +62,6 @@ def _make_fp8_tp_experts(
     config.moe_backend = backend
     for field, value in (config_overrides or {}).items():
         setattr(config, field, value)
-    if intermediate_size_unpadded is not None:  # derived as FusedMoEFactory does
-        config = dataclasses.replace(
-            config,
-            intermediate_size_unpadded=intermediate_size_unpadded,
-            intermediate_size_per_partition_unpadded=None,
-        )
     return RoutedExperts(
         "model.layers.0.mlp.experts",
         torch.bfloat16,
@@ -422,34 +413,25 @@ def test_padded_experts_flagged_for_reload_fill(monkeypatch):
     assert _flagged(_make_fp8_tp_experts(monkeypatch, 1, 0)) == set()
 
 
-def test_unpadded_size_passed_at_construction_flags_padding(monkeypatch):
+@pytest.mark.parametrize("unpadded", [None, 256])
+def test_factory_unpadded_size_flags_padding(dist_init, unpadded):
     """Kimi-K3 passes the checkpoint's size as `intermediate_size_unpadded`."""
-    layer = _make_fp8_tp_experts(
-        monkeypatch,
-        1,
-        0,
-        intermediate_size=384,
-        quant_config=_static_fp8(),
-        intermediate_size_unpadded=256,
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.static_forward_context = dict()
+    with set_current_vllm_config(vllm_config):
+        experts = FusedMoEFactory(
+            num_experts=2,
+            top_k=1,
+            hidden_size=256,
+            intermediate_size=384,
+            params_dtype=torch.bfloat16,
+            tp_size=1,
+            dp_size=1,
+            pcp_size=1,
+            prefix="model.layers.0.mlp.experts",
+            intermediate_size_unpadded=unpadded,
+        ).routed_experts
+    assert experts.moe_config.intermediate_size_per_partition_unpadded == (
+        unpadded or 384
     )
-    assert layer.moe_config.intermediate_size_per_partition_unpadded == 256
-    assert _flagged(layer) == {"w13_weight", "w2_weight"}
-
-
-@pytest.mark.parametrize("unpadded", [None, 3072])
-def test_unpadded_intermediate_size_split_over_moe_tp(unpadded):
-    # DP4 without EP: the experts shard over the flattened MoE TP group
-    tp_size, _ = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
-        tp_size=1, dp_size=4, dp_rank=3, pcp_size=1, pcp_rank=0
-    )
-    config = make_dummy_moe_config(intermediate_size=4096)
-    config = dataclasses.replace(
-        config,
-        moe_parallel_config=dataclasses.replace(
-            config.moe_parallel_config, tp_size=tp_size, dp_size=4
-        ),
-        intermediate_size_unpadded=unpadded,
-        intermediate_size_per_partition_unpadded=None,
-    )
-    assert config.intermediate_size_per_partition == 1024
-    assert config.intermediate_size_per_partition_unpadded == (unpadded or 4096) // 4
+    assert _flagged(experts) == ({"w13_weight", "w2_weight"} if unpadded else set())
