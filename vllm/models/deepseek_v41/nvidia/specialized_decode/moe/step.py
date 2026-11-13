@@ -19,7 +19,7 @@ kernel, above that on `_forward_impl`. Either way their output stays
 TP-partial for the next boundary, though their stock layers reduce it.
 """
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 
 @contextmanager
-def deferred_finalize(config: FusedMoEConfig, max_num_tokens: int) -> Iterator[None]:
+def deferred_finalize(config: FusedMoEConfig, max_num_tokens: int) -> Generator[None]:
     """Within the block, let the experts leave the top-k reduction of calls of
     up to `max_num_tokens` tokens to the caller; then restore the layer's own
     deferral, which the stock forward reads."""
