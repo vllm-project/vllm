@@ -23,7 +23,7 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 /// </｜DSML｜function_calls>
 /// ```
 ///
-/// Arguments are emitted only after a full `invoke` block is parsed.
+/// Arguments stream as their parameter values arrive.
 ///
 /// DeepSeek V3.2 relies on DSML markers such as `｜DSML｜`, which are
 /// represented as special tokens in the tokenizer and therefore must be
@@ -76,14 +76,15 @@ impl ToolParser for DeepSeekV32ToolParser {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
     use super::super::test_utils::{DsmlParserTestExt as _, collect_stream, tokenizer};
     use super::DeepSeekV32ToolParser;
-    use crate::tool::ToolParser;
     use crate::tool::test_utils::{split_by_chars, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace_with;
+    use crate::tool::{ToolParser, ToolParserOutput};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -145,7 +146,10 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v32_parse_complete_converts_schema_types() {
+    fn deepseek_v32_parse_complete_passes_json_values_through() {
+        // `string="false"` values are JSON text as the encoder wrote them, so
+        // they pass through as spelled, regardless of the schema (`empty` is a
+        // string parameter).
         let mut parser = DeepSeekV32ToolParser::new(&test_tools(), &tokenizer());
         let output = parser
             .parse_complete(
@@ -153,8 +157,8 @@ mod tests {
                  <｜DSML｜invoke name=\"convert\">\n\
                  <｜DSML｜parameter name=\"whole\" string=\"false\">5.0</｜DSML｜parameter>\n\
                  <｜DSML｜parameter name=\"flag\" string=\"false\">true</｜DSML｜parameter>\n\
-                 <｜DSML｜parameter name=\"payload\" string=\"false\">{\"nested\":true}</｜DSML｜parameter>\n\
-                 <｜DSML｜parameter name=\"items\" string=\"false\">[1,2]</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"payload\" string=\"false\">{\"nested\": true}</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"items\" string=\"false\">[1, 2]</｜DSML｜parameter>\n\
                  <｜DSML｜parameter name=\"empty\" string=\"false\">null</｜DSML｜parameter>\n\
                  </｜DSML｜invoke>\n\
                  </｜DSML｜function_calls>",
@@ -162,16 +166,63 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.calls().len(), 1);
-        assert_eq!(
-            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
-            json!({
-                "whole": 5.0,
-                "flag": true,
-                "payload": { "nested": true },
-                "items": [1, 2],
-                "empty": "null",
-            })
-        );
+        expect![[r#"{"whole": 5.0, "flag": true, "payload": {"nested": true}, "items": [1, 2], "empty": null}"#]]
+        .assert_eq(&output.calls()[0].arguments);
+    }
+
+    #[test]
+    fn deepseek_v32_parse_complete_writes_malformed_json_values_as_strings() {
+        // A `string="false"` value that is not valid JSON, such as a string
+        // labelled as JSON, is kept as a string so the arguments stay valid
+        // JSON. A non-`"true"` attribute value counts as `"false"`.
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools(), &tokenizer());
+        let output = parser
+            .parse_complete(
+                "<｜DSML｜function_calls>\n\
+                 <｜DSML｜invoke name=\"get_weather\">\n\
+                 <｜DSML｜parameter name=\"location\" string=\"false\">Hangzhou</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"unit\" string=\"false\"></｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"days\" string=\"False\">True</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"payload\" string=\"false\">{'a': 1}</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"items\" string=\"false\">\n[1, 2]\n</｜DSML｜parameter>\n\
+                 </｜DSML｜invoke>\n\
+                 </｜DSML｜function_calls>",
+            )
+            .unwrap();
+
+        assert_eq!(output.calls().len(), 1);
+        expect![[r#"{"location": "Hangzhou", "unit": "", "days": "True", "payload": "{'a': 1}", "items": [1, 2]}"#]]
+        .assert_eq(&output.calls()[0].arguments);
+    }
+
+    #[test]
+    fn deepseek_v32_streams_arguments_before_the_invoke_closes() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools(), &tokenizer());
+        let opened = parser
+            .parse_chunk(
+                "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"get_weather\">\n\
+                 <｜DSML｜parameter name=\"location\" string=\"true\">Hang",
+            )
+            .unwrap();
+        let closed = parser
+            .parse_chunk(
+                "zhou</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"unit\" string=\"false\">\"celsius\"</｜DSML｜parameter>\n\
+                 <｜DSML｜parameter name=\"days\">3</｜DSML｜parameter>\n\
+                 </｜DSML｜invoke>\n</｜DSML｜function_calls>",
+            )
+            .unwrap();
+
+        let arguments = |output: &ToolParserOutput| {
+            format!(
+                "{:?}",
+                output.calls().iter().map(|call| &call.arguments).collect::<Vec<_>>()
+            )
+        };
+        assert_eq!(opened.calls()[0].name.as_deref(), Some("get_weather"));
+        expect![[r#"["", "{\"location\": \"", "Hang"]"#]].assert_eq(&arguments(&opened));
+        expect![[r#"["zhou", "\"", ", \"unit\": \"celsius\"", ", \"days\": 3", "}"]"#]]
+            .assert_eq(&arguments(&closed));
     }
 
     #[test]
