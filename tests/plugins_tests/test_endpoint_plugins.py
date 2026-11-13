@@ -1003,6 +1003,13 @@ def _held(trigger: str, *signals: str, **serve_kwargs: Any) -> dict:
             _SIGINT_EXIT,
             ["start:C", "engine_shutdown"],
         ),
+        # The first signal after request_shutdown() is not a repeat either.
+        (
+            "held_drain",
+            _held("request_shutdown", "SIGTERM", "SIGINT", "SIGINT"),
+            _SIGINT_EXIT,
+            ["start:C", "engine_shutdown"],
+        ),
         (
             "held_drain",
             _held("SIGTERM", "SIGTERM", exit_on_repeated_cleanup_signal=False),

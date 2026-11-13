@@ -216,7 +216,8 @@ async def serve_http(
 
     `exit_on_repeated_cleanup_signal` is False for a server whose parent
     process signals it and bounds its shutdown, so that a signal delivered
-    twice does not skip HTTP and plugin cleanup.
+    twice does not skip HTTP and plugin cleanup. Such a server still exits on
+    a repeated signal once it has abandoned a plugin drain.
     """
     logger.info("Available routes are:")
     # post endpoints
