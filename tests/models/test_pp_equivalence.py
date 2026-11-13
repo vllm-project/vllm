@@ -307,8 +307,8 @@ def test_pp_equivalence_detects_a_changed_weight(vllm_runner):
 def _capture_stdio():
     """Capture stdout/stderr at the FD level.
 
-    Avoid pytest ``capfd``: on ROCm/XPU, ``@multi_gpu_test`` spawns a child and
-    cloudpickles fixtures, and ``capfd`` is not picklable.
+    Avoid pytest `capfd`: on ROCm/XPU, `@multi_gpu_test` spawns a child and
+    cloudpickles fixtures, and `capfd` is not picklable.
     """
     with tempfile.TemporaryFile() as tmp:
         out_fd, err_fd = sys.stdout.fileno(), sys.stderr.fileno()
