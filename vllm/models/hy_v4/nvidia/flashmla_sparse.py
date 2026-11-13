@@ -16,8 +16,8 @@ The subclass intentionally keeps the inherited `get_name()`
 (`"FLASHMLA_SPARSE"`). Several shared code paths key off that exact string —
 `_canonicalize_sparse_mla_kv_cache_dtype` promotes a quantized KV cache to
 `fp8_ds_mla` for it, and `FlashMLASparseImpl` asserts that layout — so a new
-name would silently change KV cache behaviour. Only`supports_sink` and the
-two kernel wrappers differ from the parent.
+name would silently change KV cache behaviour. This subclass also supplies
+full-head sinks for ShardQ prefill.
 """
 
 from typing import TYPE_CHECKING, ClassVar
@@ -51,9 +51,8 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
     `out *= exp(lse) / (exp(lse) + exp(sink))`.
     """
 
-    # The sinks are sharded by head with TP, and ShardQ runs every head on
-    # each rank.
-    supports_shardq: ClassVar[bool] = False
+    # ShardQ computes every head for each rank's token slice.
+    supports_shardq: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -92,6 +91,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         )
         self._validate_sinks(sinks, num_heads)
         self.sinks = sinks
+        self._sinks_full: torch.Tensor | None = None
 
     @staticmethod
     def _validate_sinks(sinks: torch.Tensor | None, num_heads: int) -> None:
@@ -118,6 +118,19 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
                 "HYV4 FlashMLA sparse attention sinks must have shape "
                 f"({num_heads},), but got {tuple(sinks.shape)}."
             )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        super().process_weights_after_loading(act_dtype)
+        if self.sinks is None or not self.use_shardq:
+            return
+        from vllm.distributed import get_tp_group
+
+        tp_group = get_tp_group()
+        full = tp_group.all_gather(self.sinks.to(tp_group.device), dim=0)
+        # Reload in place to preserve pointers held by captured CUDA graphs.
+        if self._sinks_full is None:
+            self._sinks_full = torch.empty_like(full)
+        self._sinks_full.copy_(full)
 
     def _sinks_for_query(
         self,
@@ -148,12 +161,18 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
 
         query_heads = q.shape[head_dim]
         if sinks.shape[0] != query_heads:
-            raise ValueError(
-                "HYV4 FlashMLA sparse attention sink head count must match the "
-                f"runtime query layout: sinks={sinks.shape[0]}, "
-                f"query_heads={query_heads}. The sink must use the same "
-                "unpadded head layout as the query."
-            )
+            full = self._sinks_full
+            if full is not None and full.shape[0] == query_heads:
+                sinks = full
+            else:
+                full_heads = None if full is None else full.shape[0]
+                raise ValueError(
+                    "HYV4 FlashMLA sparse attention sink head count must match "
+                    f"the runtime query layout: sinks={sinks.shape[0]}, "
+                    f"full_sinks={full_heads}, query_heads={query_heads}. "
+                    "The sink must use the same unpadded head layout as the "
+                    "query."
+                )
         if sinks.device != q.device:
             raise ValueError(
                 "HYV4 FlashMLA sparse attention sinks and query must be on the "
