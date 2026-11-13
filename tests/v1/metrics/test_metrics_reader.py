@@ -102,18 +102,25 @@ def test_histogram_metric(test_registry, num_engines):
         engine_labels.remove(m.labels["engine_index"])
 
 
-@pytest.mark.parametrize("num_engines", [1, 4])
-def test_vector_metric(test_registry, num_engines):
+@pytest.mark.parametrize(
+    "values_per_engine",
+    [
+        [[10, 5, 1]],
+        [[10, 5, 1]] * 4,
+        [[8, 4], [12, 9, 6, 2]],
+    ],
+)
+def test_vector_metric(test_registry, values_per_engine):
+    num_engines = len(values_per_engine)
     c = prometheus_client.Counter(
         "vllm:spec_decode_num_accepted_tokens_per_pos",
         "Vector-like counter metric",
         labelnames=["position", "model", "engine_index"],
         registry=test_registry,
     )
-    for i in range(num_engines):
-        c.labels(position="0", model="llama", engine_index=str(i)).inc(10)
-        c.labels(position="1", model="llama", engine_index=str(i)).inc(5)
-        c.labels(position="2", model="llama", engine_index=str(i)).inc(1)
+    for i, values in enumerate(values_per_engine):
+        for pos, val in enumerate(values):
+            c.labels(position=str(pos), model="llama", engine_index=str(i)).inc(val)
 
     metrics = get_metrics_snapshot()
     assert len(metrics) == num_engines
@@ -121,32 +128,7 @@ def test_vector_metric(test_registry, num_engines):
     for m in metrics:
         assert isinstance(m, Vector)
         assert m.name == "vllm:spec_decode_num_accepted_tokens_per_pos"
-        assert m.values == [10, 5, 1]
+        assert m.values == values_per_engine[int(m.labels["engine_index"])]
         assert m.labels["model"] == "llama"
         assert m.labels["engine_index"] in engine_labels
         engine_labels.remove(m.labels["engine_index"])
-
-
-def test_vector_metric_per_label_max_pos(test_registry):
-    c = prometheus_client.Counter(
-        "vllm:spec_decode_num_accepted_tokens_per_pos",
-        "Vector-like counter metric",
-        labelnames=["position", "model", "engine_index"],
-        registry=test_registry,
-    )
-    c.labels(position="0", model="llama-small", engine_index="0").inc(8)
-    c.labels(position="1", model="llama-small", engine_index="0").inc(4)
-
-    c.labels(position="0", model="llama-large", engine_index="1").inc(12)
-    c.labels(position="1", model="llama-large", engine_index="1").inc(9)
-    c.labels(position="2", model="llama-large", engine_index="1").inc(6)
-    c.labels(position="3", model="llama-large", engine_index="1").inc(2)
-
-    metrics = {
-        m.labels["engine_index"]: m
-        for m in get_metrics_snapshot()
-        if isinstance(m, Vector)
-    }
-    assert len(metrics) == 2
-    assert metrics["0"].values == [8, 4]
-    assert metrics["1"].values == [12, 9, 6, 2]
