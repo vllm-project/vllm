@@ -787,6 +787,7 @@ steps:
 
 - label: ":computer: (CPU) Multimodal + Config"
   key: cpu-multimodal-config
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -893,6 +894,7 @@ steps:
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -904,6 +906,7 @@ steps:
 
 - label: ":computer: (CPU) Tool Parsers"
   key: cpu-tool-parsers
+  automatic_shard: true
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
