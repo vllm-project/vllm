@@ -54,10 +54,7 @@ fn dealer_input_stream(dealer: DealerSocket) -> impl Stream<Item = Result<Engine
 /// contains an unknown/unsupported request type.
 fn decode_request(message: ZmqMessage) -> Result<EngineInput> {
     let frames = message.into_vec();
-    if frames.is_empty() {
-        bail!("empty engine request message");
-    }
-    if frames.len() != 2 {
+    if frames.len() < 2 {
         bail!("invalid frame count for engine request: {}", frames.len());
     }
 
@@ -68,8 +65,10 @@ fn decode_request(message: ZmqMessage) -> Result<EngineInput> {
 
     let input = match request_type {
         EngineCoreRequestType::Add => {
-            let request: Box<EngineCoreRequest> = decode_msgpack(frames[1].as_ref())?;
-            EngineInput::Request(request)
+            // Large arrays, such as the prompt token ids of a long prompt,
+            // follow the payload in auxiliary frames.
+            let request = EngineCoreRequest::from_frames(&frames[1..])?;
+            EngineInput::Request(Box::new(request))
         }
         EngineCoreRequestType::Abort => {
             let request_ids: Vec<String> = decode_msgpack(frames[1].as_ref())?;
