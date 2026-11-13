@@ -418,6 +418,36 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+@torch.inference_mode()
+def test_top_k_per_row_decode_radix_neg_inf_cutoff() -> None:
+    """Masked (`-inf`) logits in the cutoff bin never yield garbage indices.
+
+    The radix final pass pads its sort buffer; real `-inf` candidates sort
+    below the padding, so padded slots reach the output and must carry `-1`.
+    """
+    set_random_seed(0)
+    top_k, num_columns, seq_len, num_finite = 2048, 16384, 3000, 2000
+    logits = torch.full((1, num_columns), float("-inf"), device="cuda")
+    finite_pos = torch.randperm(seq_len, device="cuda")[:num_finite]
+    logits[0, finite_pos] = torch.randn(num_finite, device="cuda")
+    seq_lens = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
+    indices = torch.full((1, top_k), -777, dtype=torch.int32, device="cuda")
+
+    torch.ops._C.top_k_per_row_decode(
+        logits, 1, seq_lens, indices, 1, logits.stride(0), logits.stride(1), top_k
+    )
+    torch.accelerator.synchronize()
+
+    row = indices[0]
+    valid = row[row != -1].long()
+    assert ((valid >= 0) & (valid < seq_len)).all()
+    assert valid.unique().numel() == valid.numel()
+    assert torch.isin(finite_pos, valid).all()
+
+
 @pytest.mark.parametrize(
     "batch_size,num_speculative_tokens,min_seq_len,max_seq_len",
     [
