@@ -12,6 +12,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import islice
 from operator import is_
 
 from vllm.v1.core.kv_cache_utils import (
@@ -25,20 +26,31 @@ from vllm.v1.core.kv_cache_utils import (
 
 @dataclass(slots=True)
 class _Session:
-    """The cached blocks of a session's latest request."""
+    """The cached blocks of a session's latest request, per KV cache group."""
 
-    # Per KV cache group, the blocks holding one `session_ref` for this
-    # session and the hash each had when the reference was taken.
+    # The blocks holding one `session_ref` for this session, and the hash
+    # each had when the reference was taken.
     blocks: list[list[KVCacheBlock]]
     keys: list[list[BlockHashWithGroupId]]
-    # Per lookup group, how many leading `blocks` are still cached under
-    # the request's hash for their position.
-    num_lookup_blocks: dict[int, int]
-    # `KVCacheSessions.epoch` at registration and at the last check of
-    # `num_lookup_blocks`.
-    epoch: int
-    lookup_epoch: int
+    # How many leading `blocks` were cached under the request's hash for
+    # their position; 0 for groups without a session lookup.
+    num_lookup_blocks: list[int]
     expires_at: float
+
+
+def _num_cached(
+    blocks: Sequence[KVCacheBlock],
+    keys: Sequence[BlockHashWithGroupId],
+    end: int | None = None,
+) -> int:
+    """Count the leading blocks, up to `end`, that were not evicted since
+    their hash was recorded in `keys`."""
+    num_cached = 0
+    for block, key in islice(zip(blocks, keys), end):
+        if block.block_hash is not key:
+            break
+        num_cached += 1
+    return num_cached
 
 
 class KVCacheSessions:
@@ -66,9 +78,6 @@ class KVCacheSessions:
         self.lookup_block_sizes = lookup_block_sizes
         # Ordered by expiry.
         self._sessions: OrderedDict[str, _Session] = OrderedDict()
-        # Bumped by BlockPool whenever a session-referenced block loses its
-        # hash; a session registered at the current epoch is intact.
-        self.epoch = 0
 
     def register(
         self,
@@ -79,43 +88,34 @@ class KVCacheSessions:
         """Make a request's blocks the session's retained prefix. Must be
         called before the blocks are freed."""
         old = self._sessions.pop(session_id, None)
-        intact = old is not None and old.epoch == self.epoch
-        session = _Session(
-            blocks=[],
-            keys=[],
-            num_lookup_blocks={},
-            epoch=self.epoch,
-            lookup_epoch=self.epoch,
-            expires_at=time.monotonic() + self.ttl,
-        )
+        session = _Session([], [], [], time.monotonic() + self.ttl)
         for group_id, blocks in enumerate(blocks_by_group):
             kept: list[KVCacheBlock] = []
             keys: list[BlockHashWithGroupId] = []
             num_lookup_blocks = 0
-            if intact:
-                assert old is not None
-                old_blocks = old.blocks[group_id]
-                if len(old_blocks) <= len(blocks) and all(map(is_, old_blocks, blocks)):
+            if old is not None:
+                old_blocks, old_keys = old.blocks[group_id], old.keys[group_id]
+                if (
+                    len(old_blocks) <= len(blocks)
+                    and all(map(is_, old_blocks, blocks))
+                    and _num_cached(old_blocks, old_keys) == len(old_blocks)
+                ):
                     # The turn extends the previous one: keep its references
                     # and only take new ones for the tail.
-                    kept, keys = old_blocks, old.keys[group_id]
-                    num_lookup_blocks = old.num_lookup_blocks.get(group_id, 0)
+                    kept, keys = old_blocks, old_keys
+                    num_lookup_blocks = old.num_lookup_blocks[group_id]
                     old.blocks[group_id] = old.keys[group_id] = []
-            num_kept = len(kept)
-            for block in blocks[num_kept:]:
+            for block in blocks[len(kept) :]:
                 if block.block_hash is not None:
                     block.session_ref += 1
                     kept.append(block)
                     keys.append(block.block_hash)
-            session.blocks.append(kept)
-            session.keys.append(keys)
 
             block_size = self.lookup_block_sizes.get(group_id)
-            if block_size is None:
-                continue
-            if num_lookup_blocks == num_kept:
-                # A block may also be cached under secondary hashes, so check
-                # that its own hash is the request's hash for its position.
+            if block_size is not None:
+                # A block can also be cached under a partial-prefix hash, so
+                # count only blocks cached under the request's hash for
+                # their position.
                 hashes = resolve_block_hashes(
                     block_hashes, self.hash_block_size, block_size
                 )
@@ -124,7 +124,10 @@ class KVCacheSessions:
                     num_lookup_blocks
                 ] == make_block_hash_with_group_id(hashes[num_lookup_blocks], group_id):
                     num_lookup_blocks += 1
-            session.num_lookup_blocks[group_id] = num_lookup_blocks
+
+            session.blocks.append(kept)
+            session.keys.append(keys)
+            session.num_lookup_blocks.append(num_lookup_blocks)
 
         if old is not None:
             self._release(old)
@@ -134,40 +137,29 @@ class KVCacheSessions:
 
     def get_blocks(
         self, session_id: str, block_hashes: Sequence[BlockHash]
-    ) -> list[Sequence[KVCacheBlock]] | None:
+    ) -> dict[int, list[KVCacheBlock]] | None:
         """Return, per KV cache group, the session's cached blocks that hold
         the start of a request with `block_hashes`, or None if it does not
         continue the session."""
         session = self._sessions.get(session_id)
         if session is None:
             return None
-        if session.lookup_epoch != self.epoch:
-            for group_id, num_lookup_blocks in session.num_lookup_blocks.items():
-                blocks, keys = session.blocks[group_id], session.keys[group_id]
-                for i in range(num_lookup_blocks):
-                    if blocks[i].block_hash is not keys[i]:
-                        session.num_lookup_blocks[group_id] = i
-                        break
-            session.lookup_epoch = self.epoch
-
-        found = None
-        for group_id, num_lookup_blocks in session.num_lookup_blocks.items():
+        found = {}
+        for group_id, block_size in self.lookup_block_sizes.items():
+            blocks, keys = session.blocks[group_id], session.keys[group_id]
             hashes = resolve_block_hashes(
-                block_hashes, self.hash_block_size, self.lookup_block_sizes[group_id]
+                block_hashes, self.hash_block_size, block_size
             )
-            num_blocks = min(num_lookup_blocks, len(hashes))
+            num_blocks = min(session.num_lookup_blocks[group_id], len(hashes))
+            if num_blocks == 0:
+                continue
             # Hashes are chained: a match at the last block implies a match
             # at every block before it.
-            if num_blocks and session.keys[group_id][
-                num_blocks - 1
-            ] == make_block_hash_with_group_id(hashes[num_blocks - 1], group_id):
-                blocks = session.blocks[group_id]
-                if found is None:
-                    found = [()] * len(session.blocks)
-                found[group_id] = (
-                    blocks if num_blocks == len(blocks) else blocks[:num_blocks]
-                )
-        return found
+            last_key = make_block_hash_with_group_id(hashes[num_blocks - 1], group_id)
+            if keys[num_blocks - 1] == last_key:
+                num_blocks = _num_cached(blocks, keys, num_blocks)
+                found[group_id] = blocks[:num_blocks]
+        return found or None
 
     def close(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)

@@ -15,7 +15,6 @@ from vllm.logger import init_logger
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_sessions import KVCacheSessions
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -172,8 +171,6 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
-        # Set by KVCacheManager when session retention is enabled.
-        self.sessions: KVCacheSessions | None = None
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -614,8 +611,6 @@ class BlockPool:
             return []
 
         if block.session_ref:
-            if self.sessions is not None:
-                self.sessions.epoch += 1
             # The cached content is gone; so is every session's claim on it.
             block.session_ref = 0
             if block.ref_cnt == 0 and block.prev_free_block is not None:

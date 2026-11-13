@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -222,8 +222,6 @@ class KVCacheManager:
                     if manager.supports_session_blocks and group.prefix_cacheable
                 },
             )
-            for manager in self.coordinator.single_type_managers:
-                manager.block_pool.sessions = self.sessions
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -275,7 +273,7 @@ class KVCacheManager:
 
     def _session_blocks(
         self, request: Request
-    ) -> Sequence[Sequence[KVCacheBlock]] | None:
+    ) -> Mapping[int, Sequence[KVCacheBlock]] | None:
         if self.sessions is None or request.session_id is None:
             return None
         return self.sessions.get_blocks(request.session_id, request.block_hashes)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
@@ -467,8 +467,8 @@ class KVCacheCoordinator(ABC):
     @staticmethod
     def _session_blocks_kwargs(
         manager_cls: type[SingleTypeKVCacheManager],
-        session_blocks: Sequence[Sequence[KVCacheBlock]] | None,
-    ) -> dict[str, Sequence[Sequence[KVCacheBlock]]]:
+        session_blocks: Mapping[int, Sequence[KVCacheBlock]] | None,
+    ) -> dict[str, Mapping[int, Sequence[KVCacheBlock]]]:
         if session_blocks is None or not manager_cls.supports_session_blocks:
             return {}
         return {"session_blocks": session_blocks}
@@ -478,7 +478,7 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_blocks: Sequence[Sequence[KVCacheBlock]] | None = None,
+        session_blocks: Mapping[int, Sequence[KVCacheBlock]] | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
         `num_uncached_common_prefix_tokens` (a shared prefix that a
@@ -534,7 +534,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_blocks: Sequence[Sequence[KVCacheBlock]] | None = None,
+        session_blocks: Mapping[int, Sequence[KVCacheBlock]] | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -599,7 +599,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_blocks: Sequence[Sequence[KVCacheBlock]] | None = None,
+        session_blocks: Mapping[int, Sequence[KVCacheBlock]] | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
@@ -799,7 +799,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_blocks: Sequence[Sequence[KVCacheBlock]] | None = None,
+        session_blocks: Mapping[int, Sequence[KVCacheBlock]] | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -945,7 +945,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-        session_blocks: Sequence[Sequence[KVCacheBlock]] | None = None,
+        session_blocks: Mapping[int, Sequence[KVCacheBlock]] | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """Like find_longest_cache_hit but evaluates each group independently.
 
