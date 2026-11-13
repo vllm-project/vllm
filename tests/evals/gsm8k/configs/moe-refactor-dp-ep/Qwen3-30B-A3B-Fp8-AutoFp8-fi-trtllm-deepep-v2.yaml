@@ -1,0 +1,7 @@
+model_name: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+accuracy_threshold: 0.88
+num_questions: 1319
+num_fewshot: 5
+# No --enforce-eager: DeepEP v2 only emits the worst-case padded decode layout
+# (psum_recv_per_rank) when cudagraphs are enabled.
+server_args: "--max-model-len 8192 --data-parallel-size 8 --enable-expert-parallel --all2all-backend deepep_v2 --moe-backend=flashinfer_trtllm"

@@ -211,7 +211,7 @@ def test_cuda_graph_replay_with_new_lengths():
 def _early_trigger_writer():
     """A PDL kernel that releases its dependents immediately, idles ~2 us,
     then writes one token's K/V into the cache, like
-    ``qk_norm_rope_cache(launch_dependents=True)``."""
+    `qk_norm_rope_cache(launch_dependents=True)`."""
     import cutlass
     import cutlass.cute as cute
     from cutlass import Int32, Int64

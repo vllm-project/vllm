@@ -63,6 +63,33 @@ vllm serve <MODEL> \
 !!! note
     Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
 
+#### UCX backend parameters
+
+`kv_connector_extra_config.ucx_backend_params` passes extra init parameters to NIXL's UCX backend. Values are strings. For example, NIXL creates UCX with `ucx_error_handling_mode=peer` by default; UCX then uses only transports that can detect peer failure, which can exclude intra-node GPU transports such as `rocm_ipc`. To trade that error handling for those transports:
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector":"NixlConnector",
+    "kv_role":"kv_both",
+    "kv_connector_extra_config":{"ucx_backend_params":{"ucx_error_handling_mode":"none"}}
+  }'
+```
+
+#### Extensible KV cache
+
+The extensible KV cache (`--enable-extensible-kv-cache`) maps the KV cache with the driver's virtual memory API. Within a host, UCX can only reach that memory over NVLink through a CUDA fabric handle, which takes an IMEX channel; without one it falls back to TCP. So with NIXL on device memory and no channel, vLLM leaves the extensible KV cache off.
+
+To use both within a host, make a channel available to every prefill and decode process, for example:
+
+```bash
+major=$(awk '$2 == "nvidia-caps-imex-channels" {print $1}' /proc/devices)
+mkdir -p /dev/nvidia-caps-imex-channels
+mknod /dev/nvidia-caps-imex-channels/channel0 c "$major" 0
+```
+
+Check the transport with `UCX_PROTO_INFO=y`: KV reads should show `cuda_ipc`, not `tcp`. Transfers across hosts use RDMA and need no channel: pass `--enable-extensible-kv-cache` to keep the feature on.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration

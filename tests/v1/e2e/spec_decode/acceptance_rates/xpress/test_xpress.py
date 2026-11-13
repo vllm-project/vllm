@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+
 import pytest
 
 from vllm import SamplingParams
@@ -18,7 +20,7 @@ QWEN3_XPRESS = ArgsTest(
     expected_gsm8k_accuracy=0.80,
     enforce_eager=False,
     max_model_len=4096,
-    gpu_memory_utilization=0.92,
+    gpu_memory_utilization=None,
     method="dflash",
     # XPress sizes a [max_num_seqs * block, vocab] scratch buffer, so it wants a
     # smaller batch than the 100 the draft-model path captures with.
@@ -34,7 +36,19 @@ QWEN3_XPRESS = ArgsTest(
 )
 
 
-@pytest.mark.parametrize("args", [QWEN3_XPRESS], ids=["qwen3_xpress"])
+# Adaptive verification shortens the acceptance length a bit,
+# but GSM8K performance should stay constant.
+QWEN3_XPRESS_AV = replace(
+    QWEN3_XPRESS,
+    enable_adaptive_verification=True,
+    expected_acceptance_rate=0.375,
+    expected_acceptance_len=6.5,
+)
+
+
+@pytest.mark.parametrize(
+    "args", [QWEN3_XPRESS, QWEN3_XPRESS_AV], ids=["qwen3_xpress", "qwen3_xpress_av"]
+)
 def test_xpress_correctness_and_acceptance_rate(args: ArgsTest, vllm_runner):
     """Guard GSM8K accuracy and acceptance metrics for XPress models."""
     assert_draft_model_correctness(args, vllm_runner)

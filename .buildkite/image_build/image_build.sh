@@ -203,6 +203,35 @@ resolve_parent_commit() {
     fi
 }
 
+resolve_merge_base_cache_commit() {
+    # PR builds: the commit the PR branched from, whose build pushed
+    # vllm-ci-test-cache:<commit>. A cache source only (see ci.hcl), unlike
+    # the VLLM_MERGE_BASE_COMMIT build arg, which would change the cache key.
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+        return 0
+    fi
+    if [[ -n "${VLLM_CACHE_MERGE_BASE_COMMIT:-}" ]]; then
+        echo "Using provided VLLM_CACHE_MERGE_BASE_COMMIT: ${VLLM_CACHE_MERGE_BASE_COMMIT}"
+        return 0
+    fi
+    local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
+    local base_ref="refs/remotes/vllm-cache-base/${base_branch}"
+    git fetch --quiet --no-tags --depth=200 origin \
+        "+refs/heads/${base_branch}:${base_ref}" 2>/dev/null || true
+    VLLM_CACHE_MERGE_BASE_COMMIT=$(git merge-base HEAD "${base_ref}" 2>/dev/null || echo "")
+    if [[ -z "${VLLM_CACHE_MERGE_BASE_COMMIT}" ]]; then
+        git fetch --quiet --no-tags --deepen=1000 origin \
+            "+refs/heads/${base_branch}:${base_ref}" 2>/dev/null || true
+        VLLM_CACHE_MERGE_BASE_COMMIT=$(git merge-base HEAD "${base_ref}" 2>/dev/null || echo "")
+    fi
+    if [[ -n "${VLLM_CACHE_MERGE_BASE_COMMIT}" ]]; then
+        echo "Computed merge base with ${base_branch} for cache fallback: ${VLLM_CACHE_MERGE_BASE_COMMIT}"
+        export VLLM_CACHE_MERGE_BASE_COMMIT
+    else
+        echo "Could not determine merge base with ${base_branch}; skipping that cache source"
+    fi
+}
+
 print_bake_config() {
     echo "--- :page_facing_up: Resolved bake configuration"
     # Write to a temp directory to avoid polluting the repo root (which is the
@@ -215,6 +244,39 @@ print_bake_config() {
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
     echo "--- :arrow_down: Uploading bake config to Buildkite"
     (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
+}
+
+is_registry_rate_limited() {
+    # BuildKit's final error, e.g. "ERROR: failed to solve: failed to push
+    # public.ecr.aws/...: toomanyrequests: Rate exceeded". Only that line is
+    # checked, so a 429 printed by a RUN step does not count.
+    grep -qiE '^ERROR: .*failed to solve: .*(toomanyrequests|too many requests)' "$1"
+}
+
+bake_with_rate_limit_retry() {
+    # A registry throttle on push (or on a base image pull) is retried after a
+    # backoff. Each retry reruns the same bake against the same builder, whose
+    # local cache still holds every layer, so it re-exports and re-pushes
+    # without recompiling.
+    local max_attempts="${IMAGE_BUILD_RATE_LIMIT_ATTEMPTS:-4}"
+    local base_delay="${IMAGE_BUILD_RATE_LIMIT_BASE_DELAY:-60}"
+    local log_file="${BUILD_TMP_DIR}/bake.log"
+    local attempt=1 status delay
+
+    while true; do
+        status=0
+        "$@" 2>&1 | tee "${log_file}" || status=$?
+        if [[ "${status}" -eq 0 ]]; then
+            return 0
+        fi
+        if ((attempt >= max_attempts)) || ! is_registry_rate_limited "${log_file}"; then
+            return "${status}"
+        fi
+        delay=$((base_delay * 2 ** (attempt - 1) + RANDOM % (base_delay + 1)))
+        attempt=$((attempt + 1))
+        echo "--- :repeat: Registry rate limit; retrying bake in ${delay}s (attempt ${attempt}/${max_attempts}, built layers are cached)"
+        sleep "${delay}"
+    done
 }
 
 record_buildkit_trace() (
@@ -353,6 +415,7 @@ setup_buildx_builder
 
 resolve_parent_commit
 export PARENT_COMMIT
+resolve_merge_base_cache_commit
 
 print_bake_config
 
@@ -361,7 +424,7 @@ BUILD_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${BUILD_TMP_DIR}"' EXIT
 BUILD_METADATA_FILE="${BUILD_TMP_DIR}/build-metadata.json"
 BUILD_STATUS=0
-docker --debug buildx bake "${BAKE_FILES[@]}" \
+bake_with_rate_limit_retry docker --debug buildx bake "${BAKE_FILES[@]}" \
     --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
 
 record_buildkit_trace "${BUILD_METADATA_FILE}" || true

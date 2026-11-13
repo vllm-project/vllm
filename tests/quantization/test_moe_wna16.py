@@ -172,7 +172,6 @@ def test_compressed_tensors_nfirst_weights_pass_through_for_triton():
         backend=WNA16MoEBackend.TRITON,
         layer=torch.nn.Module(),
         quant_config=quant_config,
-        input_dtype=None,
         w13=w13,
         w2=w2,
         w13_scale=w13_scale,
@@ -202,7 +201,6 @@ def test_gptq_nfirst_weights_pass_through_for_triton():
         backend=WNA16MoEBackend.TRITON,
         layer=torch.nn.Module(),
         quant_config=quant_config,
-        input_dtype=None,
         w13=w13,
         w2=w2,
         w13_scale=w13_scale,
@@ -384,8 +382,9 @@ def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
     assert method.moe_kernel is not None
     assert set(layer.weight_schemas) == {"w13", "w2"}
     assert set(layer.humming_configs) == {"w13", "w2"}
-    assert not hasattr(layer, "w13_weight_packed")
-    assert not hasattr(layer, "w2_weight_packed")
+    # The converted weights are written to the loaded params (one object each).
+    assert layer.w13_weight_packed is layer.w13_weight
+    assert layer.w2_weight_packed is layer.w2_weight
     assert layer.w13_weight.dtype is torch.int32
     assert layer.w2_weight.dtype is torch.int32
 
@@ -444,7 +443,7 @@ def test_xpu_platform_supports_moe_wna16():
 
 
 def _channelwise_int4_args() -> QuantizationArgs:
-    """A per-channel int4 checkpoint, which leaves ``group_size`` unset."""
+    """A per-channel int4 checkpoint, which leaves `group_size` unset."""
     args = QuantizationArgs(
         num_bits=4,
         type=QuantizationType.INT,
@@ -495,7 +494,7 @@ def test_wna16_oracle_accepts_unset_group_size(backend):
 def test_compressed_tensors_wna16_moe_marlin_prep_with_unset_group_size():
     """Load a per-channel checkpoint through the Marlin path end to end.
 
-    ``__init__`` and Marlin weight prep read ``group_size`` independently, so
+    `__init__` and Marlin weight prep read `group_size` independently, so
     both have to normalise the unset value. The post-repack shapes prove prep
     ran with the Marlin K/N rather than merely returning something.
     """
@@ -553,9 +552,9 @@ def test_compressed_tensors_wna16_moe_marlin_prep_with_unset_group_size():
 def test_moe_wna16_w13_qzeros_shard_split_int8_asym_gptq(monkeypatch):
     """8-bit asymmetric GPTQ MoE must split w13 zero-points by pack factor.
 
-    ``w13_qzeros`` is packed along the intermediate dim by ``bit8_pack_factor``,
+    `w13_qzeros` is packed along the intermediate dim by `bit8_pack_factor`,
     so the gate/up (w1/w3) boundary in the weight loader is
-    ``shard_size // bit8_pack_factor``. Hardcoding ``shard_size // 2`` only
+    `shard_size // bit8_pack_factor`. Hardcoding `shard_size // 2` only
     holds for 4-bit and raises a shape mismatch when loading an 8-bit
     (unpacked) checkpoint.
     """

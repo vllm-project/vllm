@@ -16,6 +16,10 @@ pytestmark = pytest.mark.cpu_model
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
+if not HAS_TRITON:
+    # Without Triton, CPUs run the standalone CPU model runner, which does not
+    # support speculative decoding.
+    pytest.skip("CPU speculative decoding needs triton-cpu", allow_module_level=True)
 
 # Bound the KV cache so the run does not scale with host memory.
 os.environ.setdefault("VLLM_CPU_KVCACHE_SPACE", "1")
@@ -27,10 +31,14 @@ SP = SamplingParams(max_tokens=48, temperature=0, logprobs=NUM_LOGPROBS)
 # Repetitive prompts so the ngram proposer finds matches and actually drafts;
 # without hits the run is indistinguishable from plain decoding.
 PROMPTS = [
-    "The capital of France is Paris. The capital of Italy is Rome. "
-    "The capital of Spain is Madrid. The capital of France is",
-    "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n\n"
-    "def mul(a, b):\n    return",
+    (
+        "The capital of France is Paris. The capital of Italy is Rome. "
+        "The capital of Spain is Madrid. The capital of France is"
+    ),
+    (
+        "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n\n"
+        "def mul(a, b):\n    return"
+    ),
     "one two three four five one two three four five one two three four",
 ]
 
@@ -106,7 +114,7 @@ SMOKE_PROMPTS = [
 ]
 SMOKE_SP = SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True)
 
-# Methods routed to the V2 runner, using the same target/draft pairs as the GPU
+# Model-based speculators, using the same target/draft pairs as the GPU
 # suite. MTP needs no separate draft checkpoint: its speculator layer is
 # trained jointly with, and shipped inside, the target model's own weights.
 SMOKE_CONFIGS = [
@@ -145,18 +153,11 @@ SMOKE_CONFIGS = [
 MIN_ACCEPTANCE_LEN = 1.5
 
 
-@pytest.mark.skipif(
-    not HAS_TRITON, reason="the V2 runner needs triton-cpu, which CI builds"
-)
 @pytest.mark.parametrize("model,speculative_config", SMOKE_CONFIGS)
-def test_v2_speculator_smoke(model: str, speculative_config: dict):
+def test_speculator_smoke(model: str, speculative_config: dict):
     """Gates that drafts are accepted often enough for speculation to pay off."""
     llm = _make_llm(model=model, speculative_config=speculative_config)
     try:
-        assert llm.llm_engine.vllm_config.use_v2_model_runner, (
-            f"{speculative_config['method']} fell back to the V1 runner; "
-            "this test is meant to cover the V2 path"
-        )
         llm.generate(SMOKE_PROMPTS, SMOKE_SP)
         acceptance = compute_acceptance_len(llm.get_metrics())
         assert acceptance >= MIN_ACCEPTANCE_LEN, (
