@@ -115,7 +115,7 @@ class BackBuild:
     ratio: int  # 0: window only; 1 / 2: top-k over a compressed cache
     timeline: bool = False
     tuned: bool = False  # a tuned build's paths (``layer.MonoBuild.tuned``)
-    plain: bool = False  # plain fp8 KV rows and fp8 q (`stage_split_plain`)
+    plain_fp8_kv: bool = False  # plain fp8 KV rows and fp8 q (`stage_split_plain`)
 
 
 def plus(t0, v):
@@ -198,7 +198,7 @@ def key_rec(c, t, k):
     off = slot % blk
     page = base + fx.Int64(b) * stride
     z = a["zrec"]
-    if const_expr(c["plain"]):
+    if const_expr(c["plain_fp8_kv"]):
         # a plain row has no scales: the zero record's address stands in
         return ok.select(page + fx.Int64(off * PLAIN_ROW), z), z, ok
     data = ok.select(page + fx.Int64(off * DATA), z)
@@ -850,7 +850,7 @@ def stage_combine(c, unit):
         lsum = lsum + ls[cc] * wgt
         tot = [tot[e] + vs[cc][e] * wgt for e in range(8)]
     inv = fx.Float32(1.0) / lsum
-    if const_expr(c["plain"]):
+    if const_expr(c["plain_fp8_kv"]):
         # the values' per-tensor scale (`stage_split_plain`)
         inv = inv * ld_f32(a["kv_scale"], 0)
     o = [bf16_round(tot[e] * inv) for e in range(8)]
@@ -1042,7 +1042,7 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "d": d,
         "ratio": key.ratio,
         "tuned": key.tuned,
-        "plain": key.plain,
+        "plain_fp8_kv": key.plain_fp8_kv,
         "mb": Mailbox(tag),
         "nchunk": back_plan(key)[0],
         "sl": {"q": spl.q.ptr, "raw": spl.raw.ptr, "p": spl.p.ptr, "st": spl.st.ptr},
@@ -1111,7 +1111,7 @@ def run_back(c, key, bid):
     _, n_split, n_comb, COMB0, WOA0, WOB0, early_wob = back_plan(key)
     stamp(c, 0)
     for unit in range(first_task(bid, 0), n_split, BLOCKS):
-        if const_expr(c["plain"]):
+        if const_expr(c["plain_fp8_kv"]):
             stage_split_plain(c, unit)
         else:
             stage_split(c, unit)

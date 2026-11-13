@@ -103,7 +103,7 @@ class MonoBuild:
     generic: bool = False
     # plain fp8 KV rows (--kv-cache-dtype fp8_e4m3) and fp8 q, with fp8 MFMAs in
     # the attention (`back.stage_split_plain`), instead of fp8_ds_mla records
-    plain_kv: bool = False
+    plain_fp8_kv: bool = False
 
     @property
     def tuned(self) -> bool:
@@ -165,7 +165,7 @@ def _front_key(key: MonoBuild):
         key.timeline,
         key.swa_width,
         key.tuned_front,
-        key.plain_kv,
+        key.plain_fp8_kv,
     )
 
 
@@ -181,14 +181,14 @@ def _symbol_params(key: MonoBuild) -> dict:
         out["g"] = key.ug_groups
     if key.swa_width != WINDOW:
         out["w"] = key.swa_width
-    if key.plain_kv:
+    if key.plain_fp8_kv:
         out["kv"] = "fp8"
     return out
 
 
 def _back_key(key: MonoBuild):
     return mb_back.BackBuild(
-        key.tokens, key.tp, key.ratio, key.timeline, key.tuned, key.plain_kv
+        key.tokens, key.tp, key.ratio, key.timeline, key.tuned, key.plain_fp8_kv
     )
 
 

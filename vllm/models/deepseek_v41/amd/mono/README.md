@@ -26,7 +26,7 @@ new, reading vLLM's KV records and weights as loaded.
   The paths interleave freely (same tensors at the layer boundary).
 - Steps: decode only (FULL graph or eager), M <= 48 rows (8 requests x 6
   DSpark tokens), TP2 / TP4 / TP8 (gfx950), `fp8_ds_mla` KV records (ROCm) or,
-  on gfx950, plain fp8 rows (`--kv-cache-dtype fp8_e4m3`, `MonoBuild.plain_kv`),
+  on gfx950, plain fp8 rows (`--kv-cache-dtype fp8_e4m3`, `MonoBuild.plain_fp8_kv`),
   text tokens (the routing bias is `e_score_correction_bias`).
 - Tuned builds (`MonoBuild.tuned`): the target's compress-ratio-2 layers at TP2
   on gfx950 compile paths tuned for those step widths, bit-exact against the

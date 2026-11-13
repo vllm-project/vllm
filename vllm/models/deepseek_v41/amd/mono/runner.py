@@ -213,7 +213,7 @@ class DSV41MonoLayer:
         ug_groups: int = 2,
         swa_width: int = WINDOW,
         generic: bool = False,
-        plain_kv: bool = False,
+        plain_fp8_kv: bool = False,
     ):
         _ensure_writable_flydsl_cache()
         from .common.peer_memory import PeerBuffer
@@ -234,16 +234,16 @@ class DSV41MonoLayer:
         self.experts, self.topk, self.ug_groups = experts, topk, ug_groups
         self.swa_width = swa_width
         self.generic = generic  # every build generic (``MonoBuild.generic``)
-        # plain fp8 KV rows and fp8 q (``MonoBuild.plain_kv``): every layer of
+        # plain fp8 KV rows and fp8 q (``MonoBuild.plain_fp8_kv``): every layer of
         # a model has the same cache dtype
-        assert not (plain_kv and GFX942), "plain fp8 KV needs gfx950"
-        self.plain_kv = plain_kv
+        assert not (plain_fp8_kv and GFX942), "plain fp8 KV needs gfx950"
+        self.plain_fp8_kv = plain_fp8_kv
         self.d = Dims(tp)
         dev = self.device = torch.device(device)
         self._scratch: dict[tuple[int, bool, bool], torch.Tensor] = {}
         # [epoch, -, -, -, a mark per CTA, the MoE's counters]
         self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=dev)
-        # K1's rotated q, K2's input: bf16 rows, or with plain_kv e4m3 rows of
+        # K1's rotated q, K2's input: bf16 rows, or with plain_fp8_kv e4m3 rows of
         # H x 512 bytes a token at the start of the same buffer
         self.q = torch.zeros(
             MAX_TOKENS, self.d.heads, HEAD_DIM, dtype=torch.bfloat16, device=dev
@@ -321,7 +321,7 @@ class DSV41MonoLayer:
                 ug_groups=self.ug_groups,
                 swa_width=self.swa_width,
                 generic=self.generic,
-                plain_kv=self.plain_kv,
+                plain_fp8_kv=self.plain_fp8_kv,
             )
         return self._builds[key]
 
@@ -340,7 +340,7 @@ class DSV41MonoLayer:
                 ug_groups=self.ug_groups,
                 swa_width=self.swa_width,
                 generic=self.generic,
-                plain_kv=self.plain_kv,
+                plain_fp8_kv=self.plain_fp8_kv,
             )
             # On gfx942, keylist.launch writes an index source's keys between
             # vLLM's indexer and K2 (forward), so its K2 is the one without
@@ -422,10 +422,10 @@ class DSV41MonoLayer:
         assert (
             swa_indices.stride(0) == self.swa_width and swa_cache.dtype == torch.uint8
         )
-        rec = PLAIN_ROW if self.plain_kv else 584
+        rec = PLAIN_ROW if self.plain_fp8_kv else 584
         assert swa_cache.shape[-1] == rec and swa_cache.stride(1) == rec
         swa_block = swa_cache.shape[1]
-        if self.plain_kv:
+        if self.plain_fp8_kv:
             assert a.kv_scale is not None and a.q_scale is not None
             assert a.q_scale_inv is not None
             kv_scale, q_scale, q_scale_inv = a.kv_scale, a.q_scale, a.q_scale_inv

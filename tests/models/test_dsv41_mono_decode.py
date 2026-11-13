@@ -106,9 +106,9 @@ def run(monkeypatch):
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
 
-        def pick(device, draft=None, plain_kv=False):
+        def pick(device, draft=None, plain_fp8_kv=False):
             runner.draft = draft
-            runner.plain_kv = plain_kv
+            runner.plain_fp8_kv = plain_fp8_kv
             return runner
 
         monkeypatch.setattr(md, "_mono_runner", pick)
@@ -371,7 +371,7 @@ def test_plain_fp8_kv_layers(monkeypatch, layer, path):
     mono = md.MonoDecodeLayer.create(layer, _config(cache_dtype="fp8_e4m3"))
     got = None if mono is None else "ffn" if mono.ffn_only else "whole"
     assert got == path
-    assert mono.plain_kv
+    assert mono.plain_fp8_kv
 
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
@@ -587,11 +587,11 @@ def test_gfx942_layers(monkeypatch, layer, kind):
 
 def test_gfx942_plain_fp8_kv_takes_ffn_launch(monkeypatch):
     """Plain fp8 rows are served on gfx950 only: on gfx942 such a layer keeps
-    vLLM's attention and runs the FFN launch, on a runner without plain_kv."""
+    vLLM's attention and runs the FFN launch, on a runner without plain_fp8_kv."""
     _deployment(monkeypatch, cdna=3, tp=4)
     layer = _decoder_layer(kv_cache_dtype="fp8_e4m3")
     mono = md.MonoDecodeLayer.create(layer, _config(cache_dtype="fp8_e4m3"))
-    assert _kind(mono) == "ffn top 6" and not mono.plain_kv
+    assert _kind(mono) == "ffn top 6" and not mono.plain_fp8_kv
 
 
 def test_gfx942_tp2_runs_vllm_path(monkeypatch):

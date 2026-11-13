@@ -116,7 +116,7 @@ class FrontBuild:
     tuned: bool = False
     # plain fp8 KV rows (`plan.PLAIN_ROW`) and fp8 q, instead of fp8_ds_mla
     # records and bf16 q
-    plain: bool = False
+    plain_fp8_kv: bool = False
 
 
 def plus(t0, v):
@@ -431,7 +431,7 @@ def stage_qkv(c, t):
         publish(c, c["qrdy"], t, flag_stride(c["S"]))
     # kv: this thread's pair (2 tt, 2 tt + 1)
     kn = [bf16_round((xk[j] * rk) * kw[j]) for j in range(2)]
-    if const_expr(c["plain"]):
+    if const_expr(c["plain_fp8_kv"]):
         store_plain_row(c, kn, cs, sn, slot, mine, tt)
     else:
         e0 = bf16_round(kn[0] * cs - kn[1] * sn)
@@ -555,7 +555,7 @@ def stage_wqb(c, task0, bops, t0, n, rope, settle=False):
         cs, sn = rope
         e0 = is_rope.select(v0 * cs - v1 * sn, v0)
         e1 = is_rope.select(v0 * sn + v1 * cs, v1)
-        if const_expr(c["plain"]):
+        if const_expr(c["plain_fp8_kv"]):
             # vLLM's plain path hands its attention e4m3 q: the fp32 RoPE
             # output times q_scale_inv, saturated. A q row is [H x 512] bytes;
             # an even thread stores its pair and the next thread's.
@@ -616,7 +616,7 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "ratio": key.ratio,
         "swa_width": key.swa_width,
         "tuned": key.tuned,
-        "plain": key.plain,
+        "plain_fp8_kv": key.plain_fp8_kv,
         "ldbf": lambda ptr, i: fx.Float32(
             fx.BFloat16(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.bf16))
         ),
