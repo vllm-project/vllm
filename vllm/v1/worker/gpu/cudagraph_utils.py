@@ -87,6 +87,10 @@ class BatchExecutionDescriptor:
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
     num_ubatches: int = 1
+    # Upper bound on every request's context length (seq_len). A FULL graph is
+    # captured with this as max_seq_len (max_model_len when None), so host-side
+    # choices made from max_seq_len at capture hold for every replay.
+    max_seq_len: int | None = None
 
 
 def make_cudagraph_stats(
@@ -120,11 +124,13 @@ def _is_compatible(
     num_active_loras: int,
     max_query_len: int | None,
     num_ubatches: int,
+    max_seq_len: int | None,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
     # desc.max_query_len=None means the graph does not constrain query length; a
-    # caller that does not track max_query_len must not match one that does
+    # caller that does not track max_query_len must not match one that does;
+    # likewise for desc.max_seq_len and the context length.
     # A graph captured for N microbatches can only serve a batch split N ways.
     return (
         (
@@ -134,6 +140,10 @@ def _is_compatible(
         and (
             desc.max_query_len is None
             or (max_query_len is not None and desc.max_query_len >= max_query_len)
+        )
+        and (
+            desc.max_seq_len is None
+            or (max_seq_len is not None and desc.max_seq_len >= max_seq_len)
         )
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
@@ -149,6 +159,29 @@ def has_compiled_submodule(model: nn.Module) -> bool:
         and not getattr(m, "do_not_compile", True)
         for m in model.modules()
     )
+
+
+def get_cudagraph_seq_len_bounds(
+    model: nn.Module, vllm_config: VllmConfig
+) -> list[int]:
+    """Context-length bounds to capture extra FULL decode graphs for.
+
+    A module declares one by setting `cudagraph_seq_len_bound`: when the
+    attention metadata's `max_seq_len` is at most that bound, its forward
+    skips work, and the skip is safe to capture in a FULL graph because such a
+    graph replays only for batches within its `max_seq_len`.
+    """
+    parallel_config = vllm_config.parallel_config
+    if (
+        not vllm_config.compilation_config.cudagraph_specialize_seq_len
+        or parallel_config.prefill_context_parallel_size > 1
+        or parallel_config.decode_context_parallel_size > 1
+    ):
+        return []
+    max_model_len = vllm_config.model_config.max_model_len
+    bounds = {getattr(m, "cudagraph_seq_len_bound", None) for m in model.modules()}
+    # The default graphs are captured with max_model_len already.
+    return sorted(b for b in bounds if b is not None and b < max_model_len)
 
 
 class CudaGraphManager:
@@ -173,6 +206,7 @@ class CudaGraphManager:
         varlen_decode: bool = False,
         ubatch_runner: "UBatchRunner | None" = None,
         decode_request_sizes: Sequence[int] | None = None,
+        seq_len_bounds: Sequence[int] = (),
     ):
         self.vllm_config = vllm_config
         self.decode_request_sizes = decode_request_sizes
@@ -222,6 +256,11 @@ class CudaGraphManager:
         self._decode_descs: dict[
             tuple[int, int, int], list[BatchExecutionDescriptor]
         ] = {}
+        # Uniform decode descriptor -> its copies bounded on the context length,
+        # tightest bound first (see `_add_seq_len_bounded_graphs`).
+        self._bounded_descs: dict[
+            BatchExecutionDescriptor, list[BatchExecutionDescriptor]
+        ] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
@@ -232,6 +271,7 @@ class CudaGraphManager:
         self.breakable_cg_runner: BreakableCUDAGraphWrapper | None = None
 
         self._init_candidates()
+        self.seq_len_bounds = self._add_seq_len_bounded_graphs(seq_len_bounds)
 
     def _build_lora_dispatch_map(self) -> tuple[dict[int, int], int]:
         """Precompute actual num_active_loras -> effective captured case.
@@ -425,6 +465,39 @@ class CudaGraphManager:
                         self._candidates.setdefault(key, []).extend(matching)
                     current_range_start = num_tokens + 1
 
+    def _add_seq_len_bounded_graphs(self, bounds: Sequence[int]) -> tuple[int, ...]:
+        """Add a copy of each FULL decode graph per context-length bound.
+
+        Mixed graphs replay prefills and DBO graphs split the batch, so neither
+        gets copies. A token-keyed graph's copies go first in its `_candidates`
+        lists; a uniform decode graph's are found through `_bounded_descs`.
+        Returns the bounds that have graphs.
+        """
+        bounds = tuple(sorted(bounds))
+        bounded = {
+            desc: [replace(desc, max_seq_len=b) for b in bounds]
+            for desc in self._capture_descs.get(CUDAGraphMode.FULL, [])
+            if desc.num_ubatches == 1
+            and (desc.uniform_token_count is not None or desc.max_query_len is not None)
+        }
+        if not bounds or not bounded:
+            return ()
+        # Captured after the default graphs, which memory profiling samples.
+        self._capture_descs[CUDAGraphMode.FULL].extend(
+            itertools.chain.from_iterable(bounded.values())
+        )
+        # dispatch() takes the first compatible candidate: the tightest bound
+        # first, the default graph last.
+        self._bounded_descs = bounded
+        for candidates in self._candidates.values():
+            candidates[:0] = [b for d in candidates if d in bounded for b in bounded[d]]
+        logger.info_once(
+            "Capturing %d extra FULL decode CUDA graphs for context lengths <= %s.",
+            sum(map(len, bounded.values())),
+            bounds,
+        )
+        return bounds
+
     @property
     def dp_size(self) -> int:
         # Not cached: elastic EP rewrites parallel_config in place on scale.
@@ -563,6 +636,7 @@ class CudaGraphManager:
         num_active_loras: int,
         max_query_len: int | None = None,
         num_ubatches: int = 1,
+        max_seq_len: int | None = None,
     ) -> BatchExecutionDescriptor:
         """Find the graph to run a batch with, else an eager descriptor.
 
@@ -570,7 +644,11 @@ class CudaGraphManager:
         length that covers `num_tokens`, which may be padded (e.g. to the DP
         maximum), if that graph holds its requests. Other batches, and decode
         batches no decode graph takes, take the smallest compatible token-keyed
-        graph.
+        graph. A graph bounded on the context length goes before the one it
+        copies.
+
+        `max_seq_len` is an upper bound on every request's context length;
+        None keeps the batch out of graphs bounded on it.
         """
         effective_loras = self._resolve_effective_loras(num_active_loras)
         if self._graphs_captured and num_tokens > 0:
@@ -581,7 +659,12 @@ class CudaGraphManager:
                 )
                 n = cdiv(num_tokens, uniform_token_count)
                 if n < len(decode_descs):
-                    candidates = [decode_descs[n], *candidates]
+                    decode_desc = decode_descs[n]
+                    candidates = [
+                        *self._bounded_descs.get(decode_desc, ()),
+                        decode_desc,
+                        *candidates,
+                    ]
             for desc in candidates:
                 if _is_compatible(
                     desc,
@@ -591,6 +674,7 @@ class CudaGraphManager:
                     effective_loras,
                     max_query_len,
                     num_ubatches,
+                    max_seq_len,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -644,6 +728,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
         ubatch_runner: "UBatchRunner | None" = None,
+        seq_len_bounds: Sequence[int] = (),
     ):
         super().__init__(
             vllm_config,
@@ -653,6 +738,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
             ubatch_runner=ubatch_runner,
+            seq_len_bounds=seq_len_bounds,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -806,6 +892,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len or desc.uniform_token_count,
+                max_seq_len=desc.max_seq_len,
                 pcp_manager=pcp_manager,
             )
 
@@ -898,6 +985,7 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
     max_query_len: int | None = None,
+    max_seq_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
     slot_mappings_buffer: torch.Tensor | None = None,
 ) -> AttentionState:
@@ -906,7 +994,11 @@ def prepare_inputs_to_capture(
         # even when the dummy batch distributes one token to each request.
         max_query_len = num_tokens
     input_batch = InputBatch.make_dummy(
-        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+        num_reqs,
+        num_tokens,
+        input_buffers,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
     )
     if pcp_manager is not None:
         input_batch = pcp_manager.prepare_inputs_for_capture_or_profile(input_batch)
