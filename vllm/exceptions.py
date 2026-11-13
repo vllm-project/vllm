@@ -56,6 +56,10 @@ class VLLMValidationError(VLLMClientError):
         return f"{base} ({', '.join(extras)})" if extras else base
 
 
+class PromptUpdateMismatchError(VLLMValidationError):
+    """Raised when a multi-modal item has no matching placeholder in the prompt."""
+
+
 class VLLMNotFoundError(VLLMClientError):
     """vLLM-specific NotFoundError."""
 

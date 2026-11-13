@@ -32,7 +32,9 @@ from triton_kernels.testing import assert_close
 
 from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
+    _TK38_SCATTER_COMBINE,
     _sm12x_block_m,
+    masked_moe_sum,
     triton_kernel_moe_forward,
 )
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
@@ -540,3 +542,68 @@ def test_make_routing_data_tk38_matches_reference(n_tokens, n_experts, topk):
     assert torch.equal(routing.gate_scal, weights[order])
     assert routing.n_expts_act == topk
     assert routing.n_valid == flat.numel()
+
+
+requires_rdna_scatter_combine = pytest.mark.skipif(
+    not _TK38_SCATTER_COMBINE, reason="scatter + topk-sum combine is RDNA-only"
+)
+
+
+@requires_rdna_scatter_combine
+@pytest.mark.parametrize("num_token", [1, 33, 512])
+@pytest.mark.parametrize("use_expert_map", [False, True])
+def test_tk38_scatter_combine_matches_index_add(
+    num_token, use_expert_map, monkeypatch, workspace_init
+):
+    """The scatter + topk-sum combine must match the index_add combine,
+    including the -1 (non-local) slots of an expert map."""
+    from vllm.model_executor.layers.fused_moe.experts import (
+        gpt_oss_triton_kernels_moe as gptoss_moe,
+    )
+
+    # test_equiv leaves its SM12x is_persistent constraint set on gfx12
+    opt_flags.reset_opt_flags_constraints()
+    M, E, topk = num_token, 32, ModelConfig.experts_per_token
+    K, N = ModelConfig.hidden_size, ModelConfig.intermediate_size
+    (*_, x_tri, w1_tri, w2_tri, exp_data_tri, w1_bias_tri, w2_bias_tri, pc1, pc2) = (
+        init_compute_data(M, K, N, E, "bf16", "mx4", num_warps=8)
+    )
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=pc1, w2_scale=pc2, w1_bias=w1_bias_tri, w2_bias=w2_bias_tri
+    )
+    gating, expert_map, global_num_experts = exp_data_tri, None, -1
+    if use_expert_map:
+        # Twice as many global experts; only the first E are local.
+        torch.manual_seed(0)
+        gating = torch.randn((M, 2 * E), dtype=torch.bfloat16, device="cuda")
+        expert_map = torch.full((2 * E,), -1, dtype=torch.int32, device="cuda")
+        expert_map[:E] = torch.arange(E, dtype=torch.int32, device="cuda")
+        global_num_experts = 2 * E
+
+    def run(scatter_combine: bool) -> torch.Tensor:
+        monkeypatch.setattr(gptoss_moe, "_TK38_SCATTER_COMBINE", scatter_combine)
+        return triton_kernel_moe_forward(
+            hidden_states=x_tri,
+            w1=w1_tri,
+            w2=w2_tri,
+            gating_output=gating,
+            topk=topk,
+            renormalize=True,
+            quant_config=quant_config,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+        )
+
+    out_index_add = run(False)
+    out_scatter = run(True)
+    torch.testing.assert_close(out_scatter, out_index_add, atol=1e-2, rtol=1e-2)
+
+
+@requires_rdna_scatter_combine
+def test_masked_moe_sum_without_topk_ids():
+    torch.manual_seed(0)
+    M, topk, K = 37, 4, 2880
+    inp = torch.randn((M, topk, K), dtype=torch.bfloat16, device="cuda")
+    out = torch.empty((M, K), dtype=torch.bfloat16, device="cuda")
+    masked_moe_sum(inp, None, out)
+    torch.testing.assert_close(out, inp.float().sum(dim=1).to(torch.bfloat16))
