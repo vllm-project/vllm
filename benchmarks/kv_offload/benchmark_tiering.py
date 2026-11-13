@@ -45,16 +45,34 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen
 
+"""
+Parts of the benchmark are built for the gpt-oss-120b model. 
+ 1. gpt-oss-120b has 2 attention groups FA and SWA.
+ 2. These attention groups have the same gpu block size (2.3M on H100).
+This fact is exploited in `per_group_per_group_block_bytes_from_engine` and 
+`Scenario::max_per_request_block_size` functions that used,
+ - to determine the maximum KV cache memory that a benchmark
+   run would require and subsequently,
+ - to design GPU/CPU cache overflow scenarios.
+
+ Updating to a different model, requires updating these functions.
+"""
 MODEL = "openai/gpt-oss-120b"
 TP_SIZE = 2
 PORT = 8000
 
 # gpu block size tokens
 BLOCK_SIZE = 64
-# size of a single GPU block; If not set via the env-var, this will be
-# computed at runtime using a vllm dummy run.
-# for gptoss120b, on H100, BLOCK_BYTES is 4.5MB.
-BLOCK_BYTES = os.environ.get("BLOCK_BYTES")
+# size of a single attention group in bytes.
+# gptoss-120b has a FA group and a SWA group. Both groups have the same
+# size. This lets us use a single PER_GROUP_BLOCK_BYTES value for both
+# groups in the benchmark.
+# If unset via an environment variable, this is computed once at the
+# start of the function via `per_group_per_group_block_bytes_from_engine`.
+# Note:
+# - This value is 2.3M on H100.
+# - With FS offloading, this value should match the offloaded file size.
+PER_GROUP_BLOCK_BYTES = os.environ.get("PER_GROUP_BLOCK_BYTES")
 
 BENCH_MAX_SECONDS = 420  # 7 minutes per guidellm run
 BENCH_RANDOM_SEED = 889
@@ -81,14 +99,10 @@ def gib(n: float) -> int:
     return int(n * 1024**3)
 
 
-def gpu_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
-    """Atomic GPU KV block size in bytes: one layer's page for one block.
+def per_group_per_group_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
+    """Per Attention group block-size in bytes for the gptoss120b model.
 
-    Ground truth: builds a TP=1 engine with dummy weights (uniproc executor,
-    worker in-process) and reads the allocated cache tensors from the model
-    runner directly. All layers are page-size-unified during planning, so any
-    single tensor's bytes over its block count is the atomic block size.
-    Needs a GPU. Engine logs go to a file, not the terminal.
+    Create a dummy engine and infer block-sizes from that engine.
     """
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     from vllm import LLM
@@ -112,10 +126,29 @@ def gpu_block_bytes_from_engine(block_size: int = BLOCK_SIZE) -> int:
         )
         worker = llm.llm_engine.engine_core.engine_core.model_executor.driver_worker
         runner = worker.model_runner
-        blocks = runner.kv_cache_config.num_blocks
-        sizes = {t.numel() * t.element_size() // blocks for t in runner.kv_caches}
-        assert len(sizes) == 1, f"kv cache tensors disagree on block size: {sizes}"
-    return sizes.pop()
+        cfg = runner.kv_cache_config
+        from vllm.v1.kv_cache_interface import (
+            FullAttentionSpec,
+            KVCacheConfig,
+            SlidingWindowSpec,
+        )
+
+        assert isinstance(cfg, KVCacheConfig)
+        assert len(cfg.kv_cache_groups) == 2, "gptoss has FA and SWA"
+
+        group_per_group_block_bytes = []
+        for group in cfg.kv_cache_groups:
+            spec = group.kv_cache_spec
+            assert isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)), (
+                f"Unexpected spec type: {type(spec)}"
+            )
+            group_per_group_block_bytes.append(
+                group.kv_cache_spec.page_size_bytes * len(group.layer_names)
+            )
+        assert len(set(group_per_group_block_bytes)) == 1, (
+            f"attention groups disagree on block size: {group_per_group_block_bytes}"
+        )
+    return group_per_group_block_bytes[0]
 
 
 def _cell(v: object) -> str:
@@ -172,34 +205,35 @@ class Scenario:
     cpu: Capacity  # whole-model CPU tier budget
     isl_tokens: int = BENCH_PROMPT_TOKENS  # per-turn prompt tokens
     phase: str = "prefill"  # PHASES key
-    _block_bytes: float | None = None
+    _per_group_block_bytes: float | None = None
 
-    def max_per_request_bytes(self, block_bytes: float) -> float:
+    def max_per_request_bytes(self, per_group_block_bytes: float) -> float:
         """Worst-case KV bytes resident for one request at its last turn.
 
         For gpt-oss-120b,
         FA group: full token history at BLOCK_SIZE tokens per block.
-        SWA group: bounded by the 128-token sliding window (2 blocks), no
-        matter how many turns ran.
+        SWA group: bounded by the 128-token sliding window (2 blocks).
         """
         osl = PHASES[self.phase]
         turns = BENCH_TURNS - 1
         fa_tokens = self.prefix_tokens + turns * self.isl_tokens + turns * osl
         fa_blocks = fa_tokens / BLOCK_SIZE
-        swa_blocks = 2
-        return (fa_blocks + swa_blocks) * block_bytes
+        swa_blocks = 128 / BLOCK_SIZE  # gptoss has a sliding window of 128 tokens.
+        return (fa_blocks + swa_blocks) * per_group_block_bytes
 
-    def materialize(self, block_bytes: float) -> None:
+    def materialize(self, per_group_block_bytes: float) -> None:
         """Resolve each tier's bytes/requests; all four values set after."""
-        self._block_bytes = block_bytes
-        max_per_request = self.max_per_request_bytes(block_bytes)
+        self._per_group_block_bytes = per_group_block_bytes
+        max_per_request = self.max_per_request_bytes(per_group_block_bytes)
         self.gpu.materialize(max_per_request)
         self.cpu.materialize(max_per_request)
 
     def kv_size_roofline(self) -> int:
         """Worst-case KV bytes: last-turn footprint per request x concurrency."""
-        assert self._block_bytes is not None
-        return int(self.concurrency * self.max_per_request_bytes(self._block_bytes))
+        assert self._per_group_block_bytes is not None
+        return int(
+            self.concurrency * self.max_per_request_bytes(self._per_group_block_bytes)
+        )
 
     def describe(self) -> None:
         """Print what the scenario holds; unmaterialized fields show as '?'."""
@@ -230,7 +264,7 @@ class Scenario:
                 f" (gpu {self.gpu.requests}, cpu {self.cpu.requests})"
                 f"  ({over})\n"
             )
-        if self._block_bytes is not None:
+        if self._per_group_block_bytes is not None:
             assert self.gpu.bytes is not None
             assert self.cpu.bytes is not None
             roofline = self.kv_size_roofline()
@@ -818,12 +852,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_block_bytes() -> float:
-    """BLOCK_BYTES from the environment, else calibrate with a dummy engine."""
-    if BLOCK_BYTES is not None:
-        return float(BLOCK_BYTES)
-    print("BLOCK_BYTES not set; calibrating with a dummy engine...")
-    return gpu_block_bytes_from_engine()
+def _resolve_per_group_block_bytes() -> float:
+    """PER_GROUP_BLOCK_BYTES from the environment, else calibrate."""
+    if PER_GROUP_BLOCK_BYTES is not None:
+        return float(PER_GROUP_BLOCK_BYTES)
+    print("PER_GROUP_BLOCK_BYTES not set; calibrating with a dummy engine...")
+    return per_group_per_group_block_bytes_from_engine()
 
 
 def _main() -> None:
@@ -865,10 +899,10 @@ def _main() -> None:
         assert args.command == "bench-scenario"
         specs = [by_name[n] for n in args.scenario]
 
-    block_bytes = _resolve_block_bytes()
-    print(f" ===== Using GPU block bytes: {block_bytes} =====")
+    per_group_block_bytes = _resolve_per_group_block_bytes()
+    print(f" ===== Using GPU per-group block bytes: {per_group_block_bytes} =====")
     for spec in specs:
-        spec.materialize(block_bytes)
+        spec.materialize(per_group_block_bytes)
         spec.describe()
 
     try:
