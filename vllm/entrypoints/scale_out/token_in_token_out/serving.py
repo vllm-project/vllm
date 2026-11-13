@@ -22,6 +22,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    align_step_logprobs,
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
     clamp_prompt_logprobs,
@@ -957,6 +958,7 @@ class ServingTokens(GenerateBaseServing):
         of them when `top_limit` is None, as in tokens mode.
         """
         logprobs_content: list[ChatCompletionLogProbsContent] = []
+        top_logprobs = align_step_logprobs(token_ids, top_logprobs)
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
@@ -1003,6 +1005,7 @@ class ServingTokens(GenerateBaseServing):
         is not a rank, so it is sent as `None` (the logprob is clamped).
         """
         logprobs_content: list[GenerateLogProbsContent] = []
+        top_logprobs = align_step_logprobs(token_ids, top_logprobs)
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]

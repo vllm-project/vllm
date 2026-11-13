@@ -18,6 +18,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    align_step_logprobs,
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
@@ -800,6 +801,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             if return_as_token_id is not None
             else self.return_tokens_as_token_ids
         )
+        top_logprobs = align_step_logprobs(token_ids, top_logprobs)
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:

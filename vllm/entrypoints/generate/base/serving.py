@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import Awaitable
+from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
 from typing import TypeVar
 
@@ -370,6 +371,27 @@ def completion_top_logprobs_limit(
     if return_all or logprobs is None or logprobs == -1:
         return None
     return max(logprobs + 1, 0)
+
+
+def align_step_logprobs(
+    token_ids: GenericSequence[int],
+    top_logprobs: GenericSequence[dict[int, Logprob] | None],
+) -> GenericSequence[dict[int, Logprob] | None]:
+    """Ensure ``top_logprobs`` matches ``token_ids`` in length.
+
+    If the engine returns fewer (or more) per-step logprob entries than sampled
+    tokens, indexing ``top_logprobs[i]`` would raise ``IndexError`` or
+    misalign logprob entries with tokens. Fall back to ``None`` per step so
+    callers degrade gracefully rather than returning HTTP 500 or shifted data.
+    """
+    if len(top_logprobs) == len(token_ids):
+        return top_logprobs
+    logger.warning(
+        "Mismatched logprobs length (%d) for %d output tokens; omitting step logprobs",
+        len(top_logprobs),
+        len(token_ids),
+    )
+    return [None] * len(token_ids)
 
 
 def clamp_prompt_logprobs(
