@@ -75,6 +75,25 @@ class XpuCommunicator(DeviceCommunicatorBase):
             device=input_.device,
         )
         dist.all_gather_single(gathered.view(-1), flat_input, group=self.device_group)
+        if input_.dtype in (torch.float16, torch.bfloat16, torch.float32):
+            from vllm.model_executor.determinism.batch_invariant import (
+                _fixed_order_sum_kernel,
+            )
+            from vllm.triton_utils import triton
+
+            output = torch.empty_like(flat_input)
+            numel = output.numel()
+            if numel:
+                _fixed_order_sum_kernel[(triton.cdiv(numel, 1024),)](
+                    gathered,
+                    output,
+                    numel,
+                    numel,
+                    WORLD_SIZE=self.world_size,
+                    BLOCK_SIZE=1024,
+                    LARGE=gathered.numel() > 2**31,
+                )
+            return output.view(input_.shape)
         return self._sum_gathered(gathered).view(input_.shape)
 
     def _fixed_rank_reduce_scatter(
