@@ -303,7 +303,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "string",
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -341,7 +341,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             chat_template_content_format: The format of message content passed
                 to the scoring template: "string" for plain text, "openai" for
                 structured content blocks, or "auto" to detect from the
-                template. Defaults to "string" for compatibility.
+                template. Defaults to "auto".
             tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:

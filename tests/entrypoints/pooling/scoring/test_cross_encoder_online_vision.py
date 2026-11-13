@@ -28,7 +28,7 @@ ROCM_ATTN_BACKENDS = [
 ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else ["auto"]
 
 
-# This legacy character loop is ambiguous to the automatic format detector.
+# Explicit string format supports character loops that confuse detection.
 _STRING_CONTENT = """
 {%- set ns = namespace(messages=[]) -%}
 {%- for message in messages -%}
@@ -122,7 +122,7 @@ _SERVER_PARAMS = [
     pytest.param((backend, "string"), id=backend) for backend in ATTN_BACKENDS
 ]
 _STRUCTURED_SERVER_PARAM = pytest.param(("auto", "openai"), id="structured")
-_AUTO_SERVER_PARAM = pytest.param(("auto", "auto"), id="structured-auto")
+_DEFAULT_SERVER_PARAM = pytest.param(("auto", None), id="structured-default")
 
 
 @pytest.fixture(scope="module", params=_SERVER_PARAMS)
@@ -144,7 +144,7 @@ def server(request, tmp_path_factory):
         *ROCM_EXTRA_ARGS,
     ]
 
-    if content_format != "string":
+    if content_format is not None:
         args += ["--chat-template-content-format", content_format]
 
     env = dict()
@@ -253,7 +253,9 @@ async def test_score_api_queries_str_documents_image_base64_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image_base64")
 
 
-@pytest.mark.parametrize("server", _SERVER_PARAMS + [_AUTO_SERVER_PARAM], indirect=True)
+@pytest.mark.parametrize(
+    "server", _SERVER_PARAMS + [_DEFAULT_SERVER_PARAM], indirect=True
+)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_plus_text_content(
     server: tuple[RemoteOpenAIServer, str],

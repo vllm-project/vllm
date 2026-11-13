@@ -69,20 +69,6 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
-class ChatTemplateContentFormatAction(argparse.Action):
-    """Distinguish explicit format selection from endpoint-specific defaults."""
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: str | Sequence[str] | None,
-        option_string: str | None = None,
-    ):
-        setattr(namespace, self.dest, values)
-        namespace._chat_template_content_format_explicit = True
-
-
 @config
 class BaseFrontendArgs:
     """Base arguments for the OpenAI-compatible frontend server.
@@ -102,10 +88,6 @@ class BaseFrontendArgs:
     for the specified model."""
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     """The format to render message content within a chat template.
-
-    When omitted, chat/message-embedding templates use automatic detection,
-    while score templates keep string content for compatibility. Explicit
-    "auto" detects the format for both paths.
 
     * "string" will render the content as a string. Example: `"Hello World"`
     * "openai" will render the content as a list of dictionaries, similar to
@@ -263,10 +245,6 @@ class BaseFrontendArgs:
         Subclasses should override this and call
         `super()._customize_cli_kwargs(frontend_kwargs)` first.
         """
-        frontend_kwargs["chat_template_content_format"]["action"] = (
-            ChatTemplateContentFormatAction
-        )
-
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
         frontend_kwargs["reasoning_effort_map"]["type"] = json.loads

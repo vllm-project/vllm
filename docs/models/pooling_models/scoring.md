@@ -457,12 +457,6 @@ Some scoring models require a specific prompt format to work correctly. You can 
 
 For offline scoring, pass `chat_template` to the `LLM` constructor to use it for every `LLM.score` call. A `chat_template` passed to `LLM.score` overrides the constructor's template for that call.
 
-Scoring passes string content to templates by default, preserving existing template behavior. To opt into structured text/image blocks, set `--chat-template-content-format openai` when serving or pass `chat_template_content_format="openai"` to `LLM.score()`.
-
-When the server option is omitted, scoring keeps string content with model-specific image placeholders; chat and message-based embeddings keep their existing automatic detection. An explicit `--chat-template-content-format auto` also enables detection for scoring. Explicit `string` and `openai` apply to chat, message-embedding, and scoring templates. These rules also apply when the setting is supplied through a YAML config file.
-
-`LLM.score()` defaults to `chat_template_content_format="string"`; pass `"auto"` for detection or `"openai"` for structured blocks. Templates that expect content blocks, including saved templates, must opt in through explicit `auto` or `openai`. Detection is heuristic; use `string` for ambiguous legacy templates such as character loops.
-
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 
 - **Query**: `{{ (messages | selectattr("role", "eq", "query") | first).content }}`
@@ -490,7 +484,7 @@ vLLM does not apply a checkpoint's chat template by default, since many reranker
 
 - The default chat template is used, unless `processing_kwargs.chat_template.chat_template` names another template saved with the tokenizer (e.g. `additional_chat_templates/score.jinja` for `"score"`).
 - The other `processing_kwargs.chat_template` settings, such as `add_generation_prompt`, are passed to the template; the request's `chat_template_kwargs` override them.
-- Message contents are strings by default; opt into structured blocks as described above.
+- Message contents are passed as strings, as with `--chat-template`.
 - vLLM does not restore the template suffix after truncation (`restore_suffix`). Use `max_tokens_per_doc` rather than `truncate_prompt_tokens` to truncate long documents.
 - `--chat-template` (or the `chat_template` argument of `LLM.score`) takes precedence over the saved template and its settings.
 - Models with a built-in score template keep using it.

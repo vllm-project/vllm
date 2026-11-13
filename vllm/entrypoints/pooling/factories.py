@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
@@ -218,22 +217,13 @@ def init_pooling_state(
         if pooling_task == "classify"
         else None
     )
-    score_content_format = args.chat_template_content_format
-    if score_content_format == "auto" and not getattr(
-        args, "_chat_template_content_format_explicit", False
-    ):
-        score_content_format = "string"
-
     state.serving_scores = (
         ServingScores(
             engine_client,
             state.openai_serving_models,
             supported_tasks=supported_tasks,
             request_logger=request_logger,
-            chat_template_config=replace(
-                chat_template_config,
-                chat_template_content_format=score_content_format,
-            ),
+            chat_template_config=chat_template_config,
             enable_flash_late_interaction=getattr(
                 args, "enable_flash_late_interaction", True
             ),

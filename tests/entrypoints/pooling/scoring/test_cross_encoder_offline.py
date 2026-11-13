@@ -104,14 +104,13 @@ def test_classify(llm):
 @pytest.mark.parametrize(
     "content_format",
     [
-        pytest.param(None, id="legacy-default"),
+        pytest.param(None, id="detected-default"),
         pytest.param("openai", id="structured"),
-        pytest.param("auto", id="detected-structured"),
+        pytest.param("string", id="explicit-string"),
     ],
 )
 @pytest.mark.skip_global_cleanup
 def test_score_content_format_override_matches_classify(llm: LLM, content_format):
-    # Legacy character loops keep strings unless structured content is requested.
     query, document = TEXTS_1[0], TEXTS_2[0]
     expected_prompt = json.dumps(
         [
@@ -120,14 +119,14 @@ def test_score_content_format_override_matches_classify(llm: LLM, content_format
         ]
     )
     chat_template = "{{ messages | tojson }}"
-    if content_format == "auto":
+    if content_format is None:
         chat_template = (
             "{% for message in messages %}"
             "{% for part in message.content %}{{ part.text }}{% endfor %}"
             "{% endfor %}"
         )
         expected_prompt = query + document
-    elif content_format is None:
+    elif content_format == "string":
         chat_template = (
             "{% for message in messages %}"
             "{% for char in message.content %}{{ char }}{% endfor %}"
