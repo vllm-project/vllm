@@ -3,7 +3,7 @@
 """MoonEP experts: grouped GEMM over MoonEP's expert-grouped activations.
 
 MoonEP dispatch delivers tokens already contiguous per weight row
-(``[NvS, H]`` in ``cu_seqlens[E+B]`` segment order), so the expert compute
+(`[NvS, H]` in `cu_seqlens[E+B]` segment order), so the expert compute
 is three grouped GEMMs over those segments with no permute/unpermute:
 
     gate = grouped_mm(x, w_gate[E+B])      # [NvS, I]
@@ -11,16 +11,16 @@ is three grouped GEMMs over those segments with no permute/unpermute:
     act  = silu(gate) * up * route_weight  # route weights applied here
     out  = grouped_mm(act, w_down[E+B])    # [NvS, H]
 
-Rows ``[E, E+B)`` are the redundant-expert prefetch slots that
-``MoonEPPrepareAndFinalize`` fills before ``apply`` runs. Empty segments
+Rows `[E, E+B)` are the redundant-expert prefetch slots that
+`MoonEPPrepareAndFinalize` fills before `apply` runs. Empty segments
 (including unused prefetch slots) are skipped by the grouped GEMM.
 
-Weight layout: MoonEP's ``prefetch_weight`` requires each projection to be
-its own contiguous ``[E+B, ., .]`` tensor, so gate and up are separate
-tensors rather than vLLM's interleaved ``[E, 2I, H]`` ``w13``. The modular
-kernel passes ``w1``/``w2`` from the layer (``w1`` is the gate tensor); the
-full layout is picked up from the layer in ``process_weights_after_loading``
-and shared with ``MoonEPPrepareAndFinalize`` via ``post_init_setup``.
+Weight layout: MoonEP's `prefetch_weight` requires each projection to be
+its own contiguous `[E+B, ., .]` tensor, so gate and up are separate
+tensors rather than vLLM's interleaved `[E, 2I, H]` `w13`. The modular
+kernel passes `w1`/`w2` from the layer (`w1` is the gate tensor); the
+full layout is picked up from the layer in `process_weights_after_loading`
+and shared with `MoonEPPrepareAndFinalize` via `post_init_setup`.
 """
 
 import torch
@@ -44,22 +44,22 @@ def moonep_grouped_gemm(
     w: torch.Tensor,
     cu_seqlens: torch.Tensor,
 ) -> torch.Tensor:
-    """``out[seg_g] = a[seg_g] @ w[g].T`` for each ``cu_seqlens`` segment.
+    """`out[seg_g] = a[seg_g] @ w[g].T` for each `cu_seqlens` segment.
 
     Args:
-        a: ``[NvS, K]`` activations in segment order.
-        w: ``[G, N, K]`` weights (vLLM ``[E, N, K]`` convention).
-        cu_seqlens: ``[G]`` int32 cumulative segment end offsets.
+        a: `[NvS, K]` activations in segment order.
+        w: `[G, N, K]` weights (vLLM `[E, N, K]` convention).
+        cu_seqlens: `[G]` int32 cumulative segment end offsets.
 
     Returns:
-        ``[NvS, N]``; rows past ``cu_seqlens[-1]`` are zero-filled.
+        `[NvS, N]`; rows past `cu_seqlens[-1]` are zero-filled.
 
     """
     return torch._grouped_mm(a, w.transpose(1, 2), offs=cu_seqlens)
 
 
 class MoonEPExperts(mk.FusedMoEExpertsModular):
-    """Grouped-GEMM experts over MoonEP's ``[NvS, H]`` layout (BF16)."""
+    """Grouped-GEMM experts over MoonEP's `[NvS, H]` layout (BF16)."""
 
     def __init__(
         self,

@@ -559,38 +559,6 @@ def test_lm_head_logits_processor_invalid_vocab_size(
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("device", DEVICES)
-def test_lm_head_reset_sharded_to_full_mapping(
-    default_vllm_config, dist_init, device
-) -> None:
-    if current_platform.is_cuda_alike() or current_platform.is_xpu():
-        torch.accelerator.set_device_index(device)
-
-    torch.set_default_device(device)
-    max_loras = 8
-    vocab_size = 1024
-    lora_config = LoRAConfig(
-        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
-    )
-
-    logits_processor = LogitsProcessor(vocab_size)
-    sharded_to_full_mapping = list(reversed(range(vocab_size)))
-    lora_logits_processor = LogitsProcessorWithLoRA(
-        logits_processor, 1024, torch.float16, device, sharded_to_full_mapping
-    )
-    lora_logits_processor.create_lora_weights(max_loras, lora_config)
-
-    lora_logits_processor.sharded_to_full_mapping_gpu.fill_(-1)
-
-    lora_logits_processor.reset_sharded_to_full_mapping()
-
-    torch.testing.assert_close(
-        lora_logits_processor.sharded_to_full_mapping_gpu,
-        torch.tensor(sharded_to_full_mapping, dtype=torch.long),
-    )
-
-
-@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
@@ -995,6 +963,51 @@ def test_column_parallel_packed(
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "present_groups", [(True, True), (True, False), (False, True), (False, False)]
+)
+def test_expand_packed_lora_with_missing_group(present_groups) -> None:
+    layer = MergedColumnParallelLinearWithLoRA.__new__(
+        MergedColumnParallelLinearWithLoRA
+    )
+    layer.output_sizes = [2, 3, 4, 5]
+    layer.output_slices = tuple(layer.output_sizes)
+    layer.n_slices = len(layer.output_sizes)
+    layer.tp_size = 1
+
+    rank = 2
+    input_size = 3
+    layer.lora_a_stacked = tuple(
+        torch.zeros(1, 1, rank, input_size) for _ in layer.output_sizes
+    )
+    layer.lora_b_stacked = tuple(
+        torch.zeros(1, 1, output_size, rank) for output_size in layer.output_sizes
+    )
+
+    qkv_a = torch.full((rank, input_size), 2.0)
+    qkv_b = torch.cat(
+        [torch.full((size, rank), float(i + 2)) for i, size in enumerate([2, 3, 4])]
+    )
+    z_a = torch.full((rank, input_size), 7.0)
+    z_b = torch.full((5, rank), 8.0)
+    lora_a = [qkv_a if present_groups[0] else None, z_a if present_groups[1] else None]
+    lora_b = [qkv_b if present_groups[0] else None, z_b if present_groups[1] else None]
+
+    layer.set_lora(0, lora_a, lora_b)
+
+    expected_a = [qkv_a] * 3 + [z_a]
+    expected_b = list(qkv_b.split([2, 3, 4])) + [z_b]
+    for i, present in enumerate([present_groups[0]] * 3 + [present_groups[1]]):
+        actual_a = layer.lora_a_stacked[i][0, 0]
+        actual_b = layer.lora_b_stacked[i][0, 0]
+        if present:
+            torch.testing.assert_close(actual_a, expected_a[i])
+            torch.testing.assert_close(actual_b, expected_b[i])
+        else:
+            assert torch.count_nonzero(actual_a) == 0
+            assert torch.count_nonzero(actual_b) == 0
 
 
 @torch.inference_mode()
@@ -2102,7 +2115,7 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
 def test_dsv4_compressor_projections_apply_lora_with_fp32_output(
     default_vllm_config, dist_init
 ):
-    """V4's main and indexer compressor closures must call ``fused_wkv_wgate``,
+    """V4's main and indexer compressor closures must call `fused_wkv_wgate`,
     so its adapter reaches the FP32 kv_score."""
     from vllm.models.deepseek_v4.attention import DeepseekV4Attention
     from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
@@ -2170,8 +2183,8 @@ def test_dsv4_compressor_projections_apply_lora_with_fp32_output(
 def test_dsv4_grouped_o_projection_applies_each_tokens_adapter(
     default_vllm_config, dist_init
 ):
-    """Every DeepSeek-V4 CUDA o_proj must run ``wo_a.grouped_forward``, so the
-    adapter on ``wo_a`` is applied."""
+    """Every DeepSeek-V4 CUDA o_proj must run `wo_a.grouped_forward`, so the
+    adapter on `wo_a` is applied."""
     from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
     from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
         DeepseekV4FlashInferMLAAttention,

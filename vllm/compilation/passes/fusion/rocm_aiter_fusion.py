@@ -298,9 +298,9 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 
 
 class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
-    """Pattern matching ``rms_norm`` whose output feeds *two* distinct
-    ``rocm_aiter_group_fp8_quant`` consumers, replacing it with two
-    independent fused ``rms_norm_group_fp8_quant`` ops.
+    """Pattern matching `rms_norm` whose output feeds *two* distinct
+    `rocm_aiter_group_fp8_quant` consumers, replacing it with two
+    independent fused `rms_norm_group_fp8_quant` ops.
 
     Repeating the rms_norm in the replacement is preferable to leaving
     the fused 16-bit rms output materialized for two unfused quant
@@ -366,10 +366,10 @@ class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 
 
 class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
-    """View-tolerant variant of ``DoubleAiterRMSFp8GroupQuantPattern``.
+    """View-tolerant variant of `DoubleAiterRMSFp8GroupQuantPattern`.
 
-    Matches the same 1-to-2 fan-out, but with a ``view``/``reshape`` between
-    the ``rms_norm`` output and the two ``rocm_aiter_group_fp8_quant``
+    Matches the same 1-to-2 fan-out, but with a `view`/`reshape` between
+    the `rms_norm` output and the two `rocm_aiter_group_fp8_quant`
     consumers::
 
         rms_norm -> view -> rocm_aiter_group_fp8_quant
@@ -377,13 +377,13 @@ class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
 
     This shape arises in DeepSeek-V3.2's MLA indexer q_c norm, where the
     FP8 linear path's 2D-flatten boilerplate
-    (``Fp8BlockScaledMMLinearKernel.apply_weights``) inserts a view between
+    (`Fp8BlockScaledMMLinearKernel.apply_weights`) inserts a view between
     the rms_norm output and each FP8 group quant op. The non-view sibling
     pattern silently no-ops on this graph because the pattern matcher
     requires the in-graph and in-pattern node shapes to align.
 
-    The trace_fn runs Inductor's ``view_to_reshape`` post-grad pass to
-    normalize ``view`` to ``reshape`` in both the pattern and the input
+    The trace_fn runs Inductor's `view_to_reshape` post-grad pass to
+    normalize `view` to `reshape` in both the pattern and the input
     graph, widening the match without touching the no-view sibling.
     """
 
@@ -1013,9 +1013,9 @@ class MLADualRMSNormPattern(
     VllmPatternReplacement[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 ):
     """Fuse paired q_a_layernorm + kv_a_layernorm in MLA attention into
-    AITER's ``fused_qk_rmsnorm`` HIP kernel.
+    AITER's `fused_qk_rmsnorm` HIP kernel.
 
-    Target FX-graph pattern (unfused, ``vllm_ir`` stage)::
+    Target FX-graph pattern (unfused, `vllm_ir` stage)::
 
         gemm -> split_with_sizes([q_dim, kv_dim])
             +-- q_c     -> vllm_ir.rms_norm(q_c, q_w, eps)
@@ -1024,8 +1024,8 @@ class MLADualRMSNormPattern(
                             +-- k_pe
 
     The pattern covers the connected subgraph rooted at the first
-    ``split_with_sizes`` (which produces ``q_c`` and ``kv_lora``),
-    through the two ``rms_norm`` calls, and the ``k_pe`` passthrough.
+    `split_with_sizes` (which produces `q_c` and `kv_lora`),
+    through the two `rms_norm` calls, and the `k_pe` passthrough.
     """
 
     def __init__(self, epsilon: float) -> None:
@@ -1104,12 +1104,12 @@ class MLADualRMSPerTokenQuantPattern(
     ]
 ):
     """Fuse the MLA FP8 attention path -- q-latent RMSNorm + FP8 *per-token* quant
-    plus kv-latent RMSNorm -- into AITER's ``fused_qk_rmsnorm_per_token_quant``.
+    plus kv-latent RMSNorm -- into AITER's `fused_qk_rmsnorm_per_token_quant`.
 
-    With a per-token FP8 ``q_b_proj`` (Quark / ModelOpt), the earlier
-    ``RocmAiterRMSNormQuantFusionPass`` folds the q side into
-    ``rocm_aiter_rmsnorm_fused_dynamic_quant`` and leaves the kv side a plain
-    ``vllm_ir.rms_norm``. This pattern matches that asymmetric pair::
+    With a per-token FP8 `q_b_proj` (Quark / ModelOpt), the earlier
+    `RocmAiterRMSNormQuantFusionPass` folds the q side into
+    `rocm_aiter_rmsnorm_fused_dynamic_quant` and leaves the kv side a plain
+    `vllm_ir.rms_norm`. This pattern matches that asymmetric pair::
 
         gemm -> split_with_sizes([q_dim, kv_dim])
             +-- q_c     -> rocm_aiter_rmsnorm_fused_dynamic_quant -> (q_fp8, q_scale)
@@ -1232,12 +1232,12 @@ class MLADualRMSGroupQuantPattern(
 ):
     """Fuse the MLA FP8 *block-scale* attention path -- q-latent RMSNorm + FP8
     group quant plus kv-latent RMSNorm -- into AITER's
-    ``fused_qk_rmsnorm_group_quant``.
+    `fused_qk_rmsnorm_group_quant`.
 
-    With a block-scale FP8 ``q_b_proj`` (DeepSeek fp8), the earlier
-    ``RocmAiterRMSNormQuantFusionPass`` folds the q side into
-    ``rocm_aiter_rmsnorm_fp8_group_quant`` (the Triton rms+group-quant kernel)
-    and leaves the kv side a plain ``vllm_ir.rms_norm``. This pattern matches
+    With a block-scale FP8 `q_b_proj` (DeepSeek fp8), the earlier
+    `RocmAiterRMSNormQuantFusionPass` folds the q side into
+    `rocm_aiter_rmsnorm_fp8_group_quant` (the Triton rms+group-quant kernel)
+    and leaves the kv side a plain `vllm_ir.rms_norm`. This pattern matches
     that asymmetric pair::
 
         gemm -> split_with_sizes([q_dim, kv_dim])
@@ -1353,14 +1353,14 @@ class MLADualRMSGroupQuantPattern(
 
 class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     """Post-grad PatternMatcher pass that fuses paired q / kv RMS norms in
-    MLA attention into ``fused_mla_dual_rms_norm`` backed by aiter's
-    ``fused_qk_rmsnorm`` HIP kernel.
+    MLA attention into `fused_mla_dual_rms_norm` backed by aiter's
+    `fused_qk_rmsnorm` HIP kernel.
 
     The FP8 attention path is also handled via
-    :class:`MLADualRMSPerTokenQuantPattern` or :class:`MLADualRMSGroupQuantPattern`,
+    `MLADualRMSPerTokenQuantPattern` or `MLADualRMSGroupQuantPattern`,
     which fuse the q-latent RMSNorm + FP8 per-token/group quant together with
-    the kv-latent RMSNorm into ``fused_mla_dual_rms_norm_<per_token|group>_quant``
-    backed by aiter's ``fused_qk_rmsnorm_<per_token|group>_quant`` HIP kernel.
+    the kv-latent RMSNorm into `fused_mla_dual_rms_norm_<per_token|group>_quant`
+    backed by aiter's `fused_qk_rmsnorm_<per_token|group>_quant` HIP kernel.
     """
 
     def __init__(self, config: VllmConfig) -> None:

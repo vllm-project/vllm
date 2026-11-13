@@ -20,7 +20,7 @@ LLM Compressor handles the complexity of quantization, calibration, and format c
 
 - **Multiple Quantization Algorithms**: Support for AWQ, GPTQ, AutoRound, and Round-to-Nearest.
 Also includes support for QuIP and SpinQuant-style transforms as well as KV cache and attention quantization.
-- **Multiple Quantization Methods**: Support for FP8, INT8, INT4, NVFP4, MXFP4, and mixed-precision quantization
+- **Multiple Quantization Methods**: Support for FP8, INT8, INT4, NVFP4, MXFP4, MXFP6, and mixed-precision quantization
 - **One-Shot Quantization**: Quantize models quickly with minimal calibration data
 - **vLLM Integration**: Seamlessly deploy quantized models with vLLM using the compressed-tensors format
 - **Hugging Face Compatibility**: Works with models from the Hugging Face Hub

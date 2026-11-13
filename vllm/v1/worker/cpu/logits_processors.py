@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:

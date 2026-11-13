@@ -15,6 +15,7 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -31,7 +32,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_experts,
+    get_config_file_name,
+    get_default_config,
+    get_moe_configs,
+)
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -95,8 +102,8 @@ def clear_triton_cache():
 
 def ensure_divisibility(numerator, denominator, text):
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} {} is not divisible by tp {}.".format(
-        text, numerator, denominator
+    assert numerator % denominator == 0, (
+        f"{text} {numerator} is not divisible by tp {denominator}."
     )
 
 
@@ -902,6 +909,15 @@ def get_model_params(config):
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
     elif architecture in (
+        "Glm5NextForConditionalGeneration",
+        "Glm5NextForCausalLM",
+    ):
+        text_config = config.get_text_config()
+        E = text_config.n_routed_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
+    elif architecture in (
         "DiffusionGemmaForBlockDiffusion",
         "Gemma4ForCausalLM",
         "Gemma4ForConditionalGeneration",
@@ -975,7 +991,7 @@ def get_quantization_group_size(config) -> int | None:
     """Extract the quantization group size from the HF model config.
 
     This reads directly from the HuggingFace config object (as returned by
-    ``get_config()``), not from vLLM's quantization config classes.
+    `get_config()`), not from vLLM's quantization config classes.
 
     Supports AWQ/GPTQ-style configs (direct 'group_size' key) and
     compressed-tensors configs (nested inside 'config_groups').

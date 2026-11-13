@@ -3,8 +3,8 @@
 """Encoder CUDA graph support for the MiniMax M3 vision tower.
 
 Mixin implementing the SupportsEncoderCudaGraph protocol for any host class
-that holds the vision tower as ``self.vision_tower`` (a
-``MiniMaxVLVisionModel``). The manager routes image items through this mixin;
+that holds the vision tower as `self.vision_tower` (a
+`MiniMaxVLVisionModel`). The manager routes image items through this mixin;
 video items use the eager encoder path.
 """
 
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
-    """SupportsEncoderCudaGraph for hosts with ``self.vision_tower``."""
+    """SupportsEncoderCudaGraph for hosts with `self.vision_tower`."""
 
     vision_tower: "MiniMaxVLVisionModel"
     multimodal_config: "MultiModalConfig | None"
@@ -249,12 +249,12 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = inputs.pop("pixel_values")
+        pixel_values = values.pop("pixel_values")
         # Remaining keys are consumed as encoder_metadata.
-        return self.vision_tower(pixel_values, grid_thw=None, encoder_metadata=inputs)
+        return self.vision_tower(pixel_values, grid_thw=None, encoder_metadata=values)
 
     def encoder_eager_forward(
         self,

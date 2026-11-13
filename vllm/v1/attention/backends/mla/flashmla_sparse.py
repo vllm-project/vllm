@@ -154,6 +154,10 @@ class FlashMLASparseBackend(AttentionBackend):
         "nvfp4_ds_mla",  # NVFP4 NoPE + FP8 RoPE (SM100 only)
     ]
 
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         if (
@@ -262,8 +266,8 @@ def gathered_prefill_shards(
     request's slice of this rank's KV shard.
 
     PCP gives a rank two adjacent chunk rows of a split prefill; they share
-    one context, so the workspace holds it once. ``row_shard_rows`` is
-    ``CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound``: the
+    one context, so the workspace holds it once. `row_shard_rows` is
+    `CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound`: the
     largest DCP shard of the whole request on every row, identical on every
     PCP rank, so the all-gather is shaped the same everywhere.
 
@@ -1369,11 +1373,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         assert isinstance(physical_topk, torch.Tensor)
         q = reshape_query_for_spec_decode(q, num_decodes)
         physical_topk = physical_topk.view(num_decodes, q.shape[1], -1)
+        hot_cache = self.index_group.physical_kv_cache(self.index_group_index)
         output, _ = self._fp8_flash_mla_kernel(
             q=q,
-            kv_c_and_k_pe_cache=self.index_group.physical_kv_cache(
-                self.index_group_index
-            ),
+            kv_c_and_k_pe_cache=_fp8_kv_pages(hot_cache, hot_cache.shape[1])[0],
             topk_indices=physical_topk,
             kernel_metadata=kernel_metadata,
         )
@@ -1403,6 +1406,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
+        if kv_c_and_k_pe_cache.dim() == 3:
+            kv_c_and_k_pe_cache, _ = flat_kv_row_view(
+                kv_c_and_k_pe_cache, kv_c_and_k_pe_cache.shape[1]
+            )
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
