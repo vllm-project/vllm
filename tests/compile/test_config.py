@@ -1016,24 +1016,24 @@ def _rocm_breakable_config(
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        # 682 requests of 1 + 5 tokens fit the 4096-token bound.
-        ({}, (4096, 682, 4096)),
+        # 341 requests of 1 + 5 tokens fit the 2048-token bound.
+        ({}, (2048, 341, 2048)),
         # Twice the widest decode batch: 2 * 64 * 6 = 768 tokens.
         ({"max_num_seqs": 64}, (768, 64, 768)),
-        ({"max_num_batched_tokens": 2048}, (2048, 341, 2048)),
+        ({"max_num_batched_tokens": 1024}, (1024, 170, 1024)),
         ({"num_speculative_tokens": 0}, (512, 512, None)),
         ({"breakable": False}, (512, 83, None)),
         # CDNA3 (gfx942)
         ({"capability": 94}, (512, 83, None)),
         # A set kind keeps its setting; the deprecated fields keep both.
-        ({"max_decode_cudagraph_capture_requests": 1024}, (4096, 1024, None)),
+        ({"max_decode_cudagraph_capture_requests": 1024}, (2048, 1024, None)),
         ({"max_cudagraph_capture_size": 512}, (512, 83, None)),
     ],
 )
 def test_rocm_breakable_speculative_defaults(monkeypatch, overrides, expected):
     """Breakable CUDA graphs have no compiled fallback, so speculative decode
     and mixed batches above the shared sizes would run eagerly. On CDNA4 unset
-    kinds extend to twice the widest decode batch, at most 4096 tokens: the
+    kinds extend to twice the widest decode batch, at most 2048 tokens: the
     widest prefill graph, decode graph (requests) and decode token budget."""
     config = _rocm_breakable_config(monkeypatch, **overrides)
     compilation_config = config.compilation_config
@@ -1067,7 +1067,7 @@ def test_rocm_breakable_speculative_defaults_keep_one_token_draft_decodes(
     monkeypatch,
 ):
     """One-token draft decodes keep their graphs up to max_num_seqs, past the
-    4096-token bound."""
+    2048-token bound."""
     config = _rocm_breakable_config(
         monkeypatch, num_speculative_tokens=2, max_num_seqs=8192, draft_model=True
     )

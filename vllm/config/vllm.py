@@ -98,7 +98,7 @@ _QWEN3_5_ARCHITECTURES = frozenset(
 
 # Default capture bound, in tokens, for speculative decoding with breakable CUDA
 # graphs on CDNA4 (gfx950).
-_ROCM_BREAKABLE_MAX_CAPTURE_TOKENS = 4096
+_ROCM_BREAKABLE_MAX_CAPTURE_TOKENS = 2048
 
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {

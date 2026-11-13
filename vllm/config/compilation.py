@@ -771,7 +771,7 @@ class CompilationConfig:
     max_prefill_cudagraph_capture_tokens: int | None = Field(default=None, ge=0)
     """Largest token count of a prefill CUDA graph. None (default): 8192 on SM100
     GPUs; with speculative decoding on breakable CUDA graphs on CDNA4 (gfx950),
-    twice the widest decode batch up to 4096; otherwise the platform's default
+    twice the widest decode batch up to 2048; otherwise the platform's default
     `max_cudagraph_capture_size`; at most `max_num_batched_tokens`. More and
     wider graphs take memory from the KV cache and lengthen startup."""
     decode_cudagraph_capture_request_sizes: list[int] | None = None
