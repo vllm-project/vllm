@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import gc
 import time
 import uuid
 from collections import deque
@@ -9,9 +10,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+import torch
 from transformers import AutoTokenizer
 
-from vllm import SamplingParams
+import vllm.envs as envs
+from vllm import LLM, SamplingParams
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
@@ -203,6 +206,31 @@ def test_engine_core():
 
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 0
+
+
+@create_new_process_for_each_test()
+def test_failed_inprocess_startup_releases_model(monkeypatch):
+    """An in-process engine that fails to start must release its model."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+
+    # About 1.6 GiB of weights, more than the requested memory
+    with pytest.raises(ValueError, match="No available memory for the cache blocks"):
+        LLM(
+            model="TitanML/tiny-mixtral",
+            load_format="dummy",
+            hf_overrides={
+                "num_hidden_layers": 8,
+                "hidden_size": 1024,
+                "intermediate_size": 4096,
+            },
+            enforce_eager=True,
+            gpu_memory_utilization=0.001,
+            max_model_len=128,
+        )
+
+    gc.collect()
+    assert torch.accelerator.memory_allocated() < 256 * 1024**2
 
 
 @create_new_process_for_each_test()

@@ -282,6 +282,7 @@ class PreloadSubcommand(CLISubcommand):
         from vllm.model_executor.model_loader.weight_cache.daemon import (
             _reject_unsupported_parallelism,
             _run_daemon,
+            daemon_serves_model,
             get_draft_daemon_config,
             plan_local_ranks,
         )
@@ -386,6 +387,7 @@ class PreloadSubcommand(CLISubcommand):
             for (is_draft, _, _), (_, dp_rank, pp_rank, tp_rank) in product(
                 groups, placements
             )
+            if daemon_serves_model(is_draft, pp_rank, pp_size)
         }
         seed_addresses = parse_seed_addresses(args.weight_cache_seed)
         _validate_seed_args(
@@ -419,6 +421,7 @@ class PreloadSubcommand(CLISubcommand):
             mirror_devices = mirror_device_indices(seed_addresses, local_world_size)
 
         procs: list[BaseProcess] = []
+        serving: list[BaseProcess] = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
             # Draft daemons live past the target group's port block at every
             # source node.
@@ -478,7 +481,9 @@ class PreloadSubcommand(CLISubcommand):
                         ),
                     )
                 )
-        health_state = _HealthState(procs)
+                if daemon_serves_model(is_draft, pp_rank, pp_size):
+                    serving.append(procs[-1])
+        health_state = _HealthState(serving)
         health_server = None
         health_thread = None
         if args.weight_cache_health_port is not None:
@@ -508,7 +513,12 @@ class PreloadSubcommand(CLISubcommand):
 
             ready: set[tuple[str, int]] = set()
             while not shutdown_requested:
-                dead = [p for p in procs if p.exitcode is not None]
+                # Daemons that serve no model exit cleanly after the rendezvous.
+                dead = [
+                    p
+                    for p in procs
+                    if p.exitcode is not None and (p in serving or p.exitcode != 0)
+                ]
                 if dead:
                     logger.error(
                         "Weight cache daemon rank(s) exited during %s "
@@ -522,7 +532,7 @@ class PreloadSubcommand(CLISubcommand):
                     exit_code = 128 - failure if failure < 0 else failure
                     break
                 if ready == expected_ready:
-                    wait([p.sentinel for p in procs], timeout=1.0)
+                    wait([p.sentinel for p in serving], timeout=1.0)
                     continue
                 try:
                     ready.add(ready_queue.get(timeout=1.0))
@@ -535,11 +545,10 @@ class PreloadSubcommand(CLISubcommand):
                     )
                     logger.info_once(
                         "===== Weight cache daemon READY: node %d/%d serving %d "
-                        "local rank(s) x %d role(s) in %s =====",
+                        "daemon(s) in %s =====",
                         node_rank,
                         nnodes,
-                        local_world_size,
-                        len(groups),
+                        len(expected_ready),
                         socket_dir_msg,
                     )
         finally:

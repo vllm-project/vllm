@@ -140,7 +140,11 @@ class IpcModelLoader(BaseModelLoader):
         if self.mode != "zero_copy":
             return 0
         total = self._daemon_memory()
-        if is_draft_model_cacheable(vllm_config.speculative_config):
+        # The engine runs the draft model only on the last pipeline stage.
+        if (
+            is_draft_model_cacheable(vllm_config.speculative_config)
+            and get_pp_group().is_last_rank
+        ):
             # The draft group is queried with the same config the engine
             # would load the draft with.
             draft_config = get_draft_load_config(vllm_config)

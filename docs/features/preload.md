@@ -350,7 +350,10 @@ starts a draft daemon group that caches the draft model. It uses its own cache
 key, Unix sockets (`*_draft.sock`) and rendezvous port
 (`--weight-cache-draft-master-port`, default `--weight-cache-master-port + 1`),
 so each daemon process serves exactly one model role. Other draft types are
-not cached and keep loading from disk in the engine.
+not cached and keep loading from disk in the engine. With pipeline
+parallelism, only the GPUs of the last stage serve the draft model, since the
+engine runs the draft model there; draft daemons on the other stages exit
+after startup.
 
 ## Cache modes
 

@@ -167,13 +167,21 @@ class EngineCore:
 
         self.available_gpu_memory_for_kv_cache = -1
 
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self._eep_scale_up_before_kv_init()
+        try:
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                self._eep_scale_up_before_kv_init()
 
-        measure_encoder_output_widths(vllm_config, self.collective_rpc)
+            measure_encoder_output_widths(vllm_config, self.collective_rpc)
 
-        # Setup KV Caches and update CacheConfig after profiling.
-        kv_cache_config = self._initialize_kv_caches(vllm_config)
+            # Setup KV Caches and update CacheConfig after profiling.
+            kv_cache_config = self._initialize_kv_caches(vllm_config)
+        except BaseException:
+            # Otherwise module-level state keeps an in-process model alive.
+            try:
+                self.model_executor.shutdown()
+            except Exception:
+                logger.exception("Executor shutdown after failed startup failed")
+            raise
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.

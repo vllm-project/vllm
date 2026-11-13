@@ -346,6 +346,14 @@ QWEN_MTP_CASE = ModelCase(
     ],
 )
 
+# The engine builds the draft as the only pipeline stage on the last PP rank;
+# the warm runs map it only if the draft daemon builds and keys it that way.
+QWEN_MTP_PP2_CASE = replace(
+    QWEN_MTP_CASE,
+    llm_kwargs={**QWEN_MTP_CASE.llm_kwargs, "pipeline_parallel_size": 2},
+    daemon_args=[*QWEN_MTP_CASE.daemon_args, "--pipeline-parallel-size", "2"],
+)
+
 
 DSV2_EP_CASE = ModelCase(
     model="deepseek-ai/DeepSeek-V2-Lite-Chat",
@@ -570,6 +578,13 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
+def test_ipc_cache_cold_start_and_warm_restart_pp2_mtp(vllm_runner, tmp_path):
+    """Same as above at pp=2, with an MTP draft model."""
+    run_cold_start_and_warm_restart(vllm_runner, QWEN_MTP_PP2_CASE, tmp_path)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
 def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     """A mirror daemon adopts the source's autotune cache over D2D, skips
     re-tuning, and serves outputs identical to the default-loader baseline."""
@@ -755,6 +770,10 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         extra_args=case.daemon_args,
     ) as d:
         d.wait_until_ready()
+        if "speculative_config" in case.llm_kwargs:
+            # Draft daemons serve only the GPUs of the last pipeline stage.
+            num_draft_sockets = len(list(Path(d.socket_dir).glob("*_draft.sock")))
+            assert num_draft_sockets == case.llm_kwargs.get("tensor_parallel_size", 1)
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         if case.check_flashinfer_cache:
             # Each daemon tunes before its ready report; exactly one new file
