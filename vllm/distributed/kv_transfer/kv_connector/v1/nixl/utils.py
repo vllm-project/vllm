@@ -12,8 +12,10 @@ import zmq
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheGroup,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
 )
 

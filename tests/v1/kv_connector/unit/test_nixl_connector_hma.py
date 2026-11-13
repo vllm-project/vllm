@@ -41,6 +41,7 @@ from .utils import (
     create_request,
     create_vllm_config,
     make_kv_cache_config,
+    make_kv_cache_group,
     make_nixl_scheduler,
     maybe_update_block_size,
     region_pairs_by_index,
@@ -327,7 +328,6 @@ def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
         RemoteMeta,
         ReqMeta,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
 
     worker = region_pull_worker
     worker.tp_rank = tp_rank
@@ -338,8 +338,10 @@ def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
     remote = worker.transfer_topo.get_engine_info.return_value
     remote.remote_tp_size = remote.remote_dcp_size = 4
     remote.remote_physical_blocks_per_logical = 1
+    worker._remote_physical_blocks_per_group = {"P": [1, 1]}
     ranks = tuple(range(4))
-    worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 0)
+    worker.source_ranks["P"] = [ranks, ranks]
+    _whole_block_descs(worker, ranks)
     worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
     worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
     # 8 pages: target pages are interleaved over the 4 remote DCP ranks (2 remote

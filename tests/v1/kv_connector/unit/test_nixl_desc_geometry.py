@@ -11,6 +11,7 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
+import contextlib
 import math
 from collections import defaultdict
 from threading import Event, Lock
@@ -41,6 +42,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNSpec
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
     FullAttentionManager,
     MambaManager,
     SlidingWindowManager,
@@ -56,7 +58,7 @@ from vllm.v1.kv_cache_interface import (
     create_kv_cache_views,
 )
 
-from .utils import create_vllm_config, expand_strided_descs
+from .utils import create_vllm_config, expand_strided_descs, make_kv_cache_group
 
 
 class _RecordingNixl:
@@ -1666,7 +1668,10 @@ def _make_ring_worker():
             for region_index, layer_names in enumerate(tensor_regions)
             for layer_name in layer_names
         ],
-        kv_cache_groups=[group(paged_specs), group(ring_specs)],
+        kv_cache_groups=[
+            group(paged_specs),
+            group(ring_specs, CircularBufferManager),
+        ],
     )
 
     vllm_config = create_vllm_config(block_size=4)
@@ -1764,7 +1769,7 @@ def _make_shared_base_ring_worker():
         ],
         kv_cache_groups=[
             group({swa_name: swa_spec}),
-            group({ring_name: ring_spec}),
+            group({ring_name: ring_spec}, CircularBufferManager),
         ],
     )
 

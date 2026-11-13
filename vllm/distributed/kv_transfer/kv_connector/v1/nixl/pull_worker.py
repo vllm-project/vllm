@@ -309,7 +309,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                             # Every remote rank holds the whole group: read it
                             # from one rank, paired as a non-DCP read (end-trim
                             # the remote to the blocks D still needs).
-                            ranks = plan.source_ranks_per_group[g]
+                            ranks = source_ranks[g]
                             if rank != ranks[self.tp_rank % len(ranks)]:
                                 local_ids[g] = remote_ids[g] = []
                                 continue
