@@ -158,14 +158,12 @@ CHECK_STRINGS = {
         pattern=r"\brope_scaling\b",
         tip=(
             "`rope_scaling` is deprecated in Transformers v5, use `rope_parameters`. "
-            "`PreTrainedConfig.__init__` already converts the legacy checkpoint key."
+            "Checkpoints with `rope_scaling` are already converted by "
+            "`PreTrainedConfig.convert_rope_params_to_dict` in Transformers and "
+            "normalised by `patch_rope_parameters` in "
+            "vllm/transformers_utils/config.py."
         ),
-        allowed_files={
-            "tools/pre_commit/check_forbidden_strings.py",
-            # Legacy checkpoint loading tests
-            "tests/model_executor/test_bailing_mrope.py",
-            "tests/transformers_utils/test_bailing_moe_v3_vl_config.py",
-        },
+        allowed_files={"tools/pre_commit/check_forbidden_strings.py"},
     ),
 }
 

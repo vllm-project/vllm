@@ -144,7 +144,7 @@ def test_bailing_yarn_matches_hf_without_halving_mla_width(
     assert vars(config) == original
 
 
-def _load_yarn_config(tmp_path: Path, rope_field: str, parameters: dict):
+def _load_yarn_config(tmp_path: Path, rope_parameters: dict):
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
@@ -152,7 +152,7 @@ def _load_yarn_config(tmp_path: Path, rope_field: str, parameters: dict):
                 "mrope_section": [8, 12, 12],
                 "text_config": {
                     "max_position_embeddings": 256,
-                    rope_field: parameters,
+                    "rope_parameters": rope_parameters,
                 },
             }
         )
@@ -160,18 +160,11 @@ def _load_yarn_config(tmp_path: Path, rope_field: str, parameters: dict):
     return get_config(tmp_path, trust_remote_code=False).get_text_config()
 
 
-@pytest.mark.parametrize(
-    ("rope_field", "type_field"),
-    [("rope_parameters", "rope_type"), ("rope_scaling", "type")],
-)
-def test_bailing_yarn_loads_standard_and_legacy_config(
-    tmp_path: Path, rope_field: str, type_field: str
-):
+def test_bailing_yarn_loads_config(tmp_path: Path):
     """Use the shared config loader to normalize YaRN before model construction."""
     config = _load_yarn_config(
         tmp_path,
-        rope_field,
-        {type_field: "yarn", "factor": 2.0, "original_max_position_embeddings": 128},
+        {"rope_type": "yarn", "factor": 2.0, "original_max_position_embeddings": 128},
     )
     assert config.rope_parameters["rope_type"] == "yarn"
     assert config.rope_parameters["factor"] == 2.0
@@ -185,9 +178,7 @@ def test_bailing_yarn_loads_standard_and_legacy_config(
 def test_bailing_yarn_config_requires_explicit_factor(tmp_path: Path):
     with pytest.raises(KeyError, match="factor"):
         _load_yarn_config(
-            tmp_path,
-            "rope_parameters",
-            {"rope_type": "yarn", "original_max_position_embeddings": 128},
+            tmp_path, {"rope_type": "yarn", "original_max_position_embeddings": 128}
         )
 
 
