@@ -84,6 +84,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         super().set_attn(
             model_state,
@@ -91,6 +92,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             block_tables,
             target_input_buffers,
             target_attn_groups,
+            kernel_block_sizes,
         )
         self.expanded_slot_mappings = torch.empty(
             block_tables.num_kv_cache_groups,
