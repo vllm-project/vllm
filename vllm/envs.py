@@ -281,6 +281,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
+    VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM: int = 16
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -1551,6 +1552,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # select the recipe's parallel_topk feature or set this variable explicitly.
     "VLLM_ROCM_PARALLEL_INDEX_TOPK": lambda: (
         os.getenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0") == "1"
+    ),
+    # FP8 ViT attention on ROCm with the AITER backend
+    # (--mm-encoder-attn-dtype fp8). 128 zero-pads Q/K/V head_dims below 128
+    # to 128 and runs AITER's asm FP8 head_dim-128 kernel instead of its CK-tile
+    # kernel (validated on MI355X with head_dim 80). 16 (default; empty or 0
+    # also mean 16) pads only to a multiple of 16. Other values are rejected.
+    # Opt-in: it only pays off for large images (break-even about 5k patches
+    # per single-image pass; 768x1024 is 0.86x vs BF16 on MI350X, 2048x1600
+    # 1.72x). Remove it once AITER has a native head_dim-80 asm FP8 kernel.
+    "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM": lambda: (
+        int(
+            env_with_choices(
+                "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", "16", ["", "0", "16", "128"]
+            )()
+            or 16
+        )
+        or 16
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(
