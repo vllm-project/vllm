@@ -152,8 +152,11 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
             else:
                 frame_parts = data.split(",")
 
-            frames = np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in frame_parts]
+            loaded_frames = [load_frame(frame_data) for frame_data in frame_parts]
+            frames = np.stack([np.asarray(frame) for frame in loaded_frames])
+            # Frames share the image decode settings, so keep them for hashing.
+            io_config = next(
+                (frame.io_config for frame in loaded_frames if frame.io_config), None
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))
@@ -200,7 +203,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                 "frames_indices": frames_indices,
                 "do_sample_frames": self.kwargs.get("do_sample_frames", False),
             }
-            return MediaWithBytes((frames, metadata), data.encode())
+            return MediaWithBytes((frames, metadata), data.encode(), io_config)
 
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import base64
 import contextlib
 import hashlib
 import struct
@@ -16,6 +17,7 @@ from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.media.base import MediaWithBytes
 from vllm.multimodal.media.image import ImageMediaIO
+from vllm.multimodal.media.video import VideoMediaIO
 from vllm.multimodal.parse import MultiModalDataParser
 
 pytestmark = pytest.mark.cpu_test
@@ -230,8 +232,8 @@ def test_hash_image_malformed_exif():
     assert isinstance(hash_media, str) and len(hash_media) > 0
 
 
-def _rgba_png_bytes() -> bytes:
-    image = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+def _rgba_png_bytes(size: int = 8) -> bytes:
+    image = Image.new("RGBA", (size, size), (255, 0, 0, 128))
     buf = BytesIO()
     image.save(buf, format="PNG")
     return buf.getvalue()
@@ -262,6 +264,27 @@ def test_hash_collision_media_io_config(png_bytes):
     assert hasher.hash_kwargs("blake3", image=white) == hasher.hash_kwargs(
         "blake3", image=white2
     )
+
+
+def test_hash_collision_video_jpeg_media_io_config():
+    """`video/jpeg` frames are decoded with the image options, so those
+    options must reach the video hash like they do for images."""
+    frame = base64.b64encode(_rgba_png_bytes(size=64)).decode()
+    data = ",".join([frame] * 2)
+
+    def item_for_hash(background: tuple[int, int, int]):
+        image_io = ImageMediaIO(rgba_background_color=background)
+        video = VideoMediaIO(image_io, num_frames=-1).load_base64("video/jpeg", data)
+        items = MultiModalDataParser()._parse_video_data([video])
+        assert items is not None
+        return items.get_all_items_for_hash()[0]
+
+    hasher = MultiModalHasher
+    white = hasher.hash_kwargs("blake3", video=item_for_hash((255, 255, 255)))
+    black = hasher.hash_kwargs("blake3", video=item_for_hash((0, 0, 0)))
+    white2 = hasher.hash_kwargs("blake3", video=item_for_hash((255, 255, 255)))
+    assert white != black
+    assert white == white2
 
 
 def test_hash_media_io_noop_config_preserves_hash():

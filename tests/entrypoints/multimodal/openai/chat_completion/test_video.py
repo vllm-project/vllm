@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import base64
 import json
+from io import BytesIO
 
 import openai
 import pytest
 import pytest_asyncio
+from PIL import Image
 
 from tests.utils import RemoteOpenAIServer
 from vllm.assets.base import VLLM_S3_BUCKET_URL
@@ -230,6 +233,53 @@ async def test_request_media_io_kwargs_override_uses_fewer_video_frames(
     assert default_resp.usage is not None
     assert override_resp.usage is not None
     assert override_resp.usage.prompt_tokens < default_resp.usage.prompt_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_video_jpeg_image_media_io_kwargs_change_cache_key(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    # Transparent frames with an opaque square: rgba_background_color changes
+    # the decoded pixels, so the two requests must not share a cache entry.
+    frame = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    frame.paste((0, 0, 255, 255), (16, 16, 48, 48))
+    buf = BytesIO()
+    frame.save(buf, format="PNG")
+    frame_b64 = base64.b64encode(buf.getvalue()).decode()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video_url",
+                    "video_url": {
+                        "url": "data:video/jpeg;base64," + ",".join([frame_b64] * 2)
+                    },
+                },
+                {"type": "text", "text": "What color is the background?"},
+            ],
+        }
+    ]
+
+    async def first_token_logprobs(background: list[int]) -> list[float]:
+        resp = await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_completion_tokens=1,
+            temperature=0.0,
+            logprobs=True,
+            top_logprobs=5,
+            extra_body={
+                "media_io_kwargs": {"image": {"rgba_background_color": background}}
+            },
+        )
+        content = resp.choices[0].logprobs.content
+        return [entry.logprob for entry in content[0].top_logprobs]
+
+    white = await first_token_logprobs([255, 255, 255])
+    black = await first_token_logprobs([0, 0, 0])
+    assert white != black
 
 
 @pytest.mark.asyncio
