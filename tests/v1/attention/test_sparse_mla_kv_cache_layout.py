@@ -59,8 +59,8 @@ pytestmark = pytest.mark.skip_global_cleanup
         ),
         (AttentionBackendEnum.FLASHMLA_SPARSE, "auto", True, 1152),
         (AttentionBackendEnum.FLASHMLA_SPARSE, "fp8_ds_mla", False, MultipleOf(64)),
-        (AttentionBackendEnum.FLASHMLA_SPARSE, "fp8_ds_mla", True, 656),
-        (AttentionBackendEnum.FLASHMLA_SPARSE, "nvfp4_ds_mla", True, 352),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "fp8_ds_mla", True, MultipleOf(64)),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "nvfp4_ds_mla", True, MultipleOf(64)),
     ],
 )
 def test_allocation_and_warmup_follow_addressing_mode(

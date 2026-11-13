@@ -170,11 +170,8 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
-        # Off SM100 the quantized kernel reads 64-token pages, only needed
-        # when blocks span several.
-        if spec.kv_quant_mode != KVQuantMode.NONE and (
-            not current_platform.is_device_capability_family(100)
-        ):
+        # The quantized kernel reads 64-token pages.
+        if spec.kv_quant_mode != KVQuantMode.NONE:
             return replace(spec, block_stride_alignment=MultipleOf(64))
         return align_blocks_to_rows(spec)
 

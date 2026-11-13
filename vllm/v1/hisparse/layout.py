@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, replace
 
@@ -9,10 +10,12 @@ from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
     FullAttentionManager,
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
+    MambaManager,
 )
 from vllm.v1.hisparse.runtime import (
     ResolvedHiSparseConfig,
@@ -103,6 +106,18 @@ def _lay_out_hisparse_groups(
     specs are used."""
     from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block
 
+    source_specs, indexer_specs = _partition_hisparse_specs(
+        {name: lc.spec for name, lc in mla_specs.items()}
+    )
+    row_bytes = max(
+        sum(spec.page_size_bytes for spec in indexer_specs.values()),
+        *(spec.page_size_bytes for spec in source_specs.values()),
+    )
+    regular_groups = [
+        split
+        for group in regular_groups
+        for split in _split_state_group(group, row_bytes)
+    ]
     block_bytes = max((g.page_size_bytes for g in regular_groups), default=0)
     groups = _fill_hisparse_groups(vllm_config, mla_specs, regular_groups, block_bytes)
     if not block_bytes or vllm_config.cache_config.kv_cache_layout is None:
@@ -112,13 +127,16 @@ def _lay_out_hisparse_groups(
     other_groups = [
         group for group in groups if group.role is not KVCacheGroupRole.HISPARSE_INDEXER
     ]
+    spread_block_bytes = _pool_bytes_per_block(vllm_config, other_groups)
+    if _spread_page_stride(spread_block_bytes, indexer_specs) is None:
+        return groups
     candidates = [
         groups,
         _fill_hisparse_groups(
             vllm_config,
             mla_specs,
             regular_groups,
-            _pool_bytes_per_block(vllm_config, other_groups),
+            spread_block_bytes,
             spread_indexer_pages=True,
         ),
     ]
@@ -170,6 +188,49 @@ def _partition_hisparse_specs(
     return source_specs, indexer_specs
 
 
+def _spread_page_stride(
+    block_bytes: int, indexer_specs: dict[str, MLAAttentionSpec]
+) -> int | None:
+    """Stride of the indexer pages spread evenly over a block, or None when the
+    block cannot hold a page of every indexer layer in whole rows."""
+    page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values()) // len(
+        indexer_specs
+    )
+    stride_alignment = math.lcm(
+        _INDEXER_PAGE_ALIGNMENT,
+        *(spec.page_size_bytes // spec.block_size for spec in indexer_specs.values()),
+    )
+    pages = next(
+        (
+            pages
+            for pages in range(block_bytes // page_bytes, len(indexer_specs) - 1, -1)
+            if block_bytes % (pages * stride_alignment) == 0
+        ),
+        None,
+    )
+    return block_bytes // pages if pages else None
+
+
+def _split_state_group(group: KVCacheGroup, row_bytes: int) -> list[KVCacheGroup]:
+    """Split a per-request state group (e.g. Mamba) so its page fits the
+    device row the indexer and a hot layer already need."""
+    if not issubclass(group.manager_cls, (MambaManager, CircularBufferManager)):
+        return [group]
+    state_page = max(spec.page_size_bytes for spec in group.kv_cache_specs.values())
+    states_per_group = max(row_bytes // state_page, 1)
+    names = group.layer_names
+    num_groups = cdiv(len(names), states_per_group)
+    return [
+        replace(
+            group,
+            kv_cache_specs={
+                name: group.kv_cache_specs[name] for name in names[i::num_groups]
+            },
+        )
+        for i in range(num_groups)
+    ]
+
+
 def _fill_hisparse_groups(
     vllm_config: VllmConfig,
     mla_specs: dict[str, KVCacheLayerConfig],
@@ -201,12 +262,8 @@ def _fill_hisparse_groups(
     indexer_page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values())
     page_stride = None
     if spread_indexer_pages:
-        page_bytes = indexer_page_bytes // len(indexer_specs)
-        page_stride = block_bytes // next(
-            pages
-            for pages in range(block_bytes // page_bytes, 0, -1)
-            if block_bytes % (pages * _INDEXER_PAGE_ALIGNMENT) == 0
-        )
+        page_stride = _spread_page_stride(block_bytes, indexer_specs)
+        assert page_stride is not None
         indexer_page_bytes = page_stride * len(indexer_specs)
     pages_per_block = max(block_bytes // indexer_page_bytes, 1)
     indexer_group = KVCacheGroup.from_layers(

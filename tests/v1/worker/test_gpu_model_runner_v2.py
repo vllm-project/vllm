@@ -26,6 +26,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -71,6 +72,55 @@ def test_prompt_tail_keeps_decode_graph_bound(monkeypatch, eligible, expected_bo
         GPUModelRunner.execute_model(runner, scheduler_output)
 
     assert dispatch.call_args.kwargs["max_query_len"] == expected_bound
+
+
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+def test_kv_connector_receives_attn_metadata(monkeypatch, cg_mode):
+    """Every CUDA graph mode hands the connector the attention metadata, which
+    HiSparse needs for its per-forward setup."""
+    runner = Mock(
+        lora_config=None,
+        aux_output_connector=None,
+        encoder_cache=None,
+        pcp_manager=None,
+        is_encoder_decoder=False,
+        dcp_size=1,
+        uses_inputs_embeds=False,
+        is_first_pp_rank=True,
+    )
+    runner.gather_batch_req_state.return_value = (
+        SimpleNamespace(num_tokens=8, decode_graph_eligible=True),
+        None,
+    )
+    attn_metadata = {"layer": object()}
+    runner.model_state.prepare_attn.return_value = attn_metadata
+    runner.model_state.prepare_inputs.return_value = {}
+    runner.prepare_attn.return_value = (Mock(), Mock())
+    runner.kv_connector.pre_forward.side_effect = RuntimeError("stop at forward")
+    batch_desc = SimpleNamespace(
+        cg_mode=cg_mode, num_tokens=8, num_ubatches=1, num_active_loras=0
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "dispatch_cg_and_sync_dp",
+        Mock(return_value=(batch_desc, None)),
+    )
+    monkeypatch.setattr(model_runner_module, "build_slot_mappings_by_layer", Mock())
+    monkeypatch.setattr(
+        model_runner_module,
+        "set_forward_context",
+        lambda *args, **kwargs: contextlib.nullcontext(),
+    )
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.num_scheduled_tokens = {"request": 8}
+    scheduler_output.total_num_scheduled_tokens = 8
+
+    with pytest.raises(RuntimeError, match="stop at forward"):
+        GPUModelRunner.execute_model(runner, scheduler_output)
+
+    assert runner.kv_connector.pre_forward.call_args.kwargs["attn_metadata"] is (
+        attn_metadata
+    )
 
 
 def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):

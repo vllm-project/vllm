@@ -39,7 +39,9 @@ class CompressedSlotMappingKernel(
         triton_block_size: int
         block_size: int
         dcp_world_size: int
+        dcp_rank: int
         cp_interleave: int
+        has_slot_mapping: bool
 
     @staticmethod
     @triton.jit(do_not_specialize=["block_table_stride"])
@@ -57,10 +59,12 @@ class CompressedSlotMappingKernel(
         block_table_stride,
         block_size,
         dcp_world_size,
+        dcp_rank,
         cp_interleave,
         COMPRESS_RATIO: tl.constexpr,
         PAD_ID: tl.constexpr,
         TRITON_BLOCK_SIZE: tl.constexpr,
+        HAS_SLOT_MAPPING: tl.constexpr,
     ):
         batch_idx = tl.program_id(0)
 
@@ -76,15 +80,18 @@ class CompressedSlotMappingKernel(
             mask = offset < query_len
 
             pos = start_pos + i + tl.arange(0, TRITON_BLOCK_SIZE)
-            # A replayed token has a PAD slot (SWA bounded replay: its KV is
-            # cached already); its compressed KV is cached too, so PAD here.
-            slot = tl.load(
-                slot_mapping_ptr + query_start + offset, mask=mask, other=PAD_ID
-            )
-            is_valid = ((pos + 1) % COMPRESS_RATIO == 0) & (slot != PAD_ID)
-            # Under DCP a PAD slot also marks tokens owned by other ranks; the
-            # interleave is a multiple of COMPRESS_RATIO, so a state lives
-            # entirely on the rank owning its last token.
+            is_valid = (pos + 1) % COMPRESS_RATIO == 0
+            # The interleave is a multiple of COMPRESS_RATIO, so under DCP a
+            # state lives entirely on the rank owning its last token.
+            if HAS_SLOT_MAPPING:
+                # A PAD slot marks a token owned by another DCP rank, or one SWA
+                # bounded replay recomputes: its compressed KV is cached too.
+                slot = tl.load(
+                    slot_mapping_ptr + query_start + offset, mask=mask, other=PAD_ID
+                )
+                is_valid &= slot != PAD_ID
+            else:
+                is_valid &= pos // cp_interleave % dcp_world_size == dcp_rank
             local_pos = (
                 pos // (cp_interleave * dcp_world_size) * cp_interleave
                 + pos % cp_interleave
@@ -112,14 +119,18 @@ class CompressedSlotMappingKernel(
         compress_ratio: int,
         block_size: int,
         dcp_world_size: int,
+        dcp_rank: int,
         cp_interleave: int,
+        HAS_SLOT_MAPPING: bool,
     ) -> CompileKey:
         return self.CompileKey(
             compress_ratio=compress_ratio,
             triton_block_size=self.TRITON_BLOCK_SIZE,
             block_size=triton_scalar_specialization_rep(block_size),
             dcp_world_size=triton_scalar_specialization_rep(dcp_world_size),
+            dcp_rank=triton_scalar_specialization_rep(dcp_rank),
             cp_interleave=triton_scalar_specialization_rep(cp_interleave),
+            has_slot_mapping=HAS_SLOT_MAPPING,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -141,7 +152,9 @@ class CompressedSlotMappingKernel(
                         compress_ratio=ratio,
                         block_size=vllm_config.cache_config.block_size // ratio,
                         dcp_world_size=parallel_config.decode_context_parallel_size,
+                        dcp_rank=0,
                         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+                        HAS_SLOT_MAPPING=True,
                     )
                     for ratio in compress_ratios
                 )
@@ -152,28 +165,36 @@ class CompressedSlotMappingKernel(
         int32_ptr = TritonWarmupTensor(torch.int32)
         return dict(
             compressed_slot_mapping=TritonWarmupTensor(torch.int64),
-            slot_mapping=TritonWarmupTensor(torch.int64),
+            slot_mapping=(
+                TritonWarmupTensor(torch.int64)
+                if compile_key.has_slot_mapping
+                else None
+            ),
             query_start_loc=int32_ptr,
             seq_lens=int32_ptr,
             block_table=int32_ptr,
             block_size=compile_key.block_size,
             compress_ratio=compile_key.compress_ratio,
             dcp_world_size=compile_key.dcp_world_size,
+            dcp_rank=compile_key.dcp_rank,
             cp_interleave=compile_key.cp_interleave,
+            HAS_SLOT_MAPPING=compile_key.has_slot_mapping,
         )
 
     @kernel_launcher
     def __call__(
         self,
         compressed_slot_mapping: torch.Tensor,
-        slot_mapping: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
         query_start_loc: torch.Tensor,
         seq_lens: torch.Tensor,
         block_table: torch.Tensor,
         block_size: int,
         compress_ratio: int,
         dcp_world_size: int,
+        dcp_rank: int,
         cp_interleave: int,
+        HAS_SLOT_MAPPING: bool,
     ) -> LaunchSpec:
         return (block_table.shape[0],), dict(
             block_table_stride=block_table.stride(0),
@@ -185,7 +206,7 @@ class CompressedSlotMappingKernel(
 
 def get_compressed_slot_mapping(
     num_tokens: int,
-    slot_mapping: torch.Tensor,
+    slot_mapping: torch.Tensor | None,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     block_table: torch.Tensor,
@@ -194,6 +215,7 @@ def get_compressed_slot_mapping(
     out: torch.Tensor | None = None,
     dcp_world_size: int = 1,
     cp_interleave: int = 1,
+    dcp_rank: int = 0,
 ) -> torch.Tensor:
     """Slot mapping for writing the compressed states of `num_tokens` tokens.
 
@@ -201,7 +223,8 @@ def get_compressed_slot_mapping(
     last of them: that token maps to the state's slot, the others to PAD. A
     token whose own `slot_mapping` entry is PAD maps to PAD too: SWA bounded
     replay recomputes tokens whose KV is cached already, and their compressed
-    states must not be rewritten either.
+    states must not be rewritten either. A self-addressed cache, whose group
+    may have no slot mapping, passes None and keeps the tokens `dcp_rank` owns.
     """
     if out is not None:
         # Guard: for padded / invalid sequences.
@@ -224,7 +247,9 @@ def get_compressed_slot_mapping(
         block_size,
         compress_ratio,
         dcp_world_size,
+        dcp_rank,
         cp_interleave,
+        slot_mapping is not None,
     )
     return compressed_slot_mapping
 

@@ -64,25 +64,44 @@ from vllm.v1.worker.utils import (
 
 
 @pytest.mark.parametrize(
-    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
+    (
+        "enabled",
+        "block_size",
+        "main_sizes",
+        "indexer_sizes",
+        "self_addressed",
+        "expected",
+        "indexer",
+    ),
     [
-        (True, 256, [64], [64], 64, 64),
-        (True, 64, [32, 64], [16, 32], 32, 32),
-        (True, 64, [MultipleOf(16)], [32], 32, 32),
-        (True, 64, [64], [32], None, None),
-        (False, 256, [64], [64], 256, 256),
-        (True, 384, [MultipleOf(32)], [128, 256], 128, 256),
+        (True, 256, [64], [64], False, 64, 64),
+        (True, 64, [32, 64], [16, 32], False, 32, 32),
+        (True, 64, [MultipleOf(16)], [32], False, 32, 32),
+        (True, 64, [64], [32], False, None, None),
+        (False, 256, [64], [64], False, 256, 256),
+        (True, 384, [MultipleOf(32)], [128, 256], False, 128, 256),
+        (True, 256, [MultipleOf(64)], [64], True, 256, 256),
+        (True, 256, [64], [64], True, 64, 64),
     ],
 )
 def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected, indexer
+    monkeypatch,
+    enabled,
+    block_size,
+    main_sizes,
+    indexer_sizes,
+    self_addressed,
+    expected,
+    indexer,
 ):
-    """Resolve shared MLA geometry before planning; leave other specs alone."""
+    """HiSparse keeps the scheduler block only for a self-addressed indexer
+    whose sparse attention backends support it; other specs are left alone."""
+    indexer_cls = SelfAddressedMLASpec if self_addressed else MLAAttentionSpec
     specs = {
         "main": MLAAttentionSpec(
             block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
         ),
-        "indexer": MLAAttentionSpec(
+        "indexer": indexer_cls(
             block_size=block_size,
             num_kv_heads=1,
             head_size=128,

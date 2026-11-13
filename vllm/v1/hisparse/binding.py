@@ -57,9 +57,14 @@ def resolve_hisparse_specs(
     layer_configs: dict[str, KVCacheLayerConfig],
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheLayerConfig]:
-    """Resolve a common kernel block size for HiSparse MLA specs, and add the
-    resident/hot specs HiSparse derives from them, then fit align-mode Mamba
-    blocks to the resized attention blocks."""
+    """Resolve the HiSparse page sizes for the MLA specs, add the resident/hot
+    specs HiSparse derives from them, then fit align-mode Mamba blocks to the
+    resized attention blocks.
+
+    A hybrid model's packed block is kept when its indexer derives its own
+    kernel-block slots (so its device cache can split the block) and every
+    sparse attention backend supports it: its state pages then stay the size
+    of an MLA row."""
     mla_specs = {
         name: lc for name, lc in layer_configs.items() if is_hisparse_source_layer(lc)
     }
@@ -68,10 +73,11 @@ def resolve_hisparse_specs(
     block_sizes = {lc.spec.block_size for lc in mla_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
+    scheduler_block_size = block_sizes.pop()
     backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
     specs = [lc.spec for lc in mla_specs.values()]
     try:
-        block_size = select_common_block_size(block_sizes.pop(), backends, specs)
+        block_size = select_common_block_size(scheduler_block_size, backends, specs)
     except ValueError as error:
         raise ValueError(
             "HiSparse requires a GPU block size supported by every sparse "
@@ -82,20 +88,29 @@ def resolve_hisparse_specs(
         for name, lc in mla_specs.items()
         if cast(MLAAttentionSpec, lc.spec).cache_role is SparseCacheRole.INDEXER
     ]
-    indexer_block_size = _largest_exact_kernel_block_size(
-        block_size,
-        [attn_layers[name].get_attn_backend() for name in indexer_names],
-        [cast(MLAAttentionSpec, mla_specs[name].spec) for name in indexer_names],
+    sparse_names = [name for name in mla_specs if name not in indexer_names]
+    keeps_packed_block = all(
+        not mla_specs[name].spec.uses_slot_mapping for name in indexer_names
+    ) and scheduler_block_size == select_common_block_size(
+        scheduler_block_size,
+        [attn_layers[name].get_attn_backend() for name in sparse_names],
+        [mla_specs[name].spec for name in sparse_names],
     )
-    layer_configs = layer_configs | {
-        name: replace(
-            lc,
-            spec=lc.spec.copy_with_new_block_size(
-                indexer_block_size if name in indexer_names else block_size
-            ),
+    if not keeps_packed_block:
+        indexer_block_size = _largest_exact_kernel_block_size(
+            block_size,
+            [attn_layers[name].get_attn_backend() for name in indexer_names],
+            [cast(MLAAttentionSpec, mla_specs[name].spec) for name in indexer_names],
         )
-        for name, lc in mla_specs.items()
-    }
+        layer_configs = layer_configs | {
+            name: replace(
+                lc,
+                spec=lc.spec.copy_with_new_block_size(
+                    indexer_block_size if name in indexer_names else block_size
+                ),
+            )
+            for name, lc in mla_specs.items()
+        }
     groups = get_hisparse_kv_cache_groups(vllm_config, layer_configs)
     assert groups is not None
     return fit_mamba_blocks_to_attention(

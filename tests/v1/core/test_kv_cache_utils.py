@@ -77,6 +77,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_kv_cache_kind,
 )
 from vllm.v1.hisparse.layout import (
+    _spread_page_stride,
     create_hisparse_layout,
     get_hisparse_kv_cache_groups,
     get_hisparse_steady_state_concurrency,
@@ -240,6 +241,59 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     assert layouts[0] == layouts[1]
 
 
+def test_hisparse_hybrid_state_groups_fit_indexer_row():
+    """A hybrid model's state layers split into groups no wider than the
+    indexer group, and hot pages need only kernel-row alignment, so the device
+    row stays the indexer page instead of padding to a state group or hot page."""
+    block_size = 256
+    layers: dict[str, KVCacheLayerConfig] = {}
+    for i in range(6):
+        layers[f"model.layers.{i}.self_attn"] = full_layer(
+            MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+                is_index_group_leader=True,
+            )
+        )
+        layers[f"model.layers.{i}.self_attn.indexer"] = full_layer(
+            MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=144,
+                dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.INDEXER,
+            )
+        )
+    for i in range(6, 16):
+        layers[f"model.layers.{i}.linear_attn"] = mamba_layer(
+            MambaSpec(
+                block_size=block_size, shapes=((25000,),), dtypes=(torch.float32,)
+            )
+        )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_text_config.index_topk = 128
+
+    groups = get_hisparse_kv_cache_groups(config, layers)
+    assert groups is not None
+    device_groups = [group for group in groups if not group.host_resident]
+    indexer_page = 6 * block_size * 144 * 2
+    assert sorted(
+        name
+        for group in device_groups
+        for name in group.layer_names
+        if "linear_attn" in name
+    ) == sorted(name for name in layers if "linear_attn" in name)
+    assert (
+        kv_cache_planning._get_kv_cache_bytes_per_block(
+            device_groups, KVCacheLayout.BLHNC
+        )
+        == indexer_page
+    )
+
+
 @pytest.mark.parametrize(
     ("source_alignment", "hot_alignment"),
     [(None, 576 * 2), (MultipleOf(64), 64 * 576 * 2), (MultipleOf(32), 32 * 576 * 2)],
@@ -288,7 +342,34 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page(
 
 
 @pytest.mark.parametrize(
-    ("kv_cache_layout", "indexer_block_size"), [(None, 4096), ("BLHNC", 2304)]
+    ("block_bytes", "block_size", "num_layers", "page_stride"),
+    [
+        (6635520, 2304, 24, None),
+        (211200, 64, 24, 8448),
+        (1637376, 64, 24, None),
+    ],
+)
+def test_hisparse_indexer_pages_spread_only_when_every_layer_fits(
+    block_bytes, block_size, num_layers, page_stride
+):
+    """Spreading indexer pages over a block needs a page slot per indexer layer,
+    each a whole number of rows; otherwise the spread pages would outgrow the
+    block or split a row."""
+    indexer_specs = {
+        f"model.layers.{i}.self_attn.indexer": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+        for i in range(num_layers)
+    }
+    assert _spread_page_stride(block_bytes, indexer_specs) == page_stride
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_layout", "indexer_block_size"), [(None, 3968), ("BLHNC", 3136)]
 )
 def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block_size):
     """A block-outer pool block is whole hot rows, and indexer kernel pages
@@ -305,7 +386,7 @@ def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block
             **mla,
         ),
         "model.layers.1.self_attn": AttentionSpec(
-            block_size=64, num_kv_heads=1, head_size=4096, dtype=torch.bfloat16
+            block_size=64, num_kv_heads=1, head_size=3968, dtype=torch.bfloat16
         ),
     }
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
@@ -322,7 +403,7 @@ def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block
     )
     assert indexer_group.block_size == indexer_block_size
     if kv_cache_layout is not None:
-        assert _pool_bytes_per_block(config, groups) == 1_049_472
+        assert _pool_bytes_per_block(config, groups) == 1_016_064
 
 
 def test_hisparse_rejects_deepseek_v4():
