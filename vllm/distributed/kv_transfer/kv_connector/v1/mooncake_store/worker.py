@@ -37,7 +37,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_events import MEDIUM_CPU, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.utils import CircuitBreaker
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
@@ -1206,7 +1206,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             lookahead_token_ids=lookahead_token_ids,
                             block_size=db.chunk_size,
                             lora_id=None,
-                            medium="cpu",
+                            # TODO: report the written replica tier (#58520).
+                            medium=MEDIUM_CPU,
                             lora_name=None,
                             group_idx=g_idx,
                         )
