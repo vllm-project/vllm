@@ -399,6 +399,7 @@ class DraftModelSpeculator(BaseSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        layer_causal: Mapping[str, bool] | None = None,
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
@@ -407,6 +408,7 @@ class DraftModelSpeculator(BaseSpeculator):
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            layer_causal=layer_causal,
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
@@ -476,7 +478,7 @@ class DraftModelSpeculator(BaseSpeculator):
         query_start_loc_np: np.ndarray,
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
-        causal: bool | Mapping[int, bool] = True,
+        causal: bool | Mapping[Any, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
         slot_mappings: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
@@ -748,7 +750,7 @@ class DraftModelSpeculator(BaseSpeculator):
         num_query_per_req: int,
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
-        causal: bool | Mapping[int, bool] = True,
+        causal: bool | Mapping[Any, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         query_start_loc_np = self.arange_np[: num_reqs + 1] * num_query_per_req

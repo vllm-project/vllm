@@ -31,7 +31,7 @@ def _prepare_dflash_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
     skip_attn: bool,
-    causal: bool | Mapping[int, bool],
+    causal: bool | Mapping[Any, bool],
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
@@ -84,7 +84,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        causal: bool | Mapping[int, bool],
+        causal: bool | Mapping[Any, bool],
         prepare_forward: Callable[[int, dict[str, Any] | None], None],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
