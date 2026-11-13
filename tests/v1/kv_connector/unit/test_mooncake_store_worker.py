@@ -382,6 +382,9 @@ class _FakeModelConfig:
     def get_num_layers(self, parallel_config) -> int:
         return 1
 
+    def get_total_num_hidden_layers(self) -> int:
+        return 2
+
     def get_total_num_kv_heads(self) -> int:
         return 1
 
@@ -3535,8 +3538,97 @@ def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
         layout = w.token_dbs[0].store_layout
         keys.append(layout.key_for(layout.local_shard_ids[0], BlockHash(b"h")))
 
-    assert "@pp_rank:0@" in keys[0]
-    assert "@pp_rank:1@" in keys[1]
+    assert "@layers:0-1@" in keys[0]
+    assert "@layers:1-2@" in keys[1]
+
+
+@pytest.mark.cpu_test
+def test_pp_stage_keys_name_their_layers(tmp_path, monkeypatch):
+    """A PP stage's keys name the layers it holds instead of its PP rank, so
+    an object holding every layer and a stage object holding some of them
+    never share a key, while PP=1 keys stay unchanged."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        output[:] = [local] * len(output)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    keys = []
+    for pp_size, rank in ((1, 0), (2, 0), (2, 1)):
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(rank=rank, pipeline_parallel_size=pp_size),
+            _make_kv_cache_config(),
+        )
+        keys.append(w.token_dbs[0].store_layout.key_for(0, BlockHash(b"h")))
+
+    assert keys[0] == f"test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@{b'h'.hex()}"
+    assert "@layers:0-1@" in keys[1]
+    assert "@layers:1-2@" in keys[2]
+    assert len(set(keys)) == 3
+
+
+@pytest.mark.cpu_test
+def test_pp_sizes_share_layer_range_keys_across_pp_sizes(tmp_path, monkeypatch):
+    """With pp_sizes=[1, 2], a PP=1 instance stores each block as one object
+    per PP=2 stage, under the keys the PP=2 stages use."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        output[:] = [local] * len(output)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    def layout(pp_size: int, rank: int):
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                rank=rank,
+                pipeline_parallel_size=pp_size,
+                extra_config={"pp_sizes": [1, 2]},
+            ),
+            _make_kv_cache_config(),
+        )
+        return w.token_dbs[0].store_layout
+
+    pp1 = layout(1, 0)
+    stages = [layout(2, rank) for rank in (0, 1)]
+    block_hash = BlockHash(b"h")
+
+    assert [pp1.key_for(shard, block_hash) for shard in pp1.local_shard_ids] == [
+        stage.key_for(0, block_hash) for stage in stages
+    ]
 
 
 @pytest.mark.parametrize("tp_size", [2, 4])

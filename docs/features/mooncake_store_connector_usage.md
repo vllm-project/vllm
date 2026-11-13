@@ -248,6 +248,35 @@ groups use the rank-local fallback.
 
 When `enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect.
 
+#### Sharing one Store across PP sizes
+
+An instance with PP > 1 stores each block as one object per PP stage, keyed by
+the global layer range the stage holds (`@layers:<start>-<end>`). A PP = 1
+instance stores one object holding every layer. Instances with different PP
+sizes therefore do not read each other's objects. To share entries across PP
+sizes, list them on every instance that uses the Store:
+
+```json
+{
+    "kv_connector_extra_config": {
+        "pp_sizes": [1, 2]
+    }
+}
+```
+
+Each stage then splits its layers at every stage boundary of the listed PP sizes
+and stores one object per layer range. In the example, a PP = 1 instance stores
+two objects per block, one for each PP = 2 stage, and the PP = 2 stages store one
+object each, so both instances read the same objects. Each listed PP size can
+add ranges, and a lookup checks one key per range.
+
+The listed PP sizes use the default layer partition. An instance whose own stages
+are set with `VLLM_PP_LAYER_PARTITION` also splits at its own boundaries. Every
+instance that shares the entries must use the same list. `pp_sizes` applies to
+the rank-local layout with one KV cache group: with Store TP sharing, several KV
+cache groups (hybrid models), or HiSparse, the connector logs a warning and
+ignores it.
+
 **Proxy:**
 
 A disaggregation proxy routes requests between prefiller and decoder nodes.
@@ -367,6 +396,8 @@ reset waits at most 60 seconds.
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
+- `pp_sizes` (list[int]): PP sizes of the instances that share the Store. See
+  [Sharing one Store across PP sizes](#sharing-one-store-across-pp-sizes). Unset by default.
 
 #### Automatic cache prefix
 

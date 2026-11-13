@@ -7,7 +7,7 @@
 
 import hashlib
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import NamedTuple, cast
 
@@ -62,6 +62,10 @@ class KeyMetadata:
     # Complete namespace for an opt-in Store payload format. Empty keeps
     # historical keys byte-identical.
     store_namespace: str = ""
+    # Global layer range [start, end) of the KV a key holds. Keys name it
+    # instead of the PP rank, so objects holding different layers never share
+    # a key across PP sizes. None keeps the historical `@pp_rank:` keys.
+    layer_range: tuple[int, int] | None = None
 
 
 @dataclass(order=True)
@@ -81,6 +85,7 @@ class PoolKey:
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
+                self.key_metadata.layer_range,
                 self.key_metadata.group_id,
                 self.chunk_hash,
             )
@@ -97,6 +102,11 @@ class PoolKey:
     ) -> str:
         """Return the stable prefix for a Mooncake pool key."""
         prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
+        if key_metadata.layer_range is not None:
+            start, end = key_metadata.layer_range
+            layers = f"@layers:{start}-{end}"
+        else:
+            layers = f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
         return (
             f"{prefix}"
             f"{key_metadata.model_name}"
@@ -104,7 +114,7 @@ class PoolKey:
             f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
             f"@pcp{key_metadata.pcp_rank if pcp_rank is None else pcp_rank}"
             f"@dcp{key_metadata.dcp_rank if dcp_rank is None else dcp_rank}"
-            f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
+            f"{layers}"
             f"@group:{key_metadata.group_id}"
         )
 
@@ -171,17 +181,41 @@ class StoreLayout:
         raise NotImplementedError
 
 
+def split_layer_range(
+    layer_range: tuple[int, int], cut_points: Iterable[int]
+) -> tuple[tuple[int, int], ...]:
+    """Split `[start, end)` at every cut point inside it."""
+    start, end = layer_range
+    cuts = sorted({start, end, *(cut for cut in cut_points if start < cut < end)})
+    return tuple(zip(cuts[:-1], cuts[1:]))
+
+
 class RankLocalStoreLayout(StoreLayout):
-    """Historical rank-local Store payload layout."""
+    """Historical rank-local Store payload layout.
+
+    With `layer_ranges`, each block is stored as one object per layer range
+    instead of one object holding all of this rank's layers. Instances whose
+    PP stages split the layers at the same points then share those objects.
+    """
 
     def __init__(
         self,
         metadata: KeyMetadata,
         block_size: int,
         hash_block_size: int,
+        layer_ranges: Sequence[tuple[int, int]] | None = None,
     ) -> None:
         super().__init__(metadata, block_size, hash_block_size)
-        self._key_prefix = PoolKey.build_prefix(metadata)
+        # One store shard per layer range, or a single shard for all layers.
+        self._shard_metadata = (
+            [replace(metadata, layer_range=r) for r in layer_ranges]
+            if layer_ranges
+            else [metadata]
+        )
+        self._key_prefixes = [PoolKey.build_prefix(m) for m in self._shard_metadata]
+        self.layer_ranges = tuple(layer_ranges) if layer_ranges else None
+        # Regions each layer-range shard stores, in register order.
+        self._shard_regions: list[np.ndarray] | None = None
         self.kv_caches_base_addr: list[int] = []
         self.block_stride: list[int] = []
         # Bytes at the start of each block that are stored: up to the last
@@ -191,11 +225,10 @@ class RankLocalStoreLayout(StoreLayout):
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
-        return (0,)
+        return tuple(range(len(self._shard_metadata)))
 
     def key_for(self, shard_id: StoreShardId, chunk_hash: BlockHash) -> str:
-        assert shard_id == 0
-        return PoolKey.build_key_string(self._key_prefix, chunk_hash.hex())
+        return PoolKey.build_key_string(self._key_prefixes[shard_id], chunk_hash.hex())
 
     def lookup_key_prefixes(
         self,
@@ -203,13 +236,14 @@ class RankLocalStoreLayout(StoreLayout):
     ) -> tuple[str, ...]:
         return tuple(
             PoolKey.build_prefix(
-                self.metadata,
+                metadata,
                 tp_rank=tp_rank,
                 pcp_rank=pcp_rank,
                 dcp_rank=dcp_rank,
                 pp_rank=pp_rank,
             )
             for tp_rank, pcp_rank, dcp_rank, pp_rank in rank_namespaces
+            for metadata in self._shard_metadata
         )
 
     def set_kv_caches_base_addr(self, base_addrs: list[int]) -> None:
@@ -223,12 +257,24 @@ class RankLocalStoreLayout(StoreLayout):
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
+        layer_indices: Sequence[int] | None = None,
     ) -> None:
+        """Build descriptors from the local KV cache tensors.
+
+        With layer ranges, `layer_indices` gives the global layer of each
+        tensor, and every region must hold layers of a single range.
+        """
+        if self.layer_ranges is not None and (
+            layer_indices is None or len(layer_indices) != len(kv_caches)
+        ):
+            raise ValueError("Store layer ranges need the layer of each KV cache")
         # Map each region's base address to its entry in the parallel lists.
         region_index: dict[int, int] = {}
         base_addrs: list[int] = []
         block_strides: list[int] = []
         block_lens: list[int] = []
+        region_layers: list[set[int]] = []
+        layer = -1
 
         def add_region(addr: int, block_stride: int, block_len: int) -> None:
             assert 0 < block_len <= block_stride
@@ -238,12 +284,16 @@ class RankLocalStoreLayout(StoreLayout):
                 base_addrs.append(addr)
                 block_strides.append(block_stride)
                 block_lens.append(block_len)
+                region_layers.append({layer})
             else:
                 # Several views can share a region (e.g. the layers of a
                 # block-outermost buffer); keep the bytes up to the last one.
                 block_lens[index] = max(block_lens[index], block_len)
+                region_layers[index].add(layer)
 
-        for cache in kv_caches:
+        for cache_index, cache in enumerate(kv_caches):
+            if layer_indices is not None:
+                layer = layer_indices[cache_index]
             cache, block_compact = group_compact_kernel_blocks(cache, num_blocks)
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
@@ -285,6 +335,38 @@ class RankLocalStoreLayout(StoreLayout):
         self.kv_caches_base_addr = base_addrs
         self.block_stride = block_strides
         self.block_len = block_lens
+        if self.layer_ranges is not None:
+            self._shard_regions = self._assign_regions(region_layers)
+
+    def _assign_regions(self, region_layers: list[set[int]]) -> list[np.ndarray]:
+        """Group regions by the layer range their layers fall in. Layers past
+        the last range (e.g. a draft model's on the last PP stage) belong to
+        the last range."""
+        layer_ranges = self.layer_ranges
+        assert layer_ranges is not None
+
+        def shard_of(layer: int) -> int | None:
+            if layer >= layer_ranges[-1][1]:
+                return len(layer_ranges) - 1
+            for shard, (start, end) in enumerate(layer_ranges):
+                if start <= layer < end:
+                    return shard
+            return None
+
+        shard_regions: list[list[int]] = [[] for _ in layer_ranges]
+        for region, layers in enumerate(region_layers):
+            shards = {shard_of(layer) for layer in layers}
+            shard = shards.pop() if len(shards) == 1 else None
+            if shard is None:
+                raise ValueError(
+                    f"KV cache region of layers {sorted(layers)} does not fit "
+                    f"in one of the Store layer ranges {layer_ranges}"
+                )
+            shard_regions[shard].append(region)
+        for (start, end), regions in zip(layer_ranges, shard_regions, strict=True):
+            if not regions:
+                raise ValueError(f"No KV cache for Store layer range [{start}, {end})")
+        return [np.asarray(regions, dtype=np.int64) for regions in shard_regions]
 
     def prepare_values(
         self,
@@ -294,9 +376,7 @@ class RankLocalStoreLayout(StoreLayout):
     ) -> tuple[list[list[int]], list[list[int]], list[int]]:
         if not chunks:
             return [], [], []
-        assert len(chunks) == len(shard_ids) and all(
-            shard_id == 0 for shard_id in shard_ids
-        )
+        assert len(chunks) == len(shard_ids)
         base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
         length = len(self.block_stride)
         stride = np.asarray(
@@ -316,12 +396,34 @@ class RankLocalStoreLayout(StoreLayout):
             dtype=np.int64,
             count=n,
         )
-        addrs = base[None, :] + bids[:, None] * stride[None, :]
         block_counts = (spans + self.block_size - 1) // self.block_size
-        # A chunk spanning several consecutive blocks also copies the
-        # padding between them.
-        sizes = stride[None, :] * (block_counts[:, None] - 1) + blen[None, :]
-        return addrs.tolist(), sizes.tolist(), bids.tolist()
+        if self._shard_regions is None:
+            assert all(shard_id == 0 for shard_id in shard_ids)
+            addrs = base[None, :] + bids[:, None] * stride[None, :]
+            # A chunk spanning several consecutive blocks also copies the
+            # padding between them.
+            sizes = stride[None, :] * (block_counts[:, None] - 1) + blen[None, :]
+            return addrs.tolist(), sizes.tolist(), bids.tolist()
+
+        # Each layer-range shard covers only its own regions.
+        shard_array = np.asarray(shard_ids, dtype=np.int64)
+        addr_rows: list[list[int]] = [[] for _ in range(n)]
+        size_rows: list[list[int]] = [[] for _ in range(n)]
+        for shard_id, regions in enumerate(self._shard_regions):
+            rows = np.flatnonzero(shard_array == shard_id)
+            if rows.size == 0:
+                continue
+            addrs = base[None, regions] + bids[rows, None] * stride[None, regions]
+            sizes = (
+                stride[None, regions] * (block_counts[rows, None] - 1)
+                + blen[None, regions]
+            )
+            for row, row_addrs, row_sizes in zip(
+                rows.tolist(), addrs.tolist(), sizes.tolist(), strict=True
+            ):
+                addr_rows[row] = row_addrs
+                size_rows[row] = row_sizes
+        return addr_rows, size_rows, bids.tolist()
 
 
 class TPShardedStoreLayout(StoreLayout):

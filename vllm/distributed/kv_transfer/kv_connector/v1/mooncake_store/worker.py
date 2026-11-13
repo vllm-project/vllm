@@ -12,6 +12,7 @@ and MooncakeDistributedStore integration.
 
 import dataclasses
 import functools
+import itertools
 import math
 import os
 import queue
@@ -71,6 +72,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     StoreShardId,
     TokenMajorStoreLayout,
     group_compact_kernel_blocks,
+    split_layer_range,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -84,7 +86,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.selective_lease
     SelectiveLookupLease,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
+from vllm.distributed.utils import get_default_pp_partition, get_pp_indices
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
@@ -1755,6 +1759,9 @@ class MooncakeStoreWorker:
         self.store_tp_size, store_namespace, store_group_plans = (
             self._select_store_layout(extra_config)
         )
+        store_layer_ranges = self._resolve_store_layer_ranges(
+            extra_config, model_config.get_total_num_hidden_layers()
+        )
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
             tp_rank=self.tp_rank,
@@ -1763,8 +1770,19 @@ class MooncakeStoreWorker:
             pp_rank=self.pp_rank,
             cache_prefix=cache_prefix,
             store_namespace=store_namespace,
+            layer_range=(
+                get_pp_indices(
+                    model_config.get_total_num_hidden_layers(),
+                    self.pp_rank,
+                    self.pp_size,
+                )
+                if self.pp_size > 1
+                else None
+            ),
         )
-        self.token_dbs = self._build_token_databases(metadata, store_group_plans)
+        self.token_dbs = self._build_token_databases(
+            metadata, store_group_plans, store_layer_ranges
+        )
         self._init_lookup_key_prefixes()
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
             self._selective_lease = SelectiveLookupLease(
@@ -1888,10 +1906,64 @@ class MooncakeStoreWorker:
         )
         return None, store_namespace, None
 
+    def _resolve_store_layer_ranges(
+        self, extra_config: dict[str, Any], num_layers: int
+    ) -> tuple[tuple[int, int], ...] | None:
+        """Layer ranges this PP stage stores per object, or None for one object.
+
+        `pp_sizes` lists the PP sizes of the instances sharing the Store. The
+        stage's layers are split at every stage boundary of those sizes, so
+        each instance writes and reads the same objects for the layers it
+        holds.
+        """
+        pp_sizes = extra_config.get("pp_sizes")
+        if pp_sizes is None:
+            return None
+        if not isinstance(pp_sizes, list) or not all(
+            isinstance(size, int) and size > 0 for size in pp_sizes
+        ):
+            raise ValueError(
+                f"pp_sizes must be a list of positive integers, got {pp_sizes!r}"
+            )
+        fallback_reason: str | None = None
+        if self.store_tp_size is not None:
+            fallback_reason = "the Store TP layout is in use"
+        elif len(self._kv_cache_groups) != 1:
+            fallback_reason = "the KV cache has several groups"
+        elif self._kv_cache_config.hisparse_host_num_blocks is not None:
+            fallback_reason = "HiSparse host cache registration is per group"
+        if fallback_reason is not None:
+            logger.warning(
+                "Mooncake store ignores pp_sizes=%s because %s",
+                pp_sizes,
+                fallback_reason,
+            )
+            return None
+        # VLLM_PP_LAYER_PARTITION may partition this instance's own stages;
+        # the other PP sizes use the default partition.
+        cut_points = {
+            start
+            for size in pp_sizes
+            if size != self.pp_size
+            for start in itertools.accumulate(
+                get_default_pp_partition(num_layers, size), initial=0
+            )
+        }
+        layer_ranges = split_layer_range(
+            get_pp_indices(num_layers, self.pp_rank, self.pp_size), cut_points
+        )
+        logger.info(
+            "Mooncake store stores layer ranges %s per block for pp_sizes=%s",
+            layer_ranges,
+            pp_sizes,
+        )
+        return layer_ranges
+
     def _build_token_databases(
         self,
         metadata: KeyMetadata,
         plans: tuple[_StoreGroupPlan | None, ...] | None,
+        layer_ranges: tuple[tuple[int, int], ...] | None = None,
     ) -> list[ChunkedTokenDatabase]:
         """Construct token databases and their Store layouts."""
         token_dbs: list[ChunkedTokenDatabase] = []
@@ -1901,18 +1973,28 @@ class MooncakeStoreWorker:
             )
             plan = plans[group_idx] if plans is not None else None
             if plan is None:
+                group_metadata = dataclasses.replace(
+                    metadata,
+                    group_id=group_idx,
+                    tp_rank=(
+                        self.tp_rank // self._group_tp_replication_factors[group_idx]
+                    ),
+                )
                 token_dbs.append(
                     ChunkedTokenDatabase(
-                        dataclasses.replace(
-                            metadata,
-                            group_id=group_idx,
-                            tp_rank=(
-                                self.tp_rank
-                                // self._group_tp_replication_factors[group_idx]
-                            ),
-                        ),
+                        group_metadata,
                         group.block_size,
                         hash_block_size=hash_block_size,
+                        store_layout=(
+                            RankLocalStoreLayout(
+                                group_metadata,
+                                group.block_size,
+                                hash_block_size,
+                                layer_ranges,
+                            )
+                            if layer_ranges is not None
+                            else None
+                        ),
                     )
                 )
                 continue
@@ -2168,7 +2250,19 @@ class MooncakeStoreWorker:
                         group_kernel_blocks(cache, self.num_blocks)
                         for cache in group_tensors
                     ]
-                db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
+                    db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
+                elif db.store_layout.layer_ranges is not None:
+                    layer_indices = [
+                        extract_layer_index(name)
+                        for name in group.layer_names
+                        if name in cache_by_layer
+                        for _ in cache_by_layer[name]
+                    ]
+                    db.store_layout.register_kv_caches(
+                        group_tensors, self.num_blocks, layer_indices
+                    )
+                else:
+                    db.store_layout.register_kv_caches(group_tensors, self.num_blocks)
 
         registered_buffers: dict[int, int] = {}
         num_host_segments = 0

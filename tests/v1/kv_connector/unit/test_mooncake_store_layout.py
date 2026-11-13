@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     MambaStoreLayout,
     RankLocalStoreLayout,
     TokenMajorStoreLayout,
+    split_layer_range,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
 from vllm.utils.math_utils import cdiv
@@ -368,6 +369,60 @@ def test_rank_local_layout_skips_block_padding():
     addrs, sizes, _ = layout.prepare_values([(0, BLOCK_SIZE)], [1], [0])
     assert addrs == [[view.data_ptr() + page for view in views]]
     assert sizes == [[state] * num_layers]
+
+
+def test_split_layer_range_cuts_only_inside_the_range():
+    assert split_layer_range((0, 28), {14}) == ((0, 14), (14, 28))
+    assert split_layer_range((0, 14), {0, 14, 20}) == ((0, 14),)
+    assert split_layer_range((10, 20), {5, 14, 25}) == ((10, 14), (14, 20))
+
+
+def test_rank_local_layer_ranges_store_one_object_per_range():
+    """A block is one object per layer range, holding only that range's
+    layers under a key naming the range. A layer past the last range, like a
+    draft model's on the last PP stage, belongs to the last range."""
+    num_blocks = 3
+    caches = [
+        torch.zeros(num_blocks, 1, BLOCK_SIZE, 8, dtype=torch.uint8) for _ in range(5)
+    ]
+    layout = RankLocalStoreLayout(
+        KeyMetadata("test-model", 0, 0, 0, 0),
+        BLOCK_SIZE,
+        BLOCK_SIZE,
+        layer_ranges=((0, 2), (2, 4)),
+    )
+    layout.register_kv_caches(caches, num_blocks, layer_indices=[0, 1, 2, 3, 9])
+
+    assert layout.local_shard_ids == (0, 1)
+    assert "@layers:0-2@group:0@" in layout.key_for(0, BlockHash(b"h"))
+    assert "@layers:2-4@group:0@" in layout.key_for(1, BlockHash(b"h"))
+    addrs, sizes, _ = layout.prepare_values(
+        [(0, BLOCK_SIZE), (0, BLOCK_SIZE)], [1], [1, 0]
+    )
+    block_bytes = BLOCK_SIZE * 8
+    assert addrs == [
+        [cache.data_ptr() + block_bytes for cache in caches[2:]],
+        [cache.data_ptr() + block_bytes for cache in caches[:2]],
+    ]
+    assert sizes == [[block_bytes] * 3, [block_bytes] * 2]
+
+
+def test_rank_local_layer_ranges_reject_a_region_across_ranges():
+    """A region holding layers of two ranges, like a block-outermost buffer,
+    cannot be stored as one object per range."""
+    num_blocks = 2
+    raw = torch.zeros(num_blocks, 2, BLOCK_SIZE, 8, dtype=torch.uint8)
+    layout = RankLocalStoreLayout(
+        KeyMetadata("test-model", 0, 0, 0, 0),
+        BLOCK_SIZE,
+        BLOCK_SIZE,
+        layer_ranges=((0, 1), (1, 2)),
+    )
+
+    with pytest.raises(ValueError, match="does not fit"):
+        layout.register_kv_caches(
+            [raw[:, 0:1], raw[:, 1:2]], num_blocks, layer_indices=[0, 1]
+        )
 
 
 def test_rank_local_database_api_rejects_tp_shared_layout():
