@@ -1458,14 +1458,14 @@ class D3Strategy(ReadStrategy):
 
 class KnowLineStrategy(ReadStrategy):
     """KnowLine decision models: a Qwen3.5-MoE checkpoint post-trained to
-    answer a decision as the first token after a literal ``Answer:``. The
+    answer a decision as the first token after a literal `Answer:`. The
     prompt and the answers are the checkpoint's trained format (see
     knowline.py), so picks and probabilities match the reference server
     shipped with the checkpoint.
 
     Each question is one read of its prompt, scored at the reply's first
-    token through ``logprob_token_ids``, so the logprobs are the labels' over
-    the whole vocabulary. ``MAX_LOGPROB_TOKEN_IDS`` covers all 255 labels."""
+    token through `logprob_token_ids`, so the logprobs are the labels' over
+    the whole vocabulary. `MAX_LOGPROB_TOKEN_IDS` covers all 255 labels."""
 
     #: The read-twice layout's bound, in tokens, when the checkpoint's
     #: marker does not carry its own.
@@ -1657,6 +1657,12 @@ KNOWLINE_ARCHITECTURES = frozenset(
 )
 
 
+class NoStrategyError(ValueError):
+    """No read strategy serves the architecture. Most models have none, so
+    this is an expected state, unlike the misconfigurations that fail the
+    same selection."""
+
+
 def select_read_strategy(
     model_config: ModelConfig, supported_tasks: Sequence[SupportedTask]
 ) -> type[ReadStrategy]:
@@ -1675,7 +1681,7 @@ def select_read_strategy(
     else:
         strategy = READ_STRATEGIES.get(model_config.architecture)
     if strategy is None:
-        raise ValueError(
+        raise NoStrategyError(
             "The structured decisions API does not support "
             f"{model_config.architecture}. Supported architectures: "
             f"{sorted(READ_STRATEGIES)}"
