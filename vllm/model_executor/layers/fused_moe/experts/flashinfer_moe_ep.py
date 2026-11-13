@@ -130,8 +130,8 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Build the megakernel from the layer's canonical weights.
 
-        The oracle has already put the weights in kernel format; the per-expert
-        weight global scales arrive through the quant config and become the
+        The oracle supplies the weights in the backend's input format.
+        Per-expert global scales arrive through the quant config and become
         epilogue alphas.
         """
         validate_flashinfer_moe_ep_layer(layer)  # type: ignore[arg-type]
@@ -143,8 +143,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 f"{self.moe_config.moe_backend} with {sm90_format} weights on "
                 "Hopper does not support apply_router_weight_on_input"
             )
-        # Layer parameters the megakernel reads. They end up aliasing the
-        # megakernel's own tensors, so EPLB permutes exactly what it uses.
+        # Layer parameters alias the megakernel's weight and block-scale buffers.
         # Block-FP8 layers may name their scales weight_scale_inv.
         scale = (
             "weight_scale_inv"
@@ -169,7 +168,6 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         )
         adapter.warmup()
         for name, tensor in zip(names, adapter.kernel_weights()):
-            # Rebind, never copy: the params must alias the megakernel buffers (EPLB).
             getattr(layer, name).data = tensor
         self._adapter = adapter
 

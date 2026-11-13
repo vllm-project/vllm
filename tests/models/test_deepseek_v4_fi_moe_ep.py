@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
+    fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
@@ -233,6 +234,10 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
         FLASHINFER_MOE_EP_CUTEDSL, routing_method=RoutingMethodType.Renormalize
     )
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (9, 0))
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=None, w2_scale=None, block_shape=[128, 128]
+    )
+    assert fi_ep.sm90_weight_format(quant_config) == "fp8_block"
     assert _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym) == (
         True,
         "",
@@ -241,6 +246,7 @@ def test_block_fp8_weights_run_on_hopper_and_fp4_on_blackwell(
     assert "NVFP4 weights on this GPU" in reason
 
     monkeypatch.setattr(fi_ep, "_current_capability", lambda: (10, 0))
+    assert fi_ep.sm90_weight_format(quant_config) is None
     _, reason = _is_supported(cutedsl, kFp8Static128BlockSym, kFp8Dynamic128Sym)
     assert "FP8_BLOCK weights on this GPU" in reason
 

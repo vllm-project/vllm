@@ -69,10 +69,12 @@ def supports_current_device() -> bool:
 
 
 def sm90_weight_format(quant_config: FusedMoEQuantConfig) -> Sm90WeightFormat | None:
-    """The weights a Hopper megakernel takes, or None on Blackwell."""
+    """Weight format for the current Hopper device, if supported."""
+    if _current_capability() != _SM90:
+        return None
     if quant_config.use_fp8_w8a8 and quant_config.is_block_quantized:
         return "fp8_block"
-    if quant_config.weight_quant_dtype == "mxfp4" and _current_capability() == _SM90:
+    if quant_config.weight_quant_dtype == "mxfp4":
         return "mxfp4"
     return None
 
@@ -620,9 +622,8 @@ class FlashInferMoeEp:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Kernel-resident fc1 weight, fc1 scales, fc2 weight, fc2 scales.
 
-        Contiguous per-expert tensors that alias the memory the megakernel
-        reads, so a caller may permute experts in place (EPLB). One-byte FP4
-        data and scales come back as uint8; block-FP8 weights keep FP8.
+        Contiguous per-expert views alias the memory read by the megakernel.
+        FP4 data and scales use uint8. Block-FP8 weights keep FP8.
         """
         if self._mega_layer is None:
             raise RuntimeError("FlashInfer MoE-EP layer was destroyed")
@@ -642,7 +643,7 @@ class FlashInferMoeEp:
         )
 
     def expert_weight_views(self) -> tuple[torch.Tensor, ...]:
-        """Every per-expert tensor the kernel reads: weights plus epilogue."""
+        """Kernel weight views and per-expert epilogue tensors."""
         epilogue = cast(FlashInferMoeEpEpilogue, self._epilogue)
         vectors = (epilogue.fc1_alpha, epilogue.fc2_alpha, epilogue.fc1_norm_const)
         return (*self.kernel_weights(), *(v for v in vectors if v is not None))

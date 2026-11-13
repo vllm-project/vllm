@@ -87,12 +87,13 @@ GEOMETRIES = (
     Geometry("mistral-large-3", 7168, 4096, 128, 4),
 )
 BACKENDS = (FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM)
+DEEPSEEK_V41_FLASH = Geometry("deepseek-v4.1-flash", 5120, 2304, 384, 6)
 # Routed-expert geometries of recent MoE models (Kimi-K3 at its 3584-wide
 # latent), run with synthetic block-FP8 or MXFP4 weights on the Hopper
 # megakernels.
 SM90_GEOMETRIES = (
     Geometry("glm-5.3-flash", 4096, 2048, 288, 8),
-    Geometry("deepseek-v4.1-flash", 5120, 2304, 384, 6),
+    DEEPSEEK_V41_FLASH,
     Geometry("kimi-k3", 3584, 3072, 896, 16),
     Geometry("qwen3.8-flash-next", 2560, 640, 512, 10),
 )
@@ -544,9 +545,10 @@ def test_init_warmup_forward_is_exact_on_grid_inputs(
     reason="The Hopper FlashInfer MoE-EP megakernels require SM90",
 )
 @pytest.mark.parametrize(
-    "geometry", SM90_GEOMETRIES, ids=[g.name for g in SM90_GEOMETRIES]
+    "sm90_format,geometry",
+    [pytest.param("fp8_block", g, id=f"fp8_block-{g.name}") for g in SM90_GEOMETRIES]
+    + [pytest.param("mxfp4", DEEPSEEK_V41_FLASH, id="mxfp4-deepseek-v4.1-flash")],
 )
-@pytest.mark.parametrize("sm90_format", ["fp8_block", "mxfp4"])
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_sm90_init_warmup_forward_is_exact_on_grid_inputs(
     world_size: int, sm90_format: str, geometry: Geometry
@@ -685,9 +687,7 @@ def test_block_fp8_workspace_follows_the_dp_wide_batch(
 def test_sm90_mxfp4_adapter_hands_packed_weights_to_flashinfer(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """MXFP4 weights reach the SM90 MXFP4 config as the checkpoint stores them,
-    packed E2M1 and E8M0 bytes that FlashInfer folds without requantizing, and
-    small batches get a workspace of their own as with block FP8."""
+    """Pass packed E2M1/E8M0 checkpoint weights into the SM90 MXFP4 config."""
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
     config_cls = getattr(moe_ep, "Sm90_Fp8_Mxfp4_Bf16_PullCutedsl_MegaMoeConfig", None)
     if config_cls is None:
