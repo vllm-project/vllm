@@ -9,7 +9,6 @@ server fails to start rather than falling back.
 """
 
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -68,10 +67,6 @@ def _capture_draft_config(cfg):
 
     with (
         patch("vllm.v1.worker.gpu.spec_decode.eagle.utils.get_model", _fake_get_model),
-        patch(
-            "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
-            return_value=SimpleNamespace(world_size=1),
-        ),
         pytest.raises(_Captured) as exc,
     ):
         load_eagle_model(object(), cfg)
