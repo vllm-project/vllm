@@ -23,11 +23,17 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     dense_kv_cache_views,
 )
+from tests.v1.core.utils import full_layer, new_kv_cache_group, new_kv_cache_spec
 from vllm.config.attention import HiSparseConfig
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.single_type_kv_cache_manager import (
+    HiSparseHotManager,
+    HiSparseResidentManager,
+    HiSparseSourceManager,
+)
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import (
     allocate_hisparse_kv_caches,
@@ -38,18 +44,16 @@ from vllm.v1.hisparse.runtime import (
     _has_hisparse_ops,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
+    AttentionSpec,
+    HiSparseHotPageSpec,
+    HiSparsePageSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheLayerConfig,
     KVCacheLayout,
-    KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
     SparseFullAttentionSpec,
-    UniformTypeKVCacheSpecs,
     compute_layout_strides,
 )
 from vllm.v1.worker.gpu import attn_utils
@@ -65,6 +69,7 @@ from vllm.v1.worker.utils import (
     copy_kv_cache_blocks_inplace,
     customize_attention_spec,
     map_kv_caches_to_kernel_blocks,
+    prepare_kernel_block_sizes,
 )
 
 
@@ -80,7 +85,7 @@ from vllm.v1.worker.utils import (
         (True, 384, [MultipleOf(32)], [128, 256], 128, 256),
     ],
 )
-def test_get_kv_cache_spec_resolves_hisparse_block_size(
+def test_get_kv_cache_layer_configs_resolves_hisparse_block_size(
     monkeypatch,
     enabled,
     block_size,
@@ -115,7 +120,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             tokens_per_state=compress_ratio,
             cache_role=SparseCacheRole.INDEXER,
         ),
-        "dense": FullAttentionSpec(
+        "dense": AttentionSpec(
             block_size=block_size, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
         ),
     }
@@ -127,17 +132,17 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
-            get_kv_cache_spec=lambda _, spec=specs[name]: spec,
+            get_kv_cache_config=lambda _, spec=specs[name]: full_layer(spec),
             get_attn_backend=lambda backend=backend: backend,
             is_draft_layer=False,
             kv_sharing_target_layer_name=None,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
-    mamba_fit_inputs: list[dict[str, KVCacheSpec]] = []
+    mamba_fit_inputs: list[dict[str, KVCacheLayerConfig]] = []
 
-    def fit_mamba_blocks(_, kv_cache_spec, __):
-        mamba_fit_inputs.append(kv_cache_spec)
-        return kv_cache_spec
+    def fit_mamba_blocks(_, layer_configs, __):
+        mamba_fit_inputs.append(layer_configs)
+        return layer_configs
 
     monkeypatch.setattr(
         attn_utils_module, "fit_mamba_blocks_to_attention", fit_mamba_blocks
@@ -153,34 +158,40 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     )
     if expected is None:
         with pytest.raises(ValueError, match="supported by every sparse"):
-            attn_utils.get_kv_cache_spec(config)
+            attn_utils.get_kv_cache_layer_configs(config)
         return
 
-    resolved = attn_utils.get_kv_cache_spec(config)
-    assert resolved["main"].block_size == expected
-    assert resolved["indexer"].block_size == indexer
-    assert resolved["indexer"].tokens_per_state == compress_ratio
-    assert resolved["indexer"].num_states == indexer // compress_ratio
+    resolved = attn_utils.get_kv_cache_layer_configs(config)
+    main = resolved["main"].spec
+    assert main.block_size == expected
+    indexer_spec = resolved["indexer"].spec
+    assert isinstance(indexer_spec, MLAAttentionSpec)
+    assert indexer_spec.block_size == indexer
+    assert indexer_spec.tokens_per_state == compress_ratio
+    assert indexer_spec.num_states == indexer // compress_ratio
     if sparse_full_attention:
-        main = resolved["main"]
         assert isinstance(main, SparseFullAttentionSpec)
         assert main.topk_buffer_width == 35
-    assert [specs["indexer"].block_size for specs in mamba_fit_inputs] == (
+    assert [lcs["indexer"].spec.block_size for lcs in mamba_fit_inputs] == (
         [indexer] if enabled else []
     )
     dense_backend = layers["dense"].get_attn_backend()
-    assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
+    assert resolved["dense"] == full_layer(
+        customize_attention_spec(dense_backend, specs["dense"])
+    )
     assert all(spec.block_size == block_size for spec in specs.values())
     if enabled:
         resident = resolved["main.hisparse_resident"]
         hot = resolved["main.hisparse_hot"]
-        assert isinstance(resident, HiSparseResidentSpec)
-        assert isinstance(hot, HiSparseHotSpec)
-        assert resident.block_size == hot.block_size == expected
+        assert resident.manager_cls is HiSparseResidentManager
+        assert hot.manager_cls is HiSparseHotManager
+        assert isinstance(resident.spec, HiSparsePageSpec)
+        assert isinstance(hot.spec, HiSparseHotPageSpec)
+        assert resident.spec.block_size == hot.spec.block_size == expected
         assert (
-            resident.page_size_bytes
-            == hot.page_size_bytes
-            == (resolved["main"].page_size_bytes)
+            resident.spec.page_size_bytes
+            == hot.spec.page_size_bytes
+            == main.page_size_bytes
         )
         assert len(resolved) == len(specs) + 2
         groups = attn_utils_module.get_hisparse_kv_cache_groups(config, resolved)
@@ -190,14 +201,18 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         assert set(grouped_names) == set(resolved)
     else:
         assert resolved == {
-            name: customize_attention_spec(layers[name].get_attn_backend(), spec)
+            name: full_layer(
+                customize_attention_spec(layers[name].get_attn_backend(), spec)
+            )
             for name, spec in specs.items()
         }
 
 
-def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
-    spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+def test_get_kv_cache_layer_configs_tags_draft_layers(monkeypatch):
+    layer_config = full_layer(
+        AttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        )
     )
     backend = SimpleNamespace(
         customize_spec=AttentionBackend.customize_spec,
@@ -205,7 +220,7 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
     )
     layers = {
         name: SimpleNamespace(
-            get_kv_cache_spec=lambda _: spec,
+            get_kv_cache_config=lambda _: layer_config,
             get_attn_backend=lambda: backend,
             is_draft_layer=name == "draft",
             kv_sharing_target_layer_name=None,
@@ -215,8 +230,8 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=None))
 
-    specs = attn_utils.get_kv_cache_spec(config)
-    assert specs["draft"].is_draft and not specs["target"].is_draft
+    layer_configs = attn_utils.get_kv_cache_layer_configs(config)
+    assert layer_configs["draft"].is_draft and not layer_configs["target"].is_draft
 
 
 class _FakeMetadataBuilder:
@@ -244,7 +259,7 @@ class _DraftBackend:
 
 
 def test_attention_checks_preserve_global_and_target_scoped_support():
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=1,
         head_size=128,
@@ -312,7 +327,7 @@ def test_varlen_cudagraph_unsupported_backend_checks_scoped_bounds():
     """ALWAYS passes without a bound, other builders need one at least as wide as
     the requested length, and NEVER fails whatever bound a builder reports."""
     config: Any = SimpleNamespace()
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=1,
         head_size=128,
@@ -669,7 +684,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():
     num_blocks = 3
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=1,
         head_size=2,
@@ -727,7 +742,7 @@ def test_allocate_compressed_mla_cache(
                 block_stride=spec.page_size_bytes,
             )
         ],
-        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
+        kv_cache_groups=[new_kv_cache_group(["layer.0"], spec)],
     )
 
     caches = allocate_kv_cache(
@@ -741,7 +756,7 @@ def test_allocate_compressed_mla_cache(
 def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
     num_blocks = 4
     num_layers = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
         head_size=2,
@@ -767,7 +782,7 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
 def test_fixed_block_stride_propagates_outward_in_lhbnc():
     num_blocks = 3
     num_layers = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
         head_size=2,
@@ -795,7 +810,7 @@ def test_copy_kv_cache_blocks_separate_head_groups():
     layout = KVCacheLayout.LHBNC
     num_blocks = 4
     num_layers = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=2,
         num_kv_heads=2,
         head_size=2,
@@ -839,7 +854,7 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
 ):
     num_blocks = 4
     physical_per_logical = 2
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=4,
         num_kv_heads=1,
         head_size=2,
@@ -876,11 +891,11 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
 
 def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
     """Host tensors get their own backing; view-less specs keep the raw one."""
-    spec = FullAttentionSpec(
-        block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32
-    )
+    spec = AttentionSpec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32)
     page = spec.page_size_bytes
-    resident_spec = HiSparseResidentSpec(block_size=2, page_size=page)
+    resident = HiSparseResidentManager.layer_config(
+        HiSparsePageSpec(block_size=2, page_size=page)
+    )
     device_size = 4 * page
     config = KVCacheConfig(
         num_blocks=4,
@@ -907,9 +922,11 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["source"], spec, host_resident=True),
-            KVCacheGroupSpec(["indexer"], spec),
-            KVCacheGroupSpec(["resident"], resident_spec),
+            new_kv_cache_group(
+                ["source"], HiSparseSourceManager.layer_config(spec), host_resident=True
+            ),
+            new_kv_cache_group(["indexer"], spec),
+            new_kv_cache_group(["resident"], resident),
         ],
     )
     host_buffers: list[torch.Tensor] = []
@@ -954,8 +971,6 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
         dtype=torch.bfloat16,
         topk_buffer_width=2,
     )
-    source_spec = UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))
-    assert source_spec is not None
     config = KVCacheConfig(
         num_blocks=4,
         hisparse_host_num_blocks=3,
@@ -981,13 +996,18 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
             ),
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(names, source_spec, host_resident=True),
-            KVCacheGroupSpec(
-                resident_names, HiSparseResidentSpec(block_size=2, page_size=32)
+            new_kv_cache_group(
+                names, spec, HiSparseSourceManager.config(), host_resident=True
             ),
-            KVCacheGroupSpec(
+            new_kv_cache_group(
+                resident_names,
+                HiSparsePageSpec(block_size=2, page_size=32),
+                HiSparseResidentManager.config(),
+            ),
+            new_kv_cache_group(
                 hot_names,
-                HiSparseHotSpec(block_size=2, page_size=32, blocks_per_request=2),
+                HiSparseHotPageSpec(block_size=2, page_size=32),
+                HiSparseHotManager.config(blocks_per_request=2),
             ),
         ],
     )
@@ -1093,12 +1113,21 @@ def _packed_group(
     return AttentionGroup(backend, ["layer.0"], spec, 0)
 
 
+def _kv_cache_group(group):
+    return new_kv_cache_group(group.layer_names, group.kv_cache_spec)
+
+
 def test_packed_compressed_group_gets_kernel_block_table():
     """A packed indexer cache whose kernel needs 64-state pages gets a table and
     a bound view in kernel blocks that address the same packed-block rows."""
     row, stride_rows = 132, 5 * 64
     group = _packed_group(4, row, [128, 256])
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    group.create_metadata_builders(
+        _VLLM_CONFIG,
+        "cpu",
+        kernel_block_size=1024,
+        kv_cache_group=_kv_cache_group(group),
+    )
     assert group.get_metadata_builder().kv_cache_spec.block_size == 256
 
     backing = torch.arange(3 * stride_rows).repeat_interleave(row)
@@ -1115,7 +1144,12 @@ def test_split_group_maps_manager_block_table():
     """Groups split in a dense layout keep manager block tables; builders get
     b * blocks_per_kv_block + j against the view allocated in kernel blocks."""
     group = _packed_group(4, 132, [128, 256])
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=256)
+    group.create_metadata_builders(
+        _VLLM_CONFIG,
+        "cpu",
+        kernel_block_size=256,
+        kv_cache_group=_kv_cache_group(group),
+    )
     kernel_view = torch.zeros(12, 1, 64, 132)
     bound = map_kv_caches_to_kernel_blocks({"layer.0": kernel_view}, [group])
     assert bound["layer.0"] is kernel_view
@@ -1143,7 +1177,12 @@ def test_packed_token_cache_without_slot_mapping_is_split():
     one: its kernel blocks address the manager blocks' rows."""
     row, stride_rows = 132, 20 * 64
     group = _packed_group(1, row, [64], spec_cls=SelfAddressedMLASpec)
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    group.create_metadata_builders(
+        _VLLM_CONFIG,
+        "cpu",
+        kernel_block_size=1024,
+        kv_cache_group=_kv_cache_group(group),
+    )
     # Each row holds its own row index.
     backing = torch.arange(3 * stride_rows).repeat_interleave(row)
     manager = backing.view(3, 1, stride_rows, row)[:, :, :1024]
@@ -1160,7 +1199,12 @@ def test_packed_token_cache_without_slot_mapping_is_split():
 
 def test_packed_token_cache_cannot_be_split():
     group = _packed_group(1, 1152, [64])
-    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    group.create_metadata_builders(
+        _VLLM_CONFIG,
+        "cpu",
+        kernel_block_size=1024,
+        kv_cache_group=_kv_cache_group(group),
+    )
     packed = torch.zeros(3, 1, 2048, 1152, dtype=torch.uint8)[:, :, :1024]
     with pytest.raises(ValueError, match="cannot be split"):
         map_kv_caches_to_kernel_blocks({"layer.0": packed}, [group])
@@ -1208,3 +1252,11 @@ def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():
     torch.testing.assert_close(
         raw.view(num_tensors, num_blocks, block_stride), expected
     )
+
+
+def test_pp_stage_without_group_layers_keeps_manager_block_size():
+    """Under PP a stage may hold none of a group's layers; the group then has no
+    specs to dispatch on and keeps its manager block size."""
+    group = new_kv_cache_group([], new_kv_cache_spec(block_size=64))
+    config = KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[group])
+    assert prepare_kernel_block_sizes(config, [[]]) == [64]

@@ -50,6 +50,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
@@ -58,8 +59,7 @@ from vllm.v1.hisparse.runtime import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
-    KVCacheSpec,
+    KVCacheLayerConfig,
     SparseFullAttentionSpec,
     get_kv_quant_mode,
 )
@@ -204,7 +204,7 @@ class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
 
 
 class Qwen4ExpQSABackend(AttentionBackend):
-    """FullAttentionSpec backend used by the merged QSA owner."""
+    """Full-attention backend used by the merged QSA owner."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     # fp8/fp8_e4m3: e4m3 bytes in a uint8 cache, written by reshape_and_cache
@@ -593,8 +593,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        spec = FullAttentionSpec(
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
+        spec = AttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -602,12 +602,11 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
-        if self.hisparse_cache is None:
-            return spec
-        return SparseFullAttentionSpec(
-            **vars(spec),
-            topk_buffer_width=self.indexer.output_width,
-        )
+        if self.hisparse_cache is not None:
+            spec = SparseFullAttentionSpec(
+                **vars(spec), topk_buffer_width=self.indexer.output_width
+            )
+        return FullAttentionManager.layer_config(spec)
 
     def hisparse_kv_view(self, rows: torch.Tensor) -> torch.Tensor:
         return rows.unflatten(-1, (self.num_kv_heads, 2 * self.head_dim)).transpose(
