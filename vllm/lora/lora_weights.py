@@ -38,7 +38,7 @@ class LoRALayerWeights:
         """Optimize the LoRA by merging the scaling into lora_b."""
         if self.scaling == 1:
             return self
-        self.lora_b *= self.scaling
+        self.lora_b = self.lora_b * self.scaling
         self.scaling = 1
         return self
 
@@ -286,7 +286,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         for i in range(len(self.lora_b)):
             if self.scaling[i] == 1 or self.lora_b[i] is None:  # type: ignore
                 continue
-            self.lora_b[i] *= self.scaling[i]  # type: ignore
+            self.lora_b[i] = self.lora_b[i] * self.scaling[i]  # type: ignore
             self.scaling[i] = 1  # type: ignore
         return self
 
