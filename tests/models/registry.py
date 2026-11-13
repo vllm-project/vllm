@@ -458,6 +458,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
     ),
+    "MistralLarge4ForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Large-4-1T-A52B", is_available_online=False
+    ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
         {
@@ -589,12 +592,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
-    ),
-    "TeleChat2ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat2-3B", trust_remote_code=True
-    ),
-    "TeleChat3ForCausalLM": _HfExamplesInfo(
-        "Tele-AI/TeleChat3-36B-Thinking", trust_remote_code=True
     ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
@@ -953,7 +950,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Gemma4UnifiedForConditionalGeneration": _HfExamplesInfo(
         "google/gemma-4-12B-it",
-        is_available_online=False,
     ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
@@ -1643,6 +1639,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="Inferact/Muse-Spark-Open-DSpark",
         is_available_online=False,
     ),
+    "MistralLarge4DSparkModel": _HfExamplesInfo(
+        "mistralai/Mistral-Large-4-1T-A52B",
+        speculative_model="mistralai/Mistral-Large-4-1T-A52B",  # mtp_dspark.*
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
     "Qwen3DSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_model="deepseek-ai/dspark_qwen3_8b_block7",
@@ -1935,6 +1937,9 @@ _TRANSFORMERS_BACKEND_MODELS = {
         "vllm-project/Ilama-3.2-1B", trust_remote_code=True
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMultiModalForTranscription": _HfExamplesInfo(
+        "microsoft/VibeVoice-ASR-HF"
+    ),
     "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924"),
     "TransformersForMTP": _HfExamplesInfo(
         "zai-org/GLM-4.5",

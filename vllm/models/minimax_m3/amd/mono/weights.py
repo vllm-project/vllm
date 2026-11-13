@@ -26,6 +26,7 @@ from aiter import dtypes
 from aiter.ops.quant import pertoken_quant
 from aiter.ops.shuffle import shuffle_weight
 
+from vllm.model_executor.kernels.linear.mxfp8.aiter_flydsl import row_major_weight
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
 )
@@ -123,7 +124,7 @@ def _ptpc_fp8_from_mxfp8(
         f"{name}: scale {None if s is None else tuple(s.shape)}",
     )
     assert w is not None and s is not None
-    bf = dequant_mxfp8_to_bf16(w.data, s.data.view(torch.uint8))
+    bf = dequant_mxfp8_to_bf16(row_major_weight(linear), s.data.view(torch.uint8))
     q, scale = pertoken_quant(bf, quant_dtype=dtypes.fp8)
     return (
         shuffle_weight(q, layout=(16, 16)).contiguous(),
@@ -150,15 +151,16 @@ def mxfp8_a_tiles(
         f"{name}: scale {None if s is None else tuple(s.shape)}",
     )
     assert w is not None and s is not None
-    # the row-major layout the native MXFP8 linear kernel keeps; a kernel that
-    # preshuffles or pads would make the tiles silently wrong
+    # the tiles are cut from the row-major layout; any other preshuffle or
+    # padding would make them silently wrong
+    w = row_major_weight(linear)
     _need(
         not getattr(w, "is_shuffled", False) and not getattr(s, "is_shuffled", False),
         f"{name}: weight preshuffled",
     )
     _need(rows % 32 == 0 and cols % 256 == 0, f"{name}: shape {rows} x {cols}")
     tiles = (
-        w.data.contiguous()
+        w.contiguous()
         .view(torch.uint8)
         .view(rows // 16, 16, cols // 128, 2, 4, 16)
         .permute(0, 2, 4, 1, 3, 5)
@@ -218,7 +220,7 @@ def _build_cp_qkv(
         f"layer {layer_id} qkv_proj CP: TP group rank {dist.get_rank(tp_group)}"
         f" of {dist.get_world_size(tp_group)}, not {rank} of {TP}",
     )
-    bf = dequant_mxfp8_to_bf16(w.data, s.data.view(torch.uint8))
+    bf = dequant_mxfp8_to_bf16(row_major_weight(linear), s.data.view(torch.uint8))
 
     iq_start = (LOCAL_Q_HEADS + 2) * HEAD_DIM  # 2304
     iq_end = iq_start + HEAD_DIM  # 2432
