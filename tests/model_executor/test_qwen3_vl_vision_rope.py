@@ -14,6 +14,7 @@ from vllm.distributed import (
     initialize_model_parallel,
 )
 from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -136,6 +137,7 @@ def test_qwen3_vision_rotation_matches_fp32_reference():
 
     rotary = visual.blocks[0].attn.apply_rotary_emb
     assert _rel_l2(rotary.forward_native(qk, cos, sin), expected) < _MAX_REL_L2
-    if torch.cuda.is_available():
-        out = rotary.forward_cuda(qk.cuda(), cos.cuda(), sin.cuda()).cpu()
+    if current_platform.is_cuda_alike():
+        # Dispatches to forward_cuda or forward_hip for the current platform.
+        out = rotary(qk.cuda(), cos.cuda(), sin.cuda()).cpu()
         assert _rel_l2(out, expected) < _MAX_REL_L2
