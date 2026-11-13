@@ -441,21 +441,29 @@ def test_modelopt_int8_pb_wo_requires_group_size(mixed):
             ModelOptInt8Config.from_config({"quantization": layer})
 
 
+_SKIP_INT8_UNSUPPORTED = pytest.mark.skipif(
+    not is_quant_method_supported("modelopt_int8"),
+    reason="modelopt_int8 quantization is not supported on this platform",
+)
+
+
 @pytest.mark.parametrize(
     ("config_file", "quant_config", "expected"),
     [
-        (
+        pytest.param(
             "config.json",
             {"quant_method": "modelopt", "quant_algo": "INT8_PB_WO", "group_size": 32},
             ModelOptInt8Config,
+            marks=_SKIP_INT8_UNSUPPORTED,
         ),
-        (
+        pytest.param(
             "hf_quant_config.json",
             {
                 "producer": {"name": "modelopt"},
                 "quantization": {"quant_algo": "INT8_PB_WO", "group_size": 32},
             },
             ModelOptInt8Config,
+            marks=_SKIP_INT8_UNSUPPORTED,
         ),
         (
             "config.json",

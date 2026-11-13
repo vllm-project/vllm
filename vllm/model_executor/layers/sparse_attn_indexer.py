@@ -58,6 +58,7 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import round_up
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     LayerNameType,
@@ -133,6 +134,19 @@ def _merge_dcp_topk_global(
     bits that positions below `num_positions` use.
     """
     if dcp_world_size <= 1:
+        return
+
+    if current_platform.is_rocm():
+        from vllm.model_executor.kernels.attention.dsa.dcp_indexer_rocm import (
+            pack_dcp_candidates,
+            select_dcp_candidates,
+        )
+
+        packed = pack_dcp_candidates(
+            logits, topk_indices, dcp_rank, dcp_world_size, cp_interleave, row_starts
+        )
+        gathered = get_dcp_group().all_gather(packed, dim=1)
+        select_dcp_candidates(gathered, topk_indices)
         return
 
     # CuteDSL-only path (no PyTorch fallback): Triton-pack each rank's
@@ -333,21 +347,27 @@ def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor
     """Upcast BF16 MQA logits for the FP32 top-k kernels.
 
     Only columns below `row_ends` (int32, one per row) are converted, the
-    span the consumers read; DeepGEMM's aligned row stride is kept.
+    span the consumers read; DeepGEMM's aligned row stride is kept, with
+    storage for whole rows (gvr_2 reads the logits as [rows, stride]).
     """
     if logits.dtype == torch.float32:
         return logits
-    out = torch.empty_strided(
-        logits.shape, logits.stride(), dtype=torch.float32, device=logits.device
-    )
     num_rows, width = logits.shape
+    assert logits.stride(1) == 1
+    out = torch.empty(
+        (num_rows, max(logits.stride(0), width)),
+        dtype=torch.float32,
+        device=logits.device,
+    )[:, :width]
     if num_rows == 0 or width == 0:
         return out
     assert row_ends.numel() == num_rows and row_ends.dtype == torch.int32
+    # About two 8-warp CTAs per SM.
     block = 1024
-    splits = min(triton.cdiv(width, block), max(1, 1024 // num_rows))
+    ctas = 2 * num_compute_units(logits.device.index)
+    splits = min(triton.cdiv(width, block), max(1, ctas // num_rows))
     _upcast_logits_kernel[(num_rows, splits)](
-        logits, out, row_ends.contiguous(), logits.stride(0), BLOCK=block
+        logits, out, row_ends.contiguous(), logits.stride(0), BLOCK=block, num_warps=8
     )
     return out
 
@@ -938,16 +958,11 @@ def sparse_attn_indexer(
                             output_idx=topk_indices[rows],
                         )
                     else:
-                        ops.top_k_per_row_prefill(
+                        get_indexer_topk(topk_backend).forward_prefill(
                             logits,
-                            torch.zeros_like(row_ends)
-                            if row_starts is None
-                            else row_starts,
+                            row_starts,
                             row_ends,
                             topk_indices[rows],
-                            num_rows,
-                            logits.stride(0),
-                            logits.stride(1),
                             topk_tokens,
                         )
 
@@ -1289,6 +1304,7 @@ class SparseAttnIndexer(CustomOp):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        get_indexer_topk(self.topk_backend)
         self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
             vllm_config.attention_config.resolve_indexer_logits_dtype("float32")
         ]
