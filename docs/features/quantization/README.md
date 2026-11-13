@@ -59,6 +59,27 @@ Other transforms, older GPUs, and an explicit `--linear-backend` other than `aut
 
     Use `{"dtype":"float8e4m3"}` for FP8 activations. Checkpoints that declare 8-bit activations, such as compressed-tensors W4A8, select a kernel that supports them automatically.
 
+## Humming MoE Loading Memory
+
+When using `--quantization humming`, set `moe_convert_symmetric_integer` to
+`false` in the checkpoint's `quantization_config` to skip Humming's optional
+symmetric integer weight re-encoding for MoE experts. The default is `true`.
+For example, add this field alongside the existing weight and activation schema:
+
+```json
+{"moe_convert_symmetric_integer": false}
+```
+
+The option also accepts per-layer overrides in Humming's `dynamic` configuration.
+It does not change linear layers or other MoE backends.
+
+The optional conversion unpacks a whole expert projection into INT32 to inspect
+and potentially re-encode its integer codes. Disabling it avoids that temporary
+expansion and retains the original integer representation. Required kernel
+repacking and its allocations still occur. This controls loading memory, not
+the KV cache or the final weight precision. Keeping the integer representation
+can select different kernels, so check inference performance for your workload.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:

@@ -2,6 +2,21 @@ group: Quantization
 depends_on:
   - image-build
 steps:
+- label: ":nvidia: (H100) Humming Loading"
+  key: humming-loading
+  device: h100
+  num_devices: 1
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - tests/quantization/test_humming_loading.py
+  - tests/conftest.py
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/utils/humming.py
+  commands:
+    - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/test_humming_loading.py
+
 # Disabled until torchao transitive dependencies are locked.
 # - label: ":nvidia: (H200 MIG 35GB) Quantization"
 #   device: h200_35gb

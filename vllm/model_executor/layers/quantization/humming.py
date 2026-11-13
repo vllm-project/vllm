@@ -280,6 +280,7 @@ class HummingConfig(QuantizationConfig):
             input_schema = None
             force_input_schema = None
             allow_input_schema_fallback = True
+            layer_config = resolve_humming_layer_config(self.full_config or {}, prefix)
 
             if self.full_config:
                 input_config = self.get_layer_input_config(self.full_config, prefix)
@@ -311,6 +312,9 @@ class HummingConfig(QuantizationConfig):
                 force_input_schema=force_input_schema,
                 is_online_quant=is_online_quant,
                 allow_input_schema_fallback=allow_input_schema_fallback,
+                moe_convert_symmetric_integer=layer_config.get(
+                    "moe_convert_symmetric_integer", True
+                ),
             )
         return None
 
@@ -350,7 +354,10 @@ class HummingLayerQuantizationConfig(HummingConfig):
         force_input_schema: "HummingInputSchema | None" = None,
         is_online_quant: bool = False,
         allow_input_schema_fallback: bool = True,
+        moe_convert_symmetric_integer: bool = True,
     ):
+        if not isinstance(moe_convert_symmetric_integer, bool):
+            raise ValueError("moe_convert_symmetric_integer must be a boolean")
         self.weight_schema = weight_schema
         if input_schema is None:
             input_schema = _hm.HummingInputSchema()
@@ -359,11 +366,17 @@ class HummingLayerQuantizationConfig(HummingConfig):
         self.force_input_schema = force_input_schema
         self.is_online_quant = is_online_quant
         self.allow_input_schema_fallback = allow_input_schema_fallback
+        self.moe_convert_symmetric_integer = moe_convert_symmetric_integer
 
     @classmethod
     def from_config(cls, config):
         weight_schema = _hm.BaseWeightSchema.from_config(config)
-        return cls(weight_schema)
+        return cls(
+            weight_schema,
+            moe_convert_symmetric_integer=config.get(
+                "moe_convert_symmetric_integer", True
+            ),
+        )
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -802,6 +815,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             input_schema=self.input_schema,
             force_weight_schema=self.force_weight_schema,
             allow_input_schema_fallback=self.quant_config.allow_input_schema_fallback,
+            convert_symmetric_integer=self.quant_config.moe_convert_symmetric_integer,
         )
 
         # Build the MoE kernel
