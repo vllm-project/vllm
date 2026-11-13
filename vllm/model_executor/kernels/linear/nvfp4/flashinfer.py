@@ -6,11 +6,8 @@ import torch
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
-    as_quantized_activation,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    nvfp4_weight_padding_bytes,
-    pad_nvfp4_activation_for_cutlass,
     pad_nvfp4_weight_for_cutlass,
     slice_nvfp4_output,
     swizzle_blockscale,
@@ -150,34 +147,15 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        qa = as_quantized_activation(x, self.input_quant_key())
-        if qa is not None:
-            x_fp4, x_blockscale = qa.data, qa.scale
-            x_fp4 = x_fp4.reshape(-1, x_fp4.shape[-1])
-            output_dtype = qa.orig_dtype
-            output_shape = [*qa.orig_shape[:-1], output_size]
-        else:
-            assert isinstance(x, torch.Tensor)
-            output_dtype = x.dtype
-            output_shape = [*x.shape[:-1], output_size]
-            x_fp4, x_blockscale = scaled_fp4_quant(
-                x,
-                layer.input_global_scale_inv,
-                is_sf_swizzled_layout=True,
-                backend="flashinfer-cutedsl",
-            )
-
-        x_fp4 = pad_nvfp4_activation_for_cutlass(
-            x_fp4, nvfp4_weight_padding_bytes(layer)
-        )
+        qa = self.prepare_input(layer, x)
 
         out = flashinfer_scaled_fp4_mm(
-            x_fp4,
+            qa.data,
             layer.weight,
-            x_blockscale,
+            qa.scale,
             layer.weight_scale,
             layer.alpha,
-            output_dtype,
+            qa.orig_dtype,
             backend="cute-dsl",
         )
 
@@ -185,7 +163,7 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
 
         if bias is not None:
             out = out + bias
-        return out.view(*output_shape)
+        return out.view(*qa.orig_shape[:-1], output_size)
 
 
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
@@ -232,34 +210,15 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        weights_padding_bytes = nvfp4_weight_padding_bytes(layer)
-
-        qa = as_quantized_activation(x, self.input_quant_key())
-        if qa is not None:
-            x_fp4, x_blockscale = qa.data, qa.scale
-            x_fp4 = x_fp4.reshape(-1, x_fp4.shape[-1])
-            x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
-            output_dtype = qa.orig_dtype
-            output_shape = [*qa.orig_shape[:-1], output_size]
-        else:
-            assert isinstance(x, torch.Tensor)
-            output_dtype = x.dtype
-            output_shape = [*x.shape[:-1], output_size]
-            x_fp4, x_blockscale = scaled_fp4_quant(
-                x,
-                layer.input_global_scale_inv,
-                is_sf_swizzled_layout=True,
-                backend="flashinfer-cutlass",
-                padded_n=x.shape[-1] + weights_padding_bytes * 2,
-            )
+        qa = self.prepare_input(layer, x)
 
         out = flashinfer_scaled_fp4_mm(
-            x_fp4,
+            qa.data,
             layer.weight,
-            x_blockscale,
+            qa.scale,
             layer.weight_scale,
             layer.alpha,
-            output_dtype,
+            qa.orig_dtype,
             backend="cutlass",
         )
 
@@ -267,7 +226,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
 
         if bias is not None:
             out = out + bias
-        return out.view(*output_shape)
+        return out.view(*qa.orig_shape[:-1], output_size)
 
 
 class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
@@ -342,6 +301,9 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
 class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cuDNN wrapper."""
 
+    def input_quant_key(self) -> QuantKey:
+        return kNvfp4Dynamic
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -367,29 +329,19 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
-        weights_padding_bytes = nvfp4_weight_padding_bytes(layer)
-
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="flashinfer-cudnn",
-            padded_n=x.shape[-1] + weights_padding_bytes * 2,
-        )
+        qa = self.prepare_input(layer, x)
 
         out = flashinfer_scaled_fp4_mm(
-            x_fp4,
+            qa.data,
             layer.weight,
-            x_blockscale,
+            qa.scale,
             layer.weight_scale,
             layer.alpha,
-            output_dtype,
+            qa.orig_dtype,
             backend="cudnn",
         )
 
@@ -397,11 +349,14 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
 
         if bias is not None:
             out = out + bias
-        return out.view(*output_shape)
+        return out.view(*qa.orig_shape[:-1], output_size)
 
 
 class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's b12x CuTe DSL warp-level MMA kernel (SM120+)."""
+
+    def input_quant_key(self) -> QuantKey:
+        return kNvfp4Dynamic
 
     @classmethod
     def is_supported(
@@ -431,31 +386,19 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
-
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="b12x",
-        )
-
-        x_fp4 = pad_nvfp4_activation_for_cutlass(
-            x_fp4, nvfp4_weight_padding_bytes(layer)
-        )
+        qa = self.prepare_input(layer, x)
 
         out = flashinfer_scaled_fp4_mm(
-            x_fp4,
+            qa.data,
             layer.weight,
-            x_blockscale,
+            qa.scale,
             layer.weight_scale,
             layer.alpha,
-            output_dtype,
+            qa.orig_dtype,
             backend="b12x",
         )
 
@@ -463,4 +406,4 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
 
         if bias is not None:
             out = out + bias
-        return out.view(*output_shape)
+        return out.view(*qa.orig_shape[:-1], output_size)
