@@ -56,6 +56,9 @@ def _make_runner(
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = decode_query_len
     runner.adaptive_verification = None
+    # A speculator that does not plan verifies the scheduled chain as is.
+    runner.spec_round = SimpleNamespace(plan_batch=lambda *args: (None, None, None))
+    runner.speculator = runner.sampler = None
     runner.pcp_manager = None
     runner.use_pp = False
     runner.req_states = SimpleNamespace(
