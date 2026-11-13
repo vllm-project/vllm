@@ -53,8 +53,12 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Advertise each attention layer's KV heads for spec-driven TP slicing
+#  18: Register Mamba state as regions like any other; replace
+#      physical_blocks_per_logical_kv_block, ssm_sizes and ple_block_len with
+#      physical_blocks_per_group
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 18
 
 
 @dataclass
@@ -68,23 +72,23 @@ class NixlAgentMetadata:
     block_strides: list[int]
     kv_cache_layout: str
     block_size: int
-    ssm_sizes: tuple[int, int]
     attn_backend_name: str
-    physical_blocks_per_logical_kv_block: int
+    # Kernel blocks each logical block of each cache group spans.
+    physical_blocks_per_group: list[int]
     region_num_blocks: list[int] | None = None
     region_group_ids: list[int] | None = None
     region_names: list[str] | None = None
     region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
-    # Page length of the PLE short-conv state (None when the model has none).
-    ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
     # Cache group of each layer in region_members.
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # KV heads of each attention layer on this rank, to rebuild its spec.
+    layer_num_kv_heads: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -139,6 +143,7 @@ def _get_speculative_compatibility_factors(
         "model": draft_model_config.model,
         "revision": draft_model_config.revision,
         "code_revision": draft_model_config.code_revision,
+        "parallel_drafting": speculative_config.parallel_drafting,
         "kv_cache_dtype": str(kv_cache_dtype),
         "auxiliary_layer_ids": (
             tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
@@ -219,6 +224,16 @@ def compute_nixl_compatibility_hash(
     return compat_hash
 
 
+@dataclass(frozen=True)
+class ReadSpec:
+    """Specification for a single remote block read operation."""
+
+    remote_rank: int
+    local_block_ids: BlockIds
+    remote_block_ids: BlockIds
+    block_ids_by_region: bool = False
+
+
 @dataclass
 class HeartbeatInfo:
     """Heartbeat data for a single remote engine, sent from D worker to P."""
@@ -267,9 +282,6 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
-    # Worker-only, per-group range of the remote-sized sub-blocks of each local
-    # group a pull covers. None derives it from the block counts.
-    covered_sub_blocks: list[range] | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
