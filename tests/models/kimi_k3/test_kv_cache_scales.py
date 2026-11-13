@@ -75,6 +75,18 @@ SCALE_NAMES = {
 class _SelfContainedAttention(torch.nn.Module, AttentionLayerBase):
     """An attention layer that is neither `Attention` nor `MLAAttention`."""
 
+    supports_kv_cache_quant = True
+
+    def get_attn_backend(self):
+        raise NotImplementedError
+
+    def get_kv_cache_config(self, vllm_config):
+        return None
+
+
+class _StateCache(torch.nn.Module, AttentionLayerBase):
+    """A cache-owning layer without KV-cache quantization (e.g. an indexer)."""
+
     def get_attn_backend(self):
         raise NotImplementedError
 
@@ -89,7 +101,7 @@ class _SelfContainedAttention(torch.nn.Module, AttentionLayerBase):
         (ModelOptFp8Config, "modelopt"),
     ],
 )
-def test_kv_cache_method_for_any_attention_layer(config_cls, fmt):
+def test_kv_cache_method_for_self_contained_attention(config_cls, fmt):
     config = config_cls.from_config(QUANT_CONFIGS[fmt])
     method = config.get_quant_method(
         _SelfContainedAttention(), prefix="model.layers.0.self_attn"
@@ -104,7 +116,7 @@ def test_kv_cache_method_for_any_attention_layer(config_cls, fmt):
         (ModelOptFp8Config, "modelopt"),
     ],
 )
-def test_kv_cache_method_creates_scales_on_any_attention_layer(config_cls, fmt):
+def test_kv_cache_method_creates_scales_on_self_contained_attention(config_cls, fmt):
     # With a per-tensor KV-cache scheme, `create_weights` reads nothing from the
     # layer, so it works on attention layers other than `Attention`.
     config = config_cls.from_config(QUANT_CONFIGS[fmt])
@@ -115,6 +127,19 @@ def test_kv_cache_method_creates_scales_on_any_attention_layer(config_cls, fmt):
         param = getattr(layer, name)
         assert isinstance(param, torch.nn.Parameter)
         assert param.numel() == 1
+
+
+@pytest.mark.parametrize(
+    "config_cls,fmt",
+    [
+        (CompressedTensorsConfig, "compressed-tensors"),
+        (ModelOptFp8Config, "modelopt"),
+    ],
+)
+def test_no_kv_cache_method_without_opt_in(config_cls, fmt):
+    config = config_cls.from_config(QUANT_CONFIGS[fmt])
+    method = config.get_quant_method(_StateCache(), prefix="model.layers.0.indexer")
+    assert not isinstance(method, BaseKVCacheMethod)
 
 
 @pytest.mark.skipif(
