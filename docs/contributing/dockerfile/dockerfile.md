@@ -20,6 +20,15 @@ The edges of the build graph represent:
 The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
 requirements remain cached independently of per-commit vLLM wheels and source.
 
+Mount only the requirement files a dependency stage reads. Mounting the entire
+`requirements/` directory makes unrelated changes, such as ROCm test pins,
+invalidate CUDA dependency layers and their downstream native builds.
+
+The `hybrid-test-wheels` stage builds the `mamba-ssm` and `causal-conv1d`
+wheels that `test-deps` installs. It branches from `base`, so it rebuilds with
+`base` or when `tools/build_hybrid_test_wheels.sh` changes, in parallel with
+`csrc-build`.
+
 The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 `ca-certificates` package so clients using the system trust store receive
 certificate removals when the image is rebuilt. This complements the Python
@@ -29,16 +38,10 @@ The `extensions-build` stage can also produce an optional source-built Triton
 wheel. `vllm-openai-base` installs that wheel after its other Python
 dependencies so dependency resolution cannot restore an older Triton version.
 
-The AWS EFA images are built separately by `docker/Dockerfile.efa` on top of a
-`vllm-openai` image built with `INSTALL_KV_CONNECTORS=true`. It adds a minimal
-AWS EFA userspace install (libfabric, aws-ofi-nccl and hwloc), the EFA Mooncake
-wheel (x86_64 only), and DeepEP built for NCCL GIN over EFA. Kernel modules and
-host limits remain host-managed.
-
-```bash
-docker build -f docker/Dockerfile.efa \
-    --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
-```
+When `INSTALL_KV_CONNECTORS=true`, `vllm-openai-base` also installs a minimal
+AWS EFA userspace (libfabric, aws-ofi-nccl and hwloc), which NIXL's LIBFABRIC
+backend and Mooncake's EFA transport load at runtime. Kernel modules and host
+limits remain host-managed.
 
 The release pipeline publishes the CUDA 13.0 EFA image to DockerHub as
 `vllm/vllm-openai:latest-efa` and `vllm/vllm-openai:v<version>-efa` for releases,
@@ -51,7 +54,14 @@ EFA, set it per connector:
 - `MooncakeConnector`: `"mooncake_protocol": "efa"` in `kv_connector_extra_config`.
 - `MooncakeStoreConnector`: `"protocol": "efa"` in the JSON file at `MOONCAKE_CONFIG_PATH`.
 
-The EFA Mooncake wheel is x86_64-only, so use `tcp` on arm64.
+`docker/Dockerfile.efa` builds the `-efa` images on top of such a
+`vllm-openai` image. It replaces DeepEP with the amazon-contributing fork for
+NCCL GIN over EFA and sets `NCCL_NET_PLUGIN=ofi` and `NCCL_TUNER_PLUGIN=ofi`.
+
+```bash
+docker build -f docker/Dockerfile.efa \
+    --build-arg BASE_IMAGE=vllm/vllm-openai:latest -t vllm:openai-efa docker/
+```
 
   > <figure markdown="span">
   >   ![](../../assets/contributing/dockerfile-stages-dependency.png){ align="center" alt="query" width="100%" }

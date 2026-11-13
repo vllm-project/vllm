@@ -163,7 +163,6 @@ guide: |
   - For A100-80GB devices, TP must be >= 2 to avoid OOM.
   - `--limit-mm-per-prompt` caps incoming multimodal requests.
   - `--mm-encoder-tp-mode data` deploys the small ViT encoder in DP fashion (ViT ≈ 675M vs 72B LM).
-  - vLLM uses 90% of GPU memory by default; set `--gpu-memory-utilization=0.95` to maximize KV cache.
 
   ## Benchmarking
 
