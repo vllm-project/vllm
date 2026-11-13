@@ -1435,7 +1435,7 @@ def test_ds41_flashmla_swa_bi_builder_policy(monkeypatch, num_spec):
             parallel_drafting=False,
             use_dspark=lambda: False,
         )
-    spec = swa.get_kv_cache_spec(config)
+    spec = swa.get_kv_cache_config(config).spec
     builder = DeepseekSparseSWAFlashMLAMetadataBuilder(
         spec, [swa.prefix], config, torch.device("cpu")
     )
@@ -1544,7 +1544,7 @@ def _assert_ds41_flashmla_bi_schedule(monkeypatch, length, compress_ratio):
         [0, 0, 2, 2] if compress_ratio else [0]
     )
     config.model_config.hf_config.index_topk = 512
-    spec = swa.get_kv_cache_spec(config)
+    spec = swa.get_kv_cache_config(config).spec
     builder = DeepseekSparseSWAFlashMLAMetadataBuilder(
         spec, [swa.prefix], config, device
     )
