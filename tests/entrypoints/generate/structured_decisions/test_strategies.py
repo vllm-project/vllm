@@ -46,6 +46,7 @@ from vllm.entrypoints.openai.decisions.strategies import (
     ClefFlashStrategy,
     D3Strategy,
     DiffusionGemmaCanvasStrategy,
+    GLiNER2DecideStrategy,
     JointSchemaStrategy,
     LiquidStrategy,
     NextTokenStrategy,
@@ -128,6 +129,8 @@ def test_strategy_selection():
     assert select_read_strategy(clef_flash, ("token_classify",)) is ClefFlashStrategy
     d3 = model("D3ForSequenceClassification", "raw_logits")
     assert select_read_strategy(d3, ("classify",)) is D3Strategy
+    gliner2 = model("Gliner2ForSchemaExtraction", "raw_logits")
+    assert select_read_strategy(gliner2, ("classify",)) is GLiNER2DecideStrategy
 
 
 def test_route_is_registered_by_default():
@@ -934,6 +937,133 @@ async def test_d3_rejects_instructions(d3):
     serving, engine, _ = d3
     response = await serving.create_decision(
         StructuredDecisionRequest(**D3_REQUEST, instructions="Be strict.")
+    )
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    engine.encode.assert_not_called()
+
+
+def test_gliner2_batch_encoding_preserves_label_positions(engine_and_renderer):
+    engine, online_renderer = engine_and_renderer
+    strategy = GLiNER2DecideStrategy(
+        ReadContext(engine, online_renderer, None, "auto", {})
+    )
+    questions = [
+        build_question("q", "choice", "Choose?", {"yes": "Approve", "no": None}, 26),
+        build_question("r", "choice", "?", {"a": None, "b": None}, 26),
+    ]
+    ids, positions = strategy._encode_questions(
+        "The sky is blue. Email alice@example.com!", questions, None
+    )
+    pieces = [
+        "(",
+        "[P]",
+        "q: Choose? [DESCRIPTION] yes: Approve",
+        "(",
+        "[L]",
+        "yes",
+        "[L]",
+        "no",
+        ")",
+        ")",
+        "[SEP_STRUCT]",
+        "(",
+        "[P]",
+        "r: ?",
+        "(",
+        "[L]",
+        "a",
+        "[L]",
+        "b",
+        ")",
+        ")",
+        "[SEP_TEXT]",
+        "the",
+        "sky",
+        "is",
+        "blue",
+        ".",
+        "email",
+        "alice@example.com",
+        "!",
+    ]
+    expected_ids: list[int] = []
+    expected_positions: list[list[int]] = [[], []]
+    for index, piece in enumerate(pieces):
+        if index in (4, 6):
+            expected_positions[0].append(len(expected_ids))
+        if index in (15, 17):
+            expected_positions[1].append(len(expected_ids))
+        expected_ids.extend(
+            strategy.tokenizer.convert_tokens_to_ids(strategy.tokenizer.tokenize(piece))
+        )
+    assert ids == expected_ids
+    assert positions == expected_positions
+
+
+def test_gliner2_keeps_combining_marks_and_joiners_in_words(engine_and_renderer):
+    engine, online_renderer = engine_and_renderer
+    strategy = GLiNER2DecideStrategy(
+        ReadContext(engine, online_renderer, None, "auto", {})
+    )
+    question = build_question("q", "choice", "", {"yes": None, "no": None}, 26)
+    ids, _ = strategy._encode_questions(
+        "İstanbul, cafe\u0301 and family\u200dfriend", [question], None
+    )
+    words = ["i\u0307stanbul", ",", "cafe\u0301", "and", "family\u200dfriend", "."]
+    expected = [
+        subword_id
+        for word in words
+        for subword_id in strategy.tokenizer.convert_tokens_to_ids(
+            strategy.tokenizer.tokenize(word)
+        )
+    ]
+    assert ids[-len(expected) :] == expected
+
+
+@pytest.mark.asyncio
+async def test_gliner2_reads_questions_in_one_classify_request(engine_and_renderer):
+    engine, online_renderer = engine_and_renderer
+    logits = torch.tensor([0.2, 0.5, 0.3, 0.75, 0.25, 0.1, 0.6, 0.3]).log()
+
+    async def encode(prompt, params, request_id, **kwargs):
+        yield PoolingRequestOutput(
+            request_id, PoolingOutput(logits), prompt["prompt_token_ids"], 0, True
+        )
+
+    engine.encode.side_effect = encode
+    strategy = GLiNER2DecideStrategy(
+        ReadContext(engine, online_renderer, None, "auto", {})
+    )
+    response = await serving(engine, strategy).create_decision(
+        StructuredDecisionRequest(**D3_REQUEST)
+    )
+    assert isinstance(response, StructuredDecisionResponse)
+    engine.check_admission.assert_called_once_with(1)
+    engine.encode.assert_called_once()
+    prompt, params = engine.encode.call_args.args[:2]
+    assert params.task == "classify" and params.use_activation is False
+    positions = params.extra_kwargs["label_positions"]
+    assert len(positions) == 8 and positions == sorted(positions)
+    assert response.answers["team"]["probabilities"] == pytest.approx(
+        {"billing": 0.2, "shipping": 0.5, "x": 0.3}
+    )
+    assert response.answers["urgent"]["noul"] == pytest.approx(0.75)
+    assert response.answers["tone"]["score"] == pytest.approx(1.2)
+    assert response.usage.input_tokens == len(prompt["prompt_token_ids"])
+    assert response.usage.output_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_gliner2_rejects_chat_options(engine_and_renderer):
+    engine, online_renderer = engine_and_renderer
+    strategy = GLiNER2DecideStrategy(
+        ReadContext(engine, online_renderer, None, "auto", {})
+    )
+    response = await serving(engine, strategy).create_decision(
+        StructuredDecisionRequest(
+            **D3_REQUEST, chat_template_kwargs={"enable_thinking": True}
+        )
     )
     assert isinstance(response, ErrorResponse)
     assert response.error.code == 400

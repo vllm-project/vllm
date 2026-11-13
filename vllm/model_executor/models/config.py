@@ -863,6 +863,17 @@ class HrmTextForCausalLMConfig(VerifyAndUpdateConfig):
             vllm_config.cache_config.enable_prefix_caching = False
 
 
+class GLiNER2DecideConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        if vllm_config.cache_config.enable_prefix_caching:
+            logger.info("GLiNER2.5 Decide: disabling prefix caching (no KV cache).")
+            vllm_config.cache_config.enable_prefix_caching = False
+        if vllm_config.scheduler_config.enable_chunked_prefill:
+            logger.info("GLiNER2.5 Decide: disabling chunked prefill (bidirectional).")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1604,6 +1615,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
+    "Gliner2ForSchemaExtraction": GLiNER2DecideConfig,
     "Glm5NextForCausalLM": Glm5NextModelConfig,
     "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
