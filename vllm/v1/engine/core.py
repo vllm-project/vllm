@@ -9,7 +9,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence, Sized
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -157,7 +157,7 @@ class EngineCore:
 
         self.log_stats = log_stats
         # GPU-timed iteration records arrive from the worker with later outputs,
-        # so the last ones are collected before the engine goes idle.
+        # so the last ones are requested when the engine goes idle.
         self._iteration_timings_pending = False
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
@@ -1343,8 +1343,14 @@ _INPUTS_HANDLED_DURING_STEP = (
     EngineCoreRequestType.EXECUTOR_FAILED,
     EngineCoreRequestType.WAKEUP,
 )
-# While waiting for a step's output, how long to busy-poll for new inputs
-# before falling back to a blocking wait for the output.
+# Input types that end EngineCoreProc's wait for the idle flush, because they
+# start new work. Others wait for the flush, unless queued behind one of these.
+_INPUTS_ENDING_FLUSH_WAIT = (
+    EngineCoreRequestType.ADD,
+    EngineCoreRequestType.START_DP_WAVE,
+)
+# While waiting for a step's output or for the idle flush, how long to
+# busy-poll for new inputs before falling back to a blocking wait.
 _INPUT_SPIN_DURATION_S = 1.0
 
 
@@ -1372,6 +1378,8 @@ class EngineCoreProc(EngineCore):
         # Inputs taken from input_queue while waiting for a step's output that
         # must not be handled until the step completes (see _wait_for_output).
         self._deferred_inputs = deque[tuple[EngineCoreRequestType, Any]]()
+        # The flush of GPU iteration timings requested on going idle, while pending.
+        self._iteration_flush: Future[ModelRunnerOutput] | None = None
 
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
@@ -1844,13 +1852,14 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
         if not self.has_work():
             # Before the deferred inputs, which may put the executor to sleep.
-            self._flush_iteration_timings()
+            self._request_iteration_flush()
         # Inputs deferred during the last step precede anything still queued.
         while self._deferred_inputs:
             self._handle_client_request(*self._deferred_inputs.popleft())
 
         waited = False
         while not self.has_work() and self.is_running():
+            self._wait_for_iteration_flush()
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1886,13 +1895,58 @@ class EngineCoreProc(EngineCore):
             stats.iteration_records = records
             self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
 
-    def _flush_iteration_timings(self) -> None:
-        """Collects the iterations still being timed as the engine goes idle."""
+    def _request_iteration_flush(self) -> None:
+        """Requests the iterations still being timed as the engine goes idle."""
         if self._iteration_timings_pending:
             self._iteration_timings_pending = False
-            self._publish_iteration_records(
-                self.model_executor.flush_iteration_timings()
-            )
+            self._iteration_flush = self.model_executor.flush_iteration_timings()
+            self._iteration_flush.add_done_callback(self._publish_iteration_flush)
+
+    def _publish_iteration_flush(self, flush: Future[ModelRunnerOutput]) -> None:
+        """Done callback of the flush. It runs where the executor's replies are
+        read, so the records precede the output of any step that follows."""
+        self._iteration_flush = None
+        try:
+            self._publish_iteration_records(flush.result().iteration_records)
+        except Exception:
+            # A done callback cannot raise into the busy loop.
+            logger.exception("Failed to flush GPU iteration timings.")
+            self.input_queue.put_nowait((EngineCoreRequestType.EXECUTOR_FAILED, b""))
+
+    def _wait_for_iteration_flush(self) -> None:
+        """Wait for the requested flush as for a step's output, unless new work
+        arrives: the flush then resolves ahead of that work's first output.
+        While a pause waits for the engine to go idle, nothing ends the wait."""
+        flush = self._iteration_flush
+        if flush is None:
+            return
+        poll: Callable[[], bool] = getattr(flush, "poll", flush.done)
+        wait_briefly: Callable[[Sized, float], None] | None = getattr(
+            flush, "wait_briefly", None
+        )
+        pending_inputs = self.input_queue.queue
+        spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
+        while not poll():
+            if pending_inputs:
+                new_work = pending_inputs[0][0] in _INPUTS_ENDING_FLUSH_WAIT
+                if new_work and not self._idle_state_callbacks:
+                    return
+                # Anything else waits for the flush.
+                break
+            if wait_briefly is None or time.monotonic() >= spin_deadline:
+                # Long-running flush: stop busy-looping and block for it.
+                break
+            wait_briefly(pending_inputs, spin_deadline)
+        try:
+            flush.result()
+        except Exception:
+            # Fail here, ahead of the inputs and idle callbacks that waited, and take
+            # back the done callback's message, so the failure is reported once.
+            with self.input_queue.mutex, suppress(ValueError):
+                self.input_queue.queue.remove(
+                    (EngineCoreRequestType.EXECUTOR_FAILED, b"")
+                )
+            raise
 
     def execute_dummy_batch(self) -> None:
         self._publish_iteration_records(self.model_executor.execute_dummy_batch())

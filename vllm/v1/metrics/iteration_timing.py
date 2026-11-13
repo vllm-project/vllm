@@ -139,7 +139,8 @@ class IterationTimingFlush(AsyncModelRunnerOutput):
     """The iterations still on the GPU when the engine goes idle.
 
     It resolves wherever a step's output resolves (the output thread with async
-    scheduling), and only once the engine has nothing else to run.
+    scheduling). The engine requests it when it has nothing else to run, and
+    with `MultiprocExecutor` stops waiting for it if new work arrives first.
     """
 
     def __init__(self, pending: deque[_TimedIteration]) -> None:

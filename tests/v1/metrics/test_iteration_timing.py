@@ -242,7 +242,7 @@ def test_executor_resolves_the_flush_into_records(gpu):
         flush_iteration_timings=worker.iteration_timer.flush
     )
 
-    (record,) = executor.flush_iteration_timings()
+    (record,) = executor.flush_iteration_timings().result(timeout=0).iteration_records
 
     assert record.num_generation_tokens == 3
 
