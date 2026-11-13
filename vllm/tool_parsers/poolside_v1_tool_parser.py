@@ -133,7 +133,7 @@ class PoolsideV1ToolParser(ToolParser):
     def _allowed_types(
         self, tool_name: str, arg_name: str, tools: list[Tool] | None
     ) -> set[str] | None:
-        """JSON types the argument's schema admits; ``None`` if unconstrained."""
+        """JSON types the argument's schema admits; `None` if unconstrained."""
         tool_types = self._parameter_types_cache.for_tools(tools)
         props, extra = tool_types.get(tool_name, ({}, None))
         return props.get(arg_name, extra)
@@ -531,9 +531,9 @@ class PoolsideV1ToolParser(ToolParser):
 
         Returns (formatted_prefix, parsed_dict) or None on failure.
 
-        Note: ``partial_json_parser`` strips trailing whitespace before
-        parsing (``complete.py:20``), which means the returned slice is
-        shorter than ``json_prefix`` when it has trailing whitespace.
+        Note: `partial_json_parser` strips trailing whitespace before
+        parsing (`complete.py:20`), which means the returned slice is
+        shorter than `json_prefix` when it has trailing whitespace.
         Since the parser controls the construction of the json_prefix value,
         this code relies on it being a valid prefix and we only use the fix for
         the completion of the JSON object.

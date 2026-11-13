@@ -3,17 +3,17 @@
 
 """E2E tests for online MXFP8 quantization.
 
-Loads a BF16 model with ``--quantization mxfp8`` (online quantization) and
+Loads a BF16 model with `--quantization mxfp8` (online quantization) and
 compares log-probabilities against the same model served in BF16 without
 quantization.  This exercises the full pipeline: config parsing,
-``Mxfp8OnlineLinearMethod``, ``Mxfp8OnlineMoEMethod``, weight loading,
-online quantization / shuffling, and inference through ``apply_monolithic``.
+`Mxfp8OnlineLinearMethod`, `Mxfp8OnlineMoEMethod`, weight loading,
+online quantization / shuffling, and inference through `apply_monolithic`.
 
-Layer skipping (``modules_to_not_convert``) is configured in the model's
-``config.json`` under ``quantization_config`` and is not tested here.
+Layer skipping (`modules_to_not_convert`) is configured in the model's
+`config.json` under `quantization_config` and is not tested here.
 
-``example_prompts`` is a pytest fixture (from conftest.py) that loads 8
-diverse prompts from ``tests/prompts/example.txt``.
+`example_prompts` is a pytest fixture (from conftest.py) that loads 8
+diverse prompts from `tests/prompts/example.txt`.
 """
 
 import pytest

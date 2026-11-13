@@ -58,7 +58,6 @@ def test_process_checkpoint_preserves_outputs_and_graphs(tp, transport, monkeypa
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"requires {tp} GPUs")
     config = {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",  # Test observation RPC only.
         "VLLM_BATCH_INVARIANT": "1",

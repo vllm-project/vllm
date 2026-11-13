@@ -277,6 +277,10 @@ ensure() {
     rm -f "$mf"; echo "bake recorded no digest for $ref" >&2; return 1
   fi
   rm -f "$mf"
+  # /ci rocm cache copies only a stack this build pushed, never one it reused: other PRs' CI
+  # can push to this PR's tags first.
+  [[ $MODE != base || $target != base ]] \
+    || meta set "rocm-$STACK-stack-built" "$ref@$d $ref$sibling@$ds" || return 75
   echo "$ref@$d${sibling:+ $ref$sibling@$ds}"
 }
 
@@ -395,7 +399,7 @@ case $MODE in
 
   promote)
     # /ci rocm cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
-    # ROCM_PROMOTE_SHA recorded. Copy the stack pair here under the key main's keys_at gives that
+    # ROCM_PROMOTE_SHA pushed. Copy the stack pair here under the key main's keys_at gives that
     # commit, if it was built with main's recipe; main reuses it once it gets that key.
     [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
     git fetch -q origin "${ROCM_PROMOTE_SHA:?}"

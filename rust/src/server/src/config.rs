@@ -79,6 +79,10 @@ pub struct ApiServerOptions {
     pub default_return_tokens_as_token_ids: bool,
     /// Include request timing metrics in OpenAI chat and completion responses.
     pub enable_per_request_metrics: bool,
+    /// Stream usage on every chat and completions request, as if it set
+    /// `stream_options` with `include_usage` and `continuous_usage_stats`
+    /// (`--enable-force-include-usage`).
+    pub force_include_usage: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
     /// When `true`, log every error response at ERROR (`--log-error-stack`).
@@ -421,6 +425,9 @@ pub struct Config {
     /// Keep external request IDs as engine-core request IDs instead of adding
     /// a random suffix (`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`).
     pub disable_request_id_randomization: bool,
+    /// Keep the API server running after the LLM becomes permanently unhealthy
+    /// (`VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`).
+    pub keep_alive_on_engine_death: bool,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Whether the caller manages the engine process and shuts it down when

@@ -35,7 +35,6 @@ from vllm.utils.torch_utils import (
     _is_torch_equal_or_newer,
     is_torch_equal,
 )
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from ..utils import create_new_process_for_each_test
 
@@ -224,10 +223,8 @@ def test_use_cudagraphs(
 
 # A separate process works around
 # https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 @create_new_process_for_each_test("spawn")
-def test_stock_torch_compile(vllm_runner, monkeypatch, use_v2_model_runner):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+def test_stock_torch_compile(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -596,17 +593,14 @@ def _mock_config_for_cudagraph_sizes(
     )
     config.num_speculative_tokens = VllmConfig.num_speculative_tokens.fget(config)
     config.uniform_decode_query_len = VllmConfig.uniform_decode_query_len.fget(config)
-    config.get_decode_cudagraph_query_lens = (
-        lambda decode_query_len: VllmConfig.get_decode_cudagraph_query_lens(
-            config, decode_query_len
-        )
+    config.get_decode_cudagraph_query_lens = lambda decode_query_len: (
+        VllmConfig.get_decode_cudagraph_query_lens(config, decode_query_len)
     )
-    config.get_draft_decode_cudagraph_request_sizes = (
-        lambda: VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
+    config.get_draft_decode_cudagraph_request_sizes = lambda: (
+        VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
     )
-    config.use_v2_model_runner = True
-    config._split_cudagraph_capture_sizes = (
-        lambda *args: VllmConfig._split_cudagraph_capture_sizes(config, *args)
+    config._split_cudagraph_capture_sizes = lambda *args: (
+        VllmConfig._split_cudagraph_capture_sizes(config, *args)
     )
     return config
 
@@ -1461,52 +1455,8 @@ def test_cached_compilation_config(default_vllm_config):
     assert "torch.ops._C.static_scaled_fp8_quant.default(" in code
 
 
-def _create_vllm_config_for_validation(
-    compilation_config: CompilationConfig,
-) -> MagicMock:
-    """Helper to create a mock VllmConfig for padding validation testing."""
-    mock_config = MagicMock(spec=VllmConfig)
-    mock_config.compilation_config = compilation_config
-    mock_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=8)
-    mock_config.parallel_config = ParallelConfig()
-    mock_config.speculative_config = None
-    mock_config.lora_config = None
-    return mock_config
-
-
-def test_compile_sizes_padding_validation():
-    """Test that compile_sizes with values that would be padded raises an error."""
-    # cudagraph_capture_sizes=[1, 2, 4, 8] means:
-    # - size 1 -> padded to 1
-    # - size 2 -> padded to 2
-    # - size 3 -> padded to 4
-    # - size 4 -> padded to 4
-    # - size 5 -> padded to 8
-    # etc.
-    # So compile_sizes=[3] should fail because 3 would be padded to 4
-
-    with pytest.raises(ValueError, match="would be padded to"):
-        config = CompilationConfig(
-            cudagraph_capture_sizes=[1, 2, 4, 8],
-            max_cudagraph_capture_size=8,
-            compile_sizes=[3],
-            cudagraph_mode=CUDAGraphMode.FULL,
-        )
-        config.post_init_cudagraph_sizes()
-        dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
-        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
-
-    with pytest.raises(ValueError, match="would be padded to"):
-        config = CompilationConfig(
-            cudagraph_capture_sizes=[1, 2, 4, 8],
-            max_cudagraph_capture_size=8,
-            compile_sizes=[5],
-            cudagraph_mode=CUDAGraphMode.FULL,
-        )
-        config.post_init_cudagraph_sizes()
-        dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
-        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
-
+def test_compile_sizes_post_init():
+    """compile_sizes keeps explicit sizes and expands cudagraph_capture_sizes."""
     config = CompilationConfig(
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_cudagraph_capture_size=8,
@@ -1515,8 +1465,6 @@ def test_compile_sizes_padding_validation():
     )
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [1, 2, 4, 8]
-    dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
-    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)  # Should not raise
 
     config = CompilationConfig(
         cudagraph_capture_sizes=[1, 2, 4, 8],
@@ -1527,28 +1475,23 @@ def test_compile_sizes_padding_validation():
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [1, 2, 4, 8]
 
-    # When cudagraphs are disabled (max_cudagraph_capture_size=0),
-    # padding validation should be skipped
+    # Sizes that aren't capture sizes are kept when cudagraphs are disabled.
     config = CompilationConfig(
         cudagraph_capture_sizes=[],
         max_cudagraph_capture_size=0,
-        compile_sizes=[3, 5, 7],  # would be invalid with cudagraphs
+        compile_sizes=[3, 5, 7],
     )
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [3, 5, 7]
 
-    # When cudagraph_mode is NONE but capture_sizes is non-empty,
-    # padding validation should still be skipped
     config = CompilationConfig(
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_cudagraph_capture_size=8,
         cudagraph_mode=CUDAGraphMode.NONE,
-        compile_sizes=[3, 5, 7],  # would be invalid if cudagraphs were enabled
+        compile_sizes=[3, 5, 7],
     )
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [3, 5, 7]
-    dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
-    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)  # Should not raise
 
 
 def test_inductor_asserts_default_disabled(monkeypatch):

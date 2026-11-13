@@ -250,7 +250,7 @@ def _assert_tensor_snapshots_equal(
         torch.testing.assert_close(
             after_value,
             before_value,
-            msg=lambda msg, name=name: (f"{model_name}: {name} was corrupted: {msg}"),
+            msg=lambda msg, name=name: f"{model_name}: {name} was corrupted: {msg}",
         )
 
 

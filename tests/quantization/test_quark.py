@@ -38,6 +38,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     UnquantizedFusedMoEMethod,
+    fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -45,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.oracle.int8 import Int8MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
@@ -1147,10 +1149,10 @@ def _patch_mxfp8_moe_backend(monkeypatch) -> None:
 def test_quant_method_dispatch_mixed_mxfp4_mxfp8_experts(
     monkeypatch, default_vllm_config
 ):
-    """A per-layer ``<experts prefix>*`` entry selects MXFP8 for that layer's routed
+    """A per-layer `<experts prefix>*` entry selects MXFP8 for that layer's routed
     experts only; other layers keep the global MXFP4, and the glob does not reach
-    the layer's shared experts (``shared_experts`` does not start with
-    ``experts``)."""
+    the layer's shared experts (`shared_experts` does not start with
+    `experts`)."""
     config = QuarkConfig(
         {
             "global_quant_config": _MXFP4_MOE_SPEC,
@@ -1182,8 +1184,8 @@ def test_quant_method_dispatch_mixed_mxfp4_mxfp8_experts(
 
 
 def test_quark_w8a8_mxfp8_moe_weight_shapes(monkeypatch):
-    """The parameters match the checkpoint layout: E4M3 ``[E, rows, cols]`` and
-    uint8 E8M0 ``[E, rows, cols / 32]``, sharded as block scales."""
+    """The parameters match the checkpoint layout: E4M3 `[E, rows, cols]` and
+    uint8 E8M0 `[E, rows, cols / 32]`, sharded as block scales."""
     _patch_mxfp8_moe_backend(monkeypatch)
     method = QuarkW8A8Mxfp8MoEMethod(
         _make_test_moe_config(), kMxfp8Static, kMxfp8Dynamic
@@ -1588,6 +1590,159 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
             hidden_states = model(input_ids, positions, None)
             logits = model.compute_logits(hidden_states)
         assert torch.isfinite(logits).all()
+
+
+@pytest.mark.parametrize(
+    "weight_key, act_key, per_act_token_quant, per_out_ch_quant",
+    [
+        (kInt8StaticChannelSym, kInt8StaticTensorSym, False, True),
+        (kInt8StaticTensorSym, kInt8StaticTensorSym, False, False),
+        # Dynamic activations: the two pairs supported by TritonExperts.
+        (kInt8StaticChannelSym, kInt8DynamicTokenSym, True, True),
+        (kInt8StaticTensorSym, kInt8DynamicTensorSym, False, False),
+    ],
+    ids=[
+        "static_act_per_channel_weights",
+        "static_act_per_tensor_weights",
+        "dynamic_token_act_per_channel_weights",
+        "dynamic_tensor_act_per_tensor_weights",
+    ],
+)
+def test_quark_int8_moe_scale_layout_flags(
+    weight_key: QuantKey,
+    act_key: QuantKey,
+    per_act_token_quant: bool,
+    per_out_ch_quant: bool,
+) -> None:
+    """Activation and weight scale layouts are reported independently.
+
+    Quark INT8 must derive the activation layout from the activation quant key
+    and the weight layout from the weight quant key (the Triton kernels index
+    W13/W2 channel scales off the weight layout, not the activation layout).
+    """
+    static_act = act_key.scale.static
+    moe_config = _make_test_moe_config()
+    # Pin the dynamic-activation backend so the test does not depend on the
+    # platform's backend priority.
+    with patch(
+        "vllm.model_executor.layers.quantization.quark.quark_moe."
+        "select_int8_moe_backend",
+        return_value=(Int8MoeBackend.TRITON, MagicMock()),
+    ):
+        method = QuarkW8A8Int8MoEMethod(moe_config, weight_key, act_key)
+    if static_act:
+        assert method.int8_backend is None  # static activations: legacy path
+    else:
+        assert method.int8_backend == Int8MoeBackend.TRITON
+
+    intermediate = moe_config.intermediate_size
+    layer = SimpleNamespace(
+        w13_weight_scale=torch.ones(moe_config.num_experts, 2 * intermediate, 1),
+        w2_weight_scale=torch.ones(moe_config.num_experts, intermediate, 1),
+        w13_input_scale=torch.tensor(0.5) if static_act else None,
+        w2_input_scale=torch.tensor(0.25) if static_act else None,
+        w13_bias=None,
+        w2_bias=None,
+    )
+    quant_config = method.get_fused_moe_quant_config(layer)
+
+    assert quant_config is not None
+    assert quant_config.per_act_token_quant is per_act_token_quant
+    assert quant_config.per_out_ch_quant is per_out_ch_quant
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike() or not torch.cuda.is_available(),
+    reason="Requires a GPU to launch the INT8 fused_experts kernel",
+)
+def test_quark_int8_static_per_channel_weight_scales() -> None:
+    """Per-channel W13/W2 scales must be indexed by expert *and* output channel.
+
+    Scaling the channels of an expert that receives tokens must change the
+    output, while scaling those of an expert that receives none must not. When
+    the weight-scale layout is taken from the activation layout (both per-tensor
+    activations and per-channel weights), routed experts' channel scales are
+    dropped and the second check fails too. See
+    https://github.com/vllm-project/vllm/issues/58532.
+    """
+    torch.manual_seed(0)
+    moe_config = _make_test_moe_config()
+    experts = moe_config.num_experts
+    hidden = moe_config.hidden_dim
+    intermediate = moe_config.intermediate_size
+    num_tokens, top_k = 4, 2
+    routed_expert, unrouted_expert = 3, 0
+
+    w13_scale = torch.linspace(
+        0.02, 0.08, experts * 2 * intermediate, device=DEVICE_TYPE
+    ).view(experts, 2 * intermediate, 1)
+    w2_scale = torch.linspace(0.02, 0.08, experts * hidden, device=DEVICE_TYPE).view(
+        experts, hidden, 1
+    )
+    layer = SimpleNamespace(
+        w13_weight_scale=w13_scale,
+        w2_weight_scale=w2_scale,
+        w13_input_scale=torch.tensor(0.1, device=DEVICE_TYPE),
+        w2_input_scale=torch.tensor(0.1, device=DEVICE_TYPE),
+        w13_bias=None,
+        w2_bias=None,
+    )
+    method = QuarkW8A8Int8MoEMethod(
+        moe_config, kInt8StaticChannelSym, kInt8StaticTensorSym
+    )
+
+    hidden_states = torch.randn(
+        (num_tokens, hidden), device=DEVICE_TYPE, dtype=torch.bfloat16
+    )
+    w13 = torch.randint(
+        -8, 8, (experts, 2 * intermediate, hidden), device=DEVICE_TYPE, dtype=torch.int8
+    )
+    w2 = torch.randint(
+        -8, 8, (experts, hidden, intermediate), device=DEVICE_TYPE, dtype=torch.int8
+    )
+    # The routed expert is selected by every token, the unrouted one by none.
+    topk_ids = torch.tensor(
+        [[routed_expert, 1]] * num_tokens, device=DEVICE_TYPE, dtype=torch.int32
+    )
+    topk_weights = torch.ones(
+        (num_tokens, top_k), device=DEVICE_TYPE, dtype=torch.bfloat16
+    )
+
+    with set_current_vllm_config(VllmConfig()):
+
+        def run(w13_scales: torch.Tensor, w2_scales: torch.Tensor) -> torch.Tensor:
+            layer.w13_weight_scale = w13_scales
+            layer.w2_weight_scale = w2_scales
+            return fused_experts(
+                hidden_states,
+                w13,
+                w2,
+                topk_weights,
+                topk_ids,
+                quant_config=method.get_fused_moe_quant_config(layer),
+            )
+
+        baseline = run(w13_scale.clone(), w2_scale.clone())
+
+        def scaled(scales: torch.Tensor, expert: int) -> torch.Tensor:
+            out = scales.clone()
+            out[expert] *= 4
+            return out
+
+        outputs = {
+            "w13": (
+                run(scaled(w13_scale, routed_expert), w2_scale.clone()),
+                run(scaled(w13_scale, unrouted_expert), w2_scale.clone()),
+            ),
+            "w2": (
+                run(w13_scale.clone(), scaled(w2_scale, routed_expert)),
+                run(w13_scale.clone(), scaled(w2_scale, unrouted_expert)),
+            ),
+        }
+
+    for name, (routed_out, unrouted_out) in outputs.items():
+        assert not torch.equal(baseline, routed_out), name
+        torch.testing.assert_close(baseline, unrouted_out, atol=0, rtol=0, msg=name)
 
 
 @pytest.mark.parametrize("tp", [1])
@@ -2527,13 +2682,17 @@ class TestQuarkInt4Format:
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_scale",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_scale"
+                        ),
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_zero_point",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_zero_point"
+                        ),
                         torch.zeros(1),
                     ),
                 ]

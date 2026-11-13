@@ -200,17 +200,17 @@ class PyNcclCommunicator:
         device: int | str | torch.device,
         library_path: str | None = None,
     ) -> "PyNcclCommunicator":
-        """Build a communicator from pre-shared ``ncclUniqueId`` bytes.
+        """Build a communicator from pre-shared `ncclUniqueId` bytes.
 
-        For peers that cannot join a ``StatelessProcessGroup`` / TCPStore (e.g. a
+        For peers that cannot join a `StatelessProcessGroup` / TCPStore (e.g. a
         torch-free JAX trainer): every rank passes the same id, minted once via
-        ``ncclGetUniqueId`` and shared out of band. There is no barrier, so all
-        ranks must enter init concurrently or ``ncclCommInitRank`` hangs.
+        `ncclGetUniqueId` and shared out of band. There is no barrier, so all
+        ranks must enter init concurrently or `ncclCommInitRank` hangs.
 
-        Warm-up handshake: immediately after ``ncclCommInitRank`` this issues a
-        one-element ``all_reduce`` (mirroring ``__init__``). It is a collective,
+        Warm-up handshake: immediately after `ncclCommInitRank` this issues a
+        one-element `all_reduce` (mirroring `__init__`). It is a collective,
         so every peer -- including a foreign, non-vLLM rank -- must issue a
-        matching one-element ``all_reduce`` before any other collective, or all
+        matching one-element `all_reduce` before any other collective, or all
         ranks deadlock.
         """
         if len(unique_id_bytes) != NCCL_UNIQUE_ID_BYTES:

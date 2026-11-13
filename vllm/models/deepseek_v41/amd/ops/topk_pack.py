@@ -11,13 +11,13 @@ indptr, and the mapping of the entries through the compressed cache's block
 table. On MI325X they took 17.4 us of each index layer at 128k context,
 inside the decode graph.
 
-_topk_pack_kernel writes the same 3 tensors with one program: the row
-lengths (0 for a padded token), indptr, and the global slots of the first
-length entries of each row (-1 for a negative entry). It does not write the
-ragged entries past indptr[-1], which
+_topk_pack_kernel writes the same 3 tensors with one launch, a program per
+row: the row lengths (0 for a padded token), indptr, and the global slots of
+each row's non-negative entries, in order and without holes. It does not
+write the ragged entries past indptr[-1], which
 _compute_global_topk_ragged_indices_and_indptr_old also leaves uninitialized.
 
-On gfx942 with --monokernel (``ops.enabled()``), batches
+On gfx942 with --monokernel (`ops.enabled()`), batches
 of up to MAX_ROWS rows use it. tests/kernels/models/amd/test_dsv41_gfx942_decode_meta.py
 compares it with _compute_global_topk_ragged_indices_and_indptr_old.
 """
@@ -27,8 +27,6 @@ import torch
 from vllm.models.deepseek_v41.amd.ops import enabled
 from vllm.triton_utils import tl, triton
 
-# One program holds a ROWS x topk tile of int32. 16 rows of top-512 are 16
-# values per thread with 8 warps.
 MAX_ROWS = 16
 
 
@@ -49,38 +47,43 @@ def _topk_pack_kernel(
     ROWS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    row = tl.program_id(0)
     rows = tl.arange(0, ROWS)
     cols = tl.arange(0, BLOCK)
     in_batch = rows < num_tokens
     in_row = cols < topk
+
+    # A row's length counts its non-negative entries, as
+    # _compute_topk_lens_kernel does, and is 0 for a padded token. Each
+    # program counts every row to find where its own row starts.
     local = tl.load(
         topk_ptr + rows[:, None] * topk_stride + cols[None, :],
         mask=in_batch[:, None] & in_row[None, :],
         other=-1,
     )
-    req = tl.load(token_to_req_ptr + rows, mask=in_batch, other=0)
     token_ok = tl.load(is_valid_ptr + rows, mask=in_batch, other=0)
+    lens = tl.where(token_ok, tl.sum((local >= 0).to(tl.int32), axis=1), 0)
+    start = tl.sum(tl.where(rows < row, lens, 0), axis=0)
+    length = tl.sum(tl.where(rows == row, lens, 0), axis=0)
+    tl.store(lens_ptr + row, length)
+    tl.store(indptr_ptr + 1 + row, start + length)
+    if row == 0:
+        tl.store(indptr_ptr, 0)
 
-    # A row's length counts its non-negative entries, as
-    # _compute_topk_lens_kernel does, and is 0 for a padded token.
-    count = tl.sum((local >= 0).to(tl.int32), axis=1)
-    lens = tl.where(token_ok, count, 0)
-    tl.store(lens_ptr + rows, lens, mask=in_batch)
-    ends = tl.cumsum(lens, axis=0)
-    tl.store(indptr_ptr, 0)
-    tl.store(indptr_ptr + 1 + rows, ends, mask=in_batch)
-
-    # As in _pack_global_topk_ragged_kernel, row t writes its first lens[t]
-    # entries in place, and a negative entry among them becomes -1.
-    take = in_batch[:, None] & (cols[None, :] < lens[:, None]) & in_row[None, :]
-    ok = take & (local >= 0)
+    # As in _pack_global_topk_ragged_kernel, holes are compacted out, so every
+    # slot inside the row's indptr range is valid.
+    local = tl.load(topk_ptr + row * topk_stride + cols, mask=in_row, other=-1)
+    req = tl.load(token_to_req_ptr + row)
+    take = tl.load(is_valid_ptr + row) & in_row & (local >= 0)
     blk = tl.load(
-        block_table_ptr + req[:, None] * block_table_stride + local // block_size,
-        mask=ok,
+        block_table_ptr + req * block_table_stride + local // block_size,
+        mask=take,
         other=0,
     )
-    slots = tl.where(ok, blk * block_size + local % block_size, -1)
-    tl.store(ragged_ptr + (ends - lens)[:, None] + cols[None, :], slots, mask=take)
+    rank = tl.cumsum(take.to(tl.int32), axis=0) - 1
+    tl.store(
+        ragged_ptr + start + rank, blk * block_size + local % block_size, mask=take
+    )
 
 
 def launch(
@@ -104,7 +107,7 @@ def launch(
     if poison:
         for t in (lens, indptr, ragged):
             t.fill_(-7)
-    _topk_pack_kernel[(1,)](
+    _topk_pack_kernel[(num_tokens,)](
         ragged,
         indptr,
         lens,
@@ -119,7 +122,7 @@ def launch(
         topk,
         ROWS=triton.next_power_of_2(num_tokens),
         BLOCK=triton.next_power_of_2(topk),
-        num_warps=8,
+        num_warps=4,
     )
     return ragged, indptr, lens
 

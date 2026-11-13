@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton RoPE for the Kimi K3.1 DSA indexer.
 
-Applies rope to the leading ``rope_dim`` dims of each indexer head, using the
-leading ``rope_dim // 2`` frequencies sliced from the *main attention's*
+Applies rope to the leading `rope_dim` dims of each indexer head, using the
+leading `rope_dim // 2` frequencies sliced from the *main attention's*
 cos_sin_cache (training reuses the leading freqs of the main freqs_cis for
 the indexer). Compute is fp32 with a cast back to the input dtype.
 dim >= rope_dim is left untouched (in-place).
