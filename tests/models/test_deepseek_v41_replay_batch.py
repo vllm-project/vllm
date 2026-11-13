@@ -37,15 +37,13 @@ GROUPS = SimpleNamespace(
     kv_cache_groups=[
         SimpleNamespace(
             layer_names=["swa"],
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=False, prefix_replay_tokens=WINDOW
-            ),
+            prefix_cacheable=False,
+            prefix_replay_tokens=WINDOW,
         ),
         SimpleNamespace(
             layer_names=["mla"],
-            kv_cache_spec=SimpleNamespace(
-                prefix_cacheable=True, prefix_replay_tokens=0
-            ),
+            prefix_cacheable=True,
+            prefix_replay_tokens=0,
         ),
     ]
 )
@@ -158,7 +156,7 @@ def test_replay_builders_built_before_first_trimmed_step(state, monkeypatch):
     build the replay builders before any step trims."""
     copies: list = []
 
-    def copy_attn_groups(groups, prefixes):
+    def copy_attn_groups(groups, kv_cache_config, prefixes):
         copies.append(prefixes)
         return []
 
@@ -532,15 +530,13 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
         kv_cache_groups=[
             SimpleNamespace(
                 layer_names=["swa"],
-                kv_cache_spec=SimpleNamespace(
-                    prefix_cacheable=False, prefix_replay_tokens=0
-                ),
+                prefix_cacheable=False,
+                prefix_replay_tokens=0,
             ),
             SimpleNamespace(
                 layer_names=["mla"],
-                kv_cache_spec=SimpleNamespace(
-                    prefix_cacheable=True, prefix_replay_tokens=0
-                ),
+                prefix_cacheable=True,
+                prefix_replay_tokens=0,
             ),
         ]
     )
