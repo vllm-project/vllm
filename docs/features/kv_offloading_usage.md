@@ -55,6 +55,20 @@ does not query any secondary tier.
 
 The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
 
+## Hybrid attention and recurrent models
+
+With prefix caching enabled and Mamba cache mode `align`, the CPU tier can
+restore retained prompt-tail checkpoints between full-attention block
+boundaries, including with decode context parallelism (DCP). Use
+`blocks_per_chunk: 1` and a `prefix_match_unit` supported by the model's KV
+cache groups. Under DCP, each recurrent block must divide the full-attention
+block, and the hash unit must be divisible by the DCP size.
+
+Partial-tail reuse follows the hit alignment resolved by the core prefix
+cache. EAGLE/MTP groups also require their draft-attention proof tokens to be
+available before a checkpoint can be reused, and are not yet supported with
+DCP.
+
 ## Single-Tier Setup (CPU Only)
 
 ```bash

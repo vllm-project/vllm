@@ -30,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import route_major_moe_output
+from vllm.model_executor.layers.fused_moe.silu_mul_token_quant import (
+    silu_mul_token_quant,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -645,6 +648,32 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 intermediate_cache1.view(-1, N),
                 group_size=128,
                 quant_dtype=current_platform.fp8_dtype(),
+            )
+        elif (
+            # Only benchmarked on ROCm.
+            current_platform.is_rocm()
+            and activation == MoEActivation.SILU
+            and self.activation_config.clamp_limit is None
+            and self.quant_config.use_fp8_w8a8
+            and self.per_act_token_quant
+            and self.block_shape is None
+            and a2_scale is None
+            and not self.quantization_emulation
+            and lora_context is None
+        ):
+            assert cache2_dim * 2 == N, (
+                "silu_mul_token_quant fuses SiLU-and-mul, which halves N "
+                f"(got N={N}, activation output dim={cache2_dim}). An activation "
+                "that does not halve N needs its own kernel or a condition on "
+                "this branch."
+            )
+            # Under EP the first GEMM never writes the rows of remote routes and the
+            # second never reads them, so they are skipped here too.
+            qintermediate_cache2, a2q_scale = silu_mul_token_quant(
+                intermediate_cache1.view(-1, N),
+                topk_ids if skip_invalid else None,
+                expert_map if skip_invalid else None,
+                num_align_experts,
             )
         else:
             self.activation(

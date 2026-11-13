@@ -272,7 +272,21 @@ def check_and_fallback_input_schema(
     input_schema: "BaseInputSchema",
     param_dtype: torch.dtype | None = None,
     allow_fallback: bool = True,
+    allow_fp8_sm100: bool = True,
 ) -> "HummingInputSchema":
+    """Resolve *input_schema* against *weight_schema*, falling back if needed.
+
+    Args:
+        weight_schema: the weight schema the input must be compatible with.
+        input_schema: the requested input schema.
+        param_dtype: model compute dtype, used as the 16-bit fallback.
+        allow_fallback: if False, return the requested schema as-is.
+        allow_fp8_sm100: whether FP8 activations may be honored on
+            SM100-SM119. Humming's dense FP8 UMMA path is fast there, but the
+            MoE grouped-GEMM path is not (the tuner can emit invalid two-CTA
+            configs), so the MoE call sites pass False.
+
+    """
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
     from vllm.utils.humming import dtypes as humming_dtypes
 
@@ -332,16 +346,26 @@ def check_and_fallback_input_schema(
     input_group_size = input_schema.input_scale_group_size
     input_scale_dtype = input_schema.input_scale_dtype
 
+    fp8_dtypes = (
+        humming_dtypes.float8e4m3,
+        humming_dtypes.float8e5m2,
+        humming_dtypes.float8e3m4,
+    )
+
     def is_deprecated(dtype: "humming_dtypes.DataType | None") -> bool:
         if dtype is None or dtype.num_bits == 16:
             return False
         is_int4_deprecated = dtype == humming_dtypes.int4 and sm_version >= 90
         is_int8_deprecated = dtype == humming_dtypes.int8 and 103 <= sm_version < 110
-        # Humming has not yet implemented high-performance FP8 computation
-        # on SM10X and SM11X. Therefore, it is temporarily considered deprecated.
-        # TODO: removed this after Humming has high-performance FP8 computation
-        is_fp8_deprecated = dtype.num_bits < 16 and 100 <= sm_version < 120
-        return is_int4_deprecated or is_int8_deprecated or is_fp8_deprecated
+        # FP8 is fine when the caller has a fast path for it (dense UMMA):
+        # other sub-16-bit dtypes (e.g. FP4) still lack fast kernels on
+        # SM10X/SM11X.
+        is_low_bit_deprecated = (
+            dtype.num_bits < 16
+            and (dtype not in fp8_dtypes or not allow_fp8_sm100)
+            and 100 <= sm_version < 120
+        )
+        return is_int4_deprecated or is_int8_deprecated or is_low_bit_deprecated
 
     if input_schema.is_compatible_with(weight_schema, param_dtype):
         if not allow_fallback:
@@ -359,7 +383,7 @@ def check_and_fallback_input_schema(
                 and a_dtype.num_bits == 8
                 and input_group_size == 32
                 and input_scale_dtype == humming_dtypes.float8e8m0
-                and sm_version >= 120
+                and sm_version >= (100 if allow_fp8_sm100 else 120)
             )
             is_groupwise = input_group_size > 0 or weight_group_size > 0
             if input_bits == 8 and is_groupwise and not is_mxfp8:

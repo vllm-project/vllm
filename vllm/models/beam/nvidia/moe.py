@@ -5,7 +5,11 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    RoutedScaleMode,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -98,7 +102,7 @@ class BeamSparseMoeBlock(nn.Module):
             scoring_func="sigmoid",
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=config.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            routed_scale_mode=RoutedScaleMode.OUTPUT,
             router_logits_dtype=self.gate.out_dtype,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=parallel_config.eplb_config.num_redundant_experts,
