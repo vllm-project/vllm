@@ -1406,14 +1406,12 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
         k_scale=k_scale,
         v_scale=v_scale,
     ) * torch.sigmoid(output_gate)
-    block_table = torch.arange(
-        attention_cache.shape[0], device="cuda", dtype=torch.int32
-    ).roll(1)[None]
+    block_table = identity.roll(1, dims=1)
     logical_expected = _qsa_sparse_paged_attention_reference(
         q,
-        key_cache.view(torch.float8_e4m3fn) if fp8 else key_cache,
-        value_cache.view(torch.float8_e4m3fn) if fp8 else value_cache,
-        physical_rows,
+        original_key,
+        original_value,
+        selected,
         block_table,
         token_to_req,
         head_dim**-0.5,

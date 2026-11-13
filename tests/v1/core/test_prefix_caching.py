@@ -1609,6 +1609,70 @@ def test_hisparse_host_backed_request_accepts_local_prefix_hit():
     )
 
 
+def test_hisparse_clean_pages_unpin_in_write_completion_order():
+    """The pool reuses unpinned pages in the order their host writes completed."""
+    manager = make_hisparse_kv_cache_manager(
+        64, 32, enable_caching=True, num_resident_groups=2
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.max_spill_pages = 1
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    requests = [
+        make_request(name, list(range(i, i + num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+        for i, name in enumerate(("a", "b"))
+    ]
+    spills = []
+    for request in requests:
+        for hot in coordinator.hot_managers:
+            hot.require_hot(request.request_id)
+            hot.allocate_new_blocks(request.request_id, num_tokens, num_tokens)
+        assert _allocate_scheduled(manager, request, num_tokens) is not None
+        spills += coordinator.build_offload_command().page_transfers
+    for request in requests:
+        coordinator.plan_prefix_materialization(request.request_id, num_tokens)
+        spills += coordinator.build_offload_command().page_transfers
+    pages = [coordinator.pending_spills[spill.transfer_id].page for spill in spills]
+    assert pages == [("a", 0), ("b", 0), ("a", 1), ("b", 1)]
+
+    counts = {spill.transfer_id: 1 for spill in spills}
+    coordinator.update_spills(counts, counts)
+
+    expected = [
+        resident.req_to_blocks[request_id][page_idx].block_id
+        for request_id, page_idx in pages
+        for resident in coordinator.resident_managers
+    ]
+    free_ids = [
+        block.block_id
+        for block in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    assert free_ids[-len(expected) :] == expected
+
+
+def test_hisparse_freed_request_spills_are_reused_newest_first():
+    """Acked spills of a freed request free their blocks as if one at a time."""
+    manager = make_hisparse_kv_cache_manager(
+        64, 32, enable_caching=True, num_resident_groups=2
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    request = make_request("a", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_tokens) is not None
+    spills = coordinator.build_offload_command().page_transfers
+    assert len(spills) == 4
+    manager.free(request)
+
+    counts = {spill.transfer_id: 1 for spill in spills}
+    coordinator.update_spills(counts, counts)
+
+    spilled = [block_id for spill in spills for block_id in spill.resident_block_ids]
+    free_ids = [
+        block.block_id
+        for block in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    assert free_ids[: len(spilled)] == spilled[::-1]
+
+
 def test_hisparse_finished_request_leaves_free_copies():
     """Clean pages of a finished request are free-queue blocks, not pins."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)

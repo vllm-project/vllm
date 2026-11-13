@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -1186,7 +1187,7 @@ class TestHasPendingWork:
         try:
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
             connector_scheduler.manager = manager
-            connector_scheduler._jobs = {}
+            connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
@@ -1244,7 +1245,7 @@ class TestHasPendingWork:
             assert manager._tier_poll_thread is None
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
             connector_scheduler.manager = manager
-            connector_scheduler._jobs = {}
+            connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
@@ -3257,8 +3258,15 @@ def _producer_with_cpu_hit(
     )
     seed_ctx = ReqContext(req_id="seed")
     with tiering.lock:
-        assert tiering.primary_tier.prepare_store([key], seed_ctx) is not None
-        tiering.primary_tier.complete_store([key], seed_ctx)
+        assert (
+            tiering.primary_tier.prepare_store(
+                [key], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+            )
+            is not None
+        )
+        tiering.primary_tier.complete_store(
+            [key], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
     return consumer, tiering
 
 
@@ -3459,15 +3467,19 @@ def test_reset_cache_releases_parked_p2p_slots(drain_peers):
     keys = [OffloadKey(b"one"), OffloadKey(b"two")]
     try:
         tiering.on_new_request(ctx)
-        store = tiering.prepare_store(keys, ctx)
+        store = tiering.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
         assert store is not None
-        tiering.complete_store(store.keys_to_store, ctx)
+        tiering.complete_store(
+            store.keys_to_store, ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         tiering.on_schedule_end(ScheduleEndContext([], ()))
         tiering.reset_cache()
         tiering.on_reset_flushed()
         assert all(tiering.lookup(key, ctx) is LookupResult.MISS for key in keys)
         replacement = tiering.prepare_store(
-            [OffloadKey(str(i).encode()) for i in range(8)], ctx
+            [OffloadKey(str(i).encode()) for i in range(8)],
+            ctx,
+            trigger=StoreTrigger.ON_COMPUTE,
         )
         assert replacement is not None
         assert len(replacement.keys_to_store) == 8
@@ -3541,9 +3553,13 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
     step = ScheduleEndContext([], ())
 
     def store():
-        output = tiering.prepare_store([key], local_ctx)
+        output = tiering.prepare_store(
+            [key], local_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert output is not None
-        tiering.complete_store(output.keys_to_store, local_ctx)
+        tiering.complete_store(
+            output.keys_to_store, local_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         tiering.on_schedule_end(step)
 
     def lookup():

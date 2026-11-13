@@ -112,7 +112,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_TILES: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    PHYSICAL_INDICES: tl.constexpr,
+    PHYSICAL_BLOCK_STRIDE: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -157,12 +157,15 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             other=-1,
         )
         safe_token = tl.maximum(selected_token, 0)
-        selected_page = safe_token // PAGE_SIZE
-        page_offset = safe_token % PAGE_SIZE
         valid = (request >= 0) & (request < num_requests) & (selected_token >= 0)
-        if PHYSICAL_INDICES:
-            physical_page = selected_page
+        if PHYSICAL_BLOCK_STRIDE:
+            # HiSparse encodes rows using the backing block stride, including padding.
+            physical_page = safe_token // PHYSICAL_BLOCK_STRIDE
+            page_offset = safe_token % PHYSICAL_BLOCK_STRIDE
+            valid &= page_offset < PAGE_SIZE
         else:
+            selected_page = safe_token // PAGE_SIZE
+            page_offset = safe_token % PAGE_SIZE
             valid &= selected_page < PAGE_TABLE_WIDTH
             physical_page = tl.load(
                 block_table_ptr
@@ -834,7 +837,9 @@ def _qsa_sparse_paged_splitk(
         NUM_TILES=num_tiles,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
-        PHYSICAL_INDICES=physical_indices,
+        PHYSICAL_BLOCK_STRIDE=k_cache.stride(0) // k_cache.stride(1)
+        if physical_indices
+        else 0,
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -984,7 +989,9 @@ def warmup_qsa_sparse_paged_attention(
             NUM_TILES=num_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
-            PHYSICAL_INDICES=physical_indices,
+            PHYSICAL_BLOCK_STRIDE=key_cache.stride(0) // key_cache.stride(1)
+            if physical_indices
+            else 0,
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),

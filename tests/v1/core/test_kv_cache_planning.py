@@ -108,7 +108,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(index_topk=129),
+            hf_text_config=SimpleNamespace(index_topk=129),
             max_model_len=gpu_block_size,
         ),
         parallel_config=SimpleNamespace(
@@ -123,6 +123,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
+            kv_cache_layout=KVCacheLayout.BLHNC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
@@ -202,10 +203,10 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
 
 
 @pytest.mark.parametrize(
-    "main_dtype,host_blocks,host_stride,layer_stride,gpu_reserved_bytes",
+    "main_dtype,host_blocks,host_stride,layer_stride,indexer_block_size",
     [
-        (torch.bfloat16, 128, 4096, 2048, 90112),
-        (torch.uint8, 256, 2048, 1024, 45056),
+        (torch.bfloat16, 128, 4096, 2048, 128),
+        (torch.uint8, 256, 2048, 1024, 64),
     ],
     ids=["main-bf16", "main-fp8"],
 )
@@ -215,7 +216,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
     host_blocks,
     host_stride,
     layer_stride,
-    gpu_reserved_bytes,
+    indexer_block_size,
 ):
     from vllm.v1.kv_cache_interface import SparseFullAttentionSpec
 
@@ -275,9 +276,9 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         # QSA publishes its selection capacity on the cache spec. It has no
-        # MLA-only hf_config.index_topk field.
+        # MLA-only index_topk field.
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(),
+            hf_text_config=SimpleNamespace(),
             max_model_len=128,
             get_total_num_kv_heads=lambda: 2,
         ),
@@ -294,6 +295,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
             num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
             mamba_cache_mode="none",
+            kv_cache_layout=KVCacheLayout.BLNHC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
@@ -308,8 +310,10 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
 
     groups = get_kv_cache_groups(config, specs)
     # The shared pool is sized by a main-K/V page (2048 B, or 1024 B for FP8).
-    # One request needs 8 indexer + 2 x 8 resident + 2 x 5 hot + 8 dense
-    # + 1 raw-ring + 1 recurrent blocks, even with smaller indexer payloads.
+    # At 128 tokens the compressed indexers use one BF16-pool block or two
+    # FP8-pool blocks. The other groups need 2 x 8 resident + 2 x 5 hot
+    # + 8 dense + 1 raw-ring + 1 recurrent blocks in both layouts.
+    gpu_reserved_bytes = (128 // indexer_block_size + 36) * layer_stride
     assert (
         kv_cache_planning._max_memory_usage_bytes_from_groups(
             kv_cache_planning.DefaultKVCacheConfigBuilder(), config, groups
@@ -357,7 +361,15 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
             else ((name, group.kv_cache_spec) for name in group.layer_names)
         )
     }
-    assert all(device_specs[name] == specs[name] for name in indexer_names | ring_names)
+    for name in indexer_names:
+        indexer = device_specs[name]
+        assert isinstance(indexer, MLAAttentionSpec)
+        assert indexer.cache_role == SparseCacheRole.INDEXER
+        assert indexer.block_size == indexer_block_size
+        assert indexer.tokens_per_state == 4
+        assert indexer.num_states == indexer_block_size // 4
+        assert indexer.dtype == torch.bfloat16
+    assert all(device_specs[name] == specs[name] for name in ring_names)
     assert device_specs["model.layers.3.mamba"] == specs["model.layers.3.mamba"]
     hot_groups = [
         group
@@ -905,6 +917,7 @@ def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
+            kv_cache_layout=KVCacheLayout.BLHNC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )

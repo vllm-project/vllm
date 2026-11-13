@@ -41,6 +41,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_adaptive_verification: bool = False
     use_dcp: bool = False
     use_rswa: bool = False
+    use_hisparse: bool = False
 
     def __repr__(self):
         return (
@@ -61,7 +62,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_adaptive_verification={self.use_adaptive_verification}, "
             f"use_pcp={self.use_pcp}, "
             f"use_dcp={self.use_dcp}, "
-            f"use_rswa={self.use_rswa})"
+            f"use_rswa={self.use_rswa}, "
+            f"use_hisparse={self.use_hisparse})"
         )
 
 
@@ -176,6 +178,9 @@ def get_attn_backend(
         use_rswa=(
             vllm_config.model_config is not None
             and vllm_config.model_config.rswa_window is not None
+        ),
+        use_hisparse=(
+            use_sparse and vllm_config.attention_config.hisparse_config is not None
         ),
     )
 

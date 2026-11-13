@@ -4,11 +4,16 @@
 
 from collections.abc import Callable, Mapping
 from copy import copy
+from dataclasses import replace
+from math import gcd, lcm
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.abstract import (
+    get_mamba_prefill_checkpoint_alignment,
+)
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
@@ -30,7 +35,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     SparseFullAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
@@ -39,6 +46,7 @@ from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
@@ -47,7 +55,8 @@ def resolve_hisparse_specs(
     kv_cache_spec: dict[str, KVCacheSpec],
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheSpec]:
-    """Resolve sparse source/indexer block sizes and add resident/hot specs."""
+    """Resolve sparse source and indexer block sizes, derive resident/hot specs,
+    and fit align-mode Mamba blocks to the resulting attention blocks."""
     sparse_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
@@ -67,20 +76,106 @@ def resolve_hisparse_specs(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec = kv_cache_spec | {
+    indexer_specs = {
+        name: spec
+        for name, spec in sparse_specs.items()
+        if isinstance(spec, MLAAttentionSpec)
+        and spec.cache_role is SparseCacheRole.INDEXER
+    }
+    indexer_block_size = _largest_exact_kernel_block_size(
+        block_size,
+        [attn_layers[name].get_attn_backend() for name in indexer_specs],
+        list(indexer_specs.values()),
+    )
+    resized_specs: dict[str, KVCacheSpec] = {
         name: spec.copy_with_new_block_size(block_size)
         for name, spec in sparse_specs.items()
     }
-    groups = get_hisparse_kv_cache_groups(
-        vllm_config, {name: kv_cache_spec[name] for name in sparse_specs}
-    )
+    for name, indexer_spec in indexer_specs.items():
+        resized_specs[name] = indexer_spec.copy_with_new_block_size(indexer_block_size)
+    groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
     assert groups is not None
-    return kv_cache_spec | {
-        layer_name: group.kv_cache_spec
-        for group in groups
-        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
-        for layer_name in group.layer_names
-    }
+    return fit_mamba_blocks_to_attention(
+        vllm_config,
+        kv_cache_spec
+        | resized_specs
+        | {
+            layer_name: group.kv_cache_spec
+            for group in groups
+            if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+            for layer_name in group.layer_names
+        },
+        attn_layers,
+    )
+
+
+def _largest_exact_kernel_block_size(
+    block_size: int,
+    backends: list[type["AttentionBackend"]],
+    specs: list[MLAAttentionSpec],
+) -> int:
+    """Largest exact kernel page all backends accept, as a multiple of block_size."""
+    sizes: set[int] | None = None
+    for backend, spec in zip(backends, specs, strict=True):
+        exact = {
+            size
+            for size in backend.get_supported_kernel_block_sizes(spec)
+            if isinstance(size, int)
+        }
+        sizes = exact if sizes is None else sizes & exact
+    return max(
+        (size for size in sizes or () if size % block_size == 0), default=block_size
+    )
+
+
+def fit_mamba_blocks_to_attention(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    layers: Mapping[str, "AttentionLayerBase"],
+) -> dict[str, KVCacheSpec]:
+    """Shrink align-mode Mamba blocks that would grow the scheduler block.
+
+    Mamba blocks start at `cache_config.block_size`, which resized attention
+    specs may no longer use. Rebuilds the Mamba specs at the largest size up to
+    it that divides the attention blocks' lcm.
+    """
+    if not any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values()):
+        return kv_cache_spec
+    cache_config = vllm_config.cache_config
+    if cache_config.mamba_cache_mode != "align":
+        return kv_cache_spec
+    attn_block_sizes = [
+        spec.block_size
+        for spec in kv_cache_spec.values()
+        if not isinstance(spec, MambaSpec) and spec.prefix_cacheable
+    ]
+    if not attn_block_sizes:
+        return kv_cache_spec
+    scheduler_block_size = lcm(*attn_block_sizes)
+    step = lcm(
+        gcd(*attn_block_sizes),
+        get_mamba_prefill_checkpoint_alignment(vllm_config) or 1,
+    )
+    block_size = max(
+        (
+            size
+            for size in range(
+                step, min(cache_config.block_size, scheduler_block_size) + 1, step
+            )
+            if scheduler_block_size % size == 0
+        ),
+        default=cache_config.mamba_block_size,
+    )
+    if block_size == cache_config.mamba_block_size:
+        return kv_cache_spec
+    cache_config.mamba_block_size = block_size
+    resized = dict(kv_cache_spec)
+    for name, spec in kv_cache_spec.items():
+        if isinstance(spec, MambaSpec):
+            new_spec = layers[name].get_kv_cache_spec(vllm_config)
+            assert isinstance(new_spec, MambaSpec)
+            resized[name] = replace(new_spec, is_draft=spec.is_draft)
+    return resized
 
 
 def allocate_hisparse_kv_caches(
