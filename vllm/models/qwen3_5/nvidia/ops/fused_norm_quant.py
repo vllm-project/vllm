@@ -215,8 +215,10 @@ def gemma_add_rms_norm_quant(
         return q, block_scale, y
 
     # Swept on GB300 at H=5120, M=1..8192: within 3% of the best of 2/4/8/16
-    # warps at every swept M except NVFP4 M=129 (4%).
+    # warps at every swept M except NVFP4 M=129 (4%). Per-token FP8 (swept
+    # on SM120) needs 8 warps above that for its row amax, not 4.
     max_m_16_warps = 128 if nvfp4 else 384
+    large_m_warps = 8 if per_token else 4
     _gemma_add_rms_norm_quant_kernel[(M,)](
         x,
         residual if residual is not None else x,
@@ -230,7 +232,7 @@ def gemma_add_rms_norm_quant(
         HAS_RESIDUAL=residual is not None,
         QUANT="fp8_token" if per_token else "nvfp4" if nvfp4 else "fp8",
         WRITE_Y=write_y,
-        num_warps=16 if max_m_16_warps >= M else 4,
+        num_warps=16 if max_m_16_warps >= M else large_m_warps,
         launch_pdl=current_platform.is_arch_support_pdl(),
         # Overlaps the consumer's weight load with this kernel. Swept on
         # GB300: ~2% win at M <= 128; the prelaunched consumer grid steals

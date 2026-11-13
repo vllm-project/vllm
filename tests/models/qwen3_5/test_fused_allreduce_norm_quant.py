@@ -164,10 +164,11 @@ def _worker(local_rank, world_size, port):
 
         assert linear is not None and qa is not None and y is not None
         # FlashInfer's AR+norm+quant kernel matches its AR+norm bitwise; the
-        # Triton norm-quant (no all-reduce, or above the workspace budget)
-        # reduces the sum of squares in a different order than FlashInfer's
-        # norm, so off-by-one codes appear where the normed values differ.
-        exact = allreduce and num_tokens < FALLBACK_TOKENS
+        # Triton norm-quant (no all-reduce, above the workspace budget, or no
+        # FlashInfer AR+norm on this GPU) reduces the sum of squares in a
+        # different order than FlashInfer's norm, so off-by-one codes appear
+        # where the normed values differ.
+        exact = allreduce and flashinfer_allreduce_gemma_rms_norm_applies(x)
         if exact:
             torch.testing.assert_close(y, ref_y, atol=0, rtol=0)
         else:
