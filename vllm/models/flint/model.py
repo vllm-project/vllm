@@ -316,7 +316,7 @@ class FlintAttention(nn.Module):
             )
         except ImportError:
             # ROCm lacks FlashInfer support
-            FlashInferImpl = None
+            FlashInferImpl = None  # type: ignore[assignment, misc]
 
         impl = self.attn.impl
         if FlashInferImpl is not None and isinstance(impl, FlashInferImpl):
