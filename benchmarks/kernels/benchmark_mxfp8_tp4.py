@@ -10,6 +10,7 @@ Example (record the baseline and candidate SHAs):
     .venv/bin/python benchmarks/kernels/benchmark_mxfp8_tp4.py \
         --baseline /tmp/baseline_rocm_native.py
 
+Add `--shape-set prefill` for the TP1 prefill-chunk shapes of the same linears.
 Reports cold (>400 MiB rotating weights) and warm timings separately. Each timing
 is the median of 30 device-event samples; Python wall time is never ranked.
 """
@@ -31,11 +32,25 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.triton_utils import triton
 
-SHAPES = [
-    (m, n, k)
-    for n, k in [(2560, 6144), (6144, 2048), (1536, 6144), (6144, 768)]
-    for m in [1, 8, 16]
-]
+SHAPE_SETS = {
+    "tp4-decode": [
+        (m, n, k)
+        for n, k in [(2560, 6144), (6144, 2048), (1536, 6144), (6144, 768)]
+        for m in [1, 8, 16]
+    ],
+    "prefill": [
+        (m, n, k)
+        for n, k in [
+            (9856, 6144),
+            (6144, 8192),
+            (24576, 6144),
+            (6144, 12288),
+            (6144, 6144),
+            (6144, 3072),
+        ]
+        for m in [2048, 4096, 8192, 16384]
+    ],
+}
 
 
 def time_graph(calls):
@@ -87,6 +102,10 @@ def launch(module, xq, xs, w, ws, out, config):
         BLOCK_M=bm,
         BLOCK_N=bn,
         BLOCK_K=bk,
+        QUANT_X=False,
+        QUANT_ROWS=bm,
+        FP8_MAX=module._FP8_MAX,
+        TINY=module._TINY,
         num_warps=nw,
         num_stages=ns,
     )
@@ -100,7 +119,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--shape", type=int, choices=range(len(SHAPES)))
+    parser.add_argument("--shape-set", choices=SHAPE_SETS, default="tp4-decode")
+    parser.add_argument("--shape", type=int)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--asm-dir", type=Path)
@@ -121,7 +141,7 @@ def main():
         triton=triton.__version__,
         device=str(torch.cuda.get_device_properties(args.device)),
     )
-    for index, (m, n, k) in enumerate(SHAPES):
+    for index, (m, n, k) in enumerate(SHAPE_SETS[args.shape_set]):
         if args.shape is not None and index != args.shape:
             continue
         x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.5
