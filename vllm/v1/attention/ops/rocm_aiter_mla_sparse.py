@@ -2154,53 +2154,28 @@ def _mxfp8_wo_a_bmm_config(num_tokens: int, n_groups: int) -> tuple[int, ...]:
     return 128, 128, 128, 4, 2
 
 
-# AITER FlyDSL batched MXFP8 GEMMs for wo_a on its (16, 16)-preshuffled weight
-# (see the FlyDSL section of rocm_block32_gemm): (n_groups, o_lora_rank, group
-# K) -> [(max tokens, kernelName, or None for the Triton kernel), ...], tuned on
-# MI355X under HIP graphs; the last tier serves every larger token count.
-_FLYDSL_WO_A_TIERS: dict[tuple[int, int, int], list[tuple[int, str | None]]] = {
-    # DeepSeek-V4.1-Flash, TP1 (DP attention)
-    (8, 1024, 4096): [
-        (8, None),
-        (60, "flydsl_bmm_mxfp8_mfma_t64x32x512_w2x2_nb3_sk1_xcd"),
-        (144, "flydsl_bmm_mxfp8_mfma_t64x64x256_w2x2_nb4_sk1_xcd"),
-        (320, "flydsl_bmm_mxfp8_mfma_t64x64x256_w1x4_nb3_sk1_bd1_xcd"),
-        (2048, "flydsl_bmm_mxfp8_mfma_t128x128x128_w1x4_nb2_sk1_bd1_xcd"),
-        (1 << 62, "flydsl_bmm_mxfp8_mfma_t256x256x128_w1x4_nb2_sk1_bd1_xcd"),
-    ],
-}
+def _aiter_wo_a_bmm(a, a_scale, weight_preshuffled, weight_scale, n_groups, rank):
+    """wo_a on AITER's tuned batched GEMMs and the preshuffled weight; [T, G * R]."""
+    from aiter.ops.batched_gemm_op_a8w8 import batched_gemm_a8w8_mxscale_bpreshuffle
 
-
-def _flydsl_wo_a_bmm(a, a_scale, weight_preshuffled, weight_scale, out, n_groups):
-    """FlyDSL wo_a into `out`; False when no tier covers this call."""
-    num_tokens, group_dim = a.shape[0], a.shape[1] // n_groups
-    o_lora_rank = out.shape[1] // n_groups
-    tiers = _FLYDSL_WO_A_TIERS.get((n_groups, o_lora_rank, group_dim))
-    if (
-        tiers is None
-        or weight_scale.shape[0] * 32 != weight_preshuffled.shape[0]
-        or not (a.is_contiguous() and a_scale.is_contiguous())
-    ):
-        return False
     # Imported here to avoid an import cycle with the linear kernels package.
     from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
-        flydsl_kernel,
+        FLYDSL_MAX_BYTES,
     )
 
-    name = flydsl_kernel(tiers, num_tokens)
-    if name is None:
-        return False
-    from aiter.ops.flydsl.batched_gemm_a8w8_gfx950 import run_bmm_a8w8_mxfp8_gfx950
-
-    run_bmm_a8w8_mxfp8_gfx950(
-        a.view(num_tokens, n_groups, group_dim),
-        weight_preshuffled.view(n_groups, o_lora_rank, group_dim),
-        a_scale.view(num_tokens, n_groups, group_dim // 32),
-        weight_scale.view(n_groups, o_lora_rank // 32, group_dim // 32),
-        out.view(num_tokens, n_groups, o_lora_rank),
-        kernel_name=name,
-    )
-    return True
+    t, k = a.shape[0], a.shape[1] // n_groups
+    w = weight_preshuffled.view(n_groups, rank, k)
+    w_scale = weight_scale.view(n_groups, rank // 32, k // 32)
+    a, a_scale = a.contiguous().view(t, n_groups, k), a_scale.contiguous()
+    a_scale = a_scale.view(t, n_groups, k // 32)
+    rows = FLYDSL_MAX_BYTES // max(n_groups * k, 2 * n_groups * rank)
+    outs = [
+        batched_gemm_a8w8_mxscale_bpreshuffle(
+            a[i : i + rows], w, a_scale[i : i + rows], w_scale, torch.bfloat16
+        ).view(-1, n_groups * rank)
+        for i in range(0, t, rows)
+    ]
+    return outs[0] if len(outs) == 1 else torch.cat(outs)
 
 
 def _rocm_mxfp8_wo_a_bmm_impl(
@@ -2214,14 +2189,14 @@ def _rocm_mxfp8_wo_a_bmm_impl(
 ) -> torch.Tensor:
     num_tokens = a.shape[0]
     group_dim = a.shape[1] // n_groups
+    if num_tokens > 0 and weight_preshuffled is not None:
+        return _aiter_wo_a_bmm(
+            a, a_scale, weight_preshuffled, weight_scale, n_groups, o_lora_rank
+        )
     out = torch.empty(
         (num_tokens, n_groups * o_lora_rank), dtype=torch.bfloat16, device=a.device
     )
     if num_tokens == 0:
-        return out
-    if weight_preshuffled is not None and _flydsl_wo_a_bmm(
-        a, a_scale, weight_preshuffled, weight_scale, out, n_groups
-    ):
         return out
     block_m, block_n, block_k, num_warps, num_stages = _mxfp8_wo_a_bmm_config(
         num_tokens, n_groups
@@ -2285,7 +2260,8 @@ def rocm_mxfp8_wo_a_bmm(
     [T, G * K // 32] E8M0 scales, as the sparse decode reduce writes them.
     The weight is the checkpoint's MXFP8 `wo_a` as loaded, [G * R, K] with
     either [G * R // 32, K // 32] block scales or [G * R, K // 32] per-row
-    scales, so there is no dequantized copy to keep.
+    scales, so there is no dequantized copy to keep. A `weight_preshuffled`
+    the linear kernel set (possibly the weight itself) runs AITER's GEMMs.
     Returns [T, G * R].
     """
     return torch.ops.vllm.rocm_dsv41_mxfp8_wo_a_bmm(

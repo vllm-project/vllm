@@ -9,11 +9,15 @@ E8M0 scales. Uses the CDNA4 hardware microscaling matrix cores. `dot_scaled`
 tiles K by 128; a weight whose K is not a multiple of that is dequantized to
 BF16 once at load and served by a plain linear instead, since `can_implement`
 does not filter on K.
+
+Weights with 32x32 scale blocks (DeepSeek V4.1) run a block-scaled Triton GEMM,
+or AITER's tuned FlyDSL GEMMs on gfx950, on a weight preshuffled at load.
 """
 
 import torch
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -36,7 +40,6 @@ from vllm.triton_utils import tl, triton
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 from .rocm_block32_gemm import (
     BLOCK_ROWS,
-    flydsl_preshuffle,
     rocm_mxfp8_block32_gemm,
     rocm_mxfp8_block32_gemm_quant,
 )
@@ -448,6 +451,28 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
 
     supports_pre_processed_weights = True
 
+    def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
+        super().__init__(c)
+        from vllm.platforms.rocm import on_gfx950
+
+        # AITER's FlyDSL MXFP8 GEMMs are gfx950-only and write bf16 only.
+        self.flydsl_enabled = bool(
+            on_gfx950()
+            and rocm_aiter_ops.is_linear_enabled()
+            and torch.get_default_dtype() == torch.bfloat16
+        )
+
+    def _use_flydsl(self, layer: torch.nn.Module) -> bool:
+        """Whether a 32x32 block-scaled layer runs AITER's tuned FlyDSL GEMMs,
+        which need K % 64 == 0 (batched wo_a as [G, N / G, K])."""
+        n, k = layer.weight.shape
+        batch = getattr(layer, "bmm_batch_size", None)
+        if not self.flydsl_enabled or k % 64 or n % (batch or 1):
+            return False
+        return rocm_aiter_ops.is_mxfp8_block32_bpreshuffle_gemm_tuned(
+            n // (batch or 1), k, batch
+        )
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -483,9 +508,14 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         replace_parameter(layer, "weight", weight.contiguous())
         replace_parameter(layer, "weight_scale", weight_scale)
-        layer.weight_preshuffled = (
-            flydsl_preshuffle(layer.weight) if block_scale is not None else None
-        )
+        layer.weight_preshuffled = None
+        if block_scale is not None and self._use_flydsl(layer):
+            # In place, unless other code reads the row-major weight (mono decode).
+            shuffled = rocm_aiter_ops.shuffle_weight(layer.weight.data, (16, 16))
+            if not getattr(layer, "keep_row_major_weight", False):
+                replace_parameter(layer, "weight", shuffled)
+                shuffled = layer.weight.data
+            layer.weight_preshuffled = shuffled
 
     def input_quant_key(self) -> QuantKey:
         # Row-major [M, K // 32] E8M0 scales, unlike FlashInfer's swizzled ones

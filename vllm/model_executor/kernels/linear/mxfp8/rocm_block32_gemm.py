@@ -875,126 +875,25 @@ def _launch(
         )
 
 
-# --- AITER FlyDSL MXFP8 GEMMs -------------------------------------------------
-# On MI355X AITER's FlyDSL MXFP8 kernels beat the Triton ones above at most
-# shapes; they read the checkpoint's 32x32 E8M0 block scales as they are, but a
-# (16, 16)-preshuffled weight (`flydsl_preshuffle`, kept next to the original).
-# (N, K) -> [(max M, kernelName, or None for the Triton kernels), ...], tuned
-# under HIP graphs for the DeepSeek-V4.1-Flash TP1 (DP attention) linears; the
-# last tier serves every larger M. M <= 8 keeps the fused-quant Triton kernel.
-_ANY_M = 1 << 62
-_FLYDSL_TIERS: dict[tuple[int, int], list[tuple[int, str | None]]] = {
-    # wq_b, TP1
-    (32768, 1280): [
-        (8, None),
-        (60, "flydsl_mxpsh_64x64x256_F8_F8_B16_w0_x0_sk1_pf_nt"),
-        (96, "flydsl_mxpsh_96x128x128_F8_F8_B16_w0_x0_sk1_pf_nt"),
-        (192, "flydsl_mxpsh_192x128x128_F8_F8_B16_w2_x0_sk1_pf_nt"),
-        (320, "flydsl_mxpsh_192x128x128_F8_F8_B16_w2_x4_sk1"),
-        (512, "flydsl_mxpsh_128x256x128_F8_F8_B16_w2_x4_sk1"),
-        (1536, "flydsl_mxpsh_192x256x128_F8_F8_B16_w0_x4_sk1_pf"),
-        (_ANY_M, "flydsl_mxpsh_128x256x128_F8_F8_B16_w2_x4_sk1"),
-    ],
-    # wo_b, TP1
-    (5120, 8192): [
-        (8, None),
-        (96, "flydsl_mxpsh_96x128x128_F8_F8_B16_w4_x4_sk4_fsk_pf_nt"),
-        (120, "flydsl_mxpsh_128x128x128_F8_F8_B16_w4_x4_sk4_fsk_pf_nt"),
-        (320, "flydsl_mxpsh_64x64x512_F8_F8_B16_w2_x4_sk1_pf"),
-        (1536, "flydsl_mxpsh_128x128x128_F8_F8_B16_w0_x4_sk1_pf"),
-        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
-    ],
-    # shared expert gate_up, TP1
-    (4608, 5120): [
-        (8, None),
-        (48, "flydsl_mxpsh_48x32x512_F8_F8_B16_w0_x0_sk1_pf_nt"),
-        (144, "flydsl_mxpsh_48x64x512_F8_F8_B16_w2_x4_sk1_pf"),
-        (192, "flydsl_mxpsh_64x64x512_F8_F8_B16_w4_x4_sk1_pf"),
-        (320, "flydsl_mxpsh_48x64x512_F8_F8_B16_w0_x4_sk1_pf"),
-        (1536, "flydsl_mxpsh_96x192x128_F8_F8_B16_w0_x4_sk1_pf"),
-        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
-    ],
-    # shared expert down, TP1
-    (5120, 2304): [
-        (8, None),
-        (60, "flydsl_mxpsh_32x16x128_F8_F8_B16_w4_x4_sk1_pf"),
-        (96, "flydsl_mxpsh_32x64x128_F8_F8_B16_w0_x4_sk1_pf"),
-        (512, "flydsl_mxpsh_64x64x256_F8_F8_B16_w4_x4_sk1_pf"),
-        (1536, "flydsl_mxpsh_64x256x128_F8_F8_B16_w4_x4_sk1_pf"),
-        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
-    ],
-    # fused wq_a|wkv
-    (1792, 5120): [
-        (8, None),
-        (120, "flydsl_mxpsh_32x32x256_F8_F8_B16_w4_x4_sk1_pf"),
-        (1024, None),
-        (3072, "flydsl_mxpsh_128x128x128_F8_F8_B16_w4_x0_sk1_pf"),
-        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
-    ],
-    # indexer wq_b
-    (4096, 1280): [
-        (8, None),
-        (192, "flydsl_mxpsh_48x32x256_F8_F8_B16_w0_x4_sk1_pf"),
-        (512, None),
-        (3072, "flydsl_mxpsh_64x256x128_F8_F8_B16_w0_x4_sk1_pf"),
-        (_ANY_M, "flydsl_mxpsh_128x256x128_F8_F8_B16_w2_x4_sk1"),
-    ],
-    # engram, TP1
-    (25600, 6144): [
-        (8, None),
-        (96, "flydsl_mxpsh_96x128x256_F8_F8_B16_w0_x4_sk1_pf_nt"),
-        (120, "flydsl_mxpsh_128x128x128_F8_F8_B16_w4_x4_sk1_pf"),
-        (192, "flydsl_mxpsh_96x256x128_F8_F8_B16_w0_x4_sk1_pf"),
-        (240, "flydsl_mxpsh_128x128x128_F8_F8_B16_w4_x4_sk1_pf"),
-        (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
-    ],
-}
-_FLYDSL_DEFAULT_TIERS: list[tuple[int, str | None]] = [
-    (4095, None),
-    (_ANY_M, "flydsl_mxfp8_8w_256x256x128_F8_F8_B16_2x8"),
-]
-# The FlyDSL kernels index their buffers with 32 bits.
-_FLYDSL_MAX_BYTES = (1 << 31) - 1
+# AITER's FlyDSL GEMMs (picked per M from its tuned table) address each buffer
+# with 32-bit offsets, so larger M runs in row chunks.
+FLYDSL_MAX_BYTES = 1 << 31
 
 
-def flydsl_kernel(tiers: list[tuple[int, str | None]], M: int) -> str | None:
-    return next(name for max_m, name in tiers if max_m >= M)
+def _aiter_gemm(x, x_scale, weight_preshuffled, weight_scale, out) -> None:
+    from aiter import gemm_a8w8_blockscale_bpreshuffle
 
-
-def flydsl_preshuffle(weight: torch.Tensor) -> torch.Tensor | None:
-    """(16, 16)-preshuffled copy of an [N, K] e4m3 weight for the FlyDSL kernels;
-    None without AITER or off gfx950 (the tiers name gfx950 kernels)."""
-    from vllm.platforms.rocm import on_gfx950
-
-    if not on_gfx950():
-        return None
-    try:
-        from aiter.ops.shuffle import shuffle_weight
-    except ImportError:
-        return None
-    return shuffle_weight(weight, layout=(16, 16)).contiguous()
-
-
-def _gemm(x, x_scale, weight, weight_scale, out, weight_preshuffled) -> None:
     M, K = x.shape
-    N = weight.shape[0]
-    name = None
-    if weight_preshuffled is not None and out.dtype == torch.bfloat16:
-        name = flydsl_kernel(_FLYDSL_TIERS.get((N, K), _FLYDSL_DEFAULT_TIERS), M)
-    if name is None:
-        _launch(x, x_scale, weight, weight_scale, out, _config(M, N, K))
-        return
-    from aiter.ops.flydsl.mxscale_preshuffle_kernels import run_gemm_a8w8_mxfp8_gfx950
-
-    rows = _FLYDSL_MAX_BYTES // (out.element_size() * N) // 256 * 256
+    e8m0 = torch.float8_e8m0fnu
+    rows = FLYDSL_MAX_BYTES // max(K, out.element_size() * out.shape[1])
     for m0 in range(0, M, rows):
-        run_gemm_a8w8_mxfp8_gfx950(
+        gemm_a8w8_blockscale_bpreshuffle(
             x[m0 : m0 + rows],
             weight_preshuffled,
-            x_scale[m0 : m0 + rows],
-            weight_scale,
-            out[m0 : m0 + rows],
-            kernel_name=name,
+            x_scale[m0 : m0 + rows].view(e8m0),
+            weight_scale.view(e8m0),
+            out.dtype,
+            out=out[m0 : m0 + rows],
         )
 
 
@@ -1006,10 +905,12 @@ def _rocm_mxfp8_block32_gemm_impl(
     out_dtype: torch.dtype,
     weight_preshuffled: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    M = x.shape[0]
+    M, K = x.shape
     out = torch.empty((M, weight.shape[0]), dtype=out_dtype, device=x.device)
-    if M > 0:
-        _gemm(x, x_scale, weight, weight_scale, out, weight_preshuffled)
+    if M > 0 and weight_preshuffled is not None:
+        _aiter_gemm(x, x_scale, weight_preshuffled, weight_scale, out)
+    elif M > 0:
+        _launch(x, x_scale, weight, weight_scale, out, _config(M, weight.shape[0], K))
     return out
 
 
@@ -1049,8 +950,8 @@ def rocm_mxfp8_block32_gemm(
         weight: [N, K] e4m3 weight, contiguous.
         weight_scale: [ceil(N / 32), K / 32] E8M0 (uint8) weight block scales.
         out_dtype: Output dtype.
-        weight_preshuffled: `flydsl_preshuffle(weight)`, which lets the
-            FlyDSL kernels serve the M tiers they are tuned for.
+        weight_preshuffled: `weight` (16, 16)-preshuffled, possibly `weight`
+            itself; given, AITER's tuned FlyDSL GEMMs serve every M.
 
     Returns:
         The [M, N] product.
@@ -1098,6 +999,10 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
     out = torch.empty((M, weight.shape[0]), dtype=out_dtype, device=x.device)
     if M <= 0:
         return out
+    if weight_preshuffled is not None:
+        x_q, x_scale = mxfp8_e4m3_quantize(x)
+        _aiter_gemm(x_q, x_scale, weight_preshuffled, weight_scale, out)
+        return out
     cfg = _config(M, weight.shape[0], K)
     eligible = (
         cfg.packed
@@ -1134,7 +1039,7 @@ def _rocm_mxfp8_block32_gemm_quant_impl(
         _launch(x, None, weight, weight_scale, out, fused_cfg, quant_in_kernel=True)
     else:
         x_q, x_scale = mxfp8_e4m3_quantize(x)
-        _gemm(x_q, x_scale, weight, weight_scale, out, weight_preshuffled)
+        _launch(x_q, x_scale, weight, weight_scale, out, cfg)
     return out
 
 
