@@ -2831,7 +2831,7 @@ class VllmConfig:
                 if compile_range_end is not None and x < compile_range_end and x > 1:
                     computed_compile_ranges_endpoints.append(x)
         compilation_config.compile_ranges_endpoints = sorted(
-            computed_compile_ranges_endpoints
+            set(computed_compile_ranges_endpoints)
         )
 
     def try_verify_and_update_config(self):
