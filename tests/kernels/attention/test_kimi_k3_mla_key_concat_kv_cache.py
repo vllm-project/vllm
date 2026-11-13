@@ -25,9 +25,18 @@ DS_MLA_CACHE_ENTRY = 656
 BLOCK_SIZE = 8
 OWNED_TOKEN_INDICES = [1, 3]
 
+FP8 = current_platform.fp8_dtype()
+
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Kimi-K3 fused MLA ops require CUDA"
+    not current_platform.is_cuda_alike(),
+    reason="Kimi-K3 fused MLA ops require CUDA or ROCm",
 )
+# The fused fp8_ds_mla insert does not match concat_and_cache_mla on ROCm, where
+# MLA drafts get a plain fp8 cache (`configure_dense_draft`).
+_DS_MLA_CUDA_ONLY = pytest.mark.skipif(
+    current_platform.is_rocm(), reason="fused fp8_ds_mla insert is CUDA-only"
+)
+_DS_MLA = pytest.param("fp8_ds_mla", marks=_DS_MLA_CUDA_ONLY)
 
 
 def _inputs() -> dict[str, torch.Tensor]:
@@ -78,7 +87,7 @@ def _make_cache(cache_format: str) -> torch.Tensor:
             1.0,
             device="cuda",
             dtype=torch.float32,
-        ).to(torch.float8_e4m3fn)
+        ).to(FP8)
     assert cache_format == "fp8_ds_mla"
     return torch.full(
         (1, BLOCK_SIZE, DS_MLA_CACHE_ENTRY),
@@ -129,7 +138,7 @@ def _assert_cache_matches_reference(
         assert torch.equal(cache[0, slot], initial_cache[0, slot])
 
 
-@pytest.mark.parametrize("cache_format", ["bf16", "fp8_ds_mla"])
+@pytest.mark.parametrize("cache_format", ["bf16", _DS_MLA])
 def test_prefill_concat_ignores_negative_slots_for_cache(cache_format: str) -> None:
     inputs = _inputs()
     slots = _slot_mapping()
@@ -180,16 +189,16 @@ def test_fp8_prefill_outputs_ignore_negative_slots_for_cache() -> None:
     )
 
     expected = (
-        inputs["q"].to(torch.float8_e4m3fn),
-        _full_key(inputs["k_nope"], inputs["k_pe"]).to(torch.float8_e4m3fn),
-        inputs["v"].to(torch.float8_e4m3fn),
+        inputs["q"].to(FP8),
+        _full_key(inputs["k_nope"], inputs["k_pe"]).to(FP8),
+        inputs["v"].to(FP8),
     )
     for actual, reference in zip((q, k, v), expected):
         torch.testing.assert_close(actual.float(), reference.float(), rtol=0, atol=0)
     _assert_cache_matches_reference(mixed_cache, reference_cache, initial_cache)
 
 
-@pytest.mark.parametrize("cache_format", ["bf16", "fp8", "fp8_ds_mla"])
+@pytest.mark.parametrize("cache_format", ["bf16", "fp8", _DS_MLA])
 def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> None:
     inputs = _inputs()
     slots = _slot_mapping()
@@ -212,13 +221,14 @@ def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> No
 
     expected = _latent_query(inputs["ql_nope"], inputs["q_pe"])
     if cache_format == "fp8":
-        expected = expected.to(torch.float8_e4m3fn)
+        expected = expected.to(FP8)
         torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
     else:
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
     _assert_cache_matches_reference(mixed_cache, reference_cache, initial_cache)
 
 
+@_DS_MLA_CUDA_ONLY
 @pytest.mark.parametrize("decode", [False, True])
 def test_ds_mla_cache_insert_bit_compatible_with_reference(decode: bool) -> None:
     """Fused ds_mla insertion must match the reference bit-for-bit."""

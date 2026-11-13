@@ -380,7 +380,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self.W_UV_dcp: torch.Tensor | None = None
         if self.dcp_world_size > 1:
             query_dtype = (
-                torch.float8_e4m3fn
+                current_platform.fp8_dtype()
                 if is_quantized_kv_cache(self.kv_cache_dtype)
                 and self.kv_cache_dtype != "fp8_ds_mla"
                 else dtype
