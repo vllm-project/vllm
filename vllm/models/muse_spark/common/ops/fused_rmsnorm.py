@@ -13,7 +13,7 @@ try:
 except (ImportError, AttributeError):  # pragma: no cover - optional FlashInfer API
     postnorm_gated_residual = None
 
-    def supports_gated_residual_rmsnorm(*_args: object) -> bool:
+    def supports_gated_residual_rmsnorm(*_args: object, **_kwargs: object) -> bool:
         return False
 
 
@@ -280,7 +280,12 @@ def fused_rmsnorm_fwd(
         and beta.numel() == D
         and ((w is None and not input_scale) or (w is not None and input_scale))
         and (w is None or w.dtype == torch.bfloat16)
-        and supports_gated_residual_rmsnorm(x, residual_stream, w, alpha, beta)
+        # Cake's PDL programs read `branch` before griddepcontrol.wait and can
+        # emit NaN; use CuTe until https://github.com/flashinfer-ai/flashinfer/issues/9343
+        # is fixed.
+        and supports_gated_residual_rmsnorm(
+            x, residual_stream, w, alpha, beta, backend="cute"
+        )
     ):
         return postnorm_gated_residual(
             x,
@@ -290,6 +295,7 @@ def fused_rmsnorm_fwd(
             beta,
             eps,
             gain_center,
+            backend="cute",
         ).view(input_shape)
 
     if out is None:

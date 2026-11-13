@@ -181,6 +181,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         method="mtp",
         num_speculative_tokens=3,
         draft_model_config=draft_model_config,
+        draft_decode_context_parallel_size=1,
         use_local_argmax_reduction=False,
         draft_sample_method="greedy",
         enable_adaptive_verification=False,

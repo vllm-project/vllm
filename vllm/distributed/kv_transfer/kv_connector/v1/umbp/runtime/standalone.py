@@ -211,10 +211,11 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
     """Answers lookups from the shared server.
 
     A lookup that fails, or gets no reply within lookup_timeout_ms, is
-    reported as a miss, so a stalled or unreachable server degrades to
-    recomputation instead of stalling the scheduler. MORI puts no deadline on
-    these calls, so each runs on a daemon thread; until one that overran its
-    deadline returns, later calls fail at once instead of queueing behind it.
+    unavailable rather than a miss. Callers that only need a hit still
+    recompute, and a store must not treat the failure as absence. MORI puts
+    no deadline on these calls, so each runs on a daemon thread; until one
+    that overran its deadline returns, later calls fail at once instead of
+    queueing behind it.
     """
 
     def __init__(
@@ -249,19 +250,19 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
                 f"{method} got no reply within {self._call_timeout_s:g}s"
             ) from None
 
-    def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
+    def lookup(self, keys: Sequence[str]) -> Sequence[bool | None]:
         if not keys:
             return []
         try:
             result = [bool(value) for value in self._call("batch_exists", list(keys))]
         except Exception as exc:
             self._log_failure("lookup", exc)
-            return [False] * len(keys)
+            return [None] * len(keys)
         if len(result) != len(keys):
             self._log_failure(
                 "lookup", ValueError(f"{len(result)} results for {len(keys)} keys")
             )
-            return [False] * len(keys)
+            return [None] * len(keys)
         return result
 
     def clear(self) -> bool:
@@ -318,7 +319,7 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
         if now - self._last_failure_log >= _FAILURE_LOG_INTERVAL_S:
             self._last_failure_log = now
             logger.warning(
-                "UMBP standalone %s against %s failed; treating as a miss: %s",
+                "UMBP standalone %s against %s failed; reporting unavailable: %s",
                 operation,
                 self._address,
                 exc,

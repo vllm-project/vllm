@@ -276,7 +276,12 @@ class PushProxy:
             finally:
                 await prefill_task
 
-        return StreamingResponse(stream_decode(), media_type="application/json")
+        return StreamingResponse(
+            stream_decode(),
+            media_type="text/event-stream"
+            if request.get("stream")
+            else "application/json",
+        )
 
     async def create_completion(self, raw_request: Request):
         try:
