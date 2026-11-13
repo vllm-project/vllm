@@ -16,6 +16,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
+    registered_attention_layers,
     try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
@@ -44,7 +45,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheLayout,
     KVQuantMode,
     is_quantized_kv_cache,
@@ -302,7 +303,7 @@ def _clone_kv_cache_in_layout(
 
 def run_attention_backend(
     backend: AttentionBackendEnum | str,
-    kv_cache_spec: FullAttentionSpec,
+    kv_cache_spec: AttentionSpec,
     layer_names: list[str],
     vllm_config,
     device: torch.device,
@@ -358,16 +359,26 @@ def run_attention_backend(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
-    else:
-        # Build metadata
-        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        if backend == AttentionBackendEnum.FLEX_ATTENTION:
+    elif backend == AttentionBackendEnum.FLEX_ATTENTION:
+        # FlexAttention reads the attention type and sliding window from the
+        # group's layers.
+        with registered_attention_layers(
+            vllm_config, layer_names, attn_type, sliding_window
+        ):
             from vllm.v1.attention.backends.flex_attention import (
                 FlexAttentionMetadataBuilder,
             )
 
+            builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
             assert isinstance(builder, FlexAttentionMetadataBuilder)
             builder.direct_build = use_direct_block_mask
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+    else:
+        # Build metadata
+        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         attn_metadata = builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
@@ -522,7 +533,7 @@ def _test_backend_correctness(
         vllm_config.attention_config = attention_config
     device = torch.device(f"{DEVICE_TYPE}:0")
 
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -1298,8 +1309,9 @@ def test_flashinfer_resolves_layerwise_cache_dtype(
             quant_config=quant_config,
             prefix="layer",
         )
-        spec = layer.get_kv_cache_spec(config)
-        assert spec is not None
+        layer_config = layer.get_kv_cache_config(config)
+        assert layer_config is not None
+        spec = layer_config.spec
         builder = FlashInferMetadataBuilder(
             spec, ["layer"], config, torch.device(DEVICE_TYPE)
         )
@@ -1317,7 +1329,7 @@ def test_flashinfer_rejects_unresolved_quantized_layer(dist_init):
     from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
 
     config = create_vllm_config(dtype="bfloat16", block_size=64)
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=64,
         num_kv_heads=8,
         head_size=128,
@@ -1624,16 +1636,16 @@ def test_flashinfer_varlen_cudagraph_capability(
         if adaptive is not None
         else None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
-        model_config=SimpleNamespace(get_num_attention_heads=lambda _: 32),
     )
-    monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
+    monkeypatch.setattr(fi, "force_use_trtllm_attention", lambda: None)
+    monkeypatch.setattr(fi, "supports_trtllm_attention", lambda **_: True)
     monkeypatch.setattr(fi.current_platform, "has_device_capability", lambda _: True)
     monkeypatch.setattr(
         fi.FlashInferMetadataBuilder,
         "_get_flashinfer_trtllm_api_decode_kernel",
         staticmethod(lambda: fi.FlashInferDecodeKernel[decode_kernel]),
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=4,
         head_size=64,
@@ -2069,7 +2081,7 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
         block_size=16,
     )
     device = torch.device(f"{DEVICE_TYPE}:0")
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = AttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config
@@ -2106,7 +2118,7 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
         )
         == AttentionCGSupport.UNIFORM_BATCH
     )
-    wide_head_kv_cache_spec = FullAttentionSpec(
+    wide_head_kv_cache_spec = AttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=kv_cache_spec.num_kv_heads,
         head_size=512,
@@ -2167,7 +2179,7 @@ def test_flashinfer_nvfp4_decode_correctness(
         config.speculative_config = SpeculativeConfig(
             method="ngram", num_speculative_tokens=q_len - 1
         )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=bs,
         num_kv_heads=4,
         head_size=d,
