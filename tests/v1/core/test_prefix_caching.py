@@ -7046,7 +7046,7 @@ _SESSION_CONFIGS = {
 def _make_session_manager(
     kv_cache_config: KVCacheConfig,
     hash_block_size: int = 16,
-    session_ttl: float | None = SESSION_TTL,
+    session_ttl: float = SESSION_TTL,
     **kwargs,
 ) -> KVCacheManager:
     return make_kv_cache_manager(
@@ -7125,7 +7125,7 @@ def test_session_seeded_lookup_matches_disabled(config_name):
     config, hash_block_size = _SESSION_CONFIGS[config_name]()
     seeded = _make_session_manager(config, hash_block_size)
     reference = _make_session_manager(
-        copy.deepcopy(config), hash_block_size, session_ttl=None
+        copy.deepcopy(config), hash_block_size, session_ttl=0
     )
     num_seeded_turns = 0
     for turn, token_ids in enumerate(_turn_tokens()):
@@ -7146,7 +7146,7 @@ def test_session_seeded_lookup_matches_disabled(config_name):
 
 @pytest.mark.parametrize(
     "session_ttl,session_id,session_blocks_survive",
-    [(None, "s", False), (SESSION_TTL, None, False), (SESSION_TTL, "s", True)],
+    [(0, "s", False), (SESSION_TTL, None, False), (SESSION_TTL, "s", True)],
     ids=["disabled", "no-session-id", "session"],
 )
 def test_session_blocks_evicted_after_unreferenced_blocks(
@@ -7451,7 +7451,7 @@ def _check_hit_hashes(
             )
 
 
-@pytest.mark.parametrize("session_ttl", [None, 5.0])
+@pytest.mark.parametrize("session_ttl", [0, 5.0])
 @pytest.mark.parametrize("config_name", ["full", "full+sw"])
 @pytest.mark.parametrize("seed", range(6))
 def test_session_retention_random_ops_keep_invariants(
@@ -7533,5 +7533,5 @@ def test_session_retention_random_ops_keep_invariants(
             assert manager.reset_prefix_cache()
         manager.new_step_starts()
         _check_session_invariants(manager)
-    if session_ttl is not None:
+    if session_ttl:
         assert num_seeded >= 5

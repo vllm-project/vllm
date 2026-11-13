@@ -830,7 +830,7 @@ class EngineArgs:
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
-    session_cache_ttl: float | None = get_field(CacheConfig, "session_cache_ttl")
+    session_cache_ttl: float = get_field(CacheConfig, "session_cache_ttl")
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
 

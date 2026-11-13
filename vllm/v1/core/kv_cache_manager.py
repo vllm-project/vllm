@@ -147,7 +147,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
-        session_ttl: float | None = None,
+        session_ttl: float = 0,
         max_sessions: int = 65536,
     ) -> None:
         self.max_model_len = max_model_len
@@ -208,7 +208,7 @@ class KVCacheManager:
 
         # Session retention is a no-op for requests without a session id.
         self.sessions: KVCacheSessions | None = None
-        if enable_caching and session_ttl is not None:
+        if enable_caching and session_ttl > 0:
             self.sessions = KVCacheSessions(
                 ttl=session_ttl,
                 max_sessions=max_sessions,

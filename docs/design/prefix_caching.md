@@ -209,7 +209,7 @@ When the head block (least recently used block) of the free queue is cached, we 
 
 ## Session Retention
 
-Session retention keeps a conversation's cached blocks longer and makes its next prefix lookup cheaper. It is off by default. Enable it with `--session-cache-ttl <seconds>`; requests opt in by sending a `session_id` (request body field or the `X-Session-ID` header). Requests without a `session_id` are unaffected.
+Session retention keeps a conversation's cached blocks longer and makes its next prefix lookup cheaper. It is on by default with a TTL of 600 seconds; change the TTL with `--session-cache-ttl <seconds>`, or disable session retention with `--session-cache-ttl 0`. Requests opt in by sending a `session_id` (request body field or the `X-Session-ID` header). Requests without a `session_id` are unaffected.
 
 When a request with a `session_id` finishes, its cached blocks are marked as belonging to that session:
 
