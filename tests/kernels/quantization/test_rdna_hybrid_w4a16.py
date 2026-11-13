@@ -345,6 +345,62 @@ def test_gfx1151_bf16_decode_tile_selection(M, K, N, G, expected):
     assert tile == expected
 
 
+@pytest.mark.parametrize(
+    "M,K,N,G,expected",
+    [
+        (8, 5120, 34816, 128, (16, 32, 128, 2, 2, 2, False)),
+        (16, 6144, 5120, 128, (16, 32, 64, 2, 2, 2, False)),  # N < 2K
+        (16, 17408, 5120, 128, (16, 64, 128, 4, 4, 1, False)),  # tall K
+        (32, 17408, 5120, 128, (32, 64, 128, 4, 2, 1, False)),
+        (64, 5120, 34816, 128, (64, 64, 128, 2, 1, 1, False)),
+        (64, 6144, 5120, 128, (32, 128, 64, 4, 1, 2, True)),  # N < 2K
+        # Where the deferred kernel loses, keep the fused-dequant tiles.
+        (48, 17408, 5120, 128, None),  # tall K
+        (48, 4096, 6144, 64, None),  # g64 at M 33..64
+        (24, 5120, 96, 128, None),  # narrow N
+    ],
+)
+def test_gfx1151_bf16_deferred_tile_selection(M, K, N, G, expected):
+    """bf16 on gfx1151 takes the deferred-scale kernel only where it was faster."""
+    assert hybrid_module._gfx1151_bf16_deferred_tile(M, N, K, G) == expected
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize(
+    "M,K,N,G",
+    [
+        (6, 1024, 2048, 128),  # unroll 2
+        (8, 4096, 1096, 128),  # tall K; N not a multiple of BLOCK_N
+        (12, 1024, 1536, 128),  # two BLOCK_K per group
+        (48, 1024, 96, 128),  # narrow N
+        (32, 2048, 1024, 32),  # g32, unroll 4
+        (24, 512, 1024, 64),  # BLOCK_K clamped to the group
+        (56, 1024, 1024, 128),  # row sums in the kernel
+        (96, 512, 1024, 64),
+        (128, 1024, 2048, 128),
+    ],
+)
+def test_gfx1151_bf16_deferred_gemm_matches_reference(has_zp, M, K, N, G):
+    """The deferred-scale kernel matches the fp32 reference, with padded rows."""
+    tile = hybrid_module._gfx1151_bf16_deferred_tile(M, N, K, G)
+    assert tile is not None, "case no longer reaches the deferred-scale kernel"
+    set_random_seed(0)
+    x, w_int4, b_q, scales, zp_raw, zp_packed = _make_prefill_case(
+        M, K, N, G, torch.bfloat16, has_zp
+    )
+    x_pad = torch.zeros((M, K + 64), device=device, dtype=x.dtype)[:, :K]
+    x_pad.copy_(x)
+    b_pad = torch.zeros((N, K // 8 + 32), device=device, dtype=b_q.dtype)[:, : K // 8]
+    b_pad.copy_(b_q)
+    out = torch.empty((M, N), device=device, dtype=torch.bfloat16)
+    hybrid_module._triton_w4a16_bf16_deferred_gemm(
+        x_pad, b_pad, scales, G, 8, zp_packed, out, tile
+    )
+    ref = _rdna_hybrid_w4a16_reference(x, w_int4, scales, zp_raw, G, bias=None)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
 # ---------------------------------------------------------------------------
 # pack_int4_exllama_shuffle round-trips correctly
 # ---------------------------------------------------------------------------
