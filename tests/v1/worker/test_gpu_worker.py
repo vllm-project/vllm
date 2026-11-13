@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm.config.utils import Range
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -924,3 +925,34 @@ def test_discarding_the_kv_cache_releases_an_extensible_one(
     assert log == ["release", "pool"]
     Worker.discard(worker, ("weights",))
     assert log == ["release", "pool", "pool"]
+
+
+def _ranges(*endpoints: int) -> list[Range]:
+    starts = [0, *endpoints[:-1]]
+    return [Range(start=s + 1, end=e) for s, e in zip(starts, endpoints)]
+
+
+@pytest.mark.parametrize(
+    "warmup_sizes,cg_capture_sizes,endpoints,max_reachable,expected",
+    [
+        ([], [1, 2], (3072,), 2048, []),
+        ([], [1, 2], (8, 32, 3072), 2048, [32, 2048]),
+        ([], [1, 2], (8, 32, 3072), 8192, [32, 3072]),
+        ([], [1, 2], (8, 4096, 8192), 2048, [2048]),
+        ([16, 4096], [1, 2], (8, 32, 8192), 2048, [16, 2048]),
+    ],
+    ids=[
+        "covered-by-cudagraph",
+        "issue-66242-capped",
+        "reachable-unchanged",
+        "unreachable-range-skipped",
+        "unreachable-compile-size-dropped",
+    ],
+)
+def test_compile_warmup_sizes_stay_within_reachable_tokens(
+    warmup_sizes, cg_capture_sizes, endpoints, max_reachable, expected
+):
+    sizes = gpu_worker.get_compile_warmup_sizes(
+        warmup_sizes, cg_capture_sizes, _ranges(*endpoints), max_reachable
+    )
+    assert sorted(sizes) == expected
