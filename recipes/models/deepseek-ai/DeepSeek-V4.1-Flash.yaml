@@ -1507,14 +1507,14 @@ presets:
       rejection for ordinary serving and accuracy evaluation.
 
   mi355x_agentx_dp2_umbp:
-    label: "AgentX DP2 + UMBP"
+    label: "AgentX DP2"
     hardware: mi355x
     strategy: single_node_dep
     # Same checkpoint note as mi355x_agentx: the lane served the 0909 launch
     # checkpoint, and 1017 shares its format and memory layout.
     variants: [fp8, default]
     workload: "Agentic (InferenceX AgentX)"
-    description: "Two GPUs per server with attention DP2 and the MoE tensor-parallel across both ranks (no expert parallelism), behind a consistent-hash vLLM Router, at concurrency 256 and 384. UMBP offloads KV cache to a node-local host-DRAM pool shared by both ranks; per-tensor fp8 KV cache, prefill cadence 11 and Engram tables in host memory."
+    description: "Two GPUs per server with attention DP2 and the MoE tensor-parallel across both ranks (no expert parallelism), behind a consistent-hash vLLM Router, at concurrency 128 to 384. At 256 and 384 UMBP offloads KV cache to a node-local host-DRAM pool shared by both ranks; 128 runs without offloading. Per-tensor fp8 KV cache, prefill cadence 11 and Engram tables in host memory."
     source: { label: "InferenceX #5036", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5036", key: "dsv41flash-fp4-mi355x-vllm-agentic-dspark-umbp", revision: 3a4e0673e96ab2e37ab246963c9ff55b8ce32f41 }
     # Carries vllm-project/vllm#64715 (UMBP standalone for DeepSeek-V4.1-Flash)
     # and #66036 (per-tensor fp8_e4m3 KV for the ROCm sparse MLA).
@@ -1551,6 +1551,12 @@ presets:
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "NONE"
       OMP_NUM_THREADS: "1"
     points:
+      # The GPU KV cache holds the working set at 128, where UMBP did not help.
+      dp2_c128:
+        label: "128 (no offload)"
+        concurrency: 128
+        select:
+          kv_offload: off
       dp2_c256:
         label: "256"
         concurrency: 256
@@ -1572,7 +1578,7 @@ presets:
       concurrency 256 and doubled at 384, where the server without offloading
       was overloaded (73% GPU prefix hits, 265 s TTFT p90) and UMBP restored
       21.5% of prompt tokens. At 128 the GPU KV cache held the working set and
-      UMBP did not help (−4.7%), so 128 is not a point here. Throughput levels
+      UMBP did not help (−4.7%), so the 128 point runs without it. Throughput levels
       off past 384: at 544, UMBP held throughput level with 384 at much higher
       latency.
 
