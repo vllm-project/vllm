@@ -55,6 +55,8 @@ class NvFp4MoeBackend(Enum):
     HUMMING = "HUMMING"
     EMULATION = "EMULATION"
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 # Backends whose experts quantize the MoE input themselves, with one scale per
@@ -204,6 +206,7 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
     """NVFP4 MoE backend selection for one deployment configuration."""
 
     name = "NvFp4"
+    placeholder_backend = NvFp4MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: NvFp4MoeBackend
@@ -218,18 +221,12 @@ def select_nvfp4_moe_backend(
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
-    from vllm.model_executor.layers.quantization.online.requantization import (
-        is_requantization_source,
-    )
-
-    # TODO: remove and let the oracles have an option to skip init.
-    if is_requantization_source():
-        from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
-            Nvfp4QuantizationEmulationTritonExperts,
-        )
-
-        return NvFp4MoeBackend.EMULATION, Nvfp4QuantizationEmulationTritonExperts
+    # TODO: migrate to oracle base method.
+    source = NvFp4MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
 
     # NOTE: the kernels are selected in the following order.
     # FLASHINFER_B12X is intentionally excluded from auto-selection until
