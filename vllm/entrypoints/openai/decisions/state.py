@@ -11,7 +11,12 @@ from vllm.logger import init_logger
 from vllm.tasks import SupportedTask
 
 from .serving import OpenAIServingDecisions
-from .strategies import ReadContext, ReadStrategy, select_read_strategy
+from .strategies import (
+    NoStrategyError,
+    ReadContext,
+    ReadStrategy,
+    select_read_strategy,
+)
 
 logger = init_logger(__name__)
 
@@ -28,8 +33,16 @@ def init_decisions_state(
     state.openai_serving_decisions = None
     try:
         strategy_cls = select_read_strategy(engine_client.model_config, supported_tasks)
+    except NoStrategyError as e:
+        # Most models map to no strategy, so the common case stays out of
+        # the default log level: one line per server start is noise.
+        logger.debug("Decisions endpoints disabled: %s", e)
+        return None
     except ValueError as e:
-        logger.info("Decisions endpoints disabled: %s", e)
+        # A misconfiguration an operator must see: a marker on an
+        # architecture it cannot serve, a task the server does not serve,
+        # or a logprobs mode the reads cannot use.
+        logger.warning("Decisions endpoints disabled: %s", e)
         return None
     try:
         strategy = strategy_cls(
