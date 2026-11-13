@@ -23,7 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     get_layer_transfer_geometry,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from ..utils import make_moriio_writer
@@ -80,7 +80,7 @@ def test_kernel_split_view_matches_manager_geometry(
 def test_kernel_split_multi_head_view_is_unsupported():
     # A raw block copy keeps the byte order of a multi-head split only if P
     # and D split alike, which the handshake does not check.
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16, num_kv_heads=2, head_size=4, dtype=torch.bfloat16
     )
     raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
