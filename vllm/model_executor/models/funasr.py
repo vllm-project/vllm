@@ -1050,6 +1050,11 @@ class FunASRForConditionalGeneration(
     ) -> torch.Tensor:
         inputs_embeds = self.model.decoder.embed_input_ids(input_ids)
 
+        # Text-only path (e.g. warmup/dummy runs): no multimodal embeddings to
+        # merge, so `is_multimodal` is not required.
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
         return _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,
