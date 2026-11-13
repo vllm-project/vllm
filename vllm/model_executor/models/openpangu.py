@@ -828,7 +828,7 @@ class OpenPanguDecoderLayer(nn.Module):
                     f"is_causal={config.is_causal} is not support "
                     "for attention with sink"
                 )
-            rope_parameters = getattr(config, "rope_scaling", None)
+            rope_parameters = getattr(config, "rope_parameters", None)
             if rope_parameters is None:
                 rope_parameters = {
                     "rope_type": "default",

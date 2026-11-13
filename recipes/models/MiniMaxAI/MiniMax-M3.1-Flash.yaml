@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-11-12
+  date_updated: 2026-11-13
   tasks:
     - text
     - multimodal
@@ -1443,141 +1443,98 @@ presets:
     strategy: single_node_tp
     variants: [mxfp4]
     workload: "Agentic (InferenceX AgentX)"
-    description: "One TP4 engine on four of the node's eight MI355X GPUs, serving the Quark MXFP4 checkpoint: seven-token DSpark with mono decode and an FP8 KV cache up to concurrency 8, seven-token DSpark with an NVFP4 KV cache and breakable CUDA graphs at 16 and 32, and three-token DSpark with a host-DRAM KV tier at 64, on a nightly image with the MiniMax-M3.1 ROCm optimizations that need an opt-in switch enabled."
-    source: { label: "InferenceX #4866", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4866", key: "minimaxm31flash-fp4-mi355x-vllm-agentic-dspark", revision: ce4079c48b85472cc4be60f40c0fa1f7f067e8e9 }
-    image: "vllm/vllm-openai-rocm:nightly-4fab5a07475822c6eaa971dceb2e2220d0446808@sha256:6f126f27a3b58959da3c16076248fc99eb31e26d0a3ae9f8563bda7317d6a7e6"
+    description: "One TP4 engine on four of the node's eight MI355X GPUs, serving the Quark MXFP4 checkpoint on the minimax-m31-flash-75bc8cf1 image: NVFP4 KV cache, DBO and breakable CUDA graphs at every point, seven-token DSpark up to concurrency 32 and three-token DSpark at 64, with a host-DRAM KV tier (LRU eviction) at 32 and 64."
+    source: { label: "InferenceX #5035", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5035", key: "minimaxm31flash-fp4-mi355x-vllm-agentic-dspark", revision: 94ac90e2f5ae7ca3cb834f3c04097285a5833716 }
+    image: "vllm/vllm-openai-rocm:minimax-m31-flash-75bc8cf1@sha256:f8e8ab239e5edb7c3070c5802fc7fc0cbb889513bf81183dfc98ce1c77e1dfe1"
     tp: 4
     select:
       features: { text_only: true, spec_decoding: true }
     args:
       - "--enable-prefix-caching"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--enable-dbo"
+      - "--dbo-prefill-token-threshold"
+      - "16384"
+      - "--dbo-decode-token-threshold"
+      - "32768"
+      - "--renderer-num-workers"
+      - "8"
+      - "--enable-prompt-tokens-details"
     env:
       VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "900"
-      # the DSpark drafter kernels (seven-token drafts; c64's three-token draft keeps
-      # the stock draft layers)
-      VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER: "1"
-      # the FP8 indexer of the mono points bypasses it
-      VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
-      VLLM_USE_RUST_FRONTEND: "1"
-      # the draft LM head's skinny GEMM is 5x slower at exactly 5 requests
-      VLLM_ROCM_USE_SKINNY_GEMM: "0"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
+      # Keep the DBO communication stream off the compute hardware queue.
+      DEBUG_HIP_DYNAMIC_QUEUES: "0"
+      DEBUG_HIP_IGNORE_STREAM_PRIORITY: "0"
+      PYTHONHASHSEED: "0"
     json_args:
       "--speculative-config": { num_speculative_tokens: 7, rejection_sample_method: block }
-    # json_args cannot add --compilation-config (mono_decode owns it). The capture list is
-    # the V2 runner's deprecated alias for the prefill and decode graph sizes.
+      "--compilation-config": { max_cudagraph_capture_size: 2048 }
+    # vLLM refuses batch-sharded sampling when --max-num-seqs is below the TP size (c1).
     points:
-      c1:
-        label: "1 (mono)"
-        concurrency: 1
-        select: { features: { mono_decode: mono } }
-        args: ["--max-num-seqs", "2", "--max-num-batched-tokens", "8192"]
-      c2:
-        label: "2 (mono)"
-        concurrency: 2
-        select: { features: { mono_decode: mono } }
-        args: ["--max-num-seqs", "4", "--max-num-batched-tokens", "8192"]
-      c4:
-        label: "4 (mono)"
-        concurrency: 4
-        select: { features: { mono_decode: mono } }
-        args: ["--max-num-seqs", "8", "--max-num-batched-tokens", "8192"]
-      c8:
-        label: "8 (mono)"
-        concurrency: 8
-        select: { features: { mono_decode: mono } }
-        args: ["--max-num-seqs", "16", "--max-num-batched-tokens", "8192"]
-      c16:
-        label: "16 (graphs)"
-        concurrency: 16
-        args: ["--max-num-seqs", "32", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--compilation-config", '{"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]}']
-        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", VLLM_USE_BREAKABLE_CUDAGRAPH: "1" }
+      c1: { label: "1", concurrency: 1, args: ["--max-num-seqs", "2", "--gpu-memory-utilization", "0.85"] }
+      c2: { label: "2", concurrency: 2, args: ["--max-num-seqs", "4", "--gpu-memory-utilization", "0.85", "--enable-batch-sharded-sampling"] }
+      c4: { label: "4", concurrency: 4, args: ["--max-num-seqs", "8", "--gpu-memory-utilization", "0.85", "--enable-batch-sharded-sampling"] }
+      c8: { label: "8", concurrency: 8, args: ["--max-num-seqs", "16", "--gpu-memory-utilization", "0.85", "--enable-batch-sharded-sampling"] }
+      c16: { label: "16", concurrency: 16, args: ["--max-num-seqs", "32", "--gpu-memory-utilization", "0.85", "--enable-batch-sharded-sampling"] }
       c32:
-        label: "32 (graphs)"
+        label: "32 (KV offload)"
         concurrency: 32
-        args: ["--max-num-seqs", "64", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.85", "--compilation-config", '{"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]}']
-        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", VLLM_USE_BREAKABLE_CUDAGRAPH: "1" }
+        select: { kv_offload: simple }
+        args: ["--max-num-seqs", "64", "--gpu-memory-utilization", "0.85", "--enable-batch-sharded-sampling"]
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1349000000000, lazy_offload: false, cpu_lru_eviction: true } }
       c64:
         label: "64 (KV offload)"
         concurrency: 64
         select: { kv_offload: simple }
-        args: ["--max-num-seqs", "128", "--max-num-batched-tokens", "32768", "--gpu-memory-utilization", "0.9"]
-        env: { VLLM_USE_V2_MODEL_RUNNER: "1", DEBUG_HIP_DYNAMIC_QUEUES: "0", PYTHONHASHSEED: "42" }
+        args: ["--max-num-seqs", "128", "--gpu-memory-utilization", "0.9", "--enable-batch-sharded-sampling"]
         json_args:
           "--speculative-config": { num_speculative_tokens: 3 }
-          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1349000000000, lazy_offload: false } }
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1349000000000, lazy_offload: false, cpu_lru_eviction: true } }
     runbook: |
       The MI355X AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/)
       (`minimaxm31flash-fp4-mi355x-vllm-agentic-dspark`,
-      [SemiAnalysisAI/InferenceX#4866](https://github.com/SemiAnalysisAI/InferenceX/pull/4866)),
-      on the Quark MXFP4 checkpoint with `--max-num-seqs` at twice the concurrency
-      (c64 admits 128). Throughput runs replaced block verification with synthetic
-      rejection at the committed golden DSpark acceptance length (4.04 for seven
-      tokens, 2.88 for three); the commands above keep block verification.
+      [SemiAnalysisAI/InferenceX#5035](https://github.com/SemiAnalysisAI/InferenceX/pull/5035)),
+      on the Quark MXFP4 checkpoint with `--max-num-seqs` at twice the concurrency.
+      Throughput runs replaced block verification with synthetic rejection at the
+      committed golden DSpark acceptance length (4.04 for seven tokens, 2.88 for three);
+      the commands above keep block verification.
 
-      The image is a vLLM nightly (`4fab5a074`, 2026-11-05). Besides the kernels it
-      carries by default (decode CP, the qkv and FFN norm + MXFP8 quant fusions, four-wave
-      decode top-k, per-XCD sparse-decode splits, the MXFP8 GEMM tile retune for
-      M=17-256), the lane turns on the switches that default off:
+      The image `minimax-m31-flash-75bc8cf1` is vLLM `0.33.0rc1.dev910+g4fab5a074` with
+      the MiniMax-M3.1 ROCm serving stack, the `amd_kernels` FlyDSL library and FlyDSL
+      0.5.0. It routes the dense GEMMs, MoE, qkv, sparse attention, indexer, norms, DSpark
+      draft, sampling, top-p and sequence-parallel prefill to `amd_kernels` by default
+      (the server logs `amd_kernels routes: gemm, moe, qkv, attention, indexer, norm,
+      draft, sampling, top_p, sp_prefill`), so no `VLLM_ROCM_*` opt-in switch is set.
 
-      - `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1` runs seven-token DSpark draft steps of up
-        to 10 requests as fused FlyDSL kernels (the three-token draft at c64 keeps the
-        stock layers).
-      - `VLLM_ROCM_PARALLEL_INDEX_TOPK=1` selects the top-16 blocks of the NVFP4 indexer
-        in parallel; the FP8 indexer of the mono points bypasses it.
-      - `VLLM_USE_RUST_FRONTEND=1` serves the API with the Rust frontend.
-      - `VLLM_ROCM_USE_SKINNY_GEMM=0` removes the draft LM head's skinny-GEMM cliff at
-        exactly 5 requests.
+      - **Every point** runs the NVFP4 KV and indexer K caches, DBO on prefill steps of
+        16384+ tokens, breakable CUDA graphs up to 2048 tokens on the V2 model runner,
+        and 8 renderer workers, so short turns are not queued behind long prompt renders.
+      - **Batch-sharded sampling** splits the sampler across the TP ranks from
+        concurrency 2; vLLM refuses it at concurrency 1, where `--max-num-seqs` 2 is
+        below TP 4.
+      - **Concurrency 32 and 64** add a host-DRAM KV tier through
+        `SimpleCPUOffloadConnector` (`cpu_bytes_to_use` 1,349 GB for the whole engine)
+        with `cpu_lru_eviction`, which evicts the least recently used prefixes from their
+        tail. Concurrency 64 runs three-token DSpark at 0.90 memory utilization.
 
-      - **Concurrency 1-8** run mono decode with an FP8 KV cache: a decode step of up to
-        16 tokens runs each layer as one fused kernel, and prefill steps stay at 8192
-        tokens.
-      - **Concurrency 16 and 32** run seven-token DSpark with an NVFP4 KV cache at 0.85
-        memory utilization and breakable CUDA graphs (`VLLM_USE_BREAKABLE_CUDAGRAPH=1`,
-        `FULL_AND_PIECEWISE`), so prefill and mixed steps are captured as well as decode.
-      - **Concurrency 64** runs three-token DSpark at 0.90 and adds a host-DRAM KV tier
-        through `SimpleCPUOffloadConnector`, so cached prefixes are not lost once the
-        working set outgrows the GPU KV cache. `cpu_bytes_to_use` (1,349 GB) is the
-        budget for the whole engine.
+      One-hour runs of these commands on one MI355X node each (agentx-harness 1.0.12,
+      golden acceptance length, single run per point):
 
-      Dual-batch overlap is not used on this lane: it was on at concurrency 16-64 in the
-      previous revision and is off here together with the breakable graphs, so the
-      change in those three points is the combined effect, not DBO alone.
-      INT4 quick all-reduce (`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`) is not enabled:
-      the AITER in this image has no `QuickAllReduceInt4.compile`, which the nightly's
-      FlyDSL INT4 path calls, and workers fail at startup with it.
-
-      [InferenceX run 42224368840](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/42224368840)
-      passed all seven performance points and GSM8K at concurrency 8, 32 and 64 at
-      `ce4079c48` (single run, second attempt of the concurrency 16 job):
-
-      | Concurrency | Interactivity p50 / p90 (tokens/s/user) | Total tokens/s per GPU |
-      | --- | ---: | ---: |
-      | 1 | 604.4 / 590.1 | 7,617 |
-      | 2 | 608.4 / 446.2 | 7,588 |
-      | 4 | 610.2 / 428.3 | 9,698 |
-      | 8 | 450.2 / 292.2 | 16,104 |
-      | 16 | 313.5 / 204.6 | 28,686 |
-      | 32 | 220.9 / 133.7 | 58,024 |
-      | 64 | 95.1 / 59.7 | 90,495 |
-
-      Against the previous revision's run 41003224750 (day-zero image, DBO at 16-64), p90
-      interactivity is 8-22% higher at concurrency 1-8, 22% at 16, 16% at 32 and 26% at
-      64, and total throughput per GPU is 2-20% higher at every point (20% at 64).
-
-      GSM8K exact match (strict) over 1319 questions was 0.961 at concurrency 8, 0.963 at
-      32 and 0.960 at 64.
-
-      - **Concurrency 64 uses a host KV tier.** It passed on its first attempt here; the
-        previous revision's first attempt hung at its first load from the host tier (23
-        fetches in progress, none completing) and passed on a rerun, so treat the
-        offload point as less proven than the others.
-      - **Sequence-parallel prefill does not apply to this checkpoint.** InferenceX also
-        set `VLLM_ROCM_MINIMAX_M3_SP_PREFILL=1` at concurrency 64, and the server logged
-        sequence-parallel prefill as off; it is omitted here. SP prefill is available on
-        the default checkpoint through the DBO / SP prefill feature.
+      | Concurrency | Interactivity p50 / p90 (tokens/s/user) | Total tokens/s per GPU | TTFT p50 |
+      | --- | ---: | ---: | ---: |
+      | 1 | 659 / 612 | 7,713 | 0.21 s |
+      | 4 | 684 / 556 | 9,954 | 0.12 s |
+      | 8 | 610 / 478 | 17,014 | 0.11 s |
+      | 16 | 529 / 367 | 29,734 | 0.12 s |
+      | 32 | 395 / 245 | 63,707 | 0.16 s |
+      | 64 | 166 / 114 | 113,237 | 0.19 s |
 
   # MI355X AgentX 1P2D: one TP4 prefill engine feeds two TP4 decode engines over MoRI-IO
-  # RDMA WRITE, on the image and opt-in switches of mi355x_agentx above.
+  # RDMA WRITE, on the nightly 4fab5a07 image with its opt-in MiniMax-M3.1 ROCm switches.
   mi355x_agentx_pd:
     label: "AgentX 1P2D (MoRI-IO)"
     hardware: mi355x
@@ -1717,8 +1674,7 @@ presets:
       block verification with synthetic rejection at the golden DSpark acceptance length
       (4.04); the commands above keep block verification.
 
-      **Image and vLLM.** The image and opt-in switches of the MI355X AgentX TP4 lane
-      (`4fab5a074`), plus
+      **Image and vLLM.** The vLLM nightly `4fab5a074` with the opt-in switches above, plus
       [vllm-project/vllm#65822](https://github.com/vllm-project/vllm/pull/65822): with
       prefix caching on the decode engine, MoRI-IO WRITE skips the blocks the decoder already
       holds instead of rewriting them. The lane overlaid that PR's Python files on the image;
