@@ -34,6 +34,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _metadata(slots, accepted):
+    return SimpleNamespace(
+        non_spec_state_indices_tensor=slots.view(-1),
+        spec_state_indices_tensor=slots,
+        num_accepted_tokens=accepted,
+    )
+
+
 class _Case:
     """One layer's weights and caches and a step of `requests` x `q` tokens whose
     last `padded` requests are CUDA graph padding (slot 0, one accepted token)."""
@@ -73,11 +81,7 @@ class _Case:
         return self.slots[:, 0].repeat_interleave(self.q) > 0
 
     def metadata(self):
-        return SimpleNamespace(
-            non_spec_state_indices_tensor=self.slots.view(-1),
-            spec_state_indices_tensor=self.slots,
-            num_accepted_tokens=self.accepted,
-        )
+        return _metadata(self.slots, self.accepted)
 
     def stage(self, caches, batches=None):
         from vllm.models.glm5next.nvidia.specialized_decode.hopper.kda import (
@@ -299,31 +303,13 @@ def test_layer_no_worse_than_stock(requests, q, padded):
     _untouched(case, ours_caches, case.reference(projected))
 
 
-@pytest.mark.parametrize(("requests", "q"), [(1, 6), (4, 6), (2, 1)])
-def test_cuda_graph_replay(requests, q):
-    """A captured step replayed on new hidden states, slots and accepted counts
-    (written into the captured buffers) matches the same step run eagerly."""
-    case = _Case(requests, q)
-    caches = case.clone_caches()
-    stage = case.stage(caches)
-    x, metadata = case.x.clone(), case.metadata()
-    stage.run(x, metadata, q)  # compile and warm up outside the capture
+def _capture(stage, x, metadata, q):
+    """Warms `stage` up outside a capture, then captures one step in a graph."""
+    stage.run(x, metadata, q)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         out = stage.run(x, metadata, q)
-    for seed in (1, 2):  # the second replay starts from the first one's states
-        fresh = _Case(requests, q, seed=seed)
-        x.copy_(fresh.x)
-        case.slots.copy_(fresh.slots)
-        case.accepted.copy_(fresh.accepted)
-        start = tuple(c.clone() for c in caches)
-        graph.replay()
-        replayed, after = out.clone(), tuple(c.clone() for c in caches)
-        for cache, saved in zip(caches, start):
-            cache.copy_(saved)
-        expected = stage.run(fresh.x, fresh.metadata(), q)
-        assert torch.equal(replayed, expected)
-        assert all(torch.equal(a, b) for a, b in zip(after, caches))
+    return graph, out
 
 
 def _replay_matches_eager(graph, out, stage, caches, x, metadata, q):
@@ -339,6 +325,23 @@ def _replay_matches_eager(graph, out, stage, caches, x, metadata, q):
     assert all(torch.equal(a, b) for a, b in zip(after, caches))
 
 
+@pytest.mark.parametrize(("requests", "q"), [(1, 6), (4, 6), (2, 1)])
+def test_cuda_graph_replay(requests, q):
+    """A captured step replayed on new hidden states, slots and accepted counts
+    (written into the captured buffers) matches the same step run eagerly."""
+    case = _Case(requests, q)
+    caches = case.clone_caches()
+    stage = case.stage(caches)
+    x, metadata = case.x.clone(), case.metadata()
+    graph, out = _capture(stage, x, metadata, q)
+    for seed in (1, 2):  # the second replay starts from the first one's states
+        fresh = _Case(requests, q, seed=seed)
+        x.copy_(fresh.x)
+        case.slots.copy_(fresh.slots)
+        case.accepted.copy_(fresh.accepted)
+        _replay_matches_eager(graph, out, stage, caches, x, metadata, q)
+
+
 @pytest.mark.parametrize(("requests", "q"), [(2, 6), (4, 1)])
 def test_weight_refit(requests, q):
     """Weights written in place after the capture (load, refit, offload) reach the
@@ -347,10 +350,7 @@ def test_weight_refit(requests, q):
     caches = case.clone_caches()
     stage = case.stage(caches)
     x, metadata = case.x.clone(), case.metadata()
-    stage.run(x, metadata, q)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        out = stage.run(x, metadata, q)
+    graph, out = _capture(stage, x, metadata, q)
     before = out.clone()
     fresh = _Case(requests, q, seed=3)
     for name in WEIGHTS:
@@ -373,15 +373,8 @@ def test_one_layer_many_graphs(q):
     for r in sizes:
         x = case.x[: r * q].clone()
         slots, accepted = case.slots[:r].clone(), case.accepted[:r].clone()
-        metadata = SimpleNamespace(
-            non_spec_state_indices_tensor=slots.view(-1),
-            spec_state_indices_tensor=slots,
-            num_accepted_tokens=accepted,
-        )
-        stage.run(x, metadata, q)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            out = stage.run(x, metadata, q)
+        metadata = _metadata(slots, accepted)
+        graph, out = _capture(stage, x, metadata, q)
         graphs[r] = (graph, out, x, slots, accepted, metadata)
     order = sizes[::-1] + sizes[::2] + sizes[1::2]
     for seed, r in enumerate(order, 1):
@@ -411,12 +404,7 @@ def test_high_slot_index(q):
         slots = slots.view(1, q)
         state[slots[0, start]] = case.caches[1][case.slots[0, start]]
         conv[slots[0, 0]] = case.caches[0][case.slots[0, 0]]
-        metadata = SimpleNamespace(
-            non_spec_state_indices_tensor=slots.view(-1),
-            spec_state_indices_tensor=slots,
-            num_accepted_tokens=accepted,
-        )
-        out = stage.run(case.x, metadata, q).clone()
+        out = stage.run(case.x, _metadata(slots, accepted), q).clone()
         results.append((out, state[slots[0]].clone(), conv[slots[0, 0]].clone()))
     assert all(torch.equal(a, b) for a, b in zip(*results))
     assert int(slots[0, -1]) * HEADS * HEAD_DIM * HEAD_DIM >= 2**31
