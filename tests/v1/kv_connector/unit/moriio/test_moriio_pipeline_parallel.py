@@ -111,6 +111,7 @@ def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
     scheduler._is_hma_required = False
     scheduler._is_kv_master = True
     scheduler._global_dp_rank = 0
+    scheduler.incarnation = "decode-1"
     scheduler.transfer_id_to_request_id = {}
     scheduler.request_id_to_transfer_id = {}
     scheduler.paths = {}
