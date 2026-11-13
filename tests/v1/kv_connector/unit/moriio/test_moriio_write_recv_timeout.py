@@ -3,7 +3,9 @@
 """MoRIIO WRITE-mode consumer receive timeout (``write_recv_timeout``).
 
 Runs the real ``Scheduler`` and the real ``MoRIIOConnectorWorker``
-``start_load_kv`` / ``get_transfer_results``, with no GPU or RDMA.
+``start_load_kv`` / ``get_transfer_results``, with no GPU or RDMA, for each
+decode KV cache layout WRITE mode supports: plain attention, MLA, and either
+with a Mamba/KDA state group (hybrid).
 """
 
 import socket
@@ -13,6 +15,7 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
@@ -25,15 +28,58 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnectorWorker,
 )
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    MambaSpec,
+    MLAAttentionSpec,
+)
 from vllm.v1.request import RequestStatus
 
-from ..utils import create_model_runner_output, create_request, create_scheduler
+from ..utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    make_kv_cache_group,
+)
 from .test_moriio_connector import _setup_kv_transfer_request
 from .test_moriio_connector import create_vllm_config as create_moriio_config
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 TIMEOUT_S = 60.0
+BLOCK_SIZE = 16
+LAYOUTS = ["attn", "mla", "hybrid", "mla_hybrid"]
+
+
+def _kv_cache_config(layout: str) -> KVCacheConfig:
+    """The decode's KV cache groups: one attention group, MLA for the `mla`
+    layouts, plus a Mamba/KDA state group for the `hybrid` ones."""
+    if layout.startswith("mla"):
+        attn = MLAAttentionSpec(
+            block_size=BLOCK_SIZE, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+        )
+    else:
+        attn = AttentionSpec(
+            block_size=BLOCK_SIZE, num_kv_heads=4, head_size=16, dtype=torch.bfloat16
+        )
+    groups = [make_kv_cache_group(["layers.0.attn"], attn)]
+    if layout.endswith("hybrid"):
+        state = MambaSpec(
+            block_size=BLOCK_SIZE,
+            shapes=((3, 16), (4, 16, 16)),
+            dtypes=(torch.bfloat16, torch.float32),
+        )
+        groups.append(
+            make_kv_cache_group(
+                ["layers.1.linear_attn"],
+                state,
+                MambaManager,
+                MambaManager.config(mamba_cache_mode="align"),
+            )
+        )
+    return KVCacheConfig(num_blocks=10000, kv_cache_tensors=[], kv_cache_groups=groups)
 
 
 class _InlineExecutor:
@@ -87,14 +133,18 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
 class _Engine:
     """A decode instance: the real scheduler and one stub worker per TP rank."""
 
-    def __init__(self, monkeypatch, tp_size: int):
+    def __init__(self, monkeypatch, tp_size: int, layout: str = "attn"):
         self.clock = _Clock()
         monkeypatch.setattr(moriio_connector, "time", self.clock)
-        config = create_moriio_config(role="kv_consumer")
+        config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
         config.kv_transfer_config.kv_connector_extra_config["write_recv_timeout"] = (
             TIMEOUT_S
         )
-        self.scheduler = create_scheduler(config)
+        kv_cache_config = _kv_cache_config(layout)
+        if layout.endswith("hybrid"):
+            config.cache_config.mamba_cache_mode = "align"
+        self.scheduler = create_scheduler(config, kv_cache_config=kv_cache_config)
+        self.num_groups = len(kv_cache_config.kv_cache_groups)
         connector = self.scheduler.connector.connector_scheduler
         monkeypatch.setattr(connector, "send_notify_block", lambda **kwargs: None)
         # The prefill's notify socket: gone unless a test says it answers. Probes
@@ -148,14 +198,22 @@ class _Engine:
         self.scheduler.add_request(request)
         self.step()
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        # Every KV cache group holds blocks for the receive.
+        block_ids = self.scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        assert len(block_ids) == self.num_groups and all(block_ids)
         return request
 
 
+@pytest.fixture(params=LAYOUTS)
+def layout(request):
+    return request.param
+
+
 @pytest.fixture(params=[1, 2, 4], ids=["tp1", "tp2", "tp4"])
-def engine(request, monkeypatch):
+def engine(request, layout, monkeypatch):
     role = moriio_common.get_role()
     moriio_common.set_role(moriio_common.ROLE.CONSUMER)
-    yield _Engine(monkeypatch, request.param)
+    yield _Engine(monkeypatch, request.param, layout)
     moriio_common.set_role(role)
 
 
