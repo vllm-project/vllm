@@ -113,6 +113,7 @@ def test_hisparse_group_prefetch_requires_bounded_decode_only(
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
     worker.backend = CUDAHiSparseBackend()
+    worker._in_step = True
     worker._slot_mapping_staging = None
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
@@ -905,6 +906,26 @@ def test_hisparse_finish_forward_does_not_repeat_per_layer_mirrors(monkeypatch):
     monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
 
     worker._enqueue_host_mirror()
+
+    enqueue_row_dma.assert_not_called()
+
+
+def test_hisparse_skips_layer_mirrors_outside_a_step(monkeypatch):
+    """CUDA graph warmup and capture run forwards with no step; mirroring
+    their dummy rows would fail as a duplicate mirror of the next forward."""
+    worker = _make_hisparse_worker()
+    worker._in_step = False
+    monkeypatch.setattr(
+        worker,
+        "cache_handles",
+        [SimpleNamespace(host_mirror_required=True)],
+        raising=False,
+    )
+    enqueue_row_dma = MagicMock()
+    monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
+
+    worker._enqueue_layer_mirror(0)
+    worker._enqueue_layer_mirror(0)
 
     enqueue_row_dma.assert_not_called()
 
