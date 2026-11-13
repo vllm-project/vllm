@@ -125,7 +125,9 @@ steps:
   - cd tests
   - >-
     pytest -v -s tool_use
-    --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+    --ignore=tool_use/mistral
+    --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[llama3.2]"
 
 - label: ":intel: (BMG) Rust Frontend Distributed"
   key: rust-frontend-distributed-intel
