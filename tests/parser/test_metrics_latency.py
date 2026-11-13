@@ -721,6 +721,23 @@ def test_slow_call_warning_skips_fast_calls(monkeypatch, caplog_vllm) -> None:
     assert "parser_slow_call" not in caplog_vllm.text
 
 
+def test_slow_call_warnings_capped_per_accumulator(monkeypatch, caplog_vllm) -> None:
+    """A degraded stream logs a bounded number of warnings, not one per delta."""
+    _enable_slow_log(monkeypatch, call_s=0.25, request_s=1.0)
+    times = iter(float(i) for i in range(30))
+    monkeypatch.setattr(metrics, "_clock", lambda: next(times))
+    parser_metrics = ParserMetrics(ParserMode.STREAMING, Endpoint.CHAT_COMPLETIONS)
+
+    for _ in range(15):
+        with parser_metrics.time_call(tokens=1):
+            pass
+    parser_metrics.observe()
+
+    assert caplog_vllm.text.count("event=parser_slow_call") == 10
+    # The summary still reports every slow call, including the capped ones.
+    assert "slow_calls=15" in caplog_vllm.text
+
+
 def test_slow_log_master_switch_disables_both_events(monkeypatch, caplog_vllm) -> None:
     _enable_slow_log(monkeypatch, call_s=0.25, request_s=0.5)
     monkeypatch.setattr(metrics.envs, "VLLM_PARSER_SLOW_LOG", False)

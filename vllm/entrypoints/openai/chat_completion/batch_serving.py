@@ -291,9 +291,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 self.parser_endpoint,
                 request_id=f"{request_id}_{prompt_idx}",
             )
+            # Check every output before parsing any, so an error on a later
+            # choice does not waste work on the earlier ones.
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
-
+            for output in final_res.outputs:
                 if request.logprobs:
                     assert output.logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_chat_logprobs(

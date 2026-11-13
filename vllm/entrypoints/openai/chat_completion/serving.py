@@ -1020,10 +1020,12 @@ class OpenAIServingChat(GenerateBaseServing):
             self.parser_endpoint,
             request_id=request_id,
         )
-        for i, output in enumerate(final_res.outputs):
-            # check for error finish reason and raise GenerationError
-            # finish_reason='error' indicates a retryable request-level internal error
+        # finish_reason='error' indicates a retryable request-level internal
+        # error. Check every output before parsing any, so an error on a later
+        # choice does not waste work on the earlier ones.
+        for output in final_res.outputs:
             self._raise_if_error(output.finish_reason, request_id)
+        for i, output in enumerate(final_res.outputs):
             if i > 0 and parser is not None:
                 # Parsers are stateful: like streaming, use one per choice.
                 parser = self._make_parser(

@@ -145,7 +145,9 @@ replay calls (`mode=streaming_replay`) because replay is not one request.
   report it), and `tokens_total` (parsed so far by that streamed choice,
   non-streaming request, or batch conversation). Healthy calls are
   microseconds to a few milliseconds; a quarter second is already a visible
-  event-loop stall.
+  event-loop stall. Per-call events are capped per streamed choice,
+  non-streaming request, or batch conversation, so a degraded stream cannot
+  flood the log; the request summary's `slow_calls` reports the total.
 - `event=parser_slow_request` is emitted once per request whose summed parser
   time reaches `VLLM_PARSER_SLOW_REQUEST_SECONDS` (default 5; `0` disables).
   It catches gradual quadratic accumulation when no single call is slow.

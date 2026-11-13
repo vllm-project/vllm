@@ -30,6 +30,11 @@ _slow_call_seconds = 0.0
 _slow_request_seconds = 0.0
 _log_request_ids = False
 
+# A degraded streaming parser can cross the slow-call threshold on every
+# delta. Cap the per-accumulator warnings; the request summary's `slow_calls`
+# still reports the true count.
+_MAX_SLOW_CALL_WARNINGS = 10
+
 _TOOL_CALL_PARSER_INVOCATIONS_TOTAL = "vllm:tool_call_parser_invocations_total"
 
 _PARSER_DURATION_SECONDS = "vllm:parser_duration_seconds"
@@ -467,7 +472,9 @@ class _ParserCallTimer:
                 owner.tokens += tokens
             if _slow_call_seconds > 0.0 and elapsed >= _slow_call_seconds:
                 owner.slow_calls += 1
-                _warn_slow_call(owner, elapsed, tokens)
+                if owner._slow_call_warnings < _MAX_SLOW_CALL_WARNINGS:
+                    owner._slow_call_warnings += 1
+                    _warn_slow_call(owner, elapsed, tokens)
         if exc_type is not None and owner.mode is ParserMode.NON_STREAMING:
             # A non-streaming accumulator is the request's own, so a raise
             # skips the caller's observe(). Streaming accumulators are merged
@@ -496,9 +503,11 @@ class ParserMetrics:
     `time_call()` returns a shared no-op timer and `observe()` records nothing.
 
     With `VLLM_PARSER_SLOW_LOG` enabled, `time_call()` also emits a warning
-    for calls above `VLLM_PARSER_SLOW_CALL_SECONDS`, and `observe()` emits a
-    summary for requests whose summed time crosses
-    `VLLM_PARSER_SLOW_REQUEST_SECONDS`. Replay calls are excluded from both.
+    for calls above `VLLM_PARSER_SLOW_CALL_SECONDS`, up to a fixed
+    per-accumulator cap, and `observe()` emits a summary for requests whose
+    summed time crosses `VLLM_PARSER_SLOW_REQUEST_SECONDS`. The summary's
+    `slow_calls` counts every slow call, including ones past the cap. Replay
+    calls are excluded from both.
     """
 
     __slots__ = (
@@ -511,6 +520,7 @@ class ParserMetrics:
         "tokens",
         "request_id",
         "_summary_emitted",
+        "_slow_call_warnings",
         "_observed",
         "_reasons",
         "_scope",
@@ -537,6 +547,7 @@ class ParserMetrics:
         self.request_id = request_id
         self._reasons: set[str] = set()
         self._summary_emitted = False
+        self._slow_call_warnings = 0
         self._observed = False
         self._scope = (mode, endpoint)
         self._bound = False

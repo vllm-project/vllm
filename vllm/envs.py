@@ -2316,8 +2316,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_PARSER_SLOW_CALL_SECONDS", "0.25")
     ),
     # Seconds a request's summed parser time may reach before
-    # VLLM_PARSER_SLOW_LOG emits a per-request summary. Only requests with at
-    # least two parser calls are summarized. 0 disables the summary.
+    # VLLM_PARSER_SLOW_LOG emits a per-request summary. A single-call request
+    # is summarized unless its per-call warning already fired. 0 disables the
+    # summary.
     "VLLM_PARSER_SLOW_REQUEST_SECONDS": lambda: float(
         os.getenv("VLLM_PARSER_SLOW_REQUEST_SECONDS", "5")
     ),

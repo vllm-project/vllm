@@ -359,10 +359,14 @@ class OnlineDerenderer:
             Endpoint.OTHER,
             request_id=generate_response.request_id,
         )
+        # Validate every choice before decoding any, so an invalid later choice
+        # does not waste work on the earlier ones.
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
-
+        for choice in generate_response.choices:
+            # Non-empty token IDs validated above.
+            assert choice.token_ids is not None
             resolved_logprobs = (
                 _resolve_logprobs(
                     choice.logprobs,

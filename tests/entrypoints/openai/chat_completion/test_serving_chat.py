@@ -1015,6 +1015,62 @@ async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
 
 
 @pytest.mark.asyncio
+async def test_chat_full_generator_rejects_error_output_before_parsing():
+    """An engine error on a later choice is raised before any parsing starts."""
+
+    class RecordingParser:
+        tool_parser_cls = None
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def set_prompt_token_ids(self, prompt_token_ids):
+            pass
+
+        def parse(self, model_output, request, **kwargs):
+            raise AssertionError("must not parse when an output reports an error")
+
+        def count_reasoning_tokens(self, token_ids):
+            return 0
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = RecordingParser
+    serving.model_config = None
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
+    serving.default_chat_template_kwargs = {}
+    serving.online_renderer = MagicMock(reasoning_effort_map={})
+    request_output = _make_metrics_request_output()
+    request_output.outputs.append(
+        CompletionOutput(
+            index=1,
+            text="Hi",
+            token_ids=[102],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="error",
+        )
+    )
+
+    with pytest.raises(GenerationError):
+        await serving.chat_completion_full_generator(
+            ChatCompletionRequest(
+                model="test-model",
+                messages=[{"role": "user", "content": "Test prompt"}],
+                max_tokens=10,
+                n=2,
+            ),
+            _single_request_output(request_output),
+            "chatcmpl-test-id",
+            "test-model",
+            conversation=[{"role": "user", "content": "Test"}],
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+            parser=RecordingParser(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_chat_streaming_metrics_ride_on_usage_chunk():
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
     chunks = await _collect_metrics_stream_chunks(
