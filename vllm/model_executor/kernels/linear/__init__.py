@@ -138,6 +138,9 @@ from vllm.model_executor.kernels.linear.mxfp8.marlin import (
 from vllm.model_executor.kernels.linear.mxfp8.pytorch import (
     TorchMxFp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.rocm_akr import (
+    AkrMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     RocmDotScaledMxfp8LinearKernel,
 )
@@ -603,6 +606,8 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         TorchMxFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # MiniMax-M3.1's marked linears; unsupported without the amd_kernels gemm route
+        AkrMxfp8LinearKernel,
         # AITER's FlyDSL GEMM; can_implement() claims only the (N, K) shapes
         # AITER has tuned, the rest fall through to the next kernel. Kept out
         # of the "aiter" --linear-backend set, which would leave those shapes
