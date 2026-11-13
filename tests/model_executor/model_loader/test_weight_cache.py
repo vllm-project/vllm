@@ -1879,11 +1879,30 @@ def test_d2d_weight_seeding_same_host(vllm_runner, monkeypatch):
     assert mirror_outputs == baseline_outputs
 
 
+def _mooncake_has_hip_suballocation_bug() -> bool:
+    if not current_platform.is_rocm() or not has_mooncake():
+        return False
+    from importlib.metadata import PackageNotFoundError, version
+
+    from packaging.version import Version
+
+    try:
+        mooncake_version = version("mooncake-transfer-engine-rocm")
+    except PackageNotFoundError:
+        return False
+    return Version(mooncake_version) <= Version("0.3.14")
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 @pytest.mark.skipif(
     not has_mooncake(),
     reason="Cross-host weight seeding requires Mooncake TransferEngine",
+)
+@pytest.mark.skipif(
+    _mooncake_has_hip_suballocation_bug(),
+    reason="Mooncake <=0.3.14 corrupts HIP IPC sub-allocations: "
+    "https://github.com/kvcache-ai/Mooncake/issues/3546",
 )
 def test_d2d_weight_seeding_cross_host(vllm_runner, monkeypatch):
     """Pull and release real RDMA leases over the remote JSON control plane.
