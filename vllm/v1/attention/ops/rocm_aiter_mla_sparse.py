@@ -781,14 +781,6 @@ def paged_mqa_logits_module():
     return None
 
 
-def _per_sequence_context_lens(context_lens: torch.Tensor) -> torch.Tensor:
-    # AITER takes one length per sequence: the last column of a (B, next_n) table.
-    # TODO: remove once AITER accepts (B, next_n) context_lens (ROCm/aiter#6153).
-    if context_lens.dim() == 2 and context_lens.shape[1] > 1:
-        return context_lens[:, -1].contiguous()
-    return context_lens
-
-
 def _accepts_parameters(function: Callable, required: set[str]) -> bool:
     try:
         parameters = inspect.signature(function).parameters
@@ -878,7 +870,7 @@ def rocm_fp8_paged_mqa_logits(
                 kv_cache_fp8,
                 weights,
                 out_logits,
-                _per_sequence_context_lens(context_lens),
+                context_lens,
                 block_tables,
                 max_model_len,
                 ChunkK=256,
@@ -900,7 +892,7 @@ def rocm_fp8_paged_mqa_logits(
             kv_cache_fp8,
             weights,
             out_qk,
-            _per_sequence_context_lens(context_lens),
+            context_lens,
             block_tables,
             max_model_len,
             ChunkQ=heads,
@@ -1375,11 +1367,20 @@ def rocm_aiter_sparse_attn_indexer(
     cp_interleave: int = 1,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.sparse_attn_indexer import _merge_dcp_topk_global
+    from vllm.utils.math_utils import cdiv
 
-    if dcp_world_size > 1:
+    if dcp_world_size > 1 and (compress_ratio != 1 or candidate_blocks is not None):
         raise NotImplementedError(
-            "The ROCm sparse attention indexer does not support DCP"
+            "ROCm DCP indexing requires uncompressed full candidates"
         )
+
+    # Decode scores only this rank's keys; keep the bound valid for graph replay.
+    decode_max_model_len = (
+        cdiv(max_model_len, dcp_world_size * cp_interleave) * cp_interleave
+        if dcp_world_size > 1
+        else max_model_len
+    )
 
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -1406,11 +1407,11 @@ def rocm_aiter_sparse_attn_indexer(
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
-            _decode_logits_workspace(decode_rows, max_model_len)
+            _decode_logits_workspace(decode_rows, decode_max_model_len)
         else:
             workspace_manager.get_simultaneous(
                 (
-                    (q_fp8.shape[1], decode_rows, max_model_len),
+                    (q_fp8.shape[1], decode_rows, decode_max_model_len),
                     torch.float32,
                 ),
             )
@@ -1501,8 +1502,39 @@ def rocm_aiter_sparse_attn_indexer(
             ((total_seq_lens, 4), torch.uint8),
         )
         for chunk in prefill_metadata.chunks:
-            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
-            k_scale = k_scale_full[: chunk.total_seq_lens]
+            local_length = chunk.total_seq_lens
+            cu_lens, token_to_seq = chunk.cu_seq_lens, chunk.token_to_seq
+            if dcp_world_size > 1:
+                local_length = chunk.local_total_seq_lens
+                cu_lens = chunk.local_cu_seq_lens
+                token_to_seq = (
+                    torch.searchsorted(
+                        cu_lens,
+                        torch.arange(local_length, device=q_fp8.device),
+                        right=True,
+                    ).to(torch.int32)
+                    - 1
+                )
+                if local_length == 0:
+                    selected = topk_indices_buffer[
+                        chunk.token_start : chunk.token_end, :topk_tokens
+                    ]
+                    selected.fill_(-1)
+                    _merge_dcp_topk_global(
+                        torch.empty(
+                            (selected.shape[0], 0),
+                            dtype=torch.float32,
+                            device=q_fp8.device,
+                        ),
+                        selected,
+                        topk_tokens,
+                        dcp_rank,
+                        dcp_world_size,
+                        cp_interleave,
+                    )
+                    continue
+            k_fp8 = k_fp8_full[:local_length]
+            k_scale = k_scale_full[:local_length]
             # Query-split sub-chunks of one request share the K workspace
             # filled by the first sub-chunk.
             if not chunk.skip_kv_gather:
@@ -1511,8 +1543,8 @@ def rocm_aiter_sparse_attn_indexer(
                     k_fp8,
                     k_scale,
                     chunk.block_table,
-                    chunk.cu_seq_lens,
-                    token_to_seq=chunk.token_to_seq,
+                    cu_lens,
+                    token_to_seq=token_to_seq,
                     cache_layout=resolved_cache_layout,
                 )
             logits = rocm_fp8_mqa_logits(
@@ -1577,6 +1609,15 @@ def rocm_aiter_sparse_attn_indexer(
                     logits.stride(1),
                     topk_tokens,
                 )
+            _merge_dcp_topk_global(
+                logits,
+                topk_indices,
+                topk_tokens,
+                dcp_rank,
+                dcp_world_size,
+                cp_interleave,
+                chunk.cu_seqlen_ks,
+            )
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -1610,7 +1651,7 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
+            max_model_len=decode_max_model_len,
             compress_ratio=compress_ratio,
             cache_layout=cache_layout,
         )
@@ -1654,7 +1695,7 @@ def rocm_aiter_sparse_attn_indexer(
         # FULL graphs are not keyed by context length, so use a replay-safe
         # upper bound when choosing the captured kernel.
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            max_compressed_seq_len = max_model_len
+            max_compressed_seq_len = decode_max_model_len
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
         if rocm_aiter_ops.is_indexer_top_k_supported(
@@ -1687,6 +1728,14 @@ def rocm_aiter_sparse_attn_indexer(
                 topk_tokens,
             )
 
+        _merge_dcp_topk_global(
+            logits,
+            topk_indices,
+            topk_tokens,
+            dcp_rank,
+            dcp_world_size,
+            cp_interleave,
+        )
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
