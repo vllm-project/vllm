@@ -12,7 +12,7 @@ import time
 import pytest
 import requests
 
-from tests.models.kimi_k3.amd_specialized_decode.test_numerics import needs_gfx950
+from tests.models.kimi_k3.amd.specialized_decode.test_numerics import needs_gfx950
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 
 MODEL = "vllm-project/Kimi-K3-8L-dummy"

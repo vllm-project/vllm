@@ -129,7 +129,7 @@ Detection takes up to about 16 steps, so tokens of the failed steps can reach th
 client before the engine stops. A zero-delay check needs a core hook and is left to
 a follow-up.
 
-`tests/models/kimi_k3/amd_specialized_decode/test_engine_fault.py` stalls a rank in
+`tests/models/kimi_k3/amd/specialized_decode/test_engine_fault.py` stalls a rank in
 a served model and checks that the engine stops.
 
 ## Layout

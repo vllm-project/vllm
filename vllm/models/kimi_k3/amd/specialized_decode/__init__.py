@@ -10,4 +10,4 @@ loop. Enabled by `additional_config={"decode_backend": "latency_specialized"}`.
 the host side: the config check (`runtime/__init__.py`), the executor
 (`runtime/decode.py`), the layer kernels, the per-rank launch state and the later
 refusals. `mono/` is the kernel source. Tests live in
-`tests/models/kimi_k3/amd_specialized_decode/`."""
+`tests/models/kimi_k3/amd/specialized_decode/`."""
