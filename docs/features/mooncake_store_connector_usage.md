@@ -267,12 +267,22 @@ sizes, list them on every instance that uses the Store:
 Each stage then splits its layers at every stage boundary of the listed PP sizes
 and stores one object per layer range. In the example, a PP = 1 instance stores
 two objects per block, one for each PP = 2 stage, and the PP = 2 stages store one
-object each, so both instances read the same objects. Each listed PP size can
-add ranges, and a lookup checks one key per range.
+object each, so both instances read the same objects.
 
-The listed PP sizes use the default layer partition. An instance whose own stages
-are set with `VLLM_PP_LAYER_PARTITION` also splits at its own boundaries. Every
-instance that shares the entries must use the same list. With the rank-local
+A listed PP size uses the default layer partition. For a PP size whose stages are
+set with `VLLM_PP_LAYER_PARTITION`, list the layer count of each stage instead,
+for example `"pp_sizes": [1, [38, 42]]` for an 80-layer model whose PP = 2
+instances run `VLLM_PP_LAYER_PARTITION=38,42`. Every instance that shares the
+entries must use the same list, and an instance whose own partition is not in
+the list fails to start.
+
+Every layer range is a separate object, so each one adds a Store operation per
+block to saves, loads and lookups. List only the PP partitions you deploy, and
+prefer partitions whose boundaries nest (for example PP = 2 boundaries that are
+also PP = 4 boundaries), which keeps the number of ranges low. The connector logs
+the number of objects it writes per block at startup.
+
+With the rank-local
 layout, `pp_sizes` also applies to hybrid models: each KV cache group stores one
 object per range that holds some of its layers. With Store TP sharing, it applies
 to one KV cache group of attention layers that all have the same KV cache spec,
@@ -401,7 +411,8 @@ reset waits at most 60 seconds.
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
-- `pp_sizes` (list[int]): PP sizes of the instances that share the Store. See
+- `pp_sizes` (list[int | list[int]]): PP sizes, or per-stage layer counts, of the
+  instances that share the Store. See
   [Sharing one Store across PP sizes](#sharing-one-store-across-pp-sizes). Unset by default.
 
 #### Automatic cache prefix

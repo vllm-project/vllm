@@ -3734,6 +3734,70 @@ def test_pp_sizes_share_hybrid_group_keys_across_pp_sizes(tmp_path, monkeypatch)
         assert pp1[g] == stages[0][g] + stages[1][g]
 
 
+@pytest.mark.cpu_test
+def test_pp_sizes_lists_a_custom_partition(tmp_path, monkeypatch):
+    """A PP size whose stages are set with VLLM_PP_LAYER_PARTITION is listed by
+    its per-stage layer counts, so other PP sizes cut at its real boundaries.
+    An instance whose partition is not listed refuses to start."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(worker, "get_pp_group", MagicMock())
+
+    def gather_prefixes(output, local, **kwargs):
+        output[:] = [local] * len(output)
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_prefixes)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_hidden_layers", lambda _: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+    spec = AttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+
+    def keys(pp_size: int, rank: int, pp_sizes: list) -> list[str]:
+        stage = range(*worker.get_pp_indices(8, rank, pp_size))
+        kv_config = KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                make_kv_cache_group(
+                    [f"model.layers.{i}.self_attn.attn" for i in stage], spec
+                )
+            ],
+            prefix_cache_retention_interval=0,
+        )
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                rank=rank,
+                pipeline_parallel_size=pp_size,
+                extra_config={"pp_sizes": pp_sizes},
+            ),
+            kv_config,
+        )
+        layout = w.token_dbs[0].store_layout
+        return [
+            layout.key_for(shard, BlockHash(b"h")) for shard in layout.local_shard_ids
+        ]
+
+    pp1 = keys(1, 0, [1, [3, 5]])
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "3,5")
+    stages = [keys(2, rank, [1, [3, 5]]) for rank in (0, 1)]
+
+    assert "@layers:0-3@" in pp1[0]
+    assert pp1 == stages[0] + stages[1]
+    with pytest.raises(ValueError, match="add \\[3, 5\\] to pp_sizes"):
+        keys(2, 0, [1, 2])
+
+
 @pytest.mark.parametrize("tp_size", [2, 4])
 @pytest.mark.parametrize("missing_group", [None, 0, 1])
 def test_hybrid_lookup_uses_each_pp_stage_schema(

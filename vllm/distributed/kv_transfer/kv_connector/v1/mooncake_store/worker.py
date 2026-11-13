@@ -159,6 +159,29 @@ def _group_layer_ranges(
     return tuple(r for index, r in enumerate(layer_ranges) if index in used)
 
 
+def _pp_partitions(pp_sizes: object, num_layers: int) -> list[list[int]]:
+    """Layer count of each stage for every `pp_sizes` entry: a PP size uses
+    the default partition, a list gives the count of each stage."""
+    if not isinstance(pp_sizes, list) or not pp_sizes:
+        raise ValueError(f"pp_sizes must be a non-empty list, got {pp_sizes!r}")
+    partitions = []
+    for entry in pp_sizes:
+        if isinstance(entry, int) and entry > 0:
+            partitions.append(get_default_pp_partition(num_layers, entry))
+        elif (
+            isinstance(entry, list)
+            and all(isinstance(count, int) and count > 0 for count in entry)
+            and sum(entry) == num_layers
+        ):
+            partitions.append(entry)
+        else:
+            raise ValueError(
+                "Each pp_sizes entry must be a positive PP size or a list of "
+                f"per-stage layer counts summing to {num_layers}, got {entry!r}"
+            )
+    return partitions
+
+
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
     """Resolve the common Store TP requested by connector config."""
     if extra_config.get("enable_store_tp_lcm") is True:
@@ -1799,6 +1822,12 @@ class MooncakeStoreWorker:
         self.token_dbs = self._build_token_databases(
             metadata, store_group_plans, store_layer_ranges
         )
+        if store_layer_ranges is not None:
+            # Every object costs a Store operation per save, load and lookup.
+            logger.info(
+                "Mooncake store writes %d objects per block on this rank",
+                sum(len(db.store_layout.local_shard_ids) for db in self.token_dbs),
+            )
         self._init_lookup_key_prefixes()
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
             self._selective_lease = SelectiveLookupLease(
@@ -1929,20 +1958,16 @@ class MooncakeStoreWorker:
     ) -> tuple[tuple[int, int], ...] | None:
         """Layer ranges this PP stage stores per object, or None for one object.
 
-        `pp_sizes` lists the PP sizes of the instances sharing the Store. The
-        stage's layers are split at every stage boundary of those sizes, so
-        each instance writes and reads the same objects for the layers it
-        holds.
+        `pp_sizes` lists the PP partitions of the instances sharing the Store:
+        a PP size with the default partition, or the layer count of each
+        stage. The stage's layers are split at every stage boundary of those
+        partitions, so each instance writes and reads the same objects for the
+        layers it holds.
         """
         pp_sizes = extra_config.get("pp_sizes")
         if pp_sizes is None:
             return None
-        if not isinstance(pp_sizes, list) or not all(
-            isinstance(size, int) and size > 0 for size in pp_sizes
-        ):
-            raise ValueError(
-                f"pp_sizes must be a list of positive integers, got {pp_sizes!r}"
-            )
+        partitions = _pp_partitions(pp_sizes, num_layers)
         plan = plans[0] if plans else None
         fallback_reason: str | None = None
         if self._kv_cache_config.hisparse_host_num_blocks is not None:
@@ -1967,19 +1992,30 @@ class MooncakeStoreWorker:
                 fallback_reason,
             )
             return None
-        # VLLM_PP_LAYER_PARTITION may partition this instance's own stages;
-        # the other PP sizes use the default partition.
+        # The instance's own stages honour VLLM_PP_LAYER_PARTITION, so its
+        # partition must be listed for others to cut at its boundaries.
+        stages = [
+            get_pp_indices(num_layers, rank, self.pp_size)
+            for rank in range(self.pp_size)
+        ]
+        partition = [end - start for start, end in stages]
+        if partition not in partitions:
+            listed = (
+                self.pp_size
+                if partition == get_default_pp_partition(num_layers, self.pp_size)
+                else partition
+            )
+            raise ValueError(
+                f"This instance's PP partition {partition} is not in pp_sizes="
+                f"{pp_sizes!r}; add {listed!r} to pp_sizes on every instance "
+                "that shares the Store"
+            )
         cut_points = {
             start
-            for size in pp_sizes
-            if size != self.pp_size
-            for start in itertools.accumulate(
-                get_default_pp_partition(num_layers, size), initial=0
-            )
+            for counts in partitions
+            for start in itertools.accumulate(counts, initial=0)
         }
-        layer_ranges = split_layer_range(
-            get_pp_indices(num_layers, self.pp_rank, self.pp_size), cut_points
-        )
+        layer_ranges = split_layer_range(stages[self.pp_rank], cut_points)
         logger.info(
             "Mooncake store stores layer ranges %s per block for pp_sizes=%s",
             layer_ranges,
