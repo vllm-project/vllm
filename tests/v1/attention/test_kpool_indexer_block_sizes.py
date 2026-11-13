@@ -15,6 +15,7 @@ if current_platform.is_xpu():
         "GLM-5.3-Flash does not currently support XPU.", allow_module_level=True
     )
 
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.models.glm5next.common.attention import Glm5NextIndexerCache
 from vllm.v1.attention.backend import MultipleOf
@@ -52,7 +53,7 @@ def _kpool_storage_spec(manager_block: int) -> MLAAttentionSpec:
             cache_config=SimpleNamespace(block_size=manager_block),
             index_kpool=INDEX_KPOOL,
         )
-        spec = cache.get_kv_cache_spec(VllmConfig())
+        spec = cache.get_kv_cache_config(VllmConfig()).spec
     assert isinstance(spec, MLAAttentionSpec)
     return spec
 
@@ -73,7 +74,7 @@ def _prepare(
     spec: MLAAttentionSpec, backends: list[type[_KernelBlockSizeBackend]]
 ) -> list[int]:
     kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[])],
+        kv_cache_groups=[new_kv_cache_group(["layer"], spec)],
         kv_cache_tensors=[],
     )
     attn_groups = [
