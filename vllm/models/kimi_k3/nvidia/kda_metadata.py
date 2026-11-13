@@ -579,7 +579,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None
-            if self.kv_cache_spec.mamba_cache_mode == "align":
+            if self.vllm_config.cache_config.mamba_cache_mode == "align":
                 align = KDARecoverSSMAlignMetadata(
                     block_table=m.block_table_tensor,
                     num_computed_tokens=m.compute_num_computed_tokens(),

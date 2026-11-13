@@ -13,6 +13,7 @@ import torch
 
 import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
@@ -38,7 +39,6 @@ from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     KVCacheLayout,
     MambaSpec,
 )
@@ -1456,8 +1456,8 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         block_stride_alignment=16,
     )
     groups = [
-        KVCacheGroupSpec([names[0], names[2]], spec),
-        KVCacheGroupSpec([names[1]], spec),
+        new_kv_cache_group([names[0], names[2]], spec),
+        new_kv_cache_group([names[1]], spec),
     ]
     config = SimpleNamespace(
         cache_config=CacheConfig(),
@@ -1533,7 +1533,7 @@ def test_rebind_kv_cache_keeps_replayssm_trackers():
     config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(names, spec)],
+        kv_cache_groups=[new_kv_cache_group(names, spec)],
     )
     pages = {name: torch.zeros((9, 1, 1, 128), dtype=torch.int8) for name in names}
 
@@ -1590,8 +1590,8 @@ def test_triton_replayssm_plans_in_first_layer_of_each_group():
         num_blocks=4,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec([names[2], names[0]], spec),
-            KVCacheGroupSpec([names[1]], spec),
+            new_kv_cache_group([names[2], names[0]], spec),
+            new_kv_cache_group([names[1]], spec),
         ],
     )
     bind_kv_cache_to_layers(
