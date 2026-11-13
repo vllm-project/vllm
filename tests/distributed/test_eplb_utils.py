@@ -266,13 +266,6 @@ def test_commit_eplb_maps_for_layer_does_not_sync_host():
 
 
 @pytest.fixture
-def dist_init_backend() -> str:
-    # rearrange() all-reduces device tensors, which the gloo fallback that
-    # dist_init uses on XPU cannot do.
-    return current_platform.dist_backend
-
-
-@pytest.fixture
 def async_eplb(dist_init, monkeypatch):
     return make_async_eplb_state(
         monkeypatch, torch.device(current_platform.device_type), num_models=2

@@ -95,7 +95,8 @@ pub enum Endianness {
 ///
 /// Also accepts Torch type names as native-endian dtypes because prompt
 /// logprobs use tensor tuples with the same wire shape as NumPy arrays.
-/// Serializes byte order explicitly, including `=` for native byte order.
+/// Serializes an explicit byte order with its prefix, and native byte order as
+/// the plain Torch/NumPy name, which both Python decoders accept.
 /// Bfloat16 uses the Torch name after the prefix as a nonstandard descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
 pub struct NumpyDtype {
@@ -132,14 +133,11 @@ impl From<TensorDtype> for NumpyDtype {
     }
 }
 
-impl fmt::Display for NumpyDtype {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let prefix = match self.endianness {
-            Endianness::Native => '=',
-            Endianness::Little => '<',
-            Endianness::Big => '>',
-        };
-        let code = match self.scalar {
+impl NumpyDtype {
+    /// The NumPy type code, without the byte order (`f4`); Bfloat16, which
+    /// NumPy lacks, uses the Torch name.
+    pub const fn code(self) -> &'static str {
+        match self.scalar {
             TensorDtype::Bool => "b1",
             TensorDtype::U8 => "u1",
             TensorDtype::I8 => "i1",
@@ -153,8 +151,19 @@ impl fmt::Display for NumpyDtype {
             TensorDtype::F32 => "f4",
             TensorDtype::F64 => "f8",
             TensorDtype::Bf16 => "bfloat16",
-        };
-        write!(f, "{prefix}{code}")
+        }
+    }
+}
+
+impl fmt::Display for NumpyDtype {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.endianness {
+            // The plain name, which NumPy reads as native byte order and which
+            // Python's tensor decoder needs (`getattr(torch, dtype)`).
+            Endianness::Native => f.write_str(self.scalar.as_str()),
+            Endianness::Little => write!(f, "<{}", self.code()),
+            Endianness::Big => write!(f, ">{}", self.code()),
+        }
     }
 }
 
@@ -245,7 +254,7 @@ mod tests {
                 assert_eq!(dtype, NumpyDtype::from(scalar));
                 assert_eq!(
                     serde_json::to_value(dtype).unwrap(),
-                    serde_json::json!(format!("={code}"))
+                    serde_json::json!(scalar.as_str())
                 );
             }
         }

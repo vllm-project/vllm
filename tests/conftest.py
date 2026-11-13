@@ -223,13 +223,7 @@ def init_test_http_connection():
 
 
 @pytest.fixture
-def dist_init_backend() -> str:
-    """Backend for `dist_init`; a test module can override this fixture."""
-    return "gloo" if current_platform.is_cpu() else "nccl"
-
-
-@pytest.fixture
-def dist_init(dist_init_backend):
+def dist_init():
     from tests.utils import ensure_current_vllm_config
 
     # Close the fd returned by mkstemp; FileStore opens the path itself.
@@ -246,7 +240,7 @@ def dist_init(dist_init_backend):
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend=dist_init_backend,
+                backend=current_platform.dist_backend,
             )
             initialize_model_parallel(1, 1)
             yield

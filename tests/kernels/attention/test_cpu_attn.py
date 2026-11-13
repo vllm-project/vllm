@@ -26,7 +26,7 @@ from vllm.v1.attention.backends.zentorch_sdpa import (
     zentorch_sdpa_attn,
 )
 from vllm.v1.attention.selector import AttentionSelectorConfig
-from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -839,7 +839,7 @@ def test_encoder_only_attention_ignores_default_causal(
             attn_type=AttentionType.ENCODER_ONLY,
             prefix=layer_name,
         )
-        spec = EncoderOnlyAttentionSpec(
+        spec = AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,

@@ -2054,46 +2054,6 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                             rAccO[v] += tPrP[v, split, 0].to(self.acc_dtype) * lse_scale
         return
 
-    @staticmethod
-    def get_split_kv(
-        B: int,
-        S: int,
-        K: int,
-        mma_qk_tiler_mn: tuple,
-        max_active_blocks: int,
-        m_ctas_per_tile: int = 2,
-    ) -> int:
-        """Get the proper split_kv value for the MLA kernel based on parameters.
-
-        :param B: Batch size
-        :type B: int
-        :param S: Sequence length
-        :type S: int
-        :param K: Sequence length
-        :type K: int
-        :param mma_qk_tiler_mn: MLA tiling parameters
-        :type mma_qk_tiler_mn: tuple
-        :param max_active_blocks: Maximum number of active blocks
-        :type max_active_blocks: int
-        :param m_ctas_per_tile: Number of CTAs launched in M for one logical tile
-        :type m_ctas_per_tile: int
-        :return: Split_kv value
-        :rtype: int
-        """
-        max_splits = ceil_div(K, mma_qk_tiler_mn[1])
-        blocks_per_batch = max(1, max_active_blocks // B // (S * m_ctas_per_tile))
-        split_heur = min(max_splits, blocks_per_batch)
-        k_waves = ceil_div(max_splits, split_heur)
-        split_wave_aware = ceil_div(max_splits, k_waves)
-        max_split_kv = 64 if m_ctas_per_tile == 1 else 32
-        return min(split_wave_aware, max_split_kv)
-
-    @staticmethod
-    def get_split_kv_simplified(B: int, S: int, max_active_blocks: int) -> int:
-        blocks_per_batch = max(1, max_active_blocks // B // (S * 2))
-        max_split_kv = 32
-        return min(blocks_per_batch, max_split_kv)
-
     @cute.jit
     def get_k_tile_count(
         self,
