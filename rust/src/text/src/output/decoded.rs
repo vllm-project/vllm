@@ -15,7 +15,7 @@ use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
     AuxOutputRows, FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage,
-    WeightVersionSpan,
+    WeightVersionSpan, WeightVersions,
 };
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
@@ -81,8 +81,6 @@ pub struct Finished {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<Box<serde_json::Value>>,
-    /// Sampling support sets aligned with all generated token positions.
-    pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding statistics emitted by the engine.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     /// Weight-version spans over all generated token positions.
@@ -95,15 +93,18 @@ pub struct Finished {
 
 /// Sample metadata emitted by one engine output update.
 ///
-/// Token IDs and logprobs share the engine-update clock and align by generated
-/// token position. They may arrive before the corresponding decoded text is
-/// visible or alongside decoded text attributed to earlier updates.
+/// Token IDs, logprobs and sampling-mask rows share the engine-update clock and
+/// align by generated token position. They may arrive before the corresponding
+/// decoded text is visible or alongside decoded text attributed to earlier
+/// updates.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SampledDelta {
     /// Token IDs produced by this engine update, after stop-string truncation.
     pub token_ids: Vec<u32>,
     /// Per-position logprobs aligned with `token_ids`, when requested.
     pub logprobs: Option<DecodedLogprobs>,
+    /// Sampling support sets aligned with `token_ids`, when requested.
+    pub sampling_mask: Option<SamplingMask>,
 }
 
 /// Internal decoded-text event emitted before higher-level assistant
@@ -121,6 +122,9 @@ pub enum DecodedTextEvent {
         /// context to score against; `scored_positions` covers the
         /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
+        /// Log probabilities of the request's `prompt_logprob_token_ids`, when
+        /// requested.
+        prompt_token_id_logprobs: Option<WireNdArray>,
     },
     PrefillProgress(Box<PrefillProgress>),
     /// Decoded text and sampled metadata observed during one output update.
@@ -187,7 +191,10 @@ pub async fn decoded_text_event_stream(
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
-    let mut sampling_mask: Option<SamplingMask> = None;
+    let mut weight_versions = WeightVersions::default();
+    let mut sampled_sampling_mask: Option<SamplingMask> = None;
+    // Rows received so far, checked against the token count at the end.
+    let mut sampling_mask_row_count: Option<usize> = None;
     let mut routed_experts = AuxOutputRows::default();
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
@@ -208,6 +215,10 @@ pub async fn decoded_text_event_stream(
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
+            let prompt_token_id_logprobs = output
+                .prompt_info
+                .as_mut()
+                .and_then(|info| info.prompt_token_id_logprobs.take());
             let prompt_token_ids =
                 output.prompt_token_ids().expect("first llm output must carry prompt token ids");
             prompt_token_count = prompt_token_ids.len();
@@ -230,6 +241,7 @@ pub async fn decoded_text_event_stream(
                         decode_prompt_logprobs(text_tokenizer, prompt_token_ids, logprobs)
                     })
                     .transpose()?,
+                prompt_token_id_logprobs,
             })
             .await;
         };
@@ -238,7 +250,6 @@ pub async fn decoded_text_event_stream(
         let kv_transfer_params = output.kv_transfer_params;
         let ec_transfer_params = output.ec_transfer_params;
         let spec_decode_metrics = output.spec_decode_metrics.map(|metrics| *metrics);
-        let mut weight_versions = output.weight_versions;
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -284,6 +295,7 @@ pub async fn decoded_text_event_stream(
         let mut new_token_ids = output.token_ids;
         let mut new_logprobs = output.logprobs;
         let mut new_sampling_mask = output.sampling_mask;
+        let mut new_weight_versions = output.weight_versions;
         let mut new_routed_experts = output.routed_experts;
 
         // Trim tokens and logprobs if we matched stop string.
@@ -291,6 +303,7 @@ pub async fn decoded_text_event_stream(
             // Like Python's `_trim_surplus_tokens`, drop the routed-expert
             // rows of the cut tokens from the end of this output's rows.
             new_routed_experts.drop_trailing(new_token_ids.len() - num_tokens)?;
+            new_weight_versions.drop_trailing(new_token_ids.len() - num_tokens);
             new_token_ids.truncate(num_tokens);
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
@@ -301,9 +314,10 @@ pub async fn decoded_text_event_stream(
         }
 
         output_token_count += new_token_ids.len();
+        weight_versions.append(new_weight_versions);
         routed_experts.append(new_routed_experts);
-        if let Some(mut mask) = new_sampling_mask {
-            sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+        if let Some(mask) = &new_sampling_mask {
+            *sampling_mask_row_count.get_or_insert_default() += mask.rows.len();
         }
 
         let mut decoded_logprobs = new_logprobs
@@ -319,27 +333,23 @@ pub async fn decoded_text_event_stream(
                     .positions
                     .extend(dlp.positions);
             }
+            if let Some(mut mask) = new_sampling_mask.take() {
+                sampled_sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+            }
         }
 
         if let Some(reason) = finish_reason {
-            if let Some(mask) = sampling_mask.as_ref()
-                && mask.rows.len() != output_token_count
+            if let Some(row_count) = sampling_mask_row_count
+                && row_count != output_token_count
             {
                 return Err(vllm_llm::Error::SamplingMaskTokenCountMismatch {
                     request_id,
                     token_count: output_token_count,
-                    row_count: mask.rows.len(),
+                    row_count,
                 }
                 .into());
             }
-            // The spans cover every token received; cut them at the stop-string
-            // truncated count, like Python's spans over its truncated output.
-            if let Some(spans) = weight_versions.as_mut() {
-                spans.retain(|span| span.start < output_token_count);
-                if let Some(last) = spans.last_mut() {
-                    last.end = last.end.min(output_token_count);
-                }
-            }
+            let weight_versions = std::mem::take(&mut weight_versions).spans();
             let routed_experts = std::mem::take(&mut routed_experts).concat()?;
             // Flush any remaining buffered text.
             let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
@@ -351,6 +361,7 @@ pub async fn decoded_text_event_stream(
                 }
                 sampled_token_ids = new_token_ids;
                 sampled_logprobs = decoded_logprobs;
+                sampled_sampling_mask = new_sampling_mask;
                 decoded
             } else {
                 full_decoded
@@ -378,6 +389,7 @@ pub async fn decoded_text_event_stream(
                 sampled: SampledDelta {
                     token_ids: sampled_token_ids,
                     logprobs: sampled_logprobs,
+                    sampling_mask: sampled_sampling_mask,
                 },
                 finished: Some(Box::new(Finished {
                     usage: TokenUsage {
@@ -388,7 +400,6 @@ pub async fn decoded_text_event_stream(
                     finish_reason: reason,
                     kv_transfer_params,
                     ec_transfer_params,
-                    sampling_mask,
                     spec_decode_metrics,
                     weight_versions,
                     routed_experts: routed_experts.map(Box::new),
@@ -405,6 +416,7 @@ pub async fn decoded_text_event_stream(
                 sampled: SampledDelta {
                     token_ids: new_token_ids,
                     logprobs: decoded_logprobs,
+                    sampling_mask: new_sampling_mask,
                 },
                 finished: None,
             })
@@ -612,6 +624,7 @@ mod tests {
             sampled: SampledDelta {
                 token_ids: sampled_token_ids,
                 logprobs: None,
+                sampling_mask: None,
             },
             finished: finished.map(Box::new),
         }
@@ -674,6 +687,7 @@ mod tests {
                     DecodedTextEvent::Start {
                         prompt_token_ids: Arc::clone(&prompt),
                         prompt_logprobs: None,
+                        prompt_token_id_logprobs: None,
                     },
                     text_delta("", [], vec![0xe4], None),
                     text_delta(
@@ -689,7 +703,6 @@ mod tests {
                             finish_reason: FinishReason::Length,
                             kv_transfer_params: None,
                             ec_transfer_params: None,
-                            sampling_mask: None,
                             spec_decode_metrics: Some(RequestSpecDecodeMetrics {
                                 num_spec_tokens: 2,
                                 histogram: vec![0, 1, 0],
@@ -719,6 +732,7 @@ mod tests {
                     DecodedTextEvent::Start {
                         prompt_token_ids: Arc::clone(&prompt),
                         prompt_logprobs: None,
+                        prompt_token_id_logprobs: None,
                     },
                     text_delta(
                         "a",
@@ -735,7 +749,6 @@ mod tests {
                             ))),
                             kv_transfer_params: None,
                             ec_transfer_params: None,
-                            sampling_mask: None,
                             spec_decode_metrics: None,
                             weight_versions: None,
                             routed_experts: None,
@@ -1060,11 +1073,12 @@ mod tests {
             end,
         };
         let mut first = GenerateOutput::for_test(Some(Arc::from([])), ascii_tokens("ab"), None);
-        first.weight_versions = Some(vec![span("v1", 0, 2)]);
+        first.weight_versions = WeightVersions::new(Some("v1".into()), 2);
         // One merged output whose tokens span two more weight versions; the
         // stop string ends inside the `v2` span.
         let mut second = GenerateOutput::for_test(None, ascii_tokens("cxyz"), None);
-        second.weight_versions = Some(vec![span("v1", 0, 2), span("v2", 2, 5), span("v3", 5, 6)]);
+        second.weight_versions = WeightVersions::new(Some("v2".into()), 3);
+        second.weight_versions.append(WeightVersions::new(Some("v3".into()), 1));
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
 
         let output = decoded_text_event_stream(
@@ -1083,6 +1097,30 @@ mod tests {
             output.weight_versions,
             Some(vec![span("v1", 0, 2), span("v2", 2, 4)])
         );
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_in_unlabelled_tokens_reports_no_spans() {
+        let first = GenerateOutput::for_test(Some(Arc::from([])), ascii_tokens("ab"), None);
+        // The label arrives after the stop string, so no kept token has one.
+        let mut second = GenerateOutput::for_test(None, ascii_tokens("cxyz"), None);
+        second.weight_versions = WeightVersions::new(None, 1);
+        second.weight_versions.append(WeightVersions::new(Some("v1".into()), 3));
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let output = decoded_text_event_stream(
+            "test-weight-versions-unlabelled-stop".into(),
+            tokenizer,
+            stream::iter([Ok(first), Ok(second)]),
+            opts(&["bc"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.token_ids, ascii_tokens("abc"));
+        assert_eq!(output.weight_versions, None);
     }
 
     #[tokio::test]

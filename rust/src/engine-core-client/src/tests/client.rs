@@ -37,7 +37,7 @@ use crate::protocol::multimodal::{
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
-    RequestBatchOutputs, UtilityCallOutput, decode_engine_core_outputs,
+    RequestBatchOutputs, UtilityCallOutput,
 };
 use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
@@ -570,6 +570,14 @@ fn is_engine_core_dead(error: &Error) -> bool {
     match error {
         Error::EngineCoreDead => true,
         Error::Shared(error) => is_engine_core_dead(error),
+        _ => false,
+    }
+}
+
+fn is_engine_disconnected(error: &Error) -> bool {
+    match error {
+        Error::EngineDisconnected { .. } => true,
+        Error::Shared(error) => is_engine_disconnected(error),
         _ => false,
     }
 }
@@ -2320,6 +2328,81 @@ async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
     client.shutdown().await.unwrap();
 }
 
+/// A killed engine sends no `ENGINE_CORE_DEAD` sentinel: its input connection
+/// closing fails the in-flight requests and marks the client unhealthy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_disconnect_fails_in_flight_requests_and_marks_client_unhealthy() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (request_received_tx, request_received_rx) = oneshot::channel();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-killed".to_vec(),
+        move |dealer, _push| {
+            Box::pin(async move {
+                recv_engine_message(dealer).await;
+                let _ = request_received_tx.send(());
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let mut stream = client
+        .call(sample_request_with_id("req-in-flight"))
+        .await
+        .unwrap()
+        .into_outputs();
+    timeout(Duration::from_secs(2), request_received_rx)
+        .await
+        .expect("wait for the engine to receive the request")
+        .unwrap();
+
+    // Drop the engine's sockets without a sentinel, as a killed process does.
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+
+    let error = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("in-flight request must fail promptly")
+        .expect("stream must yield the failure")
+        .expect_err("request must fail");
+    assert!(
+        is_engine_disconnected(&error),
+        "unexpected error: {error:?}"
+    );
+    assert!(!client.is_healthy());
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(Error::EngineDisconnected { .. })
+    ));
+
+    let error = client
+        .call(sample_request_with_id("req-after-disconnect"))
+        .await
+        .err()
+        .expect("later requests must be rejected");
+    assert!(
+        is_engine_disconnected(&error),
+        "unexpected error: {error:?}"
+    );
+
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
     init_tracing();
@@ -3927,7 +4010,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(python_mm_features, rust_mm_features);
 
     let decoded_sampling_mask_outputs =
-        decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
+        EngineCoreOutputs::from_frames(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
@@ -3942,7 +4025,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         hex::decode(extended_outputs_hex).unwrap(),
     )];
     assert_eq!(
-        decode_engine_core_outputs(&extended_frames).unwrap(),
+        EngineCoreOutputs::from_frames(&extended_frames).unwrap(),
         decoded_outputs
     );
     expect_test::expect![[r#"
@@ -4029,7 +4112,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     };
 
     let inline_logprobs =
-        decode_engine_core_outputs(&decode_frames(inline_logprobs_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(inline_logprobs_frames)).unwrap();
     expect_sample_logprobs(
         inline_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
@@ -4038,7 +4121,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     );
 
     let multipart_logprobs =
-        decode_engine_core_outputs(&decode_frames(multipart_logprobs_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(multipart_logprobs_frames)).unwrap();
     expect_sample_logprobs(
         multipart_logprobs.as_request_batch().unwrap().outputs[0]
             .new_logprobs
@@ -4046,7 +4129,8 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             .expect("multipart logprobs decoded"),
     );
 
-    let inline_prompt = decode_engine_core_outputs(&decode_frames(inline_prompt_frames)).unwrap();
+    let inline_prompt =
+        EngineCoreOutputs::from_frames(&decode_frames(inline_prompt_frames)).unwrap();
     expect_prompt_logprobs(
         inline_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
@@ -4055,7 +4139,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     );
 
     let multipart_prompt =
-        decode_engine_core_outputs(&decode_frames(multipart_prompt_frames)).unwrap();
+        EngineCoreOutputs::from_frames(&decode_frames(multipart_prompt_frames)).unwrap();
     expect_prompt_logprobs(
         multipart_prompt.as_request_batch().unwrap().outputs[0]
             .new_prompt_logprobs_tensors
