@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING, cast
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -27,6 +29,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
 if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
@@ -47,6 +52,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
+        self._weight_bindings: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._layer: RoutedExperts | None = None
         is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
         self._expects_unquantized_inputs = is_xe2_or_xe3
 
@@ -111,6 +118,57 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         output = (M, K)
         return (workspace1, workspace2, output)
 
+    def _weights_match(self, w1: torch.Tensor, w2: torch.Tensor) -> bool:
+        return (
+            self.fused_moe_impl is not None
+            and self._weight_bindings is not None
+            and w1 is self._weight_bindings[0]
+            and w2 is self._weight_bindings[1]
+        )
+
+    def initialize_weights(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk: int,
+        activation: MoEActivation,
+        expert_map: torch.Tensor | None,
+    ) -> None:
+        """Reuse the provider while its source weight bindings remain unchanged."""
+        if self._weights_match(w1, w2):
+            return
+        weight_bindings = (w1, w2)
+        if self._layer is not None:
+            quant_config = self._layer.quant_method.get_fused_moe_quant_config(
+                self._layer
+            )
+            assert quant_config is not None
+            self.quant_config = quant_config
+        if (
+            self.quant_config is not None
+            and self.quant_config.weight_quant_dtype == "mxfp4"
+        ):
+            w1 = w1.view(torch.float4_e2m1fn_x2)
+            w2 = w2.view(torch.float4_e2m1fn_x2)
+        # XpuFusedMoe relayouts the loaded [E, N, K] weights and scales
+        # in place for this device's grouped GEMM.
+        self.fused_moe_impl = XpuFusedMoe(
+            w13=w1,
+            w13_scales=self.w1_scale,
+            w13_bias=self.w1_bias,
+            w2=w2,
+            w2_scales=self.w2_scale,
+            w2_bias=self.w2_bias,
+            n_experts_per_token=topk,
+            activation=activation.value,
+            num_experts=self.moe_config.num_local_experts,
+            ep_rank=self.moe_config.ep_rank,
+            ep_size=self.moe_config.ep_size,
+            expert_map=expert_map,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
+        )
+        self._weight_bindings = weight_bindings
+
     def apply(
         self,
         output: torch.Tensor,
@@ -129,31 +187,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        if self.fused_moe_impl is None:
-            topk = topk_ids.size(-1)
-            if (
-                self.quant_config is not None
-                and self.quant_config.weight_quant_dtype == "mxfp4"
-            ):
-                w1 = w1.view(torch.float4_e2m1fn_x2)
-                w2 = w2.view(torch.float4_e2m1fn_x2)
-            # XpuFusedMoe relayouts the loaded [E, N, K] weights and scales
-            # in place for this device's grouped GEMM.
-            self.fused_moe_impl = XpuFusedMoe(
-                w13=w1,
-                w13_scales=self.w1_scale,
-                w13_bias=self.w1_bias,
-                w2=w2,
-                w2_scales=self.w2_scale,
-                w2_bias=self.w2_bias,
-                n_experts_per_token=topk,
-                activation=activation.value,
-                num_experts=self.moe_config.num_local_experts,
-                ep_rank=self.moe_config.ep_rank,
-                ep_size=self.moe_config.ep_size,
-                expert_map=expert_map,
-                gemm1_clamp_limit=self.gemm1_clamp_limit,
-            )
+        if not self._weights_match(w1, w2):
+            self.initialize_weights(w1, w2, topk_ids.size(-1), activation, expert_map)
         assert self.fused_moe_impl is not None
         if self.moe_config.ep_size > 1:
             # Avoid topk_ids = -1, remap them to an
@@ -194,6 +229,19 @@ class XPUExpertsFp8(XPUExperts):
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Prepare layout before reload restores the captured parameter storage."""
+        self._layer = cast("RoutedExperts", layer)
+        self.initialize_weights(
+            self._layer.w13_weight,
+            self._layer.w2_weight,
+            self.moe_config.experts_per_token,
+            self._layer.activation,
+            self._layer.expert_map,
+        )
+        # Reload can restore different Parameters; post-load or first use
+        # rebinds only when those final objects differ from this preparation.
 
 
 class XPUExpertsMxFp8(XPUExpertsFp8):
