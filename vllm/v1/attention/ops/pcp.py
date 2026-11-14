@@ -103,6 +103,23 @@ def maybe_gather_indexer_k(
     return cache_k, cache_slot_mapping
 
 
+def sync_replicated_decode_rows(
+    tensors: tuple[torch.Tensor | None, ...], num_decode_tokens: int
+) -> None:
+    """Overwrite every PCP rank's decode rows with PCP rank 0's.
+
+    Under PCP+DCP each decode runs on every PCP rank. The copies are not
+    bitwise reproducible across ranks and drift apart layer by layer, while DCP
+    attends with each rank's own query and writes each decode token's KV from
+    its owner's copy. Rank 0's copy is the one that is sampled.
+    """
+    present = [t for t in tensors if t is not None]
+    rows = torch.cat([t[:num_decode_tokens] for t in present], dim=-1)
+    get_pcp_group().broadcast(rows, src=0)
+    for t, r in zip(present, rows.split([t.shape[-1] for t in present], dim=-1)):
+        t[:num_decode_tokens].copy_(r)
+
+
 def finalize_mla_pcp_decode(
     output: torch.Tensor,
     num_heads: int,

@@ -1320,6 +1320,13 @@ def _apply_candidate_mask_strided(
     )
 
 
+def _prefill_k_workspace_specs(
+    rows: int, head_dim: int
+) -> tuple[tuple[tuple[int, int], torch.dtype], ...]:
+    """Gathered indexer K values and their fp32 scale bytes."""
+    return ((rows, head_dim), FP8_DTYPE), ((rows, 4), torch.uint8)
+
+
 def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     """Upper bound on decode rows the paged-MQA logits buffer can ever hold.
 
@@ -1434,10 +1441,11 @@ def rocm_aiter_sparse_attn_indexer(
         workspace_manager = current_workspace_manager()
 
         # Prefill k_fp8 and k_scale buffers, used by
-        # rocm_aiter_sparse_attn_indexer's prefill path
+        # rocm_aiter_sparse_attn_indexer's prefill path. PCP+DCP adds the
+        # all-gather destination and the de-interleaved result.
+        num_k_buffers = 3 if use_pcp and dcp_world_size > 1 else 1
         workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), FP8_DTYPE),
-            ((total_seq_lens, 4), torch.uint8),
+            *_prefill_k_workspace_specs(total_seq_lens, head_dim) * num_k_buffers
         )
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
@@ -1457,9 +1465,26 @@ def rocm_aiter_sparse_attn_indexer(
         # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
         # split_indexer_prefill_chunks; decode logits are smaller.
         max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        _ = torch.empty(
+        max_logits = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
+        # The DCP top-k merge allocates its candidates on top of the live
+        # logits: run it at the largest row count a step can merge.
+        merge_rows = decode_rows if use_pcp else hidden_states.shape[0]
+        if dcp_world_size > 1 and topk_indices_buffer is not None and merge_rows:
+            logits = max_logits.view(torch.float32)
+            logits = logits[: logits.numel() // merge_rows * merge_rows]
+            _merge_dcp_topk_global(
+                logits.view(merge_rows, -1),
+                topk_indices_buffer[:merge_rows, :topk_tokens].fill_(-1),
+                topk_tokens,
+                dcp_rank,
+                dcp_world_size,
+                cp_interleave,
+                row_starts=torch.zeros(
+                    merge_rows, dtype=torch.int32, device=hidden_states.device
+                ),
+            )
 
         return rocm_aiter_sparse_attn_indexer_fake(
             hidden_states,
@@ -1483,6 +1508,9 @@ def rocm_aiter_sparse_attn_indexer(
             use_pcp,
             pcp_shard_decode_requests,
             cache_layout=cache_layout,
+            dcp_rank=dcp_rank,
+            dcp_world_size=dcp_world_size,
+            cp_interleave=cp_interleave,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -1533,14 +1561,32 @@ def rocm_aiter_sparse_attn_indexer(
         assert prefill_metadata is not None
 
         workspace_manager = current_workspace_manager()
-        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), FP8_DTYPE),
-            ((total_seq_lens, 4), torch.uint8),
+        gather_specs: tuple[tuple[tuple[int, int], torch.dtype], ...] = ()
+        pcp_chunks = [
+            (c, c.pcp_deinterleave_idx)
+            for c in prefill_metadata.chunks
+            if c.pcp_deinterleave_idx is not None
+        ]
+        if pcp_chunks:
+            gathered_rows = max(
+                dcp_world_size * c.local_total_seq_lens for c, _ in pcp_chunks
+            )
+            out_rows = max(idx.shape[0] for _, idx in pcp_chunks)
+            gather_specs = _prefill_k_workspace_specs(
+                gathered_rows, head_dim
+            ) + _prefill_k_workspace_specs(out_rows, head_dim)
+        k_fp8_full, k_scale_full, *gather_bufs = workspace_manager.get_simultaneous(
+            *_prefill_k_workspace_specs(total_seq_lens, head_dim), *gather_specs
         )
         for chunk in prefill_metadata.chunks:
+            deinterleave_idx = chunk.pcp_deinterleave_idx
             local_length = chunk.total_seq_lens
             cu_lens, token_to_seq = chunk.cu_seq_lens, chunk.token_to_seq
             if dcp_world_size > 1:
+                # Gather this rank's KV shard. PCP+DCP all-gathers the shards
+                # into the global token order below; DCP alone merges the
+                # per-rank top-k instead.
+                assert chunk.local_cu_seq_lens is not None
                 local_length = chunk.local_total_seq_lens
                 cu_lens = chunk.local_cu_seq_lens
                 token_to_seq = (
@@ -1551,7 +1597,8 @@ def rocm_aiter_sparse_attn_indexer(
                     ).to(torch.int32)
                     - 1
                 )
-                if local_length == 0:
+                # Under PCP+DCP every rank must still enter the all-gather.
+                if local_length == 0 and deinterleave_idx is None:
                     selected = topk_indices_buffer[
                         chunk.token_start : chunk.token_end, :topk_tokens
                     ]
@@ -1573,7 +1620,7 @@ def rocm_aiter_sparse_attn_indexer(
             k_scale = k_scale_full[:local_length]
             # Query-split sub-chunks of one request share the K workspace
             # filled by the first sub-chunk.
-            if not chunk.skip_kv_gather:
+            if not chunk.skip_kv_gather and local_length > 0:
                 cp_gather_indexer_k_quant_cache_triton(
                     kv_cache,
                     k_fp8,
@@ -1582,6 +1629,18 @@ def rocm_aiter_sparse_attn_indexer(
                     cu_lens,
                     token_to_seq=token_to_seq,
                     cache_layout=resolved_cache_layout,
+                )
+            if deinterleave_idx is not None:
+                from vllm.model_executor.layers.sparse_attn_indexer import (
+                    dcp_gather_kv_rows,
+                )
+
+                gathered_fp8, gathered_scale, out_fp8, out_scale = gather_bufs
+                k_fp8 = dcp_gather_kv_rows(
+                    k_fp8, deinterleave_idx, gathered_fp8, out_fp8
+                )
+                k_scale = dcp_gather_kv_rows(
+                    k_scale, deinterleave_idx, gathered_scale, out_scale
                 )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
@@ -1645,15 +1704,16 @@ def rocm_aiter_sparse_attn_indexer(
                     logits.stride(1),
                     topk_tokens,
                 )
-            _merge_dcp_topk_global(
-                logits,
-                topk_indices,
-                topk_tokens,
-                dcp_rank,
-                dcp_world_size,
-                cp_interleave,
-                chunk.cu_seqlen_ks,
-            )
+            if deinterleave_idx is None:
+                _merge_dcp_topk_global(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world_size,
+                    cp_interleave,
+                    chunk.cu_seqlen_ks,
+                )
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode

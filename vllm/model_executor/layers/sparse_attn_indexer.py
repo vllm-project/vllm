@@ -1417,10 +1417,6 @@ class SparseAttnIndexer(CustomOp):
         if current_platform.is_cuda() or current_platform.is_xpu():
             return self.forward_cuda(hidden_states, q_quant, k, weights)
         elif current_platform.is_rocm():
-            if self.use_pcp and self.dcp_world_size > 1:
-                raise NotImplementedError(
-                    "The ROCm sparse-indexer path does not support PCP+DCP."
-                )
             return self.forward_hip(hidden_states, q_quant, k, weights)
         elif current_platform.is_cpu():
             return self.forward_cpu(hidden_states, q_quant, k, weights)

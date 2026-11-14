@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
+from vllm.v1.attention.ops.pcp import sync_replicated_decode_rows
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 
@@ -187,6 +188,16 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             attn_metadata = attn_metadata_raw
 
         attn_metadata = cast(MLACommonMetadata | None, attn_metadata)
+        if (
+            attn_metadata is not None
+            and self.use_pcp
+            and not self.pcp_shard_decode_requests
+            and attn_metadata.num_decode_tokens > 0
+        ):
+            sync_replicated_decode_rows(
+                (q_c, kv_c, k_pe, index_k, index_weights),
+                attn_metadata.num_decode_tokens,
+            )
 
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
@@ -340,9 +351,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
-        attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
-            q_for_attn, kv_cache, attn_metadata, self
-        )
+        attn_out = self._forward_sparse_mqa(q_for_attn, kv_cache, attn_metadata)
 
         self._compute_uv_out(attn_out, output, num_actual)
         if self.use_pcp and num_actual < output.shape[0]:

@@ -277,6 +277,7 @@ steps:
       - csrc/
       - tests/evals/gsm8k/configs/GLM-5.2-MXFP4-TP2-PCP2-EP-ROCm.yaml
       - tests/evals/gsm8k/configs/GLM-5.2-MXFP4-TP1-PCP4-EP-ROCm.yaml
+      - tests/evals/gsm8k/configs/GLM-5.2-MXFP4-TP1-PCP4-DCP4-EP-ROCm.yaml
       - tests/evals/gsm8k/configs/models-pcp-rocm.txt
       - vllm/model_executor/layers/quantization
       - vllm/config/parallel.py

@@ -368,7 +368,7 @@ def test_rocm_short_prefill_skips_indexer_q_and_scoring(
         _run_indexer=call("run_indexer"),
         forward_impl=call("dense_mha"),
         _build_q_for_attn=call("build_q"),
-        impl=SimpleNamespace(forward_mqa=call("sparse_mqa", (None, None))),
+        _forward_sparse_mqa=call("sparse_mqa"),
         _compute_uv_out=call("uv_out"),
     )
 
