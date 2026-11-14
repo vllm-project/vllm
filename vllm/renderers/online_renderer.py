@@ -85,7 +85,7 @@ ResponsesPreviousMessages: TypeAlias = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResponsesRenderResult:
     messages: ResponsesPreviousMessages
     engine_input: EngineInput

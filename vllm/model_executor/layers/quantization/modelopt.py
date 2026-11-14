@@ -2326,7 +2326,7 @@ WEIGHT = Role.WEIGHT
 ACT = Role.ACT
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
 
@@ -2334,7 +2334,7 @@ class CkptCtx:
     scale_block_size: tuple[int, int] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeDtypes:
     """Runtime/model dtypes kernels need — format-agnostic."""
 
@@ -2342,7 +2342,7 @@ class RuntimeDtypes:
     out_dtype: torch.dtype
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Shapes:
     """Layer geometry from create_weights args."""
 
