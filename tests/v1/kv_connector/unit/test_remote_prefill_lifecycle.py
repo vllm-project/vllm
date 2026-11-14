@@ -1080,6 +1080,7 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         block_size,
         mamba_enabled=True,
         num_blocks=num_blocks,
+        enable_prefix_caching=enable_prefix_caching,
     )
     groups = kv_cache_config.kv_cache_groups
     groups[-1] = replace(
