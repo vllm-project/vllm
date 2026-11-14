@@ -567,7 +567,6 @@ class Ernie4_5_VLMoeModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         visual_token_mask: torch.Tensor | None = None,
-        has_multimodal_embeds: bool | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         visual_token_mask_state = None
@@ -581,12 +580,8 @@ class Ernie4_5_VLMoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            if has_multimodal_embeds is False:
-                visual_token_mask = None
-            else:
-                visual_token_mask = intermediate_tensors["visual_token_mask"].bool()
-                if has_multimodal_embeds is None:
-                    visual_token_mask_state = _VisualTokenMaskState(visual_token_mask)
+            visual_token_mask = intermediate_tensors["visual_token_mask"].bool()
+            visual_token_mask_state = _VisualTokenMaskState(visual_token_mask)
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(

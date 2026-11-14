@@ -151,14 +151,6 @@ class LoaderInWorkers:
     """Worker extension (`worker_extension_cls`): it brings this module, and
     so the load format, into the workers."""
 
-    def gpu_sync_check_status(self) -> dict[str, str | bool | None]:
-        from vllm.utils import gpu_sync_debug
-
-        return {
-            "mode": gpu_sync_debug._SYNC_CHECK_MODE,
-            "enabled": gpu_sync_debug._sync_check_enabled,
-        }
-
 
 def _hf_overrides(hf_config, *, arch: str, num_layers: int):
     info = HF_EXAMPLE_MODELS.get_hf_info(arch)
@@ -473,62 +465,3 @@ def test_ernie_vl_pp_preserves_visual_routing(vllm_runner, image_assets):
         "ERNIE-VL PP=2 logprobs differ by up to "
         f"{_max_logprob_diff(results[1], results[2])}"
     )
-
-
-@pytest.mark.timeout(CASE_TIMEOUT_S)
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="The GPU sync checker only supports CUDA-like platforms",
-)
-def test_ernie_vl_pp_text_has_no_unexpected_gpu_sync(vllm_runner, monkeypatch):
-    """Text prefill and decode must not read the visual mask back from the GPU."""
-    # The mode is captured at import, so workers must start fresh with this env.
-    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
-    info = HF_EXAMPLE_MODELS.get_hf_info("Ernie4_5_VLMoeForConditionalGeneration")
-    with vllm_runner(
-        info.default,
-        revision=info.revision,
-        trust_remote_code=info.trust_remote_code,
-        dtype="bfloat16",
-        load_format=LOAD_FORMAT,
-        hf_overrides=_ernie_vl_pp_overrides,
-        worker_extension_cls=f"{__name__}.LoaderInWorkers",
-        pipeline_parallel_size=2,
-        distributed_executor_backend="mp",
-        enforce_eager=True,
-        max_model_len=4096,
-        max_num_batched_tokens=4096,
-        max_num_seqs=1,
-        enable_chunked_prefill=False,
-        enable_flashinfer_autotune=False,
-        enable_prefix_caching=False,
-        limit_mm_per_prompt={"image": 1},
-    ) as vllm_model:
-        llm = vllm_model.llm
-        states = llm.collective_rpc("gpu_sync_check_status")
-        assert len(states) == 2
-        assert all(state == {"mode": "error", "enabled": True} for state in states)
-        vocab_size = llm.llm_engine.model_config.get_vocab_size()
-        prompt = (
-            "<|begin_of_sentence|>User: What is two plus three?\n"
-            "Assistant: <think></think>"
-        )
-        params = SamplingParams(
-            temperature=0,
-            min_tokens=8,
-            max_tokens=8,
-            ignore_eos=True,
-            detokenize=False,
-        )
-        generated = []
-        for _ in range(2):
-            (output,) = llm.generate([prompt], params, use_tqdm=False)
-            (completion,) = output.outputs
-            assert output.finished and output.prompt_token_ids
-            assert len(completion.token_ids) == 8
-            assert all(0 <= token < vocab_size for token in completion.token_ids)
-            generated.append(list(completion.token_ids))
-        assert generated[0] == generated[1]

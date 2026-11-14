@@ -26,7 +26,7 @@
 import math
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import torch
@@ -72,7 +72,6 @@ from vllm.multimodal.processing import (
     cached_encode,
 )
 from vllm.multimodal.processing.processor import HFMultiModalInputs
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -95,9 +94,6 @@ from .utils import (
     scatter_output_slices,
 )
 from .vision import get_vit_attn_backend
-
-if TYPE_CHECKING:
-    from .ernie45_vl_model_state import Ernie4_5_VLModelState
 
 logger = init_logger(__name__)
 
@@ -1396,19 +1392,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         raise ValueError("Only image or video modality is supported")
 
-    @staticmethod
-    def _get_gpu_model_state_cls() -> type["Ernie4_5_VLModelState"]:
-        from .ernie45_vl_model_state import Ernie4_5_VLModelState
-
-        return Ernie4_5_VLModelState
-
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        # CPU MRV2 has its own model states and rejects GPU model-state hooks.
-        if (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and vllm_config.parallel_config.pipeline_parallel_size > 1:
-            self.get_model_state_cls = self._get_gpu_model_state_cls
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
