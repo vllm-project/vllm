@@ -29,7 +29,7 @@ MODEL_NAMES=${MODEL_NAMES:-}
 if [[ -n "$MODEL_NAMES" ]]; then
   MODELS=("$MODEL_NAMES")
 else
-  MODELS=("Qwen/Qwen3-0.6B")
+  MODELS=("Qwen/Qwen3-0.6B" "Qwen/Qwen3.5-0.8B")
 fi
 
 KV_CACHE_MEMORY_BYTES=${KV_CACHE_MEMORY_BYTES:-268435456}  # 256 MiB
@@ -162,11 +162,15 @@ run_tests_for_model() {
 
   # ── Run edge case tests ──
   echo "Running MultiConnector edge case tests for $model_name"
+  local pytest_filter="not test_mixed_hybrid_decode_reuses_divergent_local_prefix"
+  if [[ "$model_name" == "Qwen/Qwen3.5-0.8B" ]]; then
+    pytest_filter="test_mixed_hybrid_decode_reuses_divergent_local_prefix"
+  fi
   PREFILL_PORT=$PREFILL_PORT \
   DECODE_PORT=$DECODE_PORT \
   PROXY_PORT=$PROXY_PORT \
   BLOCK_SIZE=$BLOCK_SIZE \
-    python3 -m pytest -s -x \
+    python3 -m pytest -s -x -k "$pytest_filter" \
     "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_multi_connector_edge_cases.py"
 
   # ── Cleanup ──
