@@ -161,7 +161,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(
@@ -318,6 +320,8 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         scatter_states.register_warmup(
             state_shape=recurrent_state_shape,
             state_dtype=recurrent_state_dtype,
+            # The prefill writes back the kernels' FP32 final state.
+            src_dtype=torch.float32,
             indices_dtype=torch.int32,
             max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
         )
