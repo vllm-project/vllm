@@ -892,6 +892,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
 
     supports_pre_processed_weights = True
+    accepts_quantized_input = True
 
     def __init__(
         self,
@@ -924,9 +925,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_key=kNvfp4Static,
             activation_key=activation_key,
         )
-        if (
-            self.per_token_activation
-            and self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM
+        # NONE: requantization source, which has no compute backend.
+        if self.per_token_activation and self.nvfp4_backend not in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.NONE,
         ):
             raise ValueError(
                 "Per-token NVFP4 activation for pre-quantized weights "
@@ -1210,6 +1212,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -1227,6 +1230,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            a1q_scale=x_scale,
         )
 
     def apply(
@@ -2322,7 +2326,7 @@ WEIGHT = Role.WEIGHT
 ACT = Role.ACT
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
 
@@ -2330,7 +2334,7 @@ class CkptCtx:
     scale_block_size: tuple[int, int] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeDtypes:
     """Runtime/model dtypes kernels need — format-agnostic."""
 
@@ -2338,7 +2342,7 @@ class RuntimeDtypes:
     out_dtype: torch.dtype
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Shapes:
     """Layer geometry from create_weights args."""
 
@@ -2892,6 +2896,7 @@ def select_linear_kernel(
         return init_mxfp8_linear_kernel(
             weight_shape=weight_shape or layer.weight.shape,
             bmm_batch_size=getattr(layer, "bmm_batch_size", None),
+            activation_quant_key=spec.activation,
         )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.
@@ -3107,6 +3112,7 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.kernel = init_mxfp8_linear_kernel(
                 weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
                 bmm_batch_size=layer.bmm_batch_size,
+                activation_quant_key=self.spec.activation,
             )
         if is_weights_pre_processed():
             if not self.supports_pre_processed_weights:

@@ -8,7 +8,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Step5SparseConfig:
     enabled: bool = True
     proxy_dim: int = 256

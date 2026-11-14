@@ -12,6 +12,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -480,3 +482,32 @@ def test_auto_weights_loader_drops_other_ranks_experts_before_rank_local_transfo
     )
 
     assert seen == kept
+
+
+@pytest.mark.parametrize("quant_config", [Fp8Config, QuarkConfig])
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("h.0.self_attn.k_proj.output_scale", "h.0.self_attn.attn.k_scale"),
+        ("h.0.self_attn.to_k.output_scale", "h.0.self_attn.attn.k_scale"),
+        ("h.0.self_attn.prob_output_scale", "h.0.self_attn.attn.prob_scale"),
+        ("h.0.self_attn.k_proj.k_scale", "h.0.self_attn.attn.k_scale"),
+    ],
+)
+def test_cache_scale_rules_run_before_stacked_rules(quant_config, name, expected):
+    """A stacked rule would otherwise rewrite the `.k_proj.` the scale rule needs."""
+    model_mapper = WeightsMapper(
+        orig_to_new_substr={".to_k.": ".k_proj."},
+        orig_to_new_stacked={".k_proj.": (".qkv_proj.", "k")},
+    )
+    mapper = model_mapper | quant_config.get_cache_scale_mapper()
+    scale = torch.tensor(0.5)
+
+    ((mapped_name, mapped_scale),) = mapper.apply([(name, scale)])
+
+    assert mapped_name == expected
+    assert mapped_scale is scale
+    assert getattr(mapped_scale, "shard_id", None) is None
+    assert mapper.map_name("h.0.self_attn.k_proj.weight") == (
+        "h.0.self_attn.qkv_proj.weight"
+    )
