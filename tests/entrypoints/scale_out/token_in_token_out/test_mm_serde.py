@@ -7,6 +7,7 @@ token_in_token_out generate endpoint.
 import pytest
 import torch
 from pydantic import ValidationError
+from transformers import Qwen2_5_VLConfig, Qwen2VLConfig
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -17,6 +18,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     merge_mm_kwargs_items,
     mm_kwargs_from_features,
     rebuild_mm_placeholders,
+    validate_qwen_image_features,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -37,6 +39,92 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
+
+
+@pytest.mark.parametrize("config_cls", [Qwen2VLConfig, Qwen2_5_VLConfig])
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "valid",
+        "grid-override",
+        "patch-count",
+        "empty",
+        "rank",
+        "multi-frame-image",
+        "ec-metadata",
+        "missing-ec",
+    ],
+)
+def test_validate_decoded_qwen_image_features(config_cls, variant):
+    grid = MultiModalBatchedField(keep_on_cpu=True)
+    pixels = MultiModalFlatField(slices=[slice(0, 256)])
+    image = MultiModalKwargsItem(
+        {
+            "image_grid_thw": MultiModalFieldElem(torch.tensor([1, 16, 16]), grid),
+            "pixel_values": MultiModalFieldElem(torch.zeros(256, 1176), pixels),
+        }
+    )
+    metadata = MultiModalKwargsItem({"image_grid_thw": image["image_grid_thw"]})
+    if variant in ("grid-override", "patch-count"):
+        metadata["image_grid_thw"] = MultiModalFieldElem(torch.tensor([1, 2, 2]), grid)
+    elif variant == "empty":
+        image = MultiModalKwargsItem({})
+    elif variant == "rank":
+        image["pixel_values"] = MultiModalFieldElem(torch.zeros(1, 1, 1), pixels)
+    elif variant == "multi-frame-image":
+        image["image_grid_thw"] = MultiModalFieldElem(torch.tensor([2, 16, 16]), grid)
+        image["pixel_values"] = MultiModalFieldElem(
+            torch.zeros(512, 1176), MultiModalFlatField(slices=[slice(0, 512)])
+        )
+        metadata["image_grid_thw"] = image["image_grid_thw"]
+    payload = (
+        None
+        if variant in ("ec-metadata", "missing-ec")
+        else encode_mm_kwargs_item(image)
+    )
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["image"]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRangeInfo(
+                    offset=0,
+                    length=(
+                        1
+                        if variant == "patch-count"
+                        else 128
+                        if variant == "multi-frame-image"
+                        else 64
+                    ),
+                )
+            ]
+        },
+        kwargs_data={"image": [payload]},
+        mm_metadata={"image": [encode_mm_kwargs_item(metadata)]},
+    )
+    items = mm_kwargs_from_features(features)["image"]
+    config = config_cls()
+    options = dict(allow_ec_metadata=variant == "ec-metadata", allow_shm_handles=False)
+    if variant in ("valid", "ec-metadata"):
+        validate_qwen_image_features(features, items, config, **options)
+    else:
+        with pytest.raises(ValueError, match="image|pixel_values"):
+            validate_qwen_image_features(features, items, config, **options)
+
+
+@pytest.mark.parametrize("modality", ["image", "video", "audio"])
+@pytest.mark.parametrize("payload_field", ["kwargs_data", "mm_metadata"])
+def test_mm_features_reject_reserved_model_argument(modality, payload_field):
+    """Caller fields must not collide with the bound model method's receiver."""
+    item = MultiModalKwargsItem(
+        {"self": MultiModalFieldElem(torch.zeros(1), MultiModalBatchedField())}
+    )
+    features = MultiModalFeatures(
+        mm_hashes={modality: ["item"]},
+        mm_placeholders={modality: [PlaceholderRangeInfo(offset=0, length=1)]},
+        **{payload_field: {modality: [encode_mm_kwargs_item(item)]}},
+    )
+    with pytest.raises(ValueError, match="reserved.*self"):
+        mm_kwargs_from_features(features)
 
 
 def test_mm_kwargs_item_roundtrip():

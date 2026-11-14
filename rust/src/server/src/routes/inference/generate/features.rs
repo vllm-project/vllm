@@ -245,6 +245,23 @@ mod tests {
     }
 
     #[test]
+    fn features_with_reserved_model_argument_are_rejected() {
+        for modality in [MmModality::Image, MmModality::Video, MmModality::Audio] {
+            let mut item = feature(modality, 0, None);
+            let data = item.data.as_mut().unwrap();
+            let value = data.remove("pixel_values").unwrap();
+            data.insert("self".to_owned(), value);
+            let features =
+                MultiModalFeatures::from_prepared(vec![item], MmPayload::Tensors).unwrap();
+
+            let error = features.into_prepared().unwrap_err().to_error_response().error;
+            assert_eq!(error.code, 400);
+            assert_eq!(error.param.as_deref(), Some("features"));
+            assert!(error.message.contains("reserved key 'self'"));
+        }
+    }
+
+    #[test]
     fn features_with_mismatched_lists_are_rejected() {
         let mut features = MultiModalFeatures::from_prepared(
             vec![
