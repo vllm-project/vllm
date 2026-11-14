@@ -4579,10 +4579,10 @@ class SpeedBench(CustomDataset):
 
     Download the dataset using:
 
-    `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -`
+    `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py | python3 - --format raw --config all`
     """  # noqa: E501
 
-    DOWNLOAD_SCRIPT_URL = "https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py"
+    DOWNLOAD_COMMAND = "curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py | python3 - --format raw --config all"  # noqa: E501
 
     def __init__(self, **kwargs) -> None:
         self.dataset_subset = kwargs.pop("dataset_subset", "qualitative")
@@ -4598,7 +4598,7 @@ class SpeedBench(CustomDataset):
             raise ValueError(
                 f"dataset_path {self.dataset_path} is not a directory. "
                 f"Please make sure to download the dataset from HuggingFace using "
-                f"`curl -LsSf {self.DOWNLOAD_SCRIPT_URL} | python3 -`"
+                f"`{self.DOWNLOAD_COMMAND}`"
             )
 
         self.data = []
@@ -4614,7 +4614,7 @@ class SpeedBench(CustomDataset):
             raise ValueError(
                 "JSONL file must contain a 'messages' column. "
                 "Please make sure to download the dataset from HuggingFace using "
-                f"`curl -LsSf {self.DOWNLOAD_SCRIPT_URL} | python3 -`"
+                f"`{self.DOWNLOAD_COMMAND}`"
             )
 
         for _, row in jsonl_data.iterrows():
