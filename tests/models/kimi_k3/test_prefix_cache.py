@@ -95,7 +95,7 @@ NIXL_OFFLOAD = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Mode:
     # A finer prefix_match_unit enables partial hits inside a Mamba block.
     prefix_match_unit: int | None
@@ -110,7 +110,7 @@ class Mode:
 MODES = [Mode(unit, spec) for spec in (False, True) for unit in (None, 128)]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Instance:
     tp: int = 1
     dp: int = 1
@@ -140,7 +140,7 @@ class Instance:
         return args
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Deployment:
     decode: Instance
     prefill: Instance | None = None
@@ -265,7 +265,7 @@ def _reset_gpu_prefix_cache(url: str) -> None:
         time.sleep(0.1)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Turn:
     prompt_len: int
     cached: int

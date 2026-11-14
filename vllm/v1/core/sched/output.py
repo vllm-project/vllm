@@ -191,7 +191,7 @@ class CachedRequestData:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class IterationDetails:
     """Scheduled prefill/decode request and input counts."""
 
@@ -220,7 +220,7 @@ class IterationDetails:
         return self.num_decode_tokens
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorBlockState:
     """Scheduler-local block state offered to a producer-side KV connector."""
 
@@ -343,7 +343,7 @@ class SchedulerOutput:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class GrammarOutput:
     # ids of structured output requests.
     structured_output_request_ids: list[str]

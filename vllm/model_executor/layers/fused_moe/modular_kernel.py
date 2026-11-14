@@ -141,7 +141,7 @@ class FusedMoEActivationFormat(Enum):
         return self == FusedMoEActivationFormat.BatchedExperts
 
 
-@dataclass
+@dataclass(slots=True)
 class ExpertTokensMetadata:
     """Metadata regarding expert-token routing."""
 

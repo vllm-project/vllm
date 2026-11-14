@@ -67,7 +67,7 @@ DECODE_BLOCKS = {"full": [5, 2], "swa": [0], "mamba": [3]}
 KEY_DIM, V_HEADS, V_DIM, K_DIM, CONV_ROWS = 4, 4, 2, 2, 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Layer:
     name: str
     kind: str  # "full", "swa", "mla" or "mamba"
@@ -151,7 +151,7 @@ def _mamba_shard(slot: torch.Tensor, tp_rank: int, tp_size: int) -> tuple:
     return torch.cat(parts), ssm[tp_rank * heads : (tp_rank + 1) * heads].reshape(-1)
 
 
-@dataclass
+@dataclass(slots=True)
 class Rank:
     tp_rank: int
     tp_size: int
