@@ -156,13 +156,26 @@ def load_planned(
     pass fallbacks to ``model.load_weights``. Call between ``start_reload``
     and ``finish_reload``."""
     fallbacks = []
+    dsts: list[torch.Tensor] = []
+    srcs: list[torch.Tensor] = []
+    held = 0
     for name, full in weights:
         dest = plan.get_dest(name)
         if dest is None:
             fallbacks.append((name, full))
-        for box, tensor in dest or ():
+            continue
+        for box, tensor in dest:
             part = full[tuple(slice(start, stop) for start, stop in box)]
-            tensor.copy_(part.reshape(tensor.shape))
+            dsts.append(tensor)
+            srcs.append(part.reshape(tensor.shape))
+        held += full.nbytes if dest else 0
+        # Batch copies into one dispatch per ~2 GiB instead of one per tensor;
+        # flushing bounds how many source tensors a streaming caller keeps alive.
+        if held > (2 << 30):
+            torch._foreach_copy_(dsts, srcs)
+            dsts, srcs, held = [], [], 0
+    if dsts:
+        torch._foreach_copy_(dsts, srcs)
     if fallbacks:
         model.load_weights(fallbacks)
 
