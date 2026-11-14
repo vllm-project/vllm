@@ -67,7 +67,6 @@ from vllm.transformers_utils.configs.midashenglm import DashengConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .qwen3 import use_qwen2_attention
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 _Tuple2: TypeAlias = int | tuple[int, int] | Sequence[int]
@@ -714,12 +713,11 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         with self._mark_language_model(vllm_config):
-            use_qwen2_attention(config.text_config)
             self.decoder = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "decoder"),
-                architectures=["Qwen3ForCausalLM"],
+                architectures=["Qwen2ForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (

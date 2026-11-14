@@ -112,7 +112,6 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .qwen3 import use_qwen2_attention
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -1263,12 +1262,11 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             )
 
         with self._mark_language_model(vllm_config):
-            use_qwen2_attention(thinker_config.text_config)
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
                 hf_config=thinker_config.text_config,
-                architectures=["Qwen3ForCausalLM"],
+                architectures=["Qwen2ForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (
@@ -1671,7 +1669,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.language_model(
+        hidden_states = self.language_model.model(
             input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
         )
         return hidden_states

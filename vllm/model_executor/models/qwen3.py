@@ -116,9 +116,9 @@ class Qwen3MLP(nn.Module):
 
 
 def use_qwen2_attention(config: PreTrainedConfig) -> None:
-    """Make Qwen3 layers build Qwen2 attention: QKV bias and no q/k-norm."""
+    """Make Qwen3 layers build Qwen2 attention: QKV bias and opt-in q/k-norm."""
     config.attention_bias = True
-    config.qk_norm = False
+    config.qk_norm = getattr(config, "qk_norm", False)
     # Every layer gets the global sliding window, so it can't be per layer
     if len(set(getattr(config, "layer_types", []))) > 1:
         assert config.max_window_layers == config.num_hidden_layers, (

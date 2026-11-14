@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
@@ -707,6 +708,16 @@ def init_vllm_registered_model(
 
     if hf_config is not None:
         vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+        # Top-level Qwen2 uses the Transformers backend, but inner Qwen2 models stay
+        # native so that composite models can keep using their submodules
+        if "Qwen2ForCausalLM" in vllm_config.model_config.architectures:
+            from vllm.model_executor.models.qwen3 import use_qwen2_attention
+
+            hf_config = copy.deepcopy(vllm_config.model_config.hf_config)
+            use_qwen2_attention(hf_config.get_text_config())
+            vllm_config = vllm_config.with_hf_config(
+                hf_config, architectures=["Qwen3ForCausalLM"]
+            )
 
     return initialize_model(vllm_config=vllm_config, prefix=prefix)
 

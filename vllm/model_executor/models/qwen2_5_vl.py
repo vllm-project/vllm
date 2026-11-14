@@ -1412,7 +1412,6 @@ class Qwen2_5_VLForConditionalGeneration(
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
-                hf_config=config.text_config,
                 architectures=["Qwen2ForCausalLM"],
             )
 
@@ -2068,7 +2067,7 @@ class Qwen2_5_VLForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.language_model(
+        hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
