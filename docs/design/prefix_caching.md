@@ -191,7 +191,7 @@ Time 1:
   Cache Blocks: 0, 1, 3
 ```
 
-As can be seen, block 3 is a new full block and is cached. However, it is redundant as block 1, meaning that we cached the same block twice. In v0, when detecting block 3 is duplicated, we free block 3 and let Request 2 use block 1 instead, so its block table becomes `[0, 1]` in Time 1. However, the block table in vLLM v1 is append-only, meaning that changing the block table from `[0, 3]` to `[0, 1]` is not allowed. As a result, we will have duplicated blocks for the hash key E-H. This duplication will be eliminated when the request is freed.
+As can be seen, block 3 is a new full block and is cached. However, it is redundant as block 1, meaning that we cached the same block twice. In v0, when detecting block 3 is duplicated, we free block 3 and let Request 2 use block 1 instead, so its block table becomes `[0, 1]` in Time 1. However, the block table in vLLM v1 is append-only, meaning that changing the block table from `[0, 3]` to `[0, 1]` is not allowed. As a result, we will have duplicated blocks for the hash key E-H. Freed copies remain cached until cache pressure evicts them.
 
 ### Free
 
@@ -200,6 +200,11 @@ When a request is finished, we free all its blocks if no other requests are usin
 ![Free queue after a request is freed](../assets/design/prefix_caching/free.png)
 
 ### Eviction (LRU)
+
+When several physical blocks share a hash, cache lookup selects the oldest
+remaining copy. Large duplicate sets use an ordered map so FIFO eviction does
+not repeatedly scan deleted dictionary entries. Small duplicate sets retain a
+compact dictionary; the ordered representation uses more CPU memory per copy.
 
 When the head block (least recently used block) of the free queue is cached, we have to evict the block to prevent it from being used by other requests. Specifically, eviction involves the following steps:
 
