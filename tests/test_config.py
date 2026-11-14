@@ -1579,6 +1579,52 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+def test_shared_engram_rejects_incomplete_and_unsafe_loading():
+    with pytest.raises(ValueError, match="endpoint and generation"):
+        EngramConfig(shared_host_endpoint="owner:5000")
+
+    config = EngramConfig(
+        shared_host_endpoint="owner:5000",
+        shared_host_generation="0123456789abcdef",
+    )
+    config.resolve_dp_shared_memory(ParallelConfig(data_parallel_size=1))
+    assert config.dp_shared_memory is False
+    config.verify_load_config(
+        LoadConfig(load_format="safetensors", safetensors_load_strategy="lazy")
+    )
+    with pytest.raises(ValueError, match="safetensors lazy"):
+        config.verify_load_config(
+            LoadConfig(load_format="safetensors", safetensors_load_strategy="eager")
+        )
+    with pytest.raises(ValueError, match="DP size 1"):
+        config.verify_parallel_config(ParallelConfig(data_parallel_size=2))
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_engram_rejects_peer_group_and_mxfp4(monkeypatch):
+    """External FP8 owner tables cannot be combined with GPU peers or MXFP4."""
+    options = {
+        "shared_host_endpoint": "owner:5000",
+        "shared_host_generation": "0123456789abcdef",
+    }
+    with pytest.raises(ValueError, match="peer group"):
+        EngramConfig(**options, peer_group_size=2, peer_group_store="/shared/peers")
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture="DeepseekV41ForCausalLM",
+            hf_text_config=SimpleNamespace(
+                engram_layer_ids=[1],
+                quantization_config={"engram_embed_quant": "mxfp4"},
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="FP8 embedding tables"):
+        EngramConfig(**options).verify_model_config(model)
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",

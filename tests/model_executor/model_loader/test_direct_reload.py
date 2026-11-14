@@ -23,6 +23,8 @@ import pytest
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.engram import EngramConfig
+from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
@@ -35,6 +37,7 @@ from vllm.model_executor.model_loader.reload.direct import (
     finish_direct_reload,
     record_checkpoint_layout,
 )
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter, retire_parameter
@@ -540,6 +543,7 @@ def _config(**overrides) -> SimpleNamespace:
         lora_config=None,
         speculative_config=None,
         weight_transfer_config=None,
+        engram_config=None,
     )
     return SimpleNamespace(**(fields | overrides))
 
@@ -552,6 +556,16 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
     [
         ("direct", {}, None),
         ("layerwise", {"lora_config": object()}, None),
+        (
+            "direct",
+            {
+                "engram_config": EngramConfig(
+                    shared_host_endpoint="owner:56000",
+                    shared_host_generation="generation",
+                )
+            },
+            "immutable external Engram",
+        ),
         (
             "direct",
             {
@@ -611,6 +625,7 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
     ids=[
         "defaults",
         "layerwise-lora",
+        "external-engram",
         "offload-backend",
         "offload-prefetch",
         "offload-uva",
@@ -630,3 +645,17 @@ def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
     else:
         with pytest.raises(ValueError, match=match):
             VllmConfig._verify_direct_reload_compat(config)
+
+
+def test_external_engram_rejects_in_place_weight_updates():
+    config = VllmConfig()
+    config.engram_config = EngramConfig(
+        shared_host_endpoint="owner:56000",
+        shared_host_generation="generation",
+    )
+    with pytest.raises(ValueError, match="new external Engram owner generation"):
+        reload_weights(config, torch.nn.Module(), iter(()), None, True)
+
+    config.weight_transfer_config = WeightTransferConfig()
+    with pytest.raises(ValueError, match="in-place weight transfer"):
+        config._resolve_and_verify_engram_config()
