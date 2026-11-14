@@ -77,6 +77,10 @@ As with the backends, some experts support applying topk weights on the input ac
 
 Most experts flavors include an equivalent modular interface which will be a subclass of `FusedMoEExpertsModular`.
 
+For `TrtLlmFp8ExpertsModular`, model code selects input router weighting with the MoE layer argument `apply_router_weight_on_input=True`, as Llama4 does. The compatible prepare stage applies the score before FP8 quantization; the expert then uses unit output weights so the score is applied once. Input weighting supports top-k = 1; top-k > 1 is unsupported on this path.
+
+The MoE layer argument defaults to `apply_router_weight_on_input=False`, which retains ordinary output weighting. Model implementations select this behavior; there is no separate input-weighting CLI option.
+
 To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE kernels must have compatible activation formats, quantization types and quantization formats.
 
 | Kernel | Input act. format | Quant. types | Quant. format | Activation function | Apply Weight On Input | Modular | Source |
