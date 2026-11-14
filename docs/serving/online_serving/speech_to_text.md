@@ -16,6 +16,8 @@ NOTE: beam search is currently supported in the transcriptions endpoint for enco
 
 Set the maximum audio file size (in MB) that VLLM will accept, via the
 `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` environment variable. Default is 25 MB.
+Set the maximum accepted audio channel count via the
+`VLLM_MAX_AUDIO_CHANNELS` environment variable. Default is 8 channels.
 
 Models that transcribe long-form audio in a single pass, such as
 `microsoft/VibeVoice-ASR-HF`, take the whole recording at once, so `--max-model-len`
