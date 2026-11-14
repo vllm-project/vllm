@@ -3,7 +3,7 @@
 """The DSA (NoPE sparse MLA) layer of a planned decode step on Hopper.
 
 `HopperDsaLayer` runs all of `Glm5NextMLAAttention.forward` for a decode or
-uniform verify step in nine kernels (stock: about 33):
+uniform verify step in ten launches (nine stages; the select is two):
 
 1. G1: `x @ [q_a | kv_a | gate | wk | weights_proj]` (one GEMM, split-K 2,
    FP32 out);
@@ -12,7 +12,7 @@ uniform verify step in nine kernels (stock: about 33):
 3. G2: `qc @ [q_b | wq_b]`;
 4. G3: the W_UK absorb;
 5. indexer query quant, pool logits, top-512 pools, expansion and the MLA KV
-   rows of the selection;
+   rows of the selection; rows past 1024 pools finish in a second launch;
 6. sparse MLA over the selected rows, split over the rows;
 7. merge of the splits;
 8. G4: W_UV;
@@ -61,7 +61,7 @@ KEY = GATE + INDEX_DIM
 WPROJ = KEY + INDEX_DIM
 G1_COLS = WPROJ + INDEX_HEADS
 
-# (BN, BK, stages, split-K, warps) per GEMM, from the step-0 H200 sweep.
+# (BN, BK, stages, split-K, warps) per GEMM, tuned on H200.
 GEMM_TACTICS = {
     "g1": (64, 128, 6, 2, 4),
     "g2": (64, 128, 4, 1, 4),
@@ -69,45 +69,34 @@ GEMM_TACTICS = {
     "g4": (64, 128, 4, 1, 4),
     "g5": (64, 128, 6, 1, 4),
 }
-# Sparse MLA (rows per split, rows per tile, stages, warps) by token count, from
-# the in-situ H200 sweep (`full/dsa` e1-2k): 17 splits of 128 rows up to 12
-# tokens, 11 of 192 from 18 (-6 us per layer at 18 and 24 tokens).
+# Sparse MLA (rows per split, rows per tile, stages, warps) by token count:
+# fewer, longer splits from 13 tokens on.
 ATTENTION_TACTICS = {
     m: (128, 64, 3, 4) if m <= 12 else (192, 64, 3, 4) for m in range(1, MAX_TOKENS + 1)
 }
-# Indexer select: pool tile, programs per row, stages, warps.
+# Indexer select: pool tile, programs per row, stages, warps. The programs of
+# a launch stay within one wave of SELECT_CTAS_PER_SM per SM (select_kernel's
+# occupancy at its registers): fewer programs per row at 32 rows.
 SELECT_TACTIC = (64, 16, 2, 4)
-# Pools a row's select keeps in registers (contexts up to 4K tokens); longer
-# rows run the pass-based select. 2048 is 1-2 us slower per layer at 2K-2.4K.
+SELECT_CTAS_PER_SM = 3
+# Pools a row's select keeps in registers (contexts up to 4K tokens). Longer
+# rows finish in `select_long_kernel`: the threshold bin from the histogram the
+# logits programs fill, up to SELECT_CANDIDATES pools of that bin in registers
+# (the real 32K rows hold 114-187; a fuller bin takes byte-wise passes), the
+# expansion SELECT_EXPAND pools at a time; its tactic is (logits block, warps).
 SELECT_REGISTER_POOLS = 1024
-# The indexer query's Hadamard-128 as an MMA with the +-1 matrix instead of
-# butterflies (the same values; see `select_kernel`): in situ -12 us per layer
-# at 6 and 24 tokens (`full/dsa` e3-combo).
-SELECT_HADAMARD_MMA = True
-# Prefetch each GEMM's weights into L2 before its PDL wait (slower alone on
-# H200: 13.7 -> 16.6 us for G1); release dependents right after the wait.
-GEMM_PREFETCH = False
-EARLY_TRIGGER = True
-# Token counts whose GEMMs release their dependents only after the main loop
-# (in situ: -2.7 us per layer at 12 tokens, +3.0 at 6, +0.5-1.0 at 18 and 24).
+SELECT_CANDIDATES = 512
+SELECT_EXPAND = 512
+SELECT_LONG_TACTIC = (4096, 16)
+# Token counts whose GEMMs release their dependents after the main loop; the
+# others release them right after the PDL wait.
 LATE_TRIGGER_TOKENS = frozenset(range(7, 13))
-# The Triton absorb reads a K-major copy of W_UK (4.2 MB per layer): 3.8-4.0
-# against 5.3-6.4 us on the column-major W_UK_T at 12-24 tokens.
-ABSORB_KMAJOR = True
-# Programmatic dependent launch for the Triton kernels (off only to measure each
-# kernel alone).
-PDL = True
-# Token counts whose W_UK absorb runs as main's CuTe `head_gemv` (H200 alone:
-# 2.2 / 3.2 us at 1 / 6 tokens against 4.3 for the Triton GEMM; even at 8).
+# Token counts whose W_UK absorb runs as main's CuTe `head_gemv`; the others
+# run the Triton GEMM on a K-major copy of W_UK.
 ABSORB_GEMV_TOKENS = frozenset(range(1, 7))
 # Token counts whose o_proj runs as main's CuTe skinny GEMM (`gemm.Projection`,
-# weight loads issued before the PDL wait); H200 alone at 1 token: 10.7 us
-# against 12.9 for the Triton GEMM (graph launch excluded).
+# weight loads issued before the PDL wait).
 O_PROJ_SKINNY_TOKENS = frozenset((1, 2, 4))
-# Token counts whose o_proj runs as Kimi K3's warp split-K GEMM, with its
-# (output tile, k tile, stages, B loader warps) per token tile.
-O_PROJ_WSK_TOKENS: frozenset[int] = frozenset()
-O_PROJ_WSK_TACTICS = {8: (16, 256, 8, 2), 16: (16, 256, 8, 2), 32: (16, 256, 8, 2)}
 
 
 def _bm(tokens: int) -> int:
@@ -116,7 +105,9 @@ def _bm(tokens: int) -> int:
 
 @dataclass
 class DsaWeights:
-    """The tensors of one DSA layer the kernels read (no copies)."""
+    """The tensors of one DSA layer the kernels read. The layer reads them in
+    place, except `w_uk_t`, of which it keeps a K-major copy taken when it is
+    built: after a weight refit, rebuild the layer."""
 
     qkv_a: torch.Tensor  # [q_lora + latent, hidden]
     q_b: torch.Tensor  # [heads * nope, q_lora]
@@ -170,6 +161,7 @@ class _Workspace:
         m = MAX_TOKENS
         splits = max(triton.cdiv(ROWS, t[0]) for t in ATTENTION_TACTICS.values())
         self.max_pools = max_pools
+        self.sms = torch.cuda.get_device_properties(device).multi_processor_count
         self.y = empty(m, G1_COLS, dtype=torch.float32)
         self.qc = empty(m, Q_LORA)
         self.q = empty(m, 2 * HEADS * NOPE)  # q_b | wq_b
@@ -178,6 +170,7 @@ class _Workspace:
         self.ao = empty(m, HEADS * VALUE)
         self.logits = empty(m, max(max_pools, 1), dtype=torch.float32)
         self.pools = empty(m, SELECT, dtype=torch.int32)
+        self.candidates = empty(m, 2, SELECT_CANDIDATES, dtype=torch.int32)
         self.rows = empty(m, ROW_PITCH, dtype=torch.int32)
         self.counts = empty(m, dtype=torch.int32)
         self.partial = empty(m, splits, HEADS, LATENT, dtype=torch.float32)
@@ -187,8 +180,11 @@ class _Workspace:
         while h.shape[0] < INDEX_DIM:
             h = torch.cat([torch.cat([h, h], 1), torch.cat([h, -h], 1)], 0)
         self.hadamard = h.to(device=device, dtype=torch.bfloat16).contiguous()
-        # Counters are reset by the program that consumes them.
+        # Counters and histograms are reset by the program that consumes them.
         self.counters = torch.zeros(4096, dtype=torch.int32, device=device)
+        self.histograms = torch.zeros(
+            m, K.TOP_BINS.value, dtype=torch.int32, device=device
+        )
 
 
 _workspaces: dict[tuple[int, int], _Workspace] = {}
@@ -301,25 +297,9 @@ class HopperDsaLayer:
             raise ValueError("Hopper DSA layer: unexpected projection shapes")
         self.w = w
         self.topk_buffer = topk_buffer
-        self.w_uk_kmajor = w.w_uk_t.transpose(
-            1, 2
-        ).contiguous()  # [heads, latent, nope]
+        # [heads, latent, nope] for the Triton absorb: a copy, not refit-safe.
+        self.w_uk_kmajor = w.w_uk_t.transpose(1, 2).contiguous()
         self.o_proj = None
-        self.o_proj_wsk = None
-        if O_PROJ_WSK_TOKENS:
-            from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.gemm.warp_splitk import (  # noqa: E501
-                PreparedWarpSplitK,
-                WarpSplitKTactic,
-            )
-
-            def tactic(m):
-                tile = 8 if m <= 8 else 16 if m <= 16 else 32
-                out, k, stages, loaders = O_PROJ_WSK_TACTICS[tile]
-                return WarpSplitKTactic(out, tile, k, stages, loaders)
-
-            self.o_proj_wsk = PreparedWarpSplitK(
-                w.o_proj, {m: tactic(m) for m in sorted(O_PROJ_WSK_TOKENS)}
-            )
         if O_PROJ_SKINNY_TOKENS:
             from ..gemm import Projection
 
@@ -405,7 +385,7 @@ class HopperDsaLayer:
 
     def _gemm(self, name, x, segments, out, m, n, k, swn, swk, *, sxm, som,
               batch=1, sxb=0, swb=0, sob=0, counters=0):  # fmt: skip
-        early = EARLY_TRIGGER and m not in LATE_TRIGGER_TOKENS
+        early = m not in LATE_TRIGGER_TOKENS
         bn, bk, stages, split, warps = GEMM_TACTICS[name]
         w0 = segments[0]
         w1 = segments[1] if len(segments) > 1 else w0
@@ -418,8 +398,7 @@ class HopperDsaLayer:
             x, w0, w1, w2, out, self.ws.split_k, self.ws.counters[counters:],
             m, sxm, sxb, swb, som, sob, n0, n1,
             N=n, K=k, SWN=swn, SWK=swk, BM=_bm(m), BN=bn, BK=bk, SPLIT=split,
-            NSTAGE=stages, PREFETCH=GEMM_PREFETCH, EARLY=early,
-            num_warps=warps, launch_pdl=PDL,
+            NSTAGE=stages, EARLY=early, num_warps=warps, launch_pdl=True,
         )  # fmt: skip
 
     def forward(
@@ -457,7 +436,7 @@ class HopperDsaLayer:
             KV_BS=kv.shape[1], NEXT_N=q, HD=INDEX_DIM, KPOOL=KPOOL, RING=ring,
             TAIL_BLK=tail.stride(0), TAIL_HALF=tail.stride(1), PAGE=index.shape[1],
             PAGE_BYTES=index.stride(0), KPOOL_PROGRAMS=not skip_topk, num_warps=8,
-            launch_pdl=PDL,
+            launch_pdl=True,
         )  # fmt: skip
         # 3. q_b (and the indexer query)
         qn = HEADS * NOPE
@@ -471,14 +450,11 @@ class HopperDsaLayer:
 
             head_gemv(ws.q[:m, :qn].view(m, HEADS, NOPE), uk, ws.qabs[:m])
         else:
-            if ABSORB_KMAJOR:
-                uk = self.w_uk_kmajor
-                swn, swk = uk.stride(1), uk.stride(2)
-            else:
-                swn, swk = uk.stride(2), uk.stride(1)
-            self._gemm("g3", ws.q, [uk], ws.qabs, m, LATENT, NOPE, swn, swk,
-                       sxm=2 * qn, som=HEADS * LATENT, batch=HEADS, sxb=NOPE,
-                       swb=uk.stride(0), sob=LATENT, counters=1024)  # fmt: skip
+            uk = self.w_uk_kmajor
+            self._gemm("g3", ws.q, [uk], ws.qabs, m, LATENT, NOPE, uk.stride(1),
+                       uk.stride(2), sxm=2 * qn, som=HEADS * LATENT, batch=HEADS,
+                       sxb=NOPE, swb=uk.stride(0), sob=LATENT,
+                       counters=1024)  # fmt: skip
         # 5. top-k selection -> MLA KV rows
         mbt = inputs.block_table
         assert mbt.dtype == torch.int32 and mbt.stride(1) == 1
@@ -489,12 +465,13 @@ class HopperDsaLayer:
                 topk, topk.stride(0), topk.shape[1], inputs.req_ids, inputs.kv_slots,
                 mbt, mbt.stride(0), mbt.shape[1], ws.rows, ws.counts,
                 MBS=inputs.block_size, MSTRIDE=rows_per_block, SLW=ROW_PITCH,
-                BLOCK=1024, num_warps=4, launch_pdl=PDL,
+                BLOCK=1024, num_warps=4, launch_pdl=True,
             )  # fmt: skip
         else:
             ibt = inputs.index_block_table
             assert ibt.dtype == torch.int32 and ibt.stride(1) == 1
             bp, nch, stages, warps = SELECT_TACTIC
+            nch = max(1, min(nch, SELECT_CTAS_PER_SM * ws.sms // m))
             write = topk is not None
             if not write:
                 topk = ws.rows
@@ -502,14 +479,25 @@ class HopperDsaLayer:
                 ws.q[:, qn:], 2 * qn, y[:, WPROJ:], G1_COLS, inputs.positions,
                 inputs.req_ids, inputs.kv_slots, index.view(torch.float8_e4m3fn),
                 index.view(torch.float32), ibt, ibt.stride(0), ws.logits,
-                ws.logits.stride(0), ws.counters[2048:], ws.pools, mbt, mbt.stride(0),
-                mbt.shape[1], ws.rows, ws.counts, topk, topk.stride(0), topk.shape[1],
-                w.index_scale, NH=INDEX_HEADS, PAGE=index.shape[1],
+                ws.logits.stride(0), ws.counters[2048:], ws.histograms, mbt,
+                mbt.stride(0), mbt.shape[1], ws.rows, ws.counts, topk, topk.stride(0),
+                topk.shape[1], w.index_scale, NH=INDEX_HEADS, PAGE=index.shape[1],
                 PAGE_BYTES=index.stride(0), MBS=inputs.block_size,
                 MSTRIDE=rows_per_block, KSEL=SELECT, KPOOL=KPOOL, BP=bp, NCH=nch,
                 NSTAGE=stages, BLOCK_SEL=SELECT_REGISTER_POOLS, SLW=ROW_PITCH,
-                EXP=128, WRITE_LOGICAL=write, TOPW_BLOCK=512, had_ptr=ws.hadamard,
-                HADAMARD_MMA=SELECT_HADAMARD_MMA, num_warps=warps, launch_pdl=PDL,
+                WRITE_LOGICAL=write, TOPW_BLOCK=512, had_ptr=ws.hadamard,
+                num_warps=warps, launch_pdl=True,
+            )  # fmt: skip
+            fb, long_warps = SELECT_LONG_TACTIC
+            K.select_long_kernel[(m,)](
+                inputs.positions, inputs.req_ids, inputs.kv_slots, ws.logits,
+                ws.logits.stride(0), ws.histograms, ws.candidates, ws.pools, mbt,
+                mbt.stride(0), mbt.shape[1], ws.rows, ws.counts, topk, topk.stride(0),
+                topk.shape[1], KSEL=SELECT, KPOOL=KPOOL, MBS=inputs.block_size,
+                MSTRIDE=rows_per_block, BLOCK_SEL=SELECT_REGISTER_POOLS,
+                CAP=SELECT_CANDIDATES, FB=fb, SLW=ROW_PITCH, EXP=SELECT_EXPAND,
+                WRITE_LOGICAL=write, TOPW_BLOCK=512, num_warps=long_warps,
+                launch_pdl=True,
             )  # fmt: skip
         # 6-7. sparse MLA and the merge of its splits
         chunk, tile, stages, warps = ATTENTION_TACTICS[m]
@@ -520,11 +508,11 @@ class HopperDsaLayer:
             ws.qabs, ws.rows, ws.counts, flat, ws.partial, ws.lse,
             w.softmax_scale * 1.4426950408889634, S=splits, CH=chunk, BT=tile,
             H=HEADS, D=LATENT, SLW=ROW_PITCH, NSTAGE=stages, num_warps=warps,
-            launch_pdl=PDL,
+            launch_pdl=True,
         )  # fmt: skip
         K.combine_kernel[(m, HEADS)](
             ws.partial, ws.lse, ws.ob, S=splits, SP=triton.next_power_of_2(splits),
-            H=HEADS, D=LATENT, num_warps=4, launch_pdl=PDL,
+            H=HEADS, D=LATENT, num_warps=4, launch_pdl=True,
         )  # fmt: skip
         # 8. W_UV: ao[t, h] = ob[t, h] @ W_UV[h]
         uv = w.w_uv
@@ -535,12 +523,6 @@ class HopperDsaLayer:
         skinny = self.o_proj
         if m in O_PROJ_SKINNY_TOKENS and skinny is not None and m in skinny.configs:
             return skinny(ws.ao[:m])
-        wsk = self.o_proj_wsk
-        if m in O_PROJ_WSK_TOKENS and wsk is not None and m in wsk.codes:
-            # Its stores cover whole token tiles: rows up to the tile are scratch.
-            tile = 8 if m <= 8 else 16 if m <= 16 else 32
-            out = torch.empty((tile, HIDDEN), dtype=torch.bfloat16, device=dev)
-            return wsk.run(ws.ao[:m], out[:m])
         out = torch.empty((m, HIDDEN), dtype=torch.bfloat16, device=dev)
         self._gemm("g5", ws.ao, [w.o_proj], out, m, HIDDEN, HEADS * VALUE,
                    HEADS * VALUE, 1, sxm=HEADS * VALUE, som=HIDDEN,

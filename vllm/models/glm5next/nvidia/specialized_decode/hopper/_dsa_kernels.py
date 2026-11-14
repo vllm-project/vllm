@@ -2,29 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton kernels of the Hopper DSA layer (`dsa.HopperDsaLayer`).
 
-Every kernel is launched with programmatic dependent launch: it waits on
-`gdc_wait` before its first read of a predecessor's output and releases its
-dependents after its main loop.
+Every kernel is launched with programmatic dependent launch. Before
+`gdc_wait` it touches only weights and constant tables; it reads a
+predecessor's output only after the wait, and releases its dependents
+(`gdc_launch_dependents`) only after the wait as well, at a point chosen per
+kernel. A dependent's wait then covers every earlier grid's writes.
 """
 
 from vllm.triton_utils import tl, triton
 
 INV_SQRT_128 = tl.constexpr(0.08838834764831845)  # 1 / sqrt(128), exact in FP32
 FP8_MAX = tl.constexpr(448.0)
-
-
-@triton.jit
-def _prefetch_l2(pointers, size: tl.constexpr):
-    """`cp.async.bulk.prefetch.L2` of `size` bytes (a multiple of 16) at each
-    pointer."""
-    tl.inline_asm_elementwise(
-        "cp.async.bulk.prefetch.L2.global [$1], $2; mov.u32 $0, 0;",
-        "=r,l,r",
-        [pointers, tl.full(pointers.shape, size, tl.int32)],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
+TOP_BITS = tl.constexpr(12)  # first radix digit of the long-row select
+TOP_BINS = tl.constexpr(1 << TOP_BITS.value)
 
 
 @triton.jit(do_not_specialize=["M", "N0", "N1"])
@@ -53,7 +43,6 @@ def gemm_kernel(
     BK: tl.constexpr,
     SPLIT: tl.constexpr,
     NSTAGE: tl.constexpr,
-    PREFETCH: tl.constexpr,
     EARLY: tl.constexpr,
 ):
     """`o[m, n] = sum_k x[m, k] w[n, k]`, swap-AB (weight rows are the MMA M).
@@ -65,9 +54,8 @@ def gemm_kernel(
     an FP32 tile, and the last split of a tile to finish (atomic counter) adds
     them in split order and stores: deterministic, no output atomics.
 
-    With PREFETCH the program's weight slice is prefetched into L2 before the
-    PDL wait, so it streams while the predecessor finishes; with EARLY the
-    dependents are released right after the wait (they only prefetch and wait).
+    With EARLY the dependents are released right after the PDL wait, else
+    after the main loop.
     """
     pid_n = tl.program_id(0)
     pid_k = tl.program_id(1)
@@ -95,15 +83,6 @@ def gemm_kernel(
     xp = x_ptr + pid_b * sxb + rm[None, :] * sxm + (k0 + rk)[:, None]
     nm = rn[:, None] < N
     mm = rm[None, :] < M
-    if PREFETCH:
-        wb = w_ptr + pid_b.to(tl.int64) * swb
-        if SWK == 1:  # BN rows of K / SPLIT contiguous values
-            rows = tl.minimum(rn, N - 1) - first
-            _prefetch_l2(wb + rows * SWN + k0, (K // SPLIT) * 2)
-        else:  # K / SPLIT rows of BN contiguous values
-            _prefetch_l2(
-                wb + (k0 + tl.arange(0, K // SPLIT)) * SWK + n0 - first, BN * 2
-            )
     tl.extra.cuda.gdc_wait()
     if EARLY:
         tl.extra.cuda.gdc_launch_dependents()
@@ -329,13 +308,19 @@ def _digit(k, i: tl.constexpr):
 
 
 @triton.jit
-def _pick_bin(h, krem):
+def _top_digit(k):
+    """The top TOP_BITS bits of the key in unsigned order."""
+    return ((k >> (32 - TOP_BITS)) + (1 << (TOP_BITS - 1))) & ((1 << TOP_BITS) - 1)
+
+
+@triton.jit
+def _pick_bin(h, krem, NB: tl.constexpr = 256):
     """(bin b, count above b) of the histogram's largest bin whose suffix count
     reaches krem."""
     cs = tl.cumsum(h, 0)
     tot = tl.sum(h, 0)
     suffix = tot - cs + h
-    bins = tl.arange(0, 256)
+    bins = tl.arange(0, NB)
     b = tl.sum((suffix >= krem).to(tl.int32), 0) - 1
     above = tl.sum(tl.where(bins == b, suffix - h, 0), 0)
     return b, above
@@ -357,7 +342,7 @@ def select_kernel(
     lg_ptr,
     slg,
     ctr_ptr,
-    psel_ptr,
+    hist_ptr,
     mbt_ptr,
     smbt,
     max_blocks,
@@ -379,11 +364,9 @@ def select_kernel(
     NSTAGE: tl.constexpr,
     BLOCK_SEL: tl.constexpr,
     SLW: tl.constexpr,
-    EXP: tl.constexpr,
     WRITE_LOGICAL: tl.constexpr,
     TOPW_BLOCK: tl.constexpr,
-    had_ptr=None,
-    HADAMARD_MMA: tl.constexpr = False,
+    had_ptr,
 ):
     """The decode indexer after its projections, one row per program row.
 
@@ -391,13 +374,15 @@ def select_kernel(
     a power-of-two scale, as `fwht128_quant_fp8`), scales the head weights as
     `_fused_indexer_weight_scale` and writes the pool logits
     `sum_h w_h relu(q_h . k) * k_scale` of pool tiles c, c + NCH, ... into
-    `lg`. The last program of the row (atomic counter) picks the top KSEL pools
-    (radix select on the FP32 bits, ties to the lower pool index; in registers
-    up to BLOCK_SEL pools, else in passes over `lg`), expands them to tokens,
-    appends the incomplete pool and writes the MLA KV rows of the selection to
-    `sl` (count to `cnt`), and with WRITE_LOGICAL the token ids to the logical
+    `lg`. For a row of at most BLOCK_SEL pools the last program of the row
+    (atomic counter) picks the top KSEL pools in registers (radix select on the
+    FP32 bits, ties to the lower pool index), expands them to tokens, appends
+    the incomplete pool and writes the MLA KV rows of the selection to `sl`
+    (count to `cnt`), and with WRITE_LOGICAL the token ids to the logical
     top-k buffer. Rows with at most KSEL pools select every token without
-    logits. Padded rows (MLA slot -1) select nothing.
+    logits. Padded rows (MLA slot -1) select nothing. For a longer row every
+    program adds its logits' top TOP_BITS key bits to the row's histogram
+    `hist`, and `select_long_kernel` finishes the row.
     """
     r = tl.program_id(0)
     c = tl.program_id(1)
@@ -407,18 +392,16 @@ def select_kernel(
     ctx = tl.where(live, pos + 1, 0)
     npool = ctx // KPOOL
     req = tl.load(req_ptr + r)
+    mine = c == 0
     if npool > KSEL:
         oh = tl.arange(0, NH)
         od = tl.arange(0, 128)
         x = tl.load(iq_ptr + r * siq + oh[:, None] * 128 + od[None, :])
-        if HADAMARD_MMA:
-            # +-1 products are exact and the sums of 128 BF16 values fit FP32,
-            # so this matches the butterflies (up to exponent spreads > 2^9).
-            hm = tl.load(had_ptr + od[:, None] * 128 + od[None, :])
-            x = tl.dot(x, hm) * INV_SQRT_128
-        else:
-            x = tl.reshape(_hadamard(tl.reshape(x.to(tl.float32), (NH * 128,)), NH),
-                           (NH, 128))  # fmt: skip
+        # Hadamard-128 as an MMA with the +-1 matrix `had_ptr`: the products are
+        # exact and the sums of 128 BF16 values fit FP32, so this gives the
+        # butterflies' values (up to exponent spreads > 2^9).
+        hm = tl.load(had_ptr + od[:, None] * 128 + od[None, :])
+        x = tl.dot(x, hm) * INV_SQRT_128
         x = x.to(tl.bfloat16).to(tl.float32)
         amax = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-4)
         qs = tl.exp2(tl.ceil(tl.log2(amax * (1.0 / FP8_MAX))))
@@ -437,71 +420,199 @@ def select_kernel(
                          other=0.0)  # fmt: skip
             s = tl.dot(qb, tl.trans(kk.to(tl.bfloat16)))
             s = tl.maximum(s, 0.0) * ks[None, :]
-            tl.store(lg_ptr + r * slg + pp, tl.sum(s * weff[:, None], axis=0), mask=pm)
-        tl.debug_barrier()
-        done = tl.atomic_add(ctr_ptr + r, 1, sem="acq_rel")
-        mine = done == NCH - 1
-    else:
-        mine = c == 0
+            lg = tl.sum(s * weff[:, None], axis=0)
+            tl.store(lg_ptr + r * slg + pp, lg, mask=pm)
+            tl.atomic_add(hist_ptr + r * TOP_BINS + _top_digit(_radix_keys(lg)), 1,
+                          mask=pm & (npool > BLOCK_SEL), sem="relaxed")  # fmt: skip
+        mine = c < 0
+        if npool <= BLOCK_SEL:
+            tl.debug_barrier()
+            done = tl.atomic_add(ctr_ptr + r, 1, sem="acq_rel")
+            mine = done == NCH - 1
     tl.extra.cuda.gdc_launch_dependents()
     if mine:
+        # In registers: select (or keep every pool) and expand in one pass.
         nsel = tl.minimum(npool, KSEL)
         j = tl.arange(0, KPOOL)
         out = sl_ptr + r * SLW
-        row = lg_ptr + r * slg
-        if npool <= BLOCK_SEL:
-            # In registers: select (or keep every pool) and expand in one pass.
-            ap = tl.arange(0, BLOCK_SEL)
-            valid = ap < npool
-            if npool > KSEL:
-                tl.store(ctr_ptr + r, 0)
-                k = _radix_keys(tl.load(row + ap, mask=valid, other=0.0,
-                                        cache_modifier=".cg"))  # fmt: skip
-                krem = KSEL
-                cand = valid
-                sel = ap < 0
-                bins = tl.arange(0, 256)
-                for i in tl.static_range(4):
-                    d = _digit(k, i)
-                    h = tl.histogram(tl.where(cand, d, 0), 256)
-                    h -= tl.where(
-                        bins == 0, BLOCK_SEL - tl.sum(cand.to(tl.int32), 0), 0
-                    )
-                    b, above = _pick_bin(h, krem)
-                    sel = sel | (cand & (d > b))
-                    cand = cand & (d == b)
-                    krem -= above
-                sel = sel | (cand & (tl.cumsum(cand.to(tl.int32), 0) <= krem))
-            else:
-                sel = valid
-            opos = tl.cumsum(sel.to(tl.int32), 0) - 1
-            tok = ap * KPOOL
-            blk = tl.load(mbt_ptr + req * smbt + tok // MBS,
-                          mask=sel & (tok // MBS < max_blocks), other=0)  # fmt: skip
-            first = blk * MSTRIDE + tok % MBS
-            col = opos[:, None] * KPOOL + j[None, :]
-            tl.store(out + col, first[:, None] + j[None, :], mask=sel[:, None])
-            if WRITE_LOGICAL:
-                tl.store(topk_ptr + r * stopk + col, tok[:, None] + j[None, :],
-                         mask=sel[:, None])  # fmt: skip
-        else:
-            # Passes over the row: the threshold key byte by byte, then the
-            # selection in pool order, then the expansion.
+        ap = tl.arange(0, BLOCK_SEL)
+        valid = ap < npool
+        if npool > KSEL:
             tl.store(ctr_ptr + r, 0)
+            k = _radix_keys(tl.load(lg_ptr + r * slg + ap, mask=valid, other=0.0,
+                                    cache_modifier=".cg"))  # fmt: skip
             krem = KSEL
-            thr = 0
+            cand = valid
+            sel = ap < 0
             bins = tl.arange(0, 256)
             for i in tl.static_range(4):
+                d = _digit(k, i)
+                h = tl.histogram(tl.where(cand, d, 0), 256)
+                h -= tl.where(bins == 0, BLOCK_SEL - tl.sum(cand.to(tl.int32), 0), 0)
+                b, above = _pick_bin(h, krem)
+                sel = sel | (cand & (d > b))
+                cand = cand & (d == b)
+                krem -= above
+            sel = sel | (cand & (tl.cumsum(cand.to(tl.int32), 0) <= krem))
+        else:
+            sel = valid
+        opos = tl.cumsum(sel.to(tl.int32), 0) - 1
+        tok = ap * KPOOL
+        blk = tl.load(mbt_ptr + req * smbt + tok // MBS,
+                      mask=sel & (tok // MBS < max_blocks), other=0)  # fmt: skip
+        first = blk * MSTRIDE + tok % MBS
+        col = opos[:, None] * KPOOL + j[None, :]
+        tl.store(out + col, first[:, None] + j[None, :], mask=sel[:, None])
+        if WRITE_LOGICAL:
+            tl.store(topk_ptr + r * stopk + col, tok[:, None] + j[None, :],
+                     mask=sel[:, None])  # fmt: skip
+        _select_tail(ctx, npool, nsel, req, out, mbt_ptr, smbt, max_blocks, cnt_ptr + r,
+                     topk_ptr + r * stopk, topw, KPOOL, MBS, MSTRIDE, WRITE_LOGICAL,
+                     TOPW_BLOCK)  # fmt: skip
+
+
+@triton.jit
+def _select_tail(ctx, npool, nsel, req, out, mbt_ptr, smbt, max_blocks, cnt_ptr,
+                 topk_ptr, topw, KPOOL: tl.constexpr, MBS: tl.constexpr,
+                 MSTRIDE: tl.constexpr, WRITE_LOGICAL: tl.constexpr,
+                 TOPW_BLOCK: tl.constexpr):  # fmt: skip
+    """After the selected pools: the incomplete pool's tokens, the row's count
+    and, with WRITE_LOGICAL, the -1 fill of the logical top-k row."""
+    j = tl.arange(0, KPOOL)
+    ntail = ctx - npool * KPOOL
+    tok = npool * KPOOL + j
+    tm = (j < ntail) & (tok // MBS < max_blocks)
+    blk = tl.load(mbt_ptr + req * smbt + tok // MBS, mask=tm, other=0)
+    tl.store(out + nsel * KPOOL + j, blk * MSTRIDE + tok % MBS, mask=tm)
+    count = nsel * KPOOL + tl.sum(tm.to(tl.int32), 0)
+    tl.store(cnt_ptr, count)
+    if WRITE_LOGICAL:
+        tl.store(topk_ptr + nsel * KPOOL + j, tok, mask=tm)
+        for c0 in range(count, topw, TOPW_BLOCK):
+            cw = c0 + tl.arange(0, TOPW_BLOCK)
+            tl.store(topk_ptr + cw, -1, mask=cw < topw)
+
+
+@triton.jit(do_not_specialize=["smbt", "max_blocks", "stopk", "topw"])
+def select_long_kernel(
+    pos_ptr,
+    req_ptr,
+    kslot_ptr,
+    lg_ptr,
+    slg,
+    hist_ptr,
+    cand_ptr,
+    psel_ptr,
+    mbt_ptr,
+    smbt,
+    max_blocks,
+    sl_ptr,
+    cnt_ptr,
+    topk_ptr,
+    stopk,
+    topw,
+    KSEL: tl.constexpr,
+    KPOOL: tl.constexpr,
+    MBS: tl.constexpr,
+    MSTRIDE: tl.constexpr,
+    BLOCK_SEL: tl.constexpr,
+    CAP: tl.constexpr,
+    FB: tl.constexpr,
+    SLW: tl.constexpr,
+    EXP: tl.constexpr,
+    WRITE_LOGICAL: tl.constexpr,
+    TOPW_BLOCK: tl.constexpr,
+):
+    """The top KSEL pools of each row over BLOCK_SEL pools, from the logits and
+    the top-digit histogram `select_kernel` left; other rows do nothing. Its own
+    launch, so its tiles and warps do not set the logits programs' registers.
+
+    The histogram (zeroed here after the read) gives the threshold bin without
+    a pass over `lg`; one pass keeps the pools above it at the front of `psel`
+    and gathers the bin's pools and keys to `cand`, each in pool order, and a
+    radix select on the low bits picks the bin's share (ties to the lower pool
+    index) after them. A bin of more than CAP pools (near constant logits)
+    takes byte-wise passes over `lg` instead. Then the expansion to tokens and
+    MLA KV rows as in `select_kernel`.
+    """
+    r = tl.program_id(0)
+    tl.extra.cuda.gdc_wait()
+    # The dependents' own wait still covers this grid's writes.
+    tl.extra.cuda.gdc_launch_dependents()
+    pos = tl.load(pos_ptr + r).to(tl.int32)
+    live = tl.load(kslot_ptr + r) >= 0
+    ctx = tl.where(live, pos + 1, 0)
+    npool = ctx // KPOOL
+    if npool > BLOCK_SEL:
+        req = tl.load(req_ptr + r)
+        row = lg_ptr + r * slg
+        psel = psel_ptr + r * KSEL
+        hb = tl.arange(0, TOP_BINS)
+        hrow = hist_ptr + r * TOP_BINS + hb
+        hist = tl.load(hrow, cache_modifier=".cg")
+        tl.store(hrow, tl.zeros((TOP_BINS,), tl.int32))
+        top, above = _pick_bin(hist, KSEL, TOP_BINS)
+        ncand = tl.sum(tl.where(hb == top, hist, 0), 0)
+        bins = tl.arange(0, 256)
+        if ncand <= CAP:
+            cid = cand_ptr + r * (2 * CAP)
+            ckey = cid + CAP
+            taken = 0
+            nc = 0
+            for b0 in range(0, npool, FB):
+                ap = b0 + tl.arange(0, FB)
+                valid = ap < npool
+                k = _radix_keys(tl.load(row + ap, mask=valid, other=0.0,
+                                        cache_modifier=".cg"))  # fmt: skip
+                d = _top_digit(k)
+                hi = (valid & (d > top)).to(tl.int32)
+                eq = (valid & (d == top)).to(tl.int32)
+                tl.store(psel + taken + tl.cumsum(hi, 0) - 1, ap, mask=hi != 0)
+                at = nc + tl.cumsum(eq, 0) - 1
+                tl.store(cid + at, ap, mask=eq != 0)
+                tl.store(ckey + at, k, mask=eq != 0)
+                taken += tl.sum(hi, 0)
+                nc += tl.sum(eq, 0)
+            tl.debug_barrier()
+            # The low 32 - TOP_BITS bits of the bin's keys: 8, 8 and 4 bits.
+            ci = tl.arange(0, CAP)
+            cand = ci < ncand
+            ap = tl.load(cid + ci, mask=cand, other=0, cache_modifier=".cg")
+            k = tl.load(ckey + ci, mask=cand, other=0, cache_modifier=".cg")
+            krem = KSEL - above
+            sel = ci < 0
+            for i in tl.static_range(3):
+                if i == 0:
+                    d = (k >> 12) & 255
+                elif i == 1:
+                    d = (k >> 4) & 255
+                else:
+                    d = k & 15
+                h = tl.histogram(tl.where(cand, d, 0), 256)
+                h -= tl.where(bins == 0, CAP - tl.sum(cand.to(tl.int32), 0), 0)
+                b, ahead = _pick_bin(h, krem)
+                sel = sel | (cand & (d > b))
+                cand = cand & (d == b)
+                krem -= ahead
+            sel = sel | (cand & (tl.cumsum(cand.to(tl.int32), 0) <= krem))
+            seli = sel.to(tl.int32)
+            tl.store(psel + above + tl.cumsum(seli, 0) - 1, ap, mask=sel)
+        else:
+            # The threshold key byte by byte, then the selection in pool order.
+            krem = KSEL
+            thr = 0
+            for i in tl.static_range(4):
                 h = tl.zeros((256,), tl.int32)
-                for b0 in range(0, npool, BLOCK_SEL):
-                    ap = b0 + tl.arange(0, BLOCK_SEL)
+                for b0 in range(0, npool, FB):
+                    ap = b0 + tl.arange(0, FB)
                     valid = ap < npool
                     k = _radix_keys(tl.load(row + ap, mask=valid, other=0.0,
                                             cache_modifier=".cg"))  # fmt: skip
                     cand = valid
                     if i > 0:
-                        cand = cand & ((k >> (32 - 8 * i)) == (thr >> (32 - 8 * i)))
-                    n_out = BLOCK_SEL - tl.sum(cand.to(tl.int32), 0)
+                        shift = 32 - 8 * i
+                        cand = cand & ((k >> shift) == (thr >> shift))
+                    n_out = FB - tl.sum(cand.to(tl.int32), 0)
                     h += tl.histogram(tl.where(cand, _digit(k, i), 0), 256)
                     h -= tl.where(bins == 0, n_out, 0)
                 b, above = _pick_bin(h, krem)
@@ -512,8 +623,8 @@ def select_kernel(
                     thr = thr | (b << (24 - 8 * i))
             taken = 0
             ties = 0
-            for b0 in range(0, npool, BLOCK_SEL):
-                ap = b0 + tl.arange(0, BLOCK_SEL)
+            for b0 in range(0, npool, FB):
+                ap = b0 + tl.arange(0, FB)
                 valid = ap < npool
                 k = _radix_keys(tl.load(row + ap, mask=valid, other=0.0,
                                         cache_modifier=".cg"))  # fmt: skip
@@ -522,37 +633,26 @@ def select_kernel(
                     (eq != 0) & (tl.cumsum(eq, 0) + ties <= krem)
                 )
                 seli = sel.to(tl.int32)
-                tl.store(psel_ptr + r * KSEL + taken + tl.cumsum(seli, 0) - 1, ap,
-                         mask=sel)  # fmt: skip
+                tl.store(psel + taken + tl.cumsum(seli, 0) - 1, ap, mask=sel)
                 taken += tl.sum(seli, 0)
                 ties += tl.sum(eq, 0)
-            tl.debug_barrier()
-            for e0 in range(0, nsel, EXP):
-                rank = e0 + tl.arange(0, EXP)
-                m = rank < nsel
-                pool = tl.load(psel_ptr + r * KSEL + rank, mask=m, other=0,
-                               cache_modifier=".cg")  # fmt: skip
-                tok = pool * KPOOL
-                blk = tl.load(mbt_ptr + req * smbt + tok // MBS,
-                              mask=m & (tok // MBS < max_blocks), other=0)  # fmt: skip
-                first = blk * MSTRIDE + tok % MBS
-                col = rank[:, None] * KPOOL + j[None, :]
-                tl.store(out + col, first[:, None] + j[None, :], mask=m[:, None])
-                if WRITE_LOGICAL:
-                    tl.store(topk_ptr + r * stopk + col, tok[:, None] + j[None, :],
-                             mask=m[:, None])  # fmt: skip
-        ntail = ctx - npool * KPOOL
-        tok = npool * KPOOL + j
-        tm = (j < ntail) & (tok // MBS < max_blocks)
-        blk = tl.load(mbt_ptr + req * smbt + tok // MBS, mask=tm, other=0)
-        tl.store(out + nsel * KPOOL + j, blk * MSTRIDE + tok % MBS, mask=tm)
-        count = nsel * KPOOL + tl.sum(tm.to(tl.int32), 0)
-        tl.store(cnt_ptr + r, count)
-        if WRITE_LOGICAL:
-            tl.store(topk_ptr + r * stopk + nsel * KPOOL + j, tok, mask=tm)
-            for c0 in range(count, topw, TOPW_BLOCK):
-                cw = c0 + tl.arange(0, TOPW_BLOCK)
-                tl.store(topk_ptr + r * stopk + cw, -1, mask=cw < topw)
+        tl.debug_barrier()
+        j = tl.arange(0, KPOOL)
+        out = sl_ptr + r * SLW
+        for e0 in range(0, KSEL, EXP):
+            rank = e0 + tl.arange(0, EXP)
+            pool = tl.load(psel + rank, cache_modifier=".cg")
+            tok = pool * KPOOL
+            blk = tl.load(mbt_ptr + req * smbt + tok // MBS,
+                          mask=tok // MBS < max_blocks, other=0)  # fmt: skip
+            first = blk * MSTRIDE + tok % MBS
+            col = rank[:, None] * KPOOL + j[None, :]
+            tl.store(out + col, first[:, None] + j[None, :])
+            if WRITE_LOGICAL:
+                tl.store(topk_ptr + r * stopk + col, tok[:, None] + j[None, :])
+        _select_tail(ctx, npool, KSEL, req, out, mbt_ptr, smbt, max_blocks, cnt_ptr + r,
+                     topk_ptr + r * stopk, topw, KPOOL, MBS, MSTRIDE, WRITE_LOGICAL,
+                     TOPW_BLOCK)  # fmt: skip
 
 
 @triton.jit(do_not_specialize=["stopk", "topw", "smbt", "max_blocks"])

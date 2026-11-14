@@ -9,7 +9,9 @@
 - the projections are no less accurate than an FP32 GEMM against FP64;
 - the pool logits match an FP64 reference built on stock's query quant, and the
   top-512 pools match its exact top-k except at near-ties, for short contexts
-  (every pool), contexts above the top-k, and long ones (pass-based select);
+  (every pool), contexts above the top-k, and long ones (the histogram-bin
+  select of `select_long_kernel`); on every select path the pools are the
+  exact top 512 of the row's own logits;
 - the sparse MLA, W_UV and o_proj match FP64 on the selected rows;
 - padded rows write nothing; CUDA graph replays follow new inputs; draft steps
   that reuse the logical top-k attend to the same rows.
@@ -175,7 +177,7 @@ CASES = [
     ([2400, 3000, 2200], 6),
     ([2048, 2600, 3100, 4000], 6),
     ([2400] * 4, 1),
-    ([9000, 33000], 6),  # pass-based select
+    ([9000, 33000], 6),  # past 1024 pools: select_long_kernel
     ([33000], 1),
 ]
 
@@ -325,20 +327,110 @@ def test_select_matches_exact_topk(contexts, q):
         assert len(diff) <= 4 * 2 * int(near.sum()), (row, len(diff), flips)
 
 
-def test_select_hadamard_mma_matches_butterflies(monkeypatch):
-    """The MMA form of the indexer query's Hadamard gives the butterflies' bits."""
+def _repeat_index_entries(step, distinct, seed):
+    """Every indexer entry becomes a copy of one of `distinct` entries, so the
+    pool logits take at most `distinct` values (exact ties)."""
+    index = step.caches.index
+    pages = index.shape[0]
+    flat = index.view(pages, -1)
+    values = flat[:, : PAGE * IDIM].view(pages, PAGE, IDIM)
+    scales = flat[:, PAGE * IDIM :].view(pages, PAGE, 4)
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    src = torch.randint(0, distinct, (pages * PAGE,), generator=g, device="cuda")
+    values.copy_(values.reshape(-1, IDIM)[src].view(pages, PAGE, IDIM))
+    scales.copy_(scales.reshape(-1, 4)[src].view(pages, PAGE, 4))
+
+
+def _spread_index_scales(step, levels, seed):
+    """Every pool's FP32 scale times 1 + 0.01 j / levels, j drawn per pool from
+    `levels` values: on equal entries the logits take `levels` values within
+    1%, so one top-12-bit key bin holds every pool while the low bytes differ."""
+    index = step.caches.index
+    pages = index.shape[0]
+    scales = index.view(pages, -1)[:, PAGE * IDIM :].view(torch.float32)
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    j = torch.randint(0, levels, scales.shape, generator=g, device="cuda")
+    scales.mul_(1 + 0.01 * j.float() / levels)
+
+
+def _select_path(logits, npool):
+    """The path the select takes on a row: "registers" up to
+    SELECT_REGISTER_POOLS pools, else "bin" when the 512th pool's top-12-bit
+    key bin holds at most SELECT_CANDIDATES pools, else "bytes"."""
     from vllm.models.glm5next.nvidia.specialized_decode.hopper import dsa
 
-    base = _run([2400, 9000], 6, seed=7)[4]
-    monkeypatch.setattr(dsa, "SELECT_HADAMARD_MMA", True)
-    mma = _run([2400, 9000], 6, seed=7)[4]
-    assert torch.equal(base["counts"], mma["counts"])
-    pools = (
-        torch.tensor([2400, 9000]).repeat_interleave(6) + torch.arange(6).repeat(2)
-    ) // KPOOL
-    for row, n in enumerate(pools.tolist()):
-        assert torch.equal(base["logits"][row, : n + 1], mma["logits"][row, : n + 1])
-        assert torch.equal(base["rows"][row], mma["rows"][row])
+    if npool <= dsa.SELECT_REGISTER_POOLS:
+        return "registers"
+    k = logits.contiguous().view(torch.int32)
+    k = torch.where(k < 0, k ^ 0x7FFFFFFF, k)
+    d = ((k >> 20) + 2048) & 4095
+    top = d.sort(descending=True).values[511]
+    return "bin" if int((d == top).sum()) <= dsa.SELECT_CANDIDATES else "bytes"
+
+
+@pytest.mark.parametrize(
+    "contexts,q,distinct,levels,paths",
+    [
+        ([2400, 3000, 2200], 6, None, None, {"registers"}),
+        ([4092], 1, 1, None, {"registers"}),  # 1023 pools, constant logits
+        ([4100], 6, None, None, {"bin"}),  # 1025-1026 pools, past the registers
+        ([2400, 33000], 6, None, None, {"registers", "bin"}),  # both launches
+        ([9000, 33000], 6, None, None, {"bin"}),
+        ([33000] * 4, 1, None, None, {"bin"}),
+        ([2400, 9000] * 16, 1, None, None, {"registers", "bin"}),  # 12 programs
+        ([9000, 33000], 6, 48, None, {"bin"}),  # exact ties inside the bin
+        ([4100], 1, 1, None, {"bytes"}),  # constant logits: every pool in one bin
+        ([33000], 1, 1, None, {"bytes"}),
+        # 64 logit values within 1%: the byte passes narrow the bin, keep pools
+        # above the threshold key and take part of its ties
+        ([33000], 6, 1, 64, {"bytes"}),
+    ],
+)
+def test_select_is_exact_top512_of_its_logits(contexts, q, distinct, levels, paths):
+    """The selected pools are the top 512 of the row's own FP32 logits, ties to
+    the lower pool index, on every select path; a second step on the same
+    inputs selects the same, and the row histograms are left zeroed."""
+    g = torch.Generator(device="cuda").manual_seed(11)
+    max_pools = (max(contexts) + q) // KPOOL + 64
+    weights = _weights(g, max_pools)
+    step = Step(g, contexts, q)
+    if distinct is not None:
+        _repeat_index_entries(step, distinct, 12)
+    if levels is not None:
+        _spread_index_scales(step, levels, 13)
+    topk = torch.full((step.tokens, 2176), -7, dtype=torch.int32, device="cuda")
+    layer = _layer(weights, step.tokens, q, topk_buffer=topk)
+    layer.forward(step.x, step.inputs, step.caches, q)
+    torch.cuda.synchronize()
+    topk0, counts0 = topk.clone(), layer.ws.counts[: step.tokens].clone()
+    assert not layer.ws.histograms.any()
+    seen = set()
+    for row in range(step.tokens):
+        ctx = int(step.inputs.positions[row]) + 1
+        npool = ctx // KPOOL
+        count = int(layer.ws.counts[row])
+        tokens = topk[row, :count].long()
+        assert (topk[row, count:] == -1).all()
+        assert npool > 512
+        logits = layer.ws.logits[row, :npool]
+        seen.add(_select_path(logits, npool))
+        want = torch.argsort(-logits, stable=True)[:512].sort().values
+        got = (tokens[: 512 * KPOOL] // KPOOL).unique()
+        assert torch.equal(got, want), (row, int((got != want).sum()))
+        assert count == 512 * KPOOL + ctx % KPOOL
+        if distinct == 1 and levels is None:
+            assert torch.equal(got, torch.arange(512, device="cuda"))
+        if levels is not None:  # pools above the threshold key, and partial ties
+            thr = logits.sort(descending=True).values[511]
+            above = int((logits > thr).sum())
+            assert 0 < above < 512 < above + int((logits == thr).sum()), row
+    assert seen == paths
+    layer.forward(step.x, step.inputs, step.caches, q)
+    torch.cuda.synchronize()
+    assert not layer.ws.histograms.any()
+    assert torch.equal(layer.ws.counts[: step.tokens], counts0)
+    for row in range(step.tokens):
+        assert torch.equal(topk[row].sort().values, topk0[row].sort().values), row
 
 
 def _attention_ref(w, step, ws):
