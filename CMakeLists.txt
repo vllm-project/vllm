@@ -1787,12 +1787,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/rdna35_gdn_chunked.cu")
   endif()
 
-  # RDNA3.5 attention kernels (gfx1151 only).
+  # RDNA attention kernels (gfx1150, gfx1151, gfx1152, gfx1153; RDNA4: gfx1200,
+  # gfx1201).
   set(VLLM_ROCM_HAS_RDNA_ATTN OFF)
-  if("gfx1151" IN_LIST VLLM_GPU_ARCHES)
+  include(cmake/rocm_rdna_attn.cmake)
+  rdna_attn_targets(VLLM_RDNA_ATTN_TARGETS)
+  if(VLLM_RDNA_ATTN_TARGETS)
     set(VLLM_ROCM_HAS_RDNA_ATTN ON)
-    include(cmake/rocm_rdna_attn.cmake)
-    rdna_attn_target(_rocm_C_rdna_attn "gfx1151")
     list(APPEND VLLM_ROCM_EXT_SRC "csrc/rocm/rdna_registry.cu")
   endif()
 
@@ -1834,7 +1835,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX115X)
   endif()
   if(VLLM_ROCM_HAS_RDNA_ATTN)
-    target_link_libraries(_rocm_C PRIVATE _rocm_C_rdna_attn)
+    target_link_libraries(_rocm_C PRIVATE ${VLLM_RDNA_ATTN_TARGETS})
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA_ATTN)
   endif()
 endif()

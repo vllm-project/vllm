@@ -523,6 +523,8 @@ def _get_backend_priorities(
             ]
 
     backends = []
+    if on_gfx115x():
+        backends.append(AttentionBackendEnum.ROCM_RDNA_ATTN)
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:

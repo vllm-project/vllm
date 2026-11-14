@@ -1,4 +1,4 @@
-// RDNA3.5 decode attention over the paged KV cache
+// RDNA decode attention over the paged KV cache
 // (num_pages, NUM_KV_HEADS, PAGE_SIZE, 2 * HEAD_DIM), K and V packed per row,
 // as a template on one entry of rdna_decode_configs.h, or of
 // rdna_decode_batch_configs.h (one sequence per grid.y).
@@ -77,7 +77,9 @@ struct Decode {
   static_assert(kPageSize % 16 == 0, "a 16-key tile must sit inside one page");
 
   using elem_t = typename Elem<kBf16>::type;
-  using e16 = typename Elem<kBf16>::v16;
+  using op_t = typename Elem<kBf16>::op;
+  using opw_t = typename Elem<kBf16>::opw;
+  static constexpr int kOpWords = Elem<kBf16>::kOpWords;
   using e8 = typename Elem<kBf16>::v8;
   using e2 = typename Elem<kBf16>::v2;
 
@@ -85,7 +87,7 @@ struct Decode {
     return Elem<kBf16>::from_float(x);
   }
 
-  static __device__ __forceinline__ f8 wmma(e16 a, e16 b, f8 c) {
+  static __device__ __forceinline__ f8 wmma(op_t a, op_t b, f8 c) {
     return Elem<kBf16>::wmma(a, b, c);
   }
 
@@ -109,14 +111,10 @@ struct Decode {
 
   // B = P^T: lane l (row l & 15) holds P for keys 2e + (l >> 4) in probs[e].
   // A and B use the same k order, so no lane selects on its half.
-  static __device__ __forceinline__ e16 p_frag(const float* probs) {
-    u8v packed;
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      packed[i] = pack2(probs[2 * i], probs[2 * i + 1]);
-      packed[4 + i] = xhalf_u(packed[i]);
-    }
-    return __builtin_bit_cast(e16, packed);
+  static __device__ __forceinline__ op_t p_frag(const float* probs) {
+    return Elem<kBf16>::own_first_op(
+        [&](int i) { return pack2(probs[2 * i], probs[2 * i + 1]); },
+        [](unsigned x) { return xhalf_u(x); });
   }
 
   // The last key a query token at `position` sees: its own, or the end of the
@@ -481,8 +479,10 @@ struct Decode {
   // Consecutive dims of a K or V row per lane.
   static constexpr int kLaneDims = kPartDims / 16;
   // P goes into P@V as a high and a low part for precision. With at most 8 rows
-  // the low part uses the padding columns of the same WMMA.
+  // the low part uses the padding columns of the same WMMA; past that it costs
+  // a second WMMA, which gfx12 skips for fp16.
   static constexpr bool kPackLowHalf = kGroupRows <= 8;
+  static constexpr bool kLowWmma = !kPackLowHalf && (kBf16 || !kGfx12);
   // LDS tile rows are padded by 16 bytes to avoid bank conflicts.
   static constexpr int kTileRowBytes = kPartDims * 2 + 16;
   static constexpr int kTilesPerWave = kVInLds ? 2 : 1;
@@ -573,17 +573,15 @@ struct Decode {
   }
 
   // A = V^T for element `dim` of this lane's slice, in p_frag's key order.
-  static __device__ __forceinline__ e16 v_frag(const vrow_t* v, int dim) {
+  static __device__ __forceinline__ op_t v_frag(const vrow_t* v, int dim) {
     const int word = dim >> 1;
     const unsigned selector = (dim & 1) ? 0x07060302u : 0x05040100u;
-    u8v packed;
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      packed[i] =
-          __builtin_amdgcn_perm(v[2 * i + 1][word], v[2 * i][word], selector);
-      packed[4 + i] = xhalf_u(packed[i]);
-    }
-    return __builtin_bit_cast(e16, packed);
+    return Elem<kBf16>::own_first_op(
+        [&](int i) {
+          return __builtin_amdgcn_perm(v[2 * i + 1][word], v[2 * i][word],
+                                       selector);
+        },
+        [](unsigned x) { return xhalf_u(x); });
   }
 
   // Store a wave's real rows of one row tile, `stride` floats apart.
@@ -598,7 +596,7 @@ struct Decode {
       for (int j = 0; j < kLaneDims; ++j) values[j] = accum[j][e];
 #pragma unroll
       for (int k = 0; k < kLaneDims; k += kRowChunk)
-        *(fchunk*)(row + kLaneDims * (2 * e + laneHalf) + k) =
+        *(fchunk*)(row + kLaneDims * acc_row(e, laneHalf) + k) =
             *(const fchunk*)(values + k);
     }
   }
@@ -611,7 +609,7 @@ struct Decode {
 #pragma unroll
       for (int k = 0; k < kLaneDims; k += kRowChunk) {
         const fchunk values =
-            *(const fchunk*)(row + kLaneDims * (2 * e + laneHalf) + k);
+            *(const fchunk*)(row + kLaneDims * acc_row(e, laneHalf) + k);
 #pragma unroll
         for (int j = 0; j < kRowChunk; ++j) accum[k + j][e] += values[j];
       }
@@ -826,12 +824,13 @@ struct Decode {
       for (int rt = 0; rt < kRowTiles; ++rt) scores[rt] = f8{};
 #pragma unroll
       for (int c = 0; c < kPartChunks; ++c) {
-        const e16 kOperand =
-            *(const e16*)(kTile + laneRow * kTileRowBytes + c * 32);
+        const op_t kOperand = Elem<kBf16>::load_op(
+            (const elem_t*)(kTile + a_row(laneRow) * kTileRowBytes + c * 32),
+            laneHalf);
 #pragma unroll
         for (int rt = 0; rt < kRowTiles; ++rt) {
-          const e16 qOperand =
-              *(const e16*)&qShared[rt * 16 + laneRow][(firstChunk + c) * 16];
+          const op_t qOperand = Elem<kBf16>::load_op(
+              &qShared[rt * 16 + laneRow][(firstChunk + c) * 16], laneHalf);
           if (!(kAblate & 16) || c == 0)
             scores[rt] =
                 wmma(kOperand, qOperand, c == 0 ? opaque_zero() : scores[rt]);
@@ -929,35 +928,35 @@ struct Decode {
         }
         runSum[rt] = runSum[rt] * rescale + tileSum + xhalf(tileSum);
 
-        e16 pOperand, pLowOperand;
+        op_t pOperand, pLowOperand;
         float accumScale;
         if constexpr (kPackLowHalf) {
           // Columns 0..7 carry P's high part, 8..15 its low part; lanes 8..15
           // accumulate for row laneRow - 8.
-          const u8v high = __builtin_bit_cast(u8v, p_frag(probs));
-          const u8v low = __builtin_bit_cast(u8v, p_frag(probsLow));
+          const opw_t high = __builtin_bit_cast(opw_t, p_frag(probs));
+          const opw_t low = __builtin_bit_cast(opw_t, p_frag(probsLow));
           const unsigned upperMask = 0u - (unsigned)(laneRow >> 3);
-          u8v packed;
+          opw_t packed;
 #pragma unroll
-          for (int i = 0; i < 8; ++i)
+          for (int i = 0; i < kOpWords; ++i)
             packed[i] = (high[i] & ~upperMask) | (lower8(low[i]) & upperMask);
-          pOperand = __builtin_bit_cast(e16, packed);
+          pOperand = __builtin_bit_cast(op_t, packed);
           const unsigned rescaleBits = __builtin_bit_cast(unsigned, rescale);
           accumScale =
               __builtin_bit_cast(float, (rescaleBits & ~upperMask) |
                                             (lower8(rescaleBits) & upperMask));
         } else {
           pOperand = p_frag(probs);
-          pLowOperand = p_frag(probsLow);
+          if constexpr (kLowWmma) pLowOperand = p_frag(probsLow);
           accumScale = rescale;
         }
 #pragma unroll
         for (int j = 0; j < kLaneDims; ++j) {
           accum[rt][j] *= accumScale;
           if ((kAblate & 2) && j) continue;
-          const e16 vOperand = v_frag(v, j);
+          const op_t vOperand = v_frag(v, j);
           accum[rt][j] = wmma(vOperand, pOperand, accum[rt][j]);
-          if constexpr (!kPackLowHalf)
+          if constexpr (kLowWmma)
             accum[rt][j] = wmma(vOperand, pLowOperand, accum[rt][j]);
         }
       }
@@ -1072,7 +1071,7 @@ struct Decode {
 #pragma unroll
               for (int j = 0; j < kLaneDims; ++j)
                 x[j] = to_elem(accum[rt][j][e] * inv);
-              *(vrow_t*)(dst + kLaneDims * (2 * e + laneHalf)) =
+              *(vrow_t*)(dst + kLaneDims * acc_row(e, laneHalf)) =
                   *(const vrow_t*)x;
             }
           } else {
@@ -1240,7 +1239,9 @@ struct DecodeBatch {
   int blockTableStride, accStride, statStride, counterStride, mmStride;
 };
 
-template <DecodeConfig C, bool kBatched, typename OutT>
+// A is the GPU family the entry is built for: an entry in two families'
+// tables is two kernels, each in its family's code objects.
+template <DecodeConfig C, bool kBatched, typename OutT, Arch A>
 __global__ __launch_bounds__((Decode<C, kBatched>::kThreads)) void decode_attn(
     const typename Decode<C, kBatched>::elem_t* __restrict__ q,
     const typename Decode<C, kBatched>::elem_t* __restrict__ kv,
@@ -1288,7 +1289,7 @@ __global__ __launch_bounds__((Decode<C, kBatched>::kThreads)) void decode_attn(
 }
 
 // Arguments are checked by rdna_registry.cu.
-template <DecodeConfig C, bool kBatched = false>
+template <DecodeConfig C, bool kBatched = false, Arch A = Arch::kGfx1151>
 void launch_decode(const LaunchArgs& a) {
   using K = Decode<C, kBatched>;
   using elem_t = typename K::elem_t;
@@ -1303,17 +1304,23 @@ void launch_decode(const LaunchArgs& a) {
     (void)hipDeviceGetAttribute(&numWgps, hipDeviceAttributeMultiprocessorCount,
                                 device);
     (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
-        &perWgp, decode_attn<C, kBatched, elem_t>, K::kThreads, 0);
-    // The runtime assumes 64 KiB of LDS per WGP; gfx1151 has 128 KiB.
+        &perWgp, decode_attn<C, kBatched, elem_t, A>, K::kThreads, 0);
+    // The runtime assumes 64 KiB of LDS per WGP; gfx1150..gfx1153 and gfx12
+    // have 128 KiB (64 KiB at most per workgroup).  VGPRs a SIMD lane: 1536 in
+    // blocks of 24 on gfx1151 and gfx12, 1024 in blocks of 16 on the others.
     hipFuncAttributes attrs;
     hipDeviceProp_t prop;
-    if (hipFuncGetAttributes(&attrs, reinterpret_cast<const void*>(
-                                         decode_attn<C, kBatched, elem_t>)) ==
-            hipSuccess &&
+    if (hipFuncGetAttributes(
+            &attrs, reinterpret_cast<const void*>(
+                        decode_attn<C, kBatched, elem_t, A>)) == hipSuccess &&
         hipGetDeviceProperties(&prop, device) == hipSuccess &&
-        strstr(prop.gcnArchName, "gfx1151")) {
+        (strstr(prop.gcnArchName, "gfx115") ||
+         strstr(prop.gcnArchName, "gfx120"))) {
+      const bool bigVgprs = strstr(prop.gcnArchName, "gfx1151") ||
+                            strstr(prop.gcnArchName, "gfx120");
+      const int vgprs = bigVgprs ? 1536 : 1024, block = bigVgprs ? 24 : 16;
       const int wavesPerSimd =
-          std::min(16, 1536 / ((attrs.numRegs + 23) / 24 * 24));
+          std::min(16, vgprs / ((attrs.numRegs + block - 1) / block * block));
       const int byWaves = 2 * (2 * wavesPerSimd / K::kWaves);
       const int byLds = attrs.sharedSizeBytes
                             ? 128 * 1024 / (int)attrs.sharedSizeBytes
@@ -1340,7 +1347,7 @@ void launch_decode(const LaunchArgs& a) {
         << 1;
     batch = {a.bt_stride, a.acc_stride, a.ml_stride, a.cnt_stride, a.mm_stride};
   }
-  hipLaunchKernelGGL((decode_attn<C, kBatched, elem_t>), grid, threads, 0,
+  hipLaunchKernelGGL((decode_attn<C, kBatched, elem_t, A>), grid, threads, 0,
                      a.stream, static_cast<const elem_t*>(a.q),
                      static_cast<const elem_t*>(a.kv), a.bt, a.acc, a.m, a.l,
                      a.cnt, static_cast<elem_t*>(a.out), a.seq_lens, a.bt_width,

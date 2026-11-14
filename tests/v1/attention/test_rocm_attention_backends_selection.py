@@ -444,11 +444,13 @@ def test_standard_attention_backend_selection(
 ):
     """Standard ROCm backends remain selectable without DCP and reject DCP."""
     # These cases describe vLLM's default order; gfx1201 and gfx1100 swap
-    # ROCM_ATTN and TRITON_ATTN (covered by test_rdna_prefers_triton_attn).
+    # ROCM_ATTN and TRITON_ATTN (covered by test_rdna_prefers_triton_attn), and
+    # gfx1150..gfx1153 put ROCM_RDNA_ATTN first.
     import vllm.platforms.rocm as rocm
 
     monkeypatch.setattr(rocm, "on_gfx1201", lambda: False)
     monkeypatch.setattr(rocm, "on_gfx1100", lambda: False)
+    monkeypatch.setattr(rocm, "on_gfx115x", lambda: False)
     # Set environment variables
     for key, value in env_vars.items():
         monkeypatch.setenv(key, value)
@@ -546,6 +548,7 @@ def test_rdna_prefers_triton_attn(
     monkeypatch.setattr(rocm, "on_gfx1201", lambda: arch == "gfx1201")
     monkeypatch.setattr(rocm, "on_gfx1100", lambda: arch == "gfx1100")
     monkeypatch.setattr(rocm, "on_rdna4", lambda: arch in ("gfx1200", "gfx1201"))
+    monkeypatch.setattr(rocm, "on_gfx115x", lambda: False)
     config = AttentionSelectorConfig(**{**_AUTO_KV, **selector_kwargs})
     backend_path = rocm.RocmPlatform.get_attn_backend_cls(
         selected_backend=selected_backend, attn_selector_config=config

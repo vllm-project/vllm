@@ -44,8 +44,8 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
-// RDNA3.5 decode and prefill attention: the fields of every build (none off
-// gfx1151), and a launch of one build by its index.
+// RDNA decode and prefill attention: the fields of every build of the current
+// GPU's family (none on other GPUs), and a launch of one build by its index.
 std::vector<int64_t> rdna_decode_configs();
 std::vector<int64_t> rdna_decode_batch_configs();
 void rdna_decode_attn(int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,
