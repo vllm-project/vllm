@@ -7,6 +7,7 @@ import torch
 from tests.kernels.utils import to_int8
 from vllm import _cpu_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -25,6 +26,12 @@ M_FACTORS = [
 ]
 CACHE_SIZES = [2]
 DTYPE = [torch.bfloat16]
+
+
+@pytest.fixture(autouse=True)
+def seed_each_test():
+    # Any subset of this file (a CI shard) then draws the same inputs.
+    set_random_seed(0)
 
 
 def rand_int8(shape: tuple, device: str = "cpu"):
@@ -143,7 +150,9 @@ def onednn_gemm_test_helper(
         dtype=a.dtype
     )
 
-    torch.testing.assert_close(out, baseline)
+    # On Arm, oneDNN's bf16 GEMM lands up to ~2% from the fp32 reference at
+    # k=4096, past assert_close's bf16 default of 1.6%.
+    torch.testing.assert_close(out, baseline, rtol=3e-2, atol=1e-2)
 
     if use_bias:
         # To test runtime bias setting
@@ -152,7 +161,7 @@ def onednn_gemm_test_helper(
             dtype=a.dtype
         )
 
-        torch.testing.assert_close(out, baseline)
+        torch.testing.assert_close(out, baseline, rtol=3e-2, atol=1e-2)
 
 
 @pytest.mark.parametrize("n,k", NK_FACTORS)
