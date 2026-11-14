@@ -3,6 +3,7 @@
 #include "torch_utils.h"
 
 #include <cstring>
+#include <climits>
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
@@ -43,6 +44,16 @@ __global__ void apply_repetition_penalties_kernel(
       }
     }
   }
+}
+
+static inline __device__ uint32_t floatToSortable(float f) {
+  uint32_t u = __float_as_uint(f);
+  return (u & 0x80000000u) ? ~u : (u ^ 0x80000000u);
+}
+
+static inline __device__ float sortableToFloat(uint32_t s) {
+  uint32_t u = (s & 0x80000000u) ? (s ^ 0x80000000u) : ~s;
+  return __uint_as_float(u);
 }
 
 template <int step>
@@ -302,21 +313,6 @@ __device__ bool processHistogramStep(
             smemFinal.items.indices[dstIdx] = idx;
           }
         }
-      } else {
-        if (binIdx == thresholdBinIdx) {
-          // The elements in the threshold bin share the same 32 bits at step 3
-          int dstIdx = atomicAdd(&smemFinal.histo.data[binIdx], 1);
-          if (dstIdx < topK) {
-            if constexpr (mergeBlocks) {
-              smemOutput[dstIdx] = indices[idx];
-            } else if constexpr (multipleBlocksPerRow) {
-              smemOutput[dstIdx] = idx + rowStart;
-              reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
-            } else {
-              smemOutput[dstIdx] = idx;
-            }
-          }
-        }
       }
     }
   };
@@ -334,6 +330,67 @@ __device__ bool processHistogramStep(
 
   // Make sure the elements are in shared memory.
   __syncthreads();
+
+  // In step 3, collect threshold bin elements in deterministic row order
+  // to avoid warp scheduling non-determinism on boundary ties.
+  if constexpr (step == 3) {
+    int base = smemFoundTopKValues[0];
+    int needed = topK - base;
+    if (needed > 0) {
+      if (threadIdx.x == 0) {
+        smemFinalDstIdx[0] = 0;
+      }
+      __syncthreads();
+
+      const int rowLen = rowEnd - rowStart;
+      using BlockScan = cub::BlockScan<int, kNumThreadsPerBlock>;
+
+      for (int chunkStart = 0; chunkStart < rowLen;
+           chunkStart += kNumThreadsPerBlock) {
+        int localIdx = chunkStart + threadIdx.x;
+        bool isMatch = false;
+        float logit = 0.0f;
+        int tokenIdx = (stride1 == 1) ? localIdx : (rowStart + localIdx);
+        if (localIdx < rowLen) {
+          logit = (stride1 == 1) ? logits[rowStart + localIdx]
+                                 : logits[(rowStart + localIdx) * stride1];
+          if (isPartialMatch<patternShift>(logit, logitPattern) &&
+              extractBinIdx<step>(logit) == thresholdBinIdx) {
+            isMatch = true;
+          }
+        }
+
+        int rank = 0;
+        int chunkMatches = 0;
+        BlockScan(smemFinal.histo.scan)
+            .ExclusiveSum(isMatch ? 1 : 0, rank, chunkMatches);
+
+        if (isMatch) {
+          int dstIdx = base + smemFinalDstIdx[0] + rank;
+          if (dstIdx < topK) {
+            if constexpr (mergeBlocks) {
+              smemOutput[dstIdx] = indices[tokenIdx];
+            } else if constexpr (multipleBlocksPerRow) {
+              smemOutput[dstIdx] =
+                  (stride1 == 1) ? (localIdx + rowStart) : tokenIdx;
+              reinterpret_cast<float*>(smemOutput + topK)[dstIdx] = logit;
+            } else {
+              smemOutput[dstIdx] = tokenIdx;
+            }
+          }
+        }
+
+        __syncthreads();
+        if (threadIdx.x == 0) {
+          smemFinalDstIdx[0] += chunkMatches;
+        }
+        __syncthreads();
+        if (smemFinalDstIdx[0] >= needed) {
+          break;
+        }
+      }
+    }
+  }
 
   // Check if we should continue to next step
   return !finalBinFits;
@@ -355,10 +412,12 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
   static constexpr int kNumFinalItemsPerThread =
       kNumFinalItems / kNumThreadsPerBlock;
   // The class to sort the elements during the final pass.
-  using FinalSort = cub::BlockRadixSort<float, kNumThreadsPerBlock,
-                                        kNumFinalItemsPerThread, int>;
+  using FinalSort = cub::BlockRadixSort<uint64_t, kNumThreadsPerBlock,
+                                        kNumFinalItemsPerThread>;
   using FinalSortTempStorage =
       std::conditional_t<useRadixSort, typename FinalSort::TempStorage, int>;
+  using IndexSort =
+      cub::BlockRadixSort<int, kNumThreadsPerBlock, kNumFinalItemsPerThread>;
   // The class to compute the inclusive prefix-sum over the histogram.
   using Scan = cub::BlockScan<int, kNumThreadsPerBlock>;
 
@@ -379,6 +438,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
   __shared__ union {
     FinalItems items;
     FinalSortTempStorage finalSort;
+    typename IndexSort::TempStorage indexSort;
     Histogram histo;
   } smemFinal;
 
@@ -483,9 +543,11 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
            i += kNumThreadsPerBlock) {
         int outIndex = 0;
         auto logit = smemFinal.items.logits[i];
+        auto myIdx = smemFinal.items.indices[i];
         for (int j = 0; j < smemFinalDstIdx[0]; j++) {
           auto otherLogit = smemFinal.items.logits[j];
-          if (logit < otherLogit || (logit == otherLogit && i < j)) {
+          auto otherIdx = smemFinal.items.indices[j];
+          if (logit < otherLogit || (logit == otherLogit && otherIdx < myIdx)) {
             outIndex++;
           }
         }
@@ -503,32 +565,28 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
       if (useTopK512Optimization && smemFinalDstIdx[0] <= 128) {
         insertionSort();
       } else {
-        // Sorting with radix sort
-        float finalLogits[kNumFinalItemsPerThread];
-        // The indices of the elements to be sorted in the final pass.
-        int finalIndices[kNumFinalItemsPerThread];
+        // Sorting with radix sort using a composite 64-bit key (logit, ~tokenIdx)
+        // to guarantee deterministic tie-breaking on token index.
+        uint64_t myKeys[kNumFinalItemsPerThread];
 
-#pragma unroll
-        for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
-          finalLogits[ii] = useTopK512Optimization ? -INFINITY : -FLT_MAX;
-          if constexpr (useTopK512Optimization) finalIndices[ii] = -1;
-        }
-
-        // Read the elements from SMEM.
 #pragma unroll
         for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
           int srcIdx = ii * kNumThreadsPerBlock + threadIdx.x;
           if (srcIdx < smemFinalDstIdx[0]) {
-            finalLogits[ii] = smemFinal.items.logits[srcIdx];
-            finalIndices[ii] = smemFinal.items.indices[srcIdx];
+            float logit = smemFinal.items.logits[srcIdx];
+            uint32_t tokenIdx = smemFinal.items.indices[srcIdx];
+            uint32_t sortableLogit = floatToSortable(logit);
+            myKeys[ii] = (static_cast<uint64_t>(sortableLogit) << 32) |
+                         static_cast<uint64_t>(~tokenIdx);
+          } else {
+            myKeys[ii] = 0ULL;
           }
         }
         // Make sure the shared memory has been read.
         __syncthreads();
 
         // Sort the elements.
-        FinalSort(smemFinal.finalSort)
-            .SortDescendingBlockedToStriped(finalLogits, finalIndices);
+        FinalSort(smemFinal.finalSort).SortDescendingBlockedToStriped(myKeys);
 
         // Copy the data back to the shared memory storage.
         int baseIdx = smemFoundTopKValues[0];
@@ -538,11 +596,14 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
           int srcIdx = ii * kNumThreadsPerBlock + threadIdx.x;
           int dstIdx = baseIdx + srcIdx;
 
-          if (dstIdx < topK) {
-            smemOutput[dstIdx] = finalIndices[ii];
+          if (dstIdx < topK && myKeys[ii] != 0ULL) {
+            uint32_t tokenIdx =
+                ~static_cast<uint32_t>(myKeys[ii] & 0xffffffffu);
+            smemOutput[dstIdx] = tokenIdx;
             if constexpr (multipleBlocksPerRow) {
+              uint32_t sortableLogit = static_cast<uint32_t>(myKeys[ii] >> 32);
               reinterpret_cast<float*>(smemOutput + topK)[dstIdx] =
-                  finalLogits[ii];
+                  sortableToFloat(sortableLogit);
             }
           }
         }
@@ -553,18 +614,108 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
     __syncthreads();
   }
 
+  // Ensure deterministic index ordering in smemOutput before global store
+  if constexpr (!multipleBlocksPerRow) {
+    if (topK <= kNumFinalItems) {
+      int myKeys[kNumFinalItemsPerThread];
+#pragma unroll
+      for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
+        int idx = threadIdx.x * kNumFinalItemsPerThread + ii;
+        myKeys[ii] = (idx < topK) ? smemOutput[idx] : INT_MAX;
+      }
+      __syncthreads();
+
+      IndexSort(smemFinal.indexSort).SortBlockedToStriped(myKeys);
+
+#pragma unroll
+      for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
+        int idx = ii * kNumThreadsPerBlock + threadIdx.x;
+        if (idx < topK) {
+          smemOutput[idx] = myKeys[ii];
+        }
+      }
+      __syncthreads();
+    } else {
+      const int numTiles = (topK + kNumFinalItems - 1) / kNumFinalItems;
+      for (int tile = 0; tile < numTiles; ++tile) {
+        const int tileOffset = tile * kNumFinalItems;
+        int myKeys[kNumFinalItemsPerThread];
+#pragma unroll
+        for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
+          int idx = tileOffset + threadIdx.x * kNumFinalItemsPerThread + ii;
+          myKeys[ii] = (idx < topK) ? smemOutput[idx] : INT_MAX;
+        }
+        __syncthreads();
+
+        IndexSort(smemFinal.indexSort).SortBlockedToStriped(myKeys);
+
+#pragma unroll
+        for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
+          int idx = tileOffset + ii * kNumThreadsPerBlock + threadIdx.x;
+          if (idx < topK) {
+            smemOutput[idx] = myKeys[ii];
+          }
+        }
+        __syncthreads();
+      }
+
+      // Merge sorted tiles and write directly to global memory
+      for (int i = threadIdx.x; i < topK; i += kNumThreadsPerBlock) {
+        int val = smemOutput[i];
+        int myTile = i / kNumFinalItems;
+        int rank = i - myTile * kNumFinalItems;
+
+        for (int u = 0; u < numTiles; ++u) {
+          if (u != myTile) {
+            int uStart = u * kNumFinalItems;
+            int uEnd = min(topK, (u + 1) * kNumFinalItems);
+            int left = uStart;
+            int right = uEnd;
+            if (u < myTile) {
+              while (left < right) {
+                int mid = left + (right - left) / 2;
+                if (smemOutput[mid] <= val) {
+                  left = mid + 1;
+                } else {
+                  right = mid;
+                }
+              }
+            } else {
+              while (left < right) {
+                int mid = left + (right - left) / 2;
+                if (smemOutput[mid] < val) {
+                  left = mid + 1;
+                } else {
+                  right = mid;
+                }
+              }
+            }
+            rank += (left - uStart);
+          }
+        }
+
+        int outVal = (stride1 == 1) ? val : (val - rowStart);
+        outIndices[rank] = outVal;
+      }
+    }
+  }
+
   // Store to global memory.
-  for (int i = threadIdx.x; i < topK; i += kNumThreadsPerBlock) {
-    if constexpr (multipleBlocksPerRow) {
+  if constexpr (multipleBlocksPerRow) {
+    for (int i = threadIdx.x; i < topK; i += kNumThreadsPerBlock) {
       outIndices[i] = smemOutput[i];
       outLogits[i] = reinterpret_cast<float*>(smemOutput + topK)[i];
-    } else {
-      if (stride1 == 1) {
-        // stride1 == 1 will use vectorized_process, which indexes already skip
-        // the rowStart.
-        outIndices[i] = smemOutput[i];
-      } else {
-        outIndices[i] = smemOutput[i] - rowStart;
+    }
+  } else {
+    if (topK <= kNumFinalItems) {
+      for (int i = threadIdx.x; i < topK; i += kNumThreadsPerBlock) {
+        if (stride1 == 1) {
+          // stride1 == 1 will use vectorized_process, which indexes already skip
+          // the rowStart.
+          outIndices[i] = smemOutput[i];
+        } else {
+          outIndices[i] = smemOutput[i] - rowStart;
+        }
       }
     }
   }
