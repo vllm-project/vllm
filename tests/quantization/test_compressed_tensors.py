@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
+    should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -59,6 +60,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.import_utils import has_humming
@@ -708,6 +710,205 @@ def test_get_scheme_dict_returns_none_on_no_match():
         layer_name="model.layers.0.unmatched_layer",
     )
     assert result is None
+
+
+def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
+    """Prefix, substring, and suffix rules apply to re: targets.
+
+    Stacked q/k/v maps stay on concrete paths. Class names and kv-cache
+    field names are left alone.
+    """
+    gate = {"weights": "gate"}
+    attn = {"weights": "attn"}
+    linear = {"weights": "linear"}
+    config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": linear,
+            r"re:^model\.layers\.\d+\.mlp\.fc1\.gate\Z": gate,
+            r"re:.*self_attn\..*": attn,
+            r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z": {"weights": "q"},
+        },
+        ignore=[
+            "multi_modal_projector.linear_1",
+            r"re:^multi_modal_projector\.linear_\d+\Z",
+            r"re:^model\.layers\.\d+\.mlp\.gate\Z",
+            r"re:^model\.layers\.\d+\.ffn\.gate\.bias\Z",
+            r"re:^mtp\.layers\.\d+\Z",
+        ],
+        quant_format="pack-quantized",
+        kv_cache_scheme={
+            "type": "float",
+            "num_bits": 8,
+            "strategy": "tensor",
+            "symmetric": True,
+        },
+    )
+    mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "multi_modal_projector.": "vision_tower.multi_modal_projector.",
+        },
+        orig_to_new_substr={
+            ".mlp.fc1.": ".fc1.",
+            ".mlp.fc2.": ".fc2.",
+            ".shared_experts.w2": ".shared_experts.down_proj",
+            "mtp.": None,
+        },
+        orig_to_new_suffix={
+            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+    )
+    config.apply_vllm_mapper(mapper)
+
+    assert config.target_scheme_map["Linear"] is linear
+    assert config.target_scheme_map[r"re:.*self_attn\..*"] is attn
+    assert config.target_scheme_map[r"re:^model\.layers\.\d+\.fc1\.gate\Z"] is gate
+    # Stacked fusion is not written into regex targets.
+    assert r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in config.target_scheme_map
+    assert config.kv_cache_scheme == {
+        "type": "float",
+        "num_bits": 8,
+        "strategy": "tensor",
+        "symmetric": True,
+    }
+    assert "vision_tower.multi_modal_projector.linear_1" in config.ignore
+    assert r"re:^vision_tower\.multi_modal_projector\.linear_\d+\Z" in config.ignore
+    assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in config.ignore
+    assert (
+        r"re:^model\.layers\.\d+\.ffn\.gate\.e_score_correction_bias\Z" in config.ignore
+    )
+    assert r"re:^mtp\.layers\.\d+\Z" not in config.ignore
+    assert should_ignore_layer(
+        "vision_tower.multi_modal_projector.linear_3",
+        ignore=config.ignore,
+    )
+    assert should_ignore_layer(
+        "model.layers.2.ffn.gate.e_score_correction_bias",
+        ignore=config.ignore,
+    )
+    assert not should_ignore_layer(
+        "model.layers.2.ffn.gate.bias",
+        ignore=config.ignore,
+    )
+
+    stacked = CompressedTensorsConfig(
+        target_scheme_map={
+            "model.layers.0.self_attn.q_proj": {"weights": "q"},
+            r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z": {"weights": "q"},
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    stacked.apply_vllm_mapper(
+        WeightsMapper(orig_to_new_stacked={".q_proj": (".qkv_proj", "q")})
+    )
+    assert "model.layers.0.self_attn.qkv_proj" in stacked.target_scheme_map
+    assert r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in stacked.target_scheme_map
+
+    anchored = CompressedTensorsConfig(
+        target_scheme_map={r"re:^layers\.\d+\.mlp\.gate\Z": {"weights": "g"}},
+        ignore=["layers.1.mlp.gate"],
+        quant_format="pack-quantized",
+    )
+    anchored.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"": "model."}))
+    assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in anchored.target_scheme_map
+    assert anchored.ignore == ["model.layers.1.mlp.gate"]
+
+
+def test_apply_vllm_mapper_consolidates_ignore_after_rename():
+    """Concrete ignore names are renamed, then folded.
+
+    The regex uses the vLLM path. One leftover name stays a literal. A
+    diagonal is not widened to the missing corners. An existing regex stays
+    where it is.
+    """
+    config = CompressedTensorsConfig(
+        target_scheme_map={"Linear": {"weights": "linear"}},
+        ignore=[
+            "model.layers.0.mlp.fc1.gate",
+            "model.layers.1.mlp.fc1.gate",
+            "multi_modal_projector.0.linear",
+            "multi_modal_projector.1.linear",
+            "model.layers.0.mlp.down_proj",
+            "re:.*mtp.*",
+        ],
+        quant_format="pack-quantized",
+    )
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={
+                "multi_modal_projector.": "vision_tower.multi_modal_projector.",
+            },
+            orig_to_new_substr={".mlp.fc1.": ".fc1."},
+        )
+    )
+    assert config.ignore == [
+        r"re:^model\.layers\.(?:0|1)\.fc1\.gate\Z",
+        r"re:^vision_tower\.multi_modal_projector\.(?:0|1)\.linear\Z",
+        "model.layers.0.mlp.down_proj",
+        "re:.*mtp.*",
+    ]
+
+    diagonal = CompressedTensorsConfig(
+        target_scheme_map={"Linear": {"weights": "linear"}},
+        ignore=[
+            "layers.0.experts.0.gate",
+            "layers.1.experts.1.gate",
+        ],
+        quant_format="pack-quantized",
+    )
+    diagonal.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"": "model."}))
+    assert diagonal.ignore == [
+        (
+            "re:^(?:model\\.layers\\.0\\.experts\\.0\\.gate"
+            "|model\\.layers\\.1\\.experts\\.1\\.gate)\\Z"
+        )
+    ]
+
+    rectangle = CompressedTensorsConfig(
+        target_scheme_map={"Linear": {"weights": "linear"}},
+        ignore=[
+            f"layers.{layer}.experts.{expert}.gate"
+            for layer in range(2)
+            for expert in range(2)
+        ],
+        quant_format="pack-quantized",
+    )
+    rectangle.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"": "model."}))
+    assert rectangle.ignore == [r"re:^model\.layers\.(?:0|1)\.experts\.(?:0|1)\.gate\Z"]
+
+
+def test_apply_vllm_mapper_folds_targets_with_the_same_scheme():
+    """Concrete targets are renamed, then folded per scheme.
+
+    A class name stays a class name. Two layers with different schemes stay
+    concrete so neither scheme covers the other layer.
+    """
+    gate = {"weights": "gate"}
+    other = {"weights": "other"}
+    linear = {"weights": "linear"}
+    config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": linear,
+            "model.layers.0.mlp.fc1.gate": gate,
+            "model.layers.1.mlp.fc1.gate": gate,
+            "model.layers.2.mlp.gate": other,
+            "model.layers.3.mlp.gate": {"weights": "third"},
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    config.apply_vllm_mapper(WeightsMapper(orig_to_new_substr={".mlp.fc1.": ".fc1."}))
+    folded = r"re:^model\.layers\.(?:0|1)\.fc1\.gate\Z"
+    assert config.target_scheme_map[folded] is gate
+    assert config.target_scheme_map["Linear"] is linear
+    assert "model.layers.0.mlp.fc1.gate" not in config.target_scheme_map
+    assert config.target_scheme_map["model.layers.2.mlp.gate"] is other
+    assert config.target_scheme_map["model.layers.3.mlp.gate"] == {"weights": "third"}
 
 
 # Test constants for activation quantization
