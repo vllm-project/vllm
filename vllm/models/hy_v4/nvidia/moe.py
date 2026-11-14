@@ -91,6 +91,7 @@ class HYV4MoEFused(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        reduce_results: bool = True,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -167,6 +168,7 @@ class HYV4MoEFused(nn.Module):
             e_score_correction_bias=self.expert_bias,
             shared_experts=self.shared_experts,
             swiglu_limit=moe_swiglu_limit,
+            reduce_results=reduce_results,
         )
         self.prefix = prefix
         if use_swiglu_clamp:
