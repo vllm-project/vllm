@@ -301,6 +301,14 @@ MESSAGES_WITHOUT_TOOLS: list[ChatCompletionMessageParam] = [
     {"role": "user", "content": "Can you tell me a joke please?"},
 ]
 
+MESSAGES_ASKING_FOR_JSON: list[ChatCompletionMessageParam] = [
+    {
+        "role": "user",
+        "content": "Describe a fictional person as a JSON object with the keys "
+        "name and age.",
+    }
+]
+
 MESSAGES_ASKING_FOR_TOOLS: list[ChatCompletionMessageParam] = [
     {"role": "user", "content": "What is the weather in Dallas, Texas in Fahrenheit?"}
 ]

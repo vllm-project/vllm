@@ -5,6 +5,7 @@ import openai
 import pytest
 
 from .utils import (
+    MESSAGES_ASKING_FOR_JSON,
     MESSAGES_WITHOUT_TOOLS,
     SEED,
     WEATHER_TOOL,
@@ -82,6 +83,37 @@ async def test_chat_completion_without_tools(
     assert finish_reason_count == 1
     assert len(chunks)
     assert "".join(chunks) == output_text
+
+
+# test: a JSON answer must stream the same content as non-streaming, even for
+# parsers that accept tool calls written as bare JSON objects.
+@pytest.mark.asyncio
+async def test_chat_completion_json_answer_without_tools(
+    client: openai.AsyncOpenAI, server_config: ServerConfig
+):
+    models = await client.models.list()
+    request = dict(
+        messages=ensure_system_prompt(MESSAGES_ASKING_FOR_JSON, server_config),
+        temperature=0,
+        max_completion_tokens=100,
+        model=models.data[0].id,
+        seed=SEED,
+        response_format={"type": "json_object"},
+    )
+    chat_completion = await client.chat.completions.create(**request)
+    message = chat_completion.choices[0].message
+    assert message.content is not None
+    assert message.content.lstrip().startswith("{")
+    assert not message.tool_calls
+
+    stream = await client.chat.completions.create(**request, stream=True)
+    chunks: list[str] = []
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        assert not delta.tool_calls
+        if delta.content:
+            chunks.append(delta.content)
+    assert "".join(chunks) == message.content
 
 
 # test: `tools: []` is served like a request without tools, as OpenAI does,
