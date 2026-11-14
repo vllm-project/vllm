@@ -3,9 +3,9 @@
 """Golden tests for the native Inkling renderer encoding.
 
 The message fixtures mirror the Rust renderer's fixture tests
-(``rust/src/chat/src/renderer/inkling/tests.rs``) so the two frontends stay
-in token-level parity. Image blocks emit the bare ``<|content_image|>`` marker;
-``InklingMultiModalProcessor`` inserts the per-patch placeholder run.
+(`rust/src/chat/src/renderer/inkling/tests.rs`) so the two frontends stay
+in token-level parity. Image blocks emit the bare `<|content_image|>` marker;
+`InklingMultiModalProcessor` inserts the per-patch placeholder run.
 """
 
 import pytest
@@ -259,6 +259,108 @@ class TestRenderingSemantics:
                 add_generation_prompt=False,
             )
             == "<|message_tool|>my_tool<|content_text|>ok<|end_message|>"
+        )
+
+    def test_tool_response_image_part(self, inkling_tokenizer):
+        """Tool results may carry images (e.g. screenshots); every part must
+        render and the image must emit a marker for the MM processor."""
+        messages = [
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "name": "screenshot",
+                "content": [
+                    {"type": "text", "text": "captured"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == (
+            "<|message_tool|>screenshot<|content_text|>captured<|end_message|>"
+            "<|message_tool|>screenshot<|content_image|><|end_message|>"
+        )
+
+    def test_tool_response_image_marker_per_part(self, inkling_tokenizer):
+        image = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"},
+        }
+        text = render_text(
+            inkling_tokenizer,
+            [{"role": "tool", "name": "shot", "content": [image, image, image]}],
+            add_generation_prompt=False,
+        )
+        assert text.count("<|content_image|>") == 3
+
+    def test_tool_response_multiple_text_parts(self, inkling_tokenizer):
+        messages = [
+            {
+                "role": "tool",
+                "name": "bash",
+                "content": [
+                    {"type": "text", "text": "stdout"},
+                    {"type": "text", "text": "stderr"},
+                ],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == ("<|message_tool|>bash<|content_text|>stdoutstderr<|end_message|>")
+
+    def test_tool_response_coalesces_text_around_media(self, inkling_tokenizer):
+        image = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"},
+        }
+        messages = [
+            {
+                "role": "tool",
+                "name": "shot",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "text", "text": " and "},
+                    image,
+                    {"type": "text", "text": "after"},
+                    {"type": "text", "text": " image"},
+                ],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == (
+            "<|message_tool|>shot<|content_text|>before and <|end_message|>"
+            "<|message_tool|>shot<|content_image|><|end_message|>"
+            "<|message_tool|>shot<|content_text|>after image<|end_message|>"
+        )
+
+    @pytest.mark.parametrize("content", ["", None, []])
+    def test_tool_response_empty_still_emits_block(self, inkling_tokenizer, content):
+        assert (
+            render_text(
+                inkling_tokenizer,
+                [{"role": "tool", "name": "noop", "content": content}],
+                add_generation_prompt=False,
+            )
+            == "<|message_tool|>noop<|content_text|><|end_message|>"
+        )
+
+    def test_tool_response_audio_part(self, inkling_tokenizer):
+        messages = [
+            {
+                "role": "tool",
+                "name": "record",
+                "content": [{"type": "input_audio", "input_audio": {}}],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == (
+            "<|message_tool|>record<|content_audio_input|><|audio_end|><|end_message|>"
         )
 
     def test_tool_call_args_object_form(self, inkling_tokenizer):

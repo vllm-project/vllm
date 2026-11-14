@@ -17,7 +17,7 @@
 
 mod content;
 mod parser;
-mod pattern;
+mod pcre;
 mod spec;
 mod template;
 mod transform;
@@ -25,7 +25,7 @@ mod transform;
 #[cfg(test)]
 mod tests;
 
-pub use parser::HfUnifiedParser;
+pub use parser::{HfPosition, HfUnifiedParser};
 pub use template::ResponseTemplate;
 use thiserror::Error;
 use thiserror_ext::Macro;

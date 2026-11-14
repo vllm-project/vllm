@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.platforms import current_platform
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -29,15 +30,21 @@ class FakeEplbState:
     def __init__(self, parallel_config: Any, device: torch.device):
         self.parallel_config = parallel_config
         self.device = device
-        self.add_model_calls: list[tuple[Any, Any]] = []
+        self.add_model_calls: list[tuple[Any, Any, str | None]] = []
         self.step_calls: list[tuple[bool, bool, bool]] = []
         self.async_started = False
         self.is_async = True
         self.update_mapping_calls: list[tuple[Any, torch.Tensor]] = []
         FakeEplbState.instances.append(self)
 
-    def add_model(self, model: Any, model_config: Any) -> None:
-        self.add_model_calls.append((model, model_config))
+    def add_model(
+        self,
+        model: Any,
+        model_config: Any,
+        *,
+        model_name: str | None = None,
+    ) -> None:
+        self.add_model_calls.append((model, model_config, model_name))
 
     def step(self, is_dummy: bool, is_profile: bool, *, log_stats: bool) -> None:
         self.step_calls.append((is_dummy, is_profile, log_stats))
@@ -98,6 +105,15 @@ def _make_runner(**overrides: Any) -> Any:
     runner.execute_model_state = None
     for key, value in overrides.items():
         setattr(runner, key, value)
+    spec_config = runner.speculative_config
+    runner._draft_workspace_lane = int(
+        spec_config is not None
+        and (
+            spec_config.use_dspark()
+            if hasattr(spec_config, "use_dspark")
+            else getattr(spec_config, "method", None) == "dspark"
+        )
+    )
     return runner
 
 
@@ -131,7 +147,7 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
     assert runner.model is model
     assert runner.model_state is not None
     assert runner.eplb_state is not None
-    assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
+    assert runner.eplb_state.add_model_calls == [(model, runner.model_config, None)]
     assert runner.eplb_state.async_started is True
 
 
@@ -159,7 +175,7 @@ def test_v2_load_model_with_dummy_weights_defers_eplb_async_loop(monkeypatch):
     assert runner.load_config.load_format == "dummy"
     assert runner.eplb_state is not None
     # A scaling-up worker registers so it can join the EPLB communicator.
-    assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
+    assert runner.eplb_state.add_model_calls == [(model, runner.model_config, None)]
     assert runner.eplb_state.async_started is False
 
 
@@ -174,6 +190,74 @@ def test_v2_setup_eplb_from_mapping_updates_state_in_place():
     assert state.update_mapping_calls == [(runner.model_config, mapping)]
 
 
+def test_v2_load_model_registers_dspark_speculator_when_supported(monkeypatch):
+    FakeEplbState.instances.clear()
+    target_model = SimpleNamespace(is_moe=True)
+    draft_model = SimpleNamespace(is_moe=True)
+    draft_model_config = SimpleNamespace(
+        model="dspark-draft",
+        hf_config=SimpleNamespace(model_type="deepseek_v4"),
+    )
+
+    class FakeDSparkSpeculator:
+        def __init__(self):
+            self.model = draft_model
+            self.eplb_state = None
+            self.draft_logits = None
+
+        def load_model(self, target_model):
+            return None
+
+        def set_eplb_state(self, state) -> None:
+            self.eplb_state = state
+
+        def free_unused_weights(self, target_model) -> None:
+            return None
+
+    monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
+    monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
+    monkeypatch.setattr(mrv2, "DraftModelSpeculator", FakeDSparkSpeculator)
+    monkeypatch.setattr(
+        mrv2,
+        "get_model_loader",
+        lambda load_config: SimpleNamespace(load_model=lambda **_: target_model),
+    )
+    monkeypatch.setattr(
+        mrv2,
+        "init_model_state",
+        lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+    )
+    monkeypatch.setattr(
+        eplb,
+        "get_mixture_of_experts_model",
+        lambda model: model if getattr(model, "is_moe", False) else None,
+    )
+
+    speculator = FakeDSparkSpeculator()
+    runner = _make_runner(
+        is_last_pp_rank=False,
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            draft_model_config=draft_model_config,
+            prefill_context_kv_only=False,
+        ),
+        speculator=speculator,
+    )
+    mrv2.GPUModelRunner.load_model(runner)
+
+    eplb_state = runner.eplb_state
+    assert eplb_state is not None
+    expected_calls = [(target_model, runner.model_config, None)]
+    if not current_platform.is_rocm():
+        expected_calls.insert(
+            0, (draft_model, draft_model_config, "dspark-draft (draft)")
+        )
+        assert speculator.eplb_state is eplb_state
+    else:
+        assert speculator.eplb_state is None
+    assert eplb_state.add_model_calls == expected_calls
+
+
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     events = []
     runner = _make_runner(is_last_pp_rank=False, num_speculative_steps=0)
@@ -185,7 +269,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         slot_mappings_by_layer=None,
         hidden_states=None,
         aux_hidden_states=None,
-        dp_sync=None,
+        dp_sync_state=None,
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,

@@ -4,19 +4,19 @@
 
 In push mode, scheduler-side responsibilities are:
 
-* D side (decode): on ``update_state_after_alloc``, stash registration data
+* D side (decode): on `update_state_after_alloc`, stash registration data
   (D's identity + locally allocated block IDs) into
-  ``_push_pending_registrations``. The D worker drains it from
-  ``meta.push_registrations`` next step and sends a NIXL notification to the
+  `_push_pending_registrations`. The D worker drains it from
+  `meta.push_registrations` next step and sends a NIXL notification to the
   P worker (no scheduler-level networking).
-* P side (prefill): on ``request_finished``, stash the finished block IDs
-  into ``_finished_request_blocks`` for the lease, and into
-  ``_newly_finished_push_blocks`` so the P worker picks them up via
-  ``meta.push_finished_blocks`` and matches against any D registrations
+* P side (prefill): on `request_finished`, stash the finished block IDs
+  into `_finished_request_blocks` for the lease, and into
+  `_newly_finished_push_blocks` so the P worker picks them up via
+  `meta.push_finished_blocks` and matches against any D registrations
   it already received via NIXL notifications.
-* Both sides: ``has_pending_push_work`` keeps the engine main loop stepping
-  while pushes are in flight. ``update_connector_output`` cleans up
-  ``_finished_request_blocks`` once the WRITE completes.
+* Both sides: `has_pending_push_work` keeps the engine main loop stepping
+  while pushes are in flight. `update_connector_output` cleans up
+  `_finished_request_blocks` once the WRITE completes.
 
 A soft per-registration watchdog on the D scheduler fails requests that have
 been registered but not fulfilled within a configurable timeout.
@@ -56,7 +56,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
     All P2P communication is deferred to the worker level via NIXL
     notifications. The scheduler communicates with workers only through
-    the standard ``build_connector_meta`` / ``update_connector_output``
+    the standard `build_connector_meta` / `update_connector_output`
     hooks.
     """
 
@@ -129,7 +129,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         """In push mode, D stores registration data for the worker to send
-        to P via NIXL notification (deferred to ``build_connector_meta``).
+        to P via NIXL notification (deferred to `build_connector_meta`).
         """
         params = request.kv_transfer_params
         logger.debug(

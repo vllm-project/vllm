@@ -11,17 +11,19 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import torch
 from torch import nn
-from transformers import BatchFeature
+from transformers import BatchFeature, Kimi_K25Config
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
@@ -63,7 +65,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k25 import KimiK25Processor
 from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
@@ -135,7 +136,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
 
         # Resolve token ID from the tokenizer because transformers v5
         # may remap token IDs vs config.json.
-        config_token_id = hf_config.media_placeholder_token_id
+        config_token_id = hf_config.image_token_id
         resolved_token_id = tokenizer.convert_tokens_to_ids("<|media_pad|>")
         unk_token_id = getattr(tokenizer, "unk_token_id", None)
         is_valid_resolved = isinstance(resolved_token_id, int) and (
@@ -143,7 +144,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         )
         if is_valid_resolved and resolved_token_id != config_token_id:
             logger.warning_once(
-                "Kimi-K2.5 config.media_placeholder_token_id (%d) disagrees "
+                "Kimi-K2.5 config.image_token_id (%d) disagrees "
                 "with tokenizer mapping for <|media_pad|> (%d). "
                 "Using tokenizer value.",
                 config_token_id,
@@ -151,7 +152,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
             )
             media_token_id = resolved_token_id
             # Patch config so downstream code also sees the correct ID.
-            hf_config.media_placeholder_token_id = resolved_token_id
+            hf_config.image_token_id = resolved_token_id
         else:
             media_token_id = config_token_id
 
@@ -170,7 +171,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         return self.hf_processor
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(KimiK25Config)
+        return self.ctx.get_hf_config(Kimi_K25Config)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # None means unlimited
@@ -317,7 +318,12 @@ class KimiK25ForConditionalGeneration(
             # mm projector
             "mm_projector.proj.0": "mm_projector.linear_1",
             "mm_projector.proj.2": "mm_projector.linear_2",
-        }
+        },
+        orig_to_new_suffix={
+            ".self_attn.attn.q_scale": ".self_attn.mla_attn.mla_attn.q_scale",
+            ".self_attn.attn.k_scale": ".self_attn.mla_attn.mla_attn.k_scale",
+            ".self_attn.attn.v_scale": ".self_attn.mla_attn.mla_attn.v_scale",
+        },
     )
 
     @classmethod
@@ -338,7 +344,7 @@ class KimiK25ForConditionalGeneration(
     ) -> None:
         super().__init__()
         model_config = vllm_config.model_config
-        config: KimiK25Config = model_config.hf_config
+        config: Kimi_K25Config = model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -347,7 +353,6 @@ class KimiK25ForConditionalGeneration(
         )
         self.hidden_size = config.text_config.hidden_size
         self.device = current_platform.current_device()
-        # Build vision tower directly with KimiK25VisionConfig
         with self._mark_tower_model(vllm_config, "vision_chunk"):
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
@@ -364,6 +369,7 @@ class KimiK25ForConditionalGeneration(
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
+                out_hidden_size=config.text_config.hidden_size,
                 use_data_parallel=self.use_data_parallel,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
@@ -383,7 +389,7 @@ class KimiK25ForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-        self.media_placeholder: int = self.config.media_placeholder_token_id
+        self.media_placeholder: int = self.config.image_token_id
 
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig | None):
         if isinstance(quant_config, compressed_tensors.CompressedTensorsConfig):
@@ -479,30 +485,13 @@ class KimiK25ForConditionalGeneration(
     # Image-only (t == 1). Video chunks (t > 1) fall back to eager.      #
     # ------------------------------------------------------------------ #
 
-    @property
-    def _encoder_cudagraph_pad_totals(self) -> dict[int, int]:
-        """Row count of each captured buffer set, keyed by cu_seqlens ptr."""
-        totals = self.__dict__.get("_encoder_cg_pad_totals")
-        if totals is None:
-            totals = {}
-            self.__dict__["_encoder_cg_pad_totals"] = totals
-        return totals
-
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
-        pad_totals = self._encoder_cudagraph_pad_totals
-
-        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Varlen attention requires cu_seqlens[-1] to equal the number of
-            # rows actually passed in. The captured buffers are sized for the
-            # full token budget, so a smaller real batch has to be completed
-            # with one trailing padding sequence; declaring fewer rows than the
-            # buffer holds is undefined behaviour and returns NaN on FlashAttn.
-            total = pad_totals.get(dst.data_ptr())
-            n = min(src.shape[0], dst.shape[0])
-            dst[:n].copy_(src[:n])
-            dst[n:] = total if total is not None else src[-1]
+        attn_backend = self.vision_tower.encoder.blocks[0].attn.attn_backend
+        padding_logics = MMEncoderAttention.get_cu_seqlens_padding_logics(
+            attn_backend, "cu_seqlens"
+        )
 
         return EncoderCudaGraphConfig(
             modalities=["vision_chunk"],
@@ -515,7 +504,7 @@ class KimiK25ForConditionalGeneration(
                 "merge_gather_idx",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={"cu_seqlens": pad_cu_seqlens},
+            padding_logics=padding_logics,
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -633,8 +622,8 @@ class KimiK25ForConditionalGeneration(
 
         # max_seqlen must cover the worst case: one item consuming the full
         # budget, i.e. token_budget * kh * kw patches.
-        # max_batch_size + 1 leaves a spare cu_seqlens slot so replay can append
-        # a padding sequence covering rows the real batch does not fill.
+        # max_batch_size + 1 leaves a spare cu_seqlens slot so replay can
+        # pad the tail with zero-length sequences.
         metadata = self.vision_tower.prepare_encoder_cudagraph_metadata(
             grid_thw_list,
             max_batch_size=max_batch_size + 1,
@@ -644,10 +633,6 @@ class KimiK25ForConditionalGeneration(
 
         values: dict[str, torch.Tensor] = {"pixel_values": dummy_pixel_values}
         values.update({k: v for k, v in metadata.items() if v is not None})
-
-        cu_seqlens = values.get("cu_seqlens")
-        if cu_seqlens is not None:
-            self._encoder_cudagraph_pad_totals[cu_seqlens.data_ptr()] = total_patches
 
         return EncoderCudaGraphCaptureInputs(values=values)
 
@@ -663,8 +648,8 @@ class KimiK25ForConditionalGeneration(
         grid_thw_list = self._get_grid_thw_list(mm_kwargs)
         pixel_values = mm_kwargs["pixel_values"]
 
-        # Unpadded: pad_cu_seqlens completes the tail with the padding sequence
-        # so cu_seqlens[-1] matches the captured buffer's row count.
+        # Unpadded: the manager pads the cu_seqlens tail with zero-length
+        # sequences whose entries repeat the real total.
         metadata = self.vision_tower.prepare_encoder_cudagraph_metadata(
             grid_thw_list,
             max_batch_size=None,
@@ -677,13 +662,13 @@ class KimiK25ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = inputs.pop("pixel_values")
+        pixel_values = values.pop("pixel_values")
         # Remaining keys (pos_embeds, rope_freqs_cis, cu_seqlens, max_seqlen,
         # merge_gather_idx, sequence_lengths) are consumed as encoder_metadata.
-        encoder_metadata = inputs
+        encoder_metadata = values
 
         # Fast path: uses precomputed pos_embeds + merge_gather_idx.
         vt_output = self.vision_tower(
@@ -716,5 +701,31 @@ class KimiK25ForConditionalGeneration(
         return torch.cat(embeddings, dim=0)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        scale_mapper = self.hf_to_vllm_mapper
+        if self.quant_config is not None:
+            scale_mapper |= self.quant_config.get_cache_scale_mapper()
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        def non_scale_weights():
+            for name, weight in weights:
+                if ".self_attn." in name and name.endswith(
+                    (".q_scale", ".k_scale", ".v_scale")
+                ):
+                    mapped_name = scale_mapper.map_name(name)
+                    if mapped_name is not None and mapped_name in params_dict:
+                        param = params_dict[mapped_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, weight)
+                        loaded_params.add(mapped_name)
+                        continue
+                yield name, weight
+
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params |= loader.load_weights(
+            non_scale_weights(), mapper=self.hf_to_vllm_mapper
+        )
+        return loaded_params
