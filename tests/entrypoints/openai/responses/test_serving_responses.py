@@ -747,6 +747,126 @@ async def test_online_renderer_returns_typed_error_for_bad_harmony_call_referenc
     assert "No call message found for missing" in result.error.message
 
 
+_FUNCTION_TOOL = {
+    "type": "function",
+    "name": "get_weather",
+    "parameters": {"type": "object", "properties": {}},
+}
+_BUILTIN_TOOLS = [
+    {"type": "code_interpreter", "container": {"type": "auto"}},
+    {"type": "web_search_preview"},
+]
+
+
+@pytest.mark.parametrize(
+    "tools, has_tool, render_builtin, tool_choice, exclude, expected_names",
+    [
+        # ParsableContext path: function + builtin tools all reach the prompt.
+        (
+            [_FUNCTION_TOOL, *_BUILTIN_TOOLS],
+            True,
+            True,
+            "auto",
+            False,
+            ["get_weather", "code_interpreter", "web_search_preview"],
+        ),
+        # Server lacks the backing implementation -> builtin skipped.
+        ([{"type": "web_search_preview"}], False, True, "auto", False, []),
+        # No tool server at all -> builtin skipped.
+        (
+            [{"type": "code_interpreter", "container": {"type": "auto"}}],
+            None,
+            True,
+            "auto",
+            False,
+            [],
+        ),
+        # MCP tools are client-side calls and must never be advertised here.
+        (
+            [
+                {
+                    "type": "mcp",
+                    "server_label": "deepwiki",
+                    "server_url": "https://example.com/mcp",
+                    "allowed_tools": ["search", "read_page"],
+                }
+            ],
+            True,
+            True,
+            "auto",
+            False,
+            [],
+        ),
+        # SimpleContext path (switch off): function tools stay, builtins must
+        # NOT be advertised since the context cannot execute them.
+        (
+            [_FUNCTION_TOOL, *_BUILTIN_TOOLS],
+            True,
+            False,
+            "auto",
+            False,
+            ["get_weather"],
+        ),
+        # tool_choice="none": same handling as construct_tool_dicts. Without
+        # the opt-in flag, definitions stay in the prompt; with it, all gone.
+        (
+            [_FUNCTION_TOOL, *_BUILTIN_TOOLS],
+            True,
+            True,
+            "none",
+            False,
+            ["get_weather", "code_interpreter", "web_search_preview"],
+        ),
+        ([_FUNCTION_TOOL, *_BUILTIN_TOOLS], True, True, "none", True, []),
+    ],
+)
+@pytest.mark.asyncio
+async def test_online_renderer_renders_builtin_tools_for_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tools,
+    has_tool,
+    render_builtin,
+    tool_choice,
+    exclude,
+    expected_names,
+):
+    """Builtin tools reach preprocess_chat only on the ParsableContext path,
+    MCP tools never do, and tool_choice is honored like ordinary function
+    tools.
+
+    ``has_tool`` is None when no tool server is supplied at all.
+    """
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = None
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    renderer.exclude_tools_when_tool_choice_none = exclude
+    preprocess_chat = AsyncMock(
+        return_value=([], [tokens_input([11, 12, 13])]),
+    )
+    monkeypatch.setattr(renderer, "preprocess_chat", preprocess_chat)
+
+    tool_server = None
+    if has_tool is not None:
+        tool_server = MagicMock(spec=ToolServer)
+        tool_server.has_tool.return_value = has_tool
+        # No server-side function schema: exercise the fallback spec.
+        tool_server.get_tool_description.return_value = None
+    request = ResponsesRequest(input="hi", tools=tools, tool_choice=tool_choice)
+
+    result = await renderer.render_responses(
+        request,
+        tool_server=tool_server,
+        render_builtin_tools=render_builtin,
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    tool_dicts = preprocess_chat.call_args.kwargs["tool_dicts"] or []
+    names = [d["function"]["name"] for d in tool_dicts]
+    assert names == expected_names
+
+
 @pytest.mark.asyncio
 async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior(
     monkeypatch: pytest.MonkeyPatch,
@@ -985,6 +1105,41 @@ class TestInitializeToolSessions:
         serving_responses_instance.online_renderer.render_responses.assert_awaited_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "use_parsable_context, use_harmony, expected",
+        [
+            (True, False, True),
+            (False, False, False),
+            (True, True, False),
+            (False, True, False),
+        ],
+    )
+    async def test_first_turn_renders_builtin_tools_only_for_parsable_context(
+        self,
+        serving_responses_instance,
+        monkeypatch: pytest.MonkeyPatch,
+        use_parsable_context,
+        use_harmony,
+        expected,
+    ):
+        """SimpleContext cannot execute builtin/MCP calls, and Harmony renders
+        its own tool descriptions, so only the ParsableContext path opts in."""
+        serving = serving_responses_instance
+        serving.use_harmony = use_harmony
+        monkeypatch.setattr(
+            envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", use_parsable_context
+        )
+        serving.online_renderer.render_responses = AsyncMock(
+            return_value=SimpleNamespace(messages=[], engine_input=tokens_input([1]))
+        )
+        request = ResponsesRequest(input="hello")
+
+        await serving._render_resolved_response_inputs(request, None)
+
+        kwargs = serving.online_renderer.render_responses.call_args.kwargs
+        assert kwargs["render_builtin_tools"] is expected
+
+    @pytest.mark.asyncio
     async def test_render_next_turn_reuses_shared_responses_renderer(
         self, serving_responses_instance
     ):
@@ -1022,6 +1177,14 @@ class TestInitializeToolSessions:
         assert render_request.input == turn_messages
         assert render_request.instructions is None
         assert render_request.cache_salt == "request-salt"
+        # Only ParsableContext reaches _render_next_turn, so builtin tools must
+        # stay visible in follow-up prompts.
+        assert (
+            serving_responses_instance.online_renderer.render_responses.call_args.kwargs[
+                "render_builtin_tools"
+            ]
+            is True
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.cpu_test
