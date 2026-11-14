@@ -641,3 +641,86 @@ def test_rope_static_qquant_kvcache_fusion(
             atol=1e-1,
             rtol=1e-1,
         )
+
+
+def test_rope_kvcache_fusion_multi_geometry_and_mismatched_qkv_width():
+    from types import SimpleNamespace
+    from torch._inductor.fx_passes.post_grad import view_to_reshape
+
+    def _make_layer(name: str, num_heads: int, num_kv_heads: int, head_size: int):
+        layer = Attention.__new__(Attention)
+        torch.nn.Module.__init__(layer)
+        layer.layer_name = name
+        layer.num_heads = num_heads
+        layer.num_kv_heads = num_kv_heads
+        layer.head_size = head_size
+        layer.head_size_v = head_size
+        layer.impl = SimpleNamespace(fused_rope_kvcache_supported=lambda: True)
+        return layer
+
+    target_layer = _make_layer("target.attn", 16, 1, 128)
+    drafter_layer = _make_layer("drafter.attn", 4, 1, 64)
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rotary_embedding"],
+            pass_config=PassConfig(fuse_rope_kvcache=True),
+        ),
+    )
+    vllm_config.compilation_config.static_forward_context = {
+        target_layer.layer_name: target_layer,
+        drafter_layer.layer_name: drafter_layer,
+    }
+
+    fusion_pass = RopeKVCacheFusionPass(vllm_config)
+
+    class _DrafterSubgraph(torch.nn.Module):
+        def __init__(self, num_heads: int, num_kv_heads: int, head_size: int, name: str):
+            super().__init__()
+            self.num_heads = num_heads
+            self.num_kv_heads = num_kv_heads
+            self.head_size = head_size
+            self.q_size = num_heads * head_size
+            self.kv_size = num_kv_heads * head_size
+            self.layer_name = _encode_layer_name(name)
+
+        def forward(
+            self,
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ):
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k = auto_functionalized(
+                ROTARY_OP,
+                positions=positions,
+                query=q,
+                key=k,
+                head_size=self.head_size,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=True,
+            )[1:]
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size)
+            dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
+            return dummy, q, k, v
+
+    for num_heads, num_kv_heads, head_size, name, expected_matches in [
+        (4, 1, 64, "drafter.attn", 1),
+        (2, 1, 64, "unregistered.attn", 0),
+    ]:
+        mod = _DrafterSubgraph(num_heads, num_kv_heads, head_size, name)
+        qkv = torch.empty(
+            5, (num_heads + 2 * num_kv_heads) * head_size, dtype=torch.bfloat16
+        )
+        positions = torch.empty(5, dtype=torch.int64)
+        cos_sin_cache = torch.empty(4096, head_size, dtype=torch.bfloat16)
+        gm = torch._inductor.pattern_matcher.fwd_only(
+            mod, [qkv, positions, cos_sin_cache]
+        )
+        view_to_reshape(gm)
+        fusion_pass(gm.graph)
+        assert fusion_pass.matched_count == expected_matches
+
