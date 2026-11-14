@@ -24,6 +24,16 @@ requires_qsa_kernels = pytest.mark.skipif(
     reason="QSA kernels require CUDA and Triton",
 )
 
+
+# Triton has no e4m3 (fp8e4nv) type below sm_89. There the layer passes an fp8
+# main KV cache as its uint8 storage, and fp8 indexer caches are unsupported.
+FP8_E4M3_NATIVE = current_platform.is_cuda() and current_platform.has_device_capability(
+    89
+)
+requires_native_fp8 = pytest.mark.skipif(
+    not FP8_E4M3_NATIVE, reason="fp8 e4m3 Triton kernels need sm_89+"
+)
+
 HQ, D = 4, 128
 CR = 4
 MROPE_SECTION = (11, 11, 10)
@@ -141,7 +151,12 @@ def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
 
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
-@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+# The fused writer takes fp8 pointers, so the layer runs it with fp8 only on
+# sm_89+ (Qwen4ExpQSAAttention.use_fused_qsa_prepare).
+@pytest.mark.parametrize(
+    "indexer_dtype",
+    [torch.bfloat16, pytest.param(torch.float8_e4m3fn, marks=requires_native_fp8)],
+)
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [
