@@ -71,7 +71,7 @@ def create_scheduler(
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     long_prefill_token_threshold_adaptive: bool = False,
-    enable_prefill_progress: bool = True,
+    enable_prefill_progress: bool = False,
     disable_chunked_mm_input: bool = False,
     mm_encoder_only: bool = False,
     use_kv_connector: None | bool | str | MockKVConfig = None,

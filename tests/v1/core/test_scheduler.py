@@ -1891,7 +1891,9 @@ def test_long_prefill_threshold_floored_by_fair_share():
 
 def test_prefill_progress_reports_chunks_and_ends_with_zero():
     """Report each scheduled chunk of prefill work, ending with a final zero."""
-    scheduler = create_scheduler(max_num_batched_tokens=16, max_model_len=256)
+    scheduler = create_scheduler(
+        max_num_batched_tokens=16, max_model_len=256, enable_prefill_progress=True
+    )
     request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
     scheduler.add_request(request)
 
@@ -1919,10 +1921,8 @@ def test_prefill_progress_reports_chunks_and_ends_with_zero():
 
 
 def test_prefill_progress_can_be_disabled():
-    """Disabling the report leaves the outputs unchanged."""
-    scheduler = create_scheduler(
-        max_num_batched_tokens=16, max_model_len=256, enable_prefill_progress=False
-    )
+    """The default emits nothing; reporting is opt-in."""
+    scheduler = create_scheduler(max_num_batched_tokens=16, max_model_len=256)
     request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
     scheduler.add_request(request)
 
@@ -1941,7 +1941,9 @@ def test_prefill_progress_can_be_disabled():
 
 def test_preempted_request_reports_the_work_it_requeues():
     """A preemption puts the work it discards back on the queue."""
-    scheduler = create_scheduler(max_num_batched_tokens=16, max_model_len=256)
+    scheduler = create_scheduler(
+        max_num_batched_tokens=16, max_model_len=256, enable_prefill_progress=True
+    )
     request = create_requests(num_requests=1, num_tokens=64, max_tokens=2)[0]
     scheduler.add_request(request)
 

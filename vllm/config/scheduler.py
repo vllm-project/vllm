@@ -109,7 +109,7 @@ class SchedulerConfig:
     The cap is not applied when the request is the only one in the batch,
     since there is no other request for it to starve."""
 
-    enable_prefill_progress: bool = True
+    enable_prefill_progress: bool = False
     """Report per-request prefill progress to the frontend, so a router can
     price a running request by what the worker has left instead of by what it
     charged at admission."""
