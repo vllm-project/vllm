@@ -31,7 +31,7 @@ from fastapi import APIRouter, FastAPI, Request
 from starlette.datastructures import State
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
-from tests.utils import RemoteLaunchRenderServer
+from tests.utils import VLLM_PATH, RemoteLaunchRenderServer
 from vllm.config import VllmConfig
 from vllm.entrypoints.common.cli_args import make_arg_parser
 from vllm.entrypoints.launchers.app import build_app
@@ -1078,6 +1078,10 @@ def test_shutdown_during_plugin_lifecycle(
         timeout=6 * _TIMEOUT_S,
         env={
             **os.environ,
+            # The child runs this file, which imports `tests.utils`.
+            "PYTHONPATH": str(VLLM_PATH.resolve())
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
             # Only a `stop` meant to outlive its deadline gets a short one.
             "VLLM_ENDPOINT_PLUGIN_STOP_TIMEOUT_SECONDS": (
                 "1" if case in _EXPIRING_STOP_CASES else str(6 * _TIMEOUT_S)
