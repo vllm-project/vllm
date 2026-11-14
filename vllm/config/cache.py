@@ -337,7 +337,10 @@ class CacheConfig:
     Triton and FlashInfer support the 'none' and 'align' Mamba cache modes.
     Mamba2 speculative decoding supports both backends. Pipeline parallelism is not
     supported. Flushes are most efficient when mamba_block_size is a
-    multiple of replayssm_buffer_len, but this is not required."""
+    multiple of replayssm_buffer_len, but this is not required. On Qwen GDN
+    architectures with speculative decoding it selects RecoverSSM instead, which
+    pays off at K >= 3 under load; at K=1 it is a correctness path, not a
+    speed-up (see `use_gdn_recoverssm`)."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
     use_gdn_recoverssm: bool = field(default=False, init=False)
