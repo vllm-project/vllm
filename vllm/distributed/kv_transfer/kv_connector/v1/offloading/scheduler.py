@@ -1030,19 +1030,42 @@ class OffloadingConnectorScheduler:
         start = req_status.num_locally_computed_tokens
         end = start + num_external_tokens
 
-        events: list[tuple[int, int, CacheHitSource]] = [
-            (end, 0, CacheHitSource.EXTERNAL_UNSPECIFIED)
-        ]
+        unspecified = CacheHitSource.EXTERNAL_UNSPECIFIED
+        ranges: list[tuple[int, int, CacheHitSource]] = []
         for lo, hi, key in req_status.load_key_ranges:
             lo, hi = max(start, lo), min(end, hi)
             if lo >= hi:
                 continue
-            source = CacheHitSource(
-                self.manager.get_load_source(key, req_status.req_context)
-            )
+            source = self.manager.get_load_source(key, req_status.req_context)
+            ranges.append((lo, hi, source))
+
+        # A single attention group loads ascending, disjoint ranges, so one pass
+        # splits them. Recurrent state and multiple groups overlap: sweep those.
+        position = start
+        for lo, hi, source in ranges:
+            if lo < position:
+                return self._sweep_hit_sources(ranges, start, end)
+            if lo > position:
+                sources[unspecified] = sources.get(unspecified, 0) + lo - position
+            sources[source] = sources.get(source, 0) + hi - lo
+            position = hi
+        if end > position:
+            sources[unspecified] = sources.get(unspecified, 0) + end - position
+        return sources
+
+    @staticmethod
+    def _sweep_hit_sources(
+        ranges: list[tuple[int, int, CacheHitSource]], start: int, end: int
+    ) -> dict[CacheHitSource, int]:
+        """Split [start, end) by outermost covering tier, for overlapping ranges."""
+        events: list[tuple[int, int, CacheHitSource]] = [
+            (end, 0, CacheHitSource.EXTERNAL_UNSPECIFIED)
+        ]
+        for lo, hi, source in ranges:
             events.extend(((lo, 1, source), (hi, -1, source)))
 
         # Sweep endpoints instead of rescanning every range for each interval.
+        sources: dict[CacheHitSource, int] = {}
         active: Counter[CacheHitSource] = Counter()
         position = start
         for boundary, delta, source in sorted(events):

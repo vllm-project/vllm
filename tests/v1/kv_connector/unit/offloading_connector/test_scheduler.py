@@ -1518,6 +1518,16 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
             {CacheHitSource.EXTERNAL_UNSPECIFIED: 12},
             id="no-covering-ranges",
         ),
+        pytest.param(
+            [(0, 6, "host"), (6, 10, "disk"), (12, 16, "p2p")],
+            {
+                CacheHitSource.HOST: 2,
+                CacheHitSource.DISK: 4,
+                CacheHitSource.EXTERNAL_UNSPECIFIED: 2,
+                CacheHitSource.P2P: 4,
+            },
+            id="ascending-disjoint-with-gap",
+        ),
     ],
 )
 def test_external_cache_hit_sources_range_boundaries(ranges, expected):
