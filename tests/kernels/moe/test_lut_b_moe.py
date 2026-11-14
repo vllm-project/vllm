@@ -10,11 +10,18 @@ from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.experts.lut_b_moe import (
     LutBEmulationTritonExperts,
     LutBSm107Experts,
     make_lut_b_moe_kernel,
     mxfp8_qdq,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_lut_b import (  # noqa: E501
+    CompressedTensorsLutBMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.lut_b_utils import (
     LUT_B_PACKED_TILE_BYTES,
@@ -81,6 +88,121 @@ def test_quantize_preserves_zeros() -> None:
     weight[:, -1] = 0
     reconstructed = _dequantize(quantize_lut_b(weight), torch.float32)
     assert torch.all(reconstructed[weight == 0] == 0)
+
+
+@requires_gpu
+def test_compressed_tensors_lut_b_moe_loads_serialized_experts(workspace_init) -> None:
+    """Load serialized LUT-B projection tensors through RoutedExperts."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+    torch.manual_seed(0)
+    num_experts, hidden, intermediate = 2, 128, 128
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=1,
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        max_num_tokens=4,
+    )
+    moe_config.moe_backend = "emulation"
+    quant_config = CompressedTensorsConfig.from_config(
+        {
+            "format": "lut-b",
+            "config_groups": {
+                "group_0": {
+                    "format": "lut-b",
+                    "targets": [r"re:.*mlp\.experts\..*\.(gate|up|down)_proj$"],
+                    "weights": {
+                        "type": "codebook",
+                        "num_bits": 3,
+                        "strategy": "block",
+                        "block_structure": [8, 64],
+                        "symmetric": True,
+                        "dynamic": False,
+                        "scale_dtype": "torch.uint8",
+                    },
+                    "input_activations": None,
+                }
+            },
+        }
+    )
+    expert_map_manager = ExpertMapManager(
+        max_num_batched_tokens=4,
+        top_k=1,
+        global_num_experts=num_experts,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=moe_config.moe_parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+    with torch.device(current_platform.device_type):
+        layer = RoutedExperts(
+            "model.layers.0.mlp.experts",
+            torch.bfloat16,
+            moe_config,
+            quant_config,
+            expert_map_manager=expert_map_manager,
+        )
+        assert isinstance(layer.quant_method, CompressedTensorsLutBMoEMethod)
+        assert layer.quant_method.experts_cls is LutBEmulationTritonExperts
+
+        projections = {
+            name: torch.randn(
+                num_experts, out_dim, in_dim, device="cuda", dtype=torch.bfloat16
+            )
+            for name, out_dim, in_dim in (
+                ("gate_proj", intermediate, hidden),
+                ("up_proj", intermediate, hidden),
+                ("down_proj", hidden, intermediate),
+            )
+        }
+        quantized = {
+            name: quantize_lut_b(weight) for name, weight in projections.items()
+        }
+        expected = {
+            name: dequantize_lut_b(tensors[0], tensors[1], tensors[2], torch.bfloat16)
+            for name, tensors in quantized.items()
+        }
+        serialized = []
+        for expert_id in range(num_experts):
+            for name in projections:
+                for suffix, tensor in zip(
+                    ("weight_packed", "weight_codebook", "weight_scale"),
+                    (tensor[expert_id] for tensor in quantized[name]),
+                ):
+                    serialized.append((f"{expert_id}.{name}.{suffix}", tensor))
+
+        loaded = set(layer.load_weights(serialized))
+        assert {
+            "w13_weight_packed",
+            "w13_weight_codebook",
+            "w13_weight_scale",
+            "w2_weight_packed",
+            "w2_weight_codebook",
+            "w2_weight_scale",
+        } <= loaded
+        layer.quant_method.process_weights_after_loading(layer)
+
+        torch.testing.assert_close(
+            layer.w13_weight,
+            torch.cat((expected["gate_proj"], expected["up_proj"]), dim=1),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            layer.w2_weight, expected["down_proj"], rtol=0, atol=0
+        )
+        x = torch.randn(2, hidden, device="cuda", dtype=torch.bfloat16)
+        weights = torch.ones(2, 1, device="cuda", dtype=torch.float32)
+        ids = torch.tensor([[0], [1]], device="cuda", dtype=torch.int32)
+        output = layer.quant_method.apply(
+            layer, x, weights, ids, shared_experts=None, shared_experts_input=None
+        )
+        assert isinstance(output, torch.Tensor)
+        assert output.shape == x.shape
+        assert torch.isfinite(output).all()
 
 
 def _decode_sm107_tiles(tiles: torch.Tensor) -> torch.Tensor:
