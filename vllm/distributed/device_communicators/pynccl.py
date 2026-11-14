@@ -5,6 +5,7 @@
 # ===================== import region =====================
 import contextlib
 import threading
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.distributed as dist
@@ -24,6 +25,9 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import current_stream
+
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 
 logger = init_logger(__name__)
 
@@ -59,10 +63,21 @@ _NCCL_SYMM_OPS_REGISTERED = False
 _NCCL_SUSPEND_MEM = 0x01
 
 
-def register_nccl_symmetric_ops(pynccl_comm):
+def all_reduce_symmetric_with_copy(
+    input_tensor: torch.Tensor, pynccl_comm: "PyNcclCommunicator"
+) -> torch.Tensor:
     from vllm.distributed.device_communicators.pynccl_allocator import (
         nccl_symm_mem_context,
     )
+
+    with nccl_symm_mem_context(pynccl_comm):
+        symm_input = torch.empty_like(input_tensor)
+        symm_output = torch.empty_like(input_tensor)
+    symm_input.copy_(input_tensor)
+    return pynccl_comm.all_reduce(symm_input, symm_output)
+
+
+def register_nccl_symmetric_ops():
     from vllm.utils.torch_utils import direct_register_custom_op
 
     global _NCCL_SYMM_OPS_REGISTERED
@@ -70,15 +85,26 @@ def register_nccl_symmetric_ops(pynccl_comm):
         return
     _NCCL_SYMM_OPS_REGISTERED = True
 
-    def all_reduce_symmetric_with_copy_impl(input_tensor: torch.Tensor) -> torch.Tensor:
-        with nccl_symm_mem_context(pynccl_comm):
-            symm_input = torch.empty_like(input_tensor)
-            symm_output = torch.empty_like(input_tensor)
-        symm_input.copy_(input_tensor)
-        symm_output = pynccl_comm.all_reduce(symm_input, symm_output)
-        return symm_output
+    def all_reduce_symmetric_with_copy_impl(
+        input_tensor: torch.Tensor, group_name: str
+    ) -> torch.Tensor:
+        from vllm.distributed.parallel_state import _groups
 
-    def all_reduce_symmetric_with_copy_fake(input_tensor: torch.Tensor) -> torch.Tensor:
+        group_ref = _groups.get(group_name)
+        if group_ref is None:
+            raise ValueError(f"Group {group_name} is not found.")
+        group = group_ref()
+        if group is None:
+            raise ValueError(f"Group {group_name} is destroyed.")
+        device_comm = cast("CudaCommunicator | None", group.device_communicator)
+        pynccl_comm = device_comm.pynccl_comm if device_comm is not None else None
+        if pynccl_comm is None or pynccl_comm.disabled:
+            raise RuntimeError(f"Group {group_name} has no active PyNCCL communicator.")
+        return all_reduce_symmetric_with_copy(input_tensor, pynccl_comm)
+
+    def all_reduce_symmetric_with_copy_fake(
+        input_tensor: torch.Tensor, group_name: str
+    ) -> torch.Tensor:
         return torch.empty_like(input_tensor)
 
     direct_register_custom_op(
