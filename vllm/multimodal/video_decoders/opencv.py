@@ -12,6 +12,7 @@ from vllm.utils.import_utils import PlaceholderModule
 from .base import (
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_sampled_frames,
     check_frame_pixel_limit,
 )
 
@@ -34,16 +35,17 @@ def decode_opencv(
     frame_recovery: bool = False,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
     cap = OpenCVVideoBackendMixin.open_video_capture(data)
-    check_frame_pixel_limit(
-        int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-    )
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    check_frame_pixel_limit(width, height)
     source = loader_cls._prepare_source(
         OpenCVVideoBackendMixin.get_video_metadata(data)
     )
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
+    # OpenCV reads each distinct index once.
+    charge_sampled_frames(len(set(frame_idx)), width, height)
     frames, valid = loader_cls.read_frames(
         cap,
         frame_idx,
