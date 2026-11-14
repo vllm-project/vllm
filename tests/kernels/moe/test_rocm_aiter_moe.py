@@ -23,7 +23,7 @@ This file only keeps the MoE-shaped integration angle for those helpers.
 import importlib
 import math
 import warnings
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 from unittest import mock
 
 import pytest
@@ -1889,3 +1889,114 @@ def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens)
         intermediate % alignment == 0
     )
     assert _aiter_accepts_intermediate(padded, num_tokens)
+
+
+class _MoriMoEConfig:
+    """FusedMoEConfig stand-in for a MoRI layer: unset backend flags are off."""
+
+    def __init__(self, use_mxfp4_w4a4_dsv4: bool, epv1: bool = True):
+        import types
+
+        self.moe_parallel_config = types.SimpleNamespace(
+            use_passthrough_all2all=False, use_all2all_kernels=True
+        )
+        self.use_mori_epv1_kernels = epv1
+        self.use_mxfp4_w4a4_dsv4 = use_mxfp4_w4a4_dsv4
+        self.hidden_dim = 256
+        self.max_num_tokens = 8
+        self.num_experts = 16
+        self.experts_per_token = 2
+        self.in_dtype = torch.bfloat16
+
+    def use_mori_fp4_dispatch(self, quant_config: Any) -> bool:
+        from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+
+        return FusedMoEConfig.use_mori_fp4_dispatch(
+            cast(FusedMoEConfig, self), quant_config
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("use_"):
+            return False
+        raise AttributeError(name)
+
+
+# (use_mxfp4_w4a4_dsv4, use_mxfp4_w4a16, fp4): the DeepSeek V4.1 a4w4 MoE runs on
+# a W4A16 quant config and dispatches FP4; the plain W4A16 path, or the a4w4
+# flag on another quant path, keeps dispatching BF16.
+_MORI_FP4_DISPATCH_CASES = [
+    (True, True, True),
+    (False, True, False),
+    (True, False, False),
+]
+
+
+@pytest.mark.parametrize("dsv4, w4a16, fp4", _MORI_FP4_DISPATCH_CASES)
+def test_mori_fp4_dispatch_for_dsv4_a4w4(
+    dsv4: bool, w4a16: bool, fp4: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """The DeepSeek V4.1 a4w4 MoE (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1) sends its
+    input through MoRI EPv1 as packed MXFP4 with one e8m0 scale per 32 elements;
+    MoRI still sizes its buffers by the unpacked hidden size."""
+    import types
+
+    import vllm.model_executor.layers.fused_moe.all2all_utils as all2all_utils
+
+    handle_args: dict[str, Any] = {}
+    made: dict[str, Any] = {}
+    manager = types.SimpleNamespace(
+        rank=0, world_size=8, get_handle=lambda args: handle_args.update(args)
+    )
+    monkeypatch.setattr(
+        all2all_utils,
+        "MoriPrepareAndFinalize",
+        lambda handle, **kwargs: made.update(kwargs),
+        raising=False,
+    )
+    quant_config = types.SimpleNamespace(
+        use_mxfp4_w4a4=False,
+        use_mxfp4_w4a16=w4a16,
+        is_per_act_token=False,
+        is_block_quantized=False,
+        is_per_tensor=False,
+    )
+
+    all2all_utils.maybe_make_prepare_finalize(
+        _MoriMoEConfig(dsv4), quant_config, all2all_manager=manager
+    )
+
+    assert made["use_fp4_dispatch"] is fp4
+    assert made["use_fp8_dispatch"] is False
+    assert handle_args["token_hidden_size"] == 256
+    if fp4:
+        assert handle_args["quant_dtype"] == torch.float4_e2m1fn_x2
+        assert handle_args["scale_dim"] == 256 // 32
+        assert handle_args["scale_type_size"] == torch.float8_e8m0fnu.itemsize
+    else:
+        assert handle_args["quant_dtype"] == torch.bfloat16
+        assert handle_args["scale_dim"] == 0
+
+
+@pytest.mark.parametrize("epv1", [True, False])
+@pytest.mark.parametrize("dsv4, w4a16, fp4", _MORI_FP4_DISPATCH_CASES)
+def test_aiter_experts_output_width_with_packed_fp4_input(
+    dsv4: bool, w4a16: bool, fp4: bool, epv1: bool
+):
+    """A packed MXFP4 input holds two values per byte, so the experts' output is
+    twice the input's K exactly when MoRI EPv1 dispatched the a4w4 input as FP4.
+    MoRI EPv2 dispatches it as BF16."""
+    import types
+
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+
+    experts = object.__new__(AiterMxfp4Experts)
+    experts.moe_config = _MoriMoEConfig(dsv4, epv1=epv1)
+    experts.quant_config = types.SimpleNamespace(
+        use_mxfp4_w4a4=False, use_mxfp4_w4a16=w4a16
+    )
+
+    _, _, output = experts.workspace_shapes(5, 512, 128, 2, 16, 2, None, None)
+
+    assert output == (5, 256 if fp4 and epv1 else 128)

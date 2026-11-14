@@ -1398,7 +1398,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Opt-in switch for a4w4 (FP4 activation) MoE on DeepSeek V4.1, AITER
     # MXFP4 backend. Default is a8w4 (FP8); set to "1" to enable a4w4
     # ("true" is not accepted -- only "0"/"1"). Raises if set for other
-    # models.
+    # models. Under MoRI EPv1, a4w4 also dispatches the MoE input as packed
+    # MXFP4 with e8m0 block scales, which the experts take without
+    # quantizing again.
     "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4": lambda: maybe_convert_bool(
         os.getenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4")
     ),
