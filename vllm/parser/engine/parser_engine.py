@@ -260,8 +260,12 @@ class ParserEngine(Parser):
         """See `ReasoningParser.adjust_initial_state_from_prompt`."""
         return
 
-    def finish_streaming(self) -> DeltaMessage | None:
-        events = self._engine.finish()
+    def finish_streaming(
+        self, *, resolve_deferred_tool_start: bool = False
+    ) -> DeltaMessage | None:
+        events = self._engine.finish(
+            resolve_deferred_tool_start=resolve_deferred_tool_start
+        )
         if events or self._deferred_content:
             return self._events_to_delta(events, finished=True)
         return None
@@ -521,11 +525,16 @@ class ParserEngine(Parser):
         finished: bool,
     ) -> DeltaMessage | None:
         self._initialize_history_tool_call_cnt(request)
-        if not self._prompt_streaming_prepared and prompt_token_ids is not None:
+        if not self._prompt_streaming_prepared:
             # NOTE: call the hook BEFORE setting the flag, because the hook
             # may invoke ``_reset`` (e.g. via ``initialize_streaming``) which
             # clears ``_prompt_streaming_prepared``.
-            self.adjust_initial_state_from_prompt(prompt_token_ids)
+            if prompt_token_ids is not None:
+                self.adjust_initial_state_from_prompt(prompt_token_ids)
+            elif self.parser_engine_config.defer_reasoning_tool_start:
+                # Prompt-sensitive parsers need a definite negative signal
+                # when this call path has no prompt tokens to inspect.
+                self.adjust_initial_state_from_prompt(())
             self._prompt_streaming_prepared = True
         self._check_skip_tool_parsing(request)
         events = self._feed(delta_text, delta_token_ids)
@@ -718,11 +727,25 @@ class ParserEngine(Parser):
     @property
     def implicit_reasoning_end_token_ids(self) -> frozenset[int]:
         """Reasoning-end tokens that are also content, e.g. a tool-call start."""
+        if self._engine.defer_reasoning_tool_start:
+            # While a tool start is deferred inside open reasoning, no
+            # reasoning-end token doubles as content.
+            return frozenset()
         return self._reasoning_end_token_ids - {self._reasoning_end_token_id}
 
     def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
         """First reasoning end in `token_ids`, and if its token is content."""
         end_ids = self._reasoning_end_token_ids
+        if self._engine.defer_reasoning_tool_start:
+            # While deferral is active, only the explicit reasoning end
+            # (e.g. </think>) closes reasoning; an implicit end such as a
+            # quoted <tool_call> must not. Without an explicit end token the
+            # effective set is empty and no reasoning end is reported.
+            end_ids = (
+                frozenset({self._reasoning_end_token_id})
+                if self._reasoning_end_token_id is not None
+                else frozenset()
+            )
         if not end_ids:
             return None
         for offset, token_id in enumerate(token_ids):
