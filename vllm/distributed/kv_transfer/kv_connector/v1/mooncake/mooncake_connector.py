@@ -57,6 +57,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine_regis
     clear_shared_transfer_engine,
     register_shared_transfer_engine,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    is_attention_spec,
+    is_ssm_spec,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -2036,7 +2040,7 @@ class MooncakeConnectorWorker:
             )
             .reshape(-1)
             .tolist()
-            if not issubclass(group_specs[i].manager_cls, MambaManager)
+            if not is_ssm_spec(group_specs[i])
             else group
             for i, group in enumerate(block_ids)
         ]
@@ -2086,9 +2090,7 @@ class MooncakeConnectorWorker:
             for group_index, (local_group, remote_group) in enumerate(
                 zip(send_meta.local_block_ids, remote_block_ids_per_group)
             ):
-                is_mamba_group = issubclass(
-                    group_specs[group_index].manager_cls, MambaManager
-                )
+                is_mamba_group = is_ssm_spec(group_specs[group_index])
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
                     # align-mode placeholders. They do not carry transferable
@@ -2441,7 +2443,7 @@ class MooncakeConnectorWorker:
                 block_len = region_cache.stride(0) * region_cache.element_size()
                 region_base_addresses.append(base_addr)
 
-                if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
+                if is_attention_spec(layer_spec) and block_is_contiguous:
                     assert (
                         layer_spec.page_size_bytes
                         % self._physical_blocks_per_logical_kv_block
