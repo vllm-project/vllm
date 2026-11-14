@@ -114,6 +114,32 @@ def test_parse_fine_tuned_lora_name_invalid():
             parse_fine_tuned_lora_name(name)
 
 
+def test_parse_fine_tuned_lora_name_transformers_renames():
+    """PEFT saves under Transformers' renamed modules; map them back."""
+    from transformers import AutoConfig
+
+    from vllm.lora.utils import get_transformers_renames
+    from vllm.lora.worker_manager import _RenamedAdapterMapper
+
+    renames = get_transformers_renames(AutoConfig.for_model("mixtral"))
+    modules = {"model.layers.0.block_sparse_moe.gate", "model.layers.0.mlp.shared"}
+    mapper = _RenamedAdapterMapper(
+        None, renames, lambda name: name.split(".lora_")[0] in modules
+    )
+
+    renamed = "base_model.model.model.layers.0.mlp.gate.lora_A.weight"
+    assert parse_fine_tuned_lora_name(renamed, mapper) == (
+        "model.layers.0.block_sparse_moe.gate",
+        True,
+    )
+    # Keys that already name a module are left alone
+    existing = "base_model.model.model.layers.0.mlp.shared.lora_B.weight"
+    assert parse_fine_tuned_lora_name(existing, mapper) == (
+        "model.layers.0.mlp.shared",
+        False,
+    )
+
+
 def test_replace_submodule():
     model = nn.Sequential(
         OrderedDict(
