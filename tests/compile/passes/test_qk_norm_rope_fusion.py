@@ -9,6 +9,7 @@ from tests.compile.backend import TestBackend
 from vllm.compilation.passes.fusion.matcher_utils import (
     FLASHINFER_ROTARY_OP,
     ROTARY_OP,
+    rope_custom_op_is_c_kernel,
 )
 from vllm.compilation.passes.fusion.qk_norm_rope_fusion import (
     FUSED_QK_ROPE_OP,
@@ -32,7 +33,6 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionType
 
 RSQRT_OP = torch.ops.aten.rsqrt.default
-INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 
 
 class QKNormRoPETestModel(torch.nn.Module):
@@ -48,6 +48,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         dtype: torch.dtype,
         test_scattered_split: bool = False,
         prefix: str = "model.layers.0.self_attn.attn",
+        rotary_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -55,7 +56,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         self.head_dim = head_dim
         self.q_size = num_heads * head_dim
         self.kv_size = num_kv_heads * head_dim
-        self.rotary_dim = head_dim
+        self.rotary_dim = rotary_dim or head_dim
         self.eps = eps
         self.dtype = dtype
 
@@ -82,7 +83,6 @@ class QKNormRoPETestModel(torch.nn.Module):
         )
         self.test_scattered_split = test_scattered_split
         self.enable_rms_norm_custom_op = self.q_norm.enabled()
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
         if self.test_scattered_split:
@@ -102,13 +102,12 @@ class QKNormRoPETestModel(torch.nn.Module):
 
     def ops_in_model_before(self) -> list[OpOverload | OpOverloadPacket]:
         ops: list[OpOverload | OpOverloadPacket] = [torch.ops.vllm_ir.rms_norm]
-        if self.enable_rope_custom_op:
-            if self.rotary_emb.use_flashinfer:
-                ops.append(FLASHINFER_ROTARY_OP)
-            else:
-                ops.append(ROTARY_OP)
+        if self.rotary_emb.use_flashinfer:
+            ops.append(FLASHINFER_ROTARY_OP)
+        elif rope_custom_op_is_c_kernel():
+            ops.append(ROTARY_OP)
         else:
-            ops.append(INDEX_SELECT_OP)
+            ops.append(torch.ops.vllm_ir.rotary_embedding.default)
         return ops
 
     def ops_in_model_after(self) -> list[OpOverload | OpOverloadPacket]:
@@ -116,10 +115,12 @@ class QKNormRoPETestModel(torch.nn.Module):
 
 
 @pytest.mark.parametrize("scattered_split", [True, False])
+# Partial rotary (e.g. GLM-4 MoE) must still match the fusion pattern.
+@pytest.mark.parametrize("rotary_ratio", [1.0, 0.5])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
-@pytest.mark.parametrize("enable_rope_custom_op", [True])
+@pytest.mark.parametrize("enable_rope_custom_op", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
@@ -132,9 +133,12 @@ def test_qk_norm_rope_fusion(
     enable_rope_custom_op,
     dtype,
     scattered_split,
+    rotary_ratio,
 ):
     if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
         pytest.skip("fused_qk_norm_rope custom op not available")
+    if rotary_ratio < 1.0 and current_platform.is_xpu():
+        pytest.skip("Partial rotary support of the XPU fused kernel is unverified")
 
     torch.set_default_device(current_platform.device_type)
     torch.set_default_dtype(dtype)
@@ -174,6 +178,7 @@ def test_qk_norm_rope_fusion(
             vllm_config=vllm_config,
             dtype=dtype,
             test_scattered_split=scattered_split,
+            rotary_dim=int(head_dim * rotary_ratio),
         )
 
         noop_pass = NoOpEliminationPass(vllm_config)
