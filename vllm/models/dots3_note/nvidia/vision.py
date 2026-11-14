@@ -478,7 +478,7 @@ _ADAPTER_CLASSES: dict[str, type[nn.Module]] = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VitForwardMeta:
     cu_seqlens: torch.Tensor
     max_seqlen: int

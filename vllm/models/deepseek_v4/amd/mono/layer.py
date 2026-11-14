@@ -48,7 +48,7 @@ EPOCH_WORDS = EPOCH_COUNTERS + COUNTER_WORDS
 K2_POINTS = mb_back.BACK_POINTS + moe.TL_POINTS
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MonoBuild:
     tokens: int
     tp: int

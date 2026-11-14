@@ -74,7 +74,7 @@ class _MatchResult(NamedTuple):
     job_ids: set[int]
 
 
-@dataclass
+@dataclass(slots=True)
 class _OutboundRequestState:
     """Server-role state for a single fetch round of a peer request.
 
@@ -161,7 +161,7 @@ class _OutboundRequestState:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class _InflightXfer:
     """Metadata for a single inflight RDMA transfer, keyed by transfer_id."""
 
@@ -177,7 +177,7 @@ class _InflightXfer:
     submitted_at: float = field(default_factory=lambda: time.monotonic())
 
 
-@dataclass
+@dataclass(slots=True)
 class _ActiveLookup:
     """In-flight state for one inbound LookupMsg.
 
@@ -222,7 +222,7 @@ class _PendingLookup(NamedTuple):
     round_seq: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _ServerRequestState:
     """Per-kv_request_id server-side state.
 
