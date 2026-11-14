@@ -180,6 +180,8 @@ def _k31_markov_last_kernel(
         tokens_ptr + r * tokens_stride + STEP, _key_token(rslots + STEP * NSUB, NSUB)
     )
     # Clear the slots the step launches have not cleared (steps STEP - 1, STEP).
+    # Another warp may still be reading step STEP's slots: wait for the reads.
+    tl.debug_barrier()
     j = tl.arange(0, NSLOT * NSUB)
     tl.store(
         rslots + j, tl.zeros([NSLOT * NSUB], tl.uint64), mask=j >= (STEP - 1) * NSUB
@@ -320,5 +322,6 @@ def run(spec, num_reqs: int, base_logits: torch.Tensor) -> bool:
         STEP=n_spec - 1,
         NSLOT=nslot,
         NSUB=NSUB,
+        num_warps=1,
     )
     return True
