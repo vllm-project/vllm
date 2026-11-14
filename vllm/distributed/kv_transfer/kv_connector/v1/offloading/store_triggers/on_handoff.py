@@ -18,9 +18,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base
     StoreJobSink,
     StoreTriggerHandler,
 )
+from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import get_mamba_prefill_checkpoint_position
 from vllm.v1.kv_offload.base import GPULoadStoreSpec, StoreTrigger
+
+logger = init_logger(__name__)
 
 
 class OnHandoffStoreHandler(StoreTriggerHandler):
@@ -150,6 +153,27 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
             if max_eagle_proof_margin and not req_status.loaded_from_offload:
                 # Requests that did not load from the offload tier keep their
                 # EAGLE tail in the GPU prefix cache; skip the store.
+                continue
+            # Chunk-aligned entries belong to the aligned store. Several
+            # off-chunk boundaries still cannot share one partial-tail job.
+            group_tokens_per_chunk = {
+                config.group_idx: config.tokens_per_chunk
+                for config in self._config.kv_group_configs
+            }
+            partial_boundaries: set[int] = set()
+            for group_idx, _, boundary in entries:
+                tokens_per_chunk = group_tokens_per_chunk.get(group_idx)
+                if tokens_per_chunk is None or boundary % tokens_per_chunk == 0:
+                    continue
+                partial_boundaries.add(boundary)
+            if len(partial_boundaries) > 1:
+                # A partial-tail job stores every group at one boundary, so a
+                # hand-off carrying several cannot be stored. Dropping it only
+                # loses the offload hit.
+                logger.warning_once(
+                    "Skipping partial-tail store for a hand-off with several "
+                    "boundaries."
+                )
                 continue
             req = req_status.req
             cache_hit_alignment = self._config.cache_hit_alignment_tokens
