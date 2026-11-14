@@ -39,6 +39,10 @@ fn token_strs(tokenizer: &vllm_text::tokenizer::DynTokenizer, ids: &[u32]) -> Ve
     ids.iter().map(|&id| tokenizer.id_to_token(id).unwrap_or_default()).collect()
 }
 
+async fn check_model(state: &AppState, model: Option<&str>) -> Result<(), ApiError> {
+    state.resolve_model_with_loras(model).await.model_names.check(model)
+}
+
 pub async fn tokenize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -49,7 +53,7 @@ pub async fn tokenize(
     let max_model_len = state.llm().info().max_model_len;
 
     let result = match body {
-        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req),
+        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req).await,
         TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await,
     };
 
@@ -68,12 +72,12 @@ pub async fn tokenize(
     }
 }
 
-fn tokenize_completion(
+async fn tokenize_completion(
     state: &AppState,
     request_id: &str,
     req: TokenizeCompletionRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
-    state.base_model_names().check(req.model.as_deref())?;
+    check_model(state, req.model.as_deref()).await?;
     let return_token_strs = req.return_token_strs;
     let tokens = state
         .chat
@@ -93,7 +97,7 @@ async fn tokenize_chat(
     request_id: &str,
     req: TokenizeChatRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
-    state.base_model_names().check(req.model.as_deref())?;
+    check_model(state, req.model.as_deref()).await?;
     let return_token_strs = req.return_token_strs;
     // `continue_final_message` / `add_generation_prompt` mutual exclusion is
     // enforced in `normalize_generation_prompt_mode` inside `into_chat_request`.
@@ -116,7 +120,7 @@ pub async fn detokenize(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
 ) -> Response {
-    if let Err(error) = state.base_model_names().check(body.model.as_deref()) {
+    if let Err(error) = check_model(&state, body.model.as_deref()).await {
         return error.into_response();
     }
     let tokenizer = state.chat.text().tokenizer();

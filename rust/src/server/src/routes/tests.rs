@@ -10827,6 +10827,48 @@ async fn post_json(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_accepts_loaded_lora_models() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, add_lora_script(true, |_| {})).await;
+    let adapter = LoraModulePath {
+        name: "alice".to_string(),
+        path: "/adapters/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    state.load_static_lora(&adapter).await.expect("load static lora");
+    let mut app = build_router(state);
+
+    let (completion_status, _) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({ "model": "alice", "prompt": "hello" }),
+    )
+    .await;
+    let (chat_status, _) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({ "model": "alice", "messages": [{ "role": "user", "content": "hello" }] }),
+    )
+    .await;
+    let (detokenize_status, _) = post_json(
+        &mut app,
+        "/detokenize",
+        json!({ "model": "alice", "tokens": [72] }),
+    )
+    .await;
+
+    assert_eq!(
+        [completion_status, chat_status, detokenize_status],
+        [StatusCode::OK; 3]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tokenize_completion_round_trips_through_detokenize() {
     let (mut app, _engine_task) = test_app().await;
     let prompt = "Hello world";
