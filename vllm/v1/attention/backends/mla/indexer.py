@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -1636,6 +1637,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
 
             chunks = []
+            # Query sub-chunks of one request range share its KV-side metadata:
+            # build it once over all of the range's rows, then slice the rows.
+            num_subchunks = Counter((r.start, r.stop) for r, _ in chunk_specs)
+            whole: dict[tuple[int, int], DeepseekV32IndexerPrefillChunkMetadata | None]
+            whole = {}
             for req_slice, query_slice in chunk_specs:
                 pcp_plan = None
                 if req_idx is not None:
@@ -1647,24 +1653,32 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                         self.device,
                         self.cp_kv_cache_interleave_size,
                     )
-                metadata = build_prefill_chunk_metadata(
-                    req_slice.start,
-                    req_slice.stop,
-                    query_start_loc,
-                    query_start_loc_cpu,
-                    seq_lens,
-                    compressed_seq_lens,
-                    compressed_seq_lens_cpu,
-                    block_table,
-                    self.compress_ratio,
-                    query_slice=query_slice,
-                    skip_kv_gather=query_slice.start > 0,
-                    dcp_rank=self.dcp_rank,
-                    dcp_world_size=self.dcp_world_size,
-                    cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
-                    pcp_plan=pcp_plan,
-                    positions=positions,
-                )
+                key = (req_slice.start, req_slice.stop)
+                shared = pcp_plan is None and num_subchunks[key] > 1
+                if shared and key in whole:
+                    metadata = slice_prefill_chunk_query(whole[key], query_slice)
+                else:
+                    metadata = build_prefill_chunk_metadata(
+                        req_slice.start,
+                        req_slice.stop,
+                        query_start_loc,
+                        query_start_loc_cpu,
+                        seq_lens,
+                        compressed_seq_lens,
+                        compressed_seq_lens_cpu,
+                        block_table,
+                        self.compress_ratio,
+                        query_slice=None if shared else query_slice,
+                        skip_kv_gather=not shared and query_slice.start > 0,
+                        dcp_rank=self.dcp_rank,
+                        dcp_world_size=self.dcp_world_size,
+                        cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
+                        pcp_plan=pcp_plan,
+                        positions=positions,
+                    )
+                    if shared:
+                        whole[key] = metadata
+                        metadata = slice_prefill_chunk_query(metadata, query_slice)
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
@@ -2066,6 +2080,26 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
+    )
+
+
+def slice_prefill_chunk_query(
+    chunk: DeepseekV32IndexerPrefillChunkMetadata | None, query_slice: slice
+) -> DeepseekV32IndexerPrefillChunkMetadata | None:
+    """The query rows `query_slice` of a chunk built over all of its rows, as
+    `build_prefill_chunk_metadata(..., query_slice=query_slice)` builds them."""
+    if chunk is None:
+        return None
+    num_rows = chunk.token_end - chunk.token_start
+    start = min(query_slice.start, num_rows)
+    stop = min(query_slice.stop, num_rows)
+    return replace(
+        chunk,
+        cu_seqlen_ks=chunk.cu_seqlen_ks[start:stop],
+        cu_seqlen_ke=chunk.cu_seqlen_ke[start:stop],
+        token_start=chunk.token_start + start,
+        token_end=chunk.token_start + stop,
+        skip_kv_gather=chunk.skip_kv_gather or start > 0,
     )
 
 
