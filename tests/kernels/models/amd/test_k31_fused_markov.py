@@ -46,31 +46,40 @@ class _MarkovW2(torch.nn.Module):
         self.quant_method = UnquantizedEmbeddingMethod()
 
 
-class _Model:
-    def __init__(self, w1, w2, base):
-        head = torch.nn.Module()
-        head.markov_w1 = torch.nn.Embedding(VOCAB, RANK, _weight=w1)
-        head.markov_w2 = _MarkovW2(w2)
-        self.model = SimpleNamespace(markov_head=head)
-        self.logits_processor = SimpleNamespace(
-            scale=1.0, soft_cap=None, head_dtype=torch.bfloat16
-        )
-        self.base = base
+def _model(w1, w2, base):
+    from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM
 
-    def compute_draft_logits(self, hidden):
-        return self.base[: hidden.shape[0]].clone()
+    class _Model(K3DSparkForCausalLM):
+        """The Kimi-K3 draft's Markov interface on a random head (the fused
+        launches take Kimi-K3 DSpark drafts only)."""
 
-    def markov_embed(self, ids):
-        return self.model.markov_head.markov_w1(ids)
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+            head = torch.nn.Module()
+            head.markov_w1 = torch.nn.Embedding(VOCAB, RANK, _weight=w1)
+            head.markov_w2 = _MarkovW2(w2)
+            self.model = SimpleNamespace(markov_head=head)
+            self.logits_processor = SimpleNamespace(
+                scale=1.0, soft_cap=None, head_dtype=torch.bfloat16
+            )
+            self.base = base
 
-    def markov_bias(self, e):
-        from vllm.model_executor.layers.utils import rocm_unquantized_gemm
+        def compute_draft_logits(self, hidden):
+            return self.base[: hidden.shape[0]].clone()
 
-        w2 = self.model.markov_head.markov_w2
-        return rocm_unquantized_gemm(w2, e, w2.weight, None)
+        def markov_embed(self, ids):
+            return self.model.markov_head.markov_w1(ids)
 
-    def map_draft_to_target(self, ids):
-        return ids
+        def markov_bias(self, e):
+            from vllm.model_executor.layers.utils import rocm_unquantized_gemm
+
+            w2 = self.model.markov_head.markov_w2
+            return rocm_unquantized_gemm(w2, e, w2.weight, None)
+
+        def map_draft_to_target(self, ids):
+            return ids
+
+    return _Model()
 
 
 def _speculator(temp: float, seed: int, row_mapped: bool):
@@ -84,7 +93,7 @@ def _speculator(temp: float, seed: int, row_mapped: bool):
     w2 = (torch.randn(VOCAB, RANK, generator=g, device=dev) * 0.05).to(bf16)
     base = torch.randn(MAX_REQS * N_SPEC, VOCAB, generator=g, device=dev) * 3
     s = DSparkSpeculator.__new__(DSparkSpeculator)
-    s.model = _Model(w1, w2, base.to(bf16))
+    s.model = _model(w1, w2, base.to(bf16))
     s.num_speculative_steps = N_SPEC
     s.max_num_reqs = MAX_REQS
     s._draft_topk = None

@@ -30,8 +30,13 @@ bias dot product differs from the GEMV's (as with any GEMM tiling), so a bias
 value can differ in its last bf16 bit. Graph capturable: fixed launches, slots
 allocated (zeroed) once and cleared by the launches themselves.
 
-Enabled by VLLM_K31_BEAT_MARKOV=1. tests/kernels/models/amd/test_k31_fused_markov.py
-compares it with vLLM's loop.
+Enabled by VLLM_K31_BEAT_MARKOV=1, for Kimi-K3 DSpark drafts only.
+tests/kernels/models/amd/test_k31_fused_markov.py compares it with vLLM's loop.
+deepseek_v41/amd/ops/fused_markov.py is the same scheme for DeepSeek-V4.1 on
+gfx942, reached through the draft model's ``sample_sequential``. That hook
+would turn off the batch-sharded draft logits cache
+(``supports_batch_sharded_draft_logits``), which these launches honour
+(``row_mapping``), so the speculator calls them directly instead.
 """
 
 import torch
@@ -210,7 +215,12 @@ def _slots(device, nslot, rows):
 def why_not(spec, num_reqs: int) -> str | None:
     """Why this draft step takes vLLM's loop, or None when the fused launches
     compute the same sampling. Checked before the base logits are computed."""
+    from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM
+
     model = spec.model
+    # Checked at Kimi-K3's shapes only; other DSpark drafts keep their loop.
+    if not isinstance(model, K3DSparkForCausalLM):
+        return "not a Kimi-K3 DSpark draft"
     head = getattr(getattr(model, "model", None), "markov_head", None)
     if head is None:
         return "no Markov head"
