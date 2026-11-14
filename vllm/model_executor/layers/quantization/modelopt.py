@@ -92,6 +92,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     CSF_SCALE_ENCODINGS,
     csf_weights_transform,
+    fold_nvfp4_shard_global_scales,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -2478,15 +2479,14 @@ class KNvfp4Static(QuantKeyScheme):
                 "constructing this layer, or add it to the quantization "
                 "ignore list."
             )
-        if torch.unique(layer.weight_scale_2).numel() != 1:
-            logger.warning_once(
-                "In NVFP4 linear, the global weight scale differs across "
-                "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
-                "likely reduce accuracy. Consider a checkpoint with the same "
-                "global NVFP4 scale for fused weights."
-            )
-        # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
-        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
+        # Merged layers carry one weight global scale per shard; fold them into
+        # the block scales. No reciprocation: Marlin/cutlass want amax/2688.
+        weight_global_scale = fold_nvfp4_shard_global_scales(
+            layer.weight_scale,
+            layer.weight_scale_2,
+            getattr(layer, "output_partition_sizes", None),
+            divisor=False,
+        )
         replace_parameter(layer, "weight_global_scale", weight_global_scale)
         # Kernels read weight_global_scale; the loaded param keeps its data.
         retire_parameter(layer, "weight_scale_2")
