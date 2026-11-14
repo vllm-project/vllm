@@ -237,8 +237,9 @@ async def test_request_media_io_kwargs_override_uses_fewer_video_frames(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("video_uuid", [None, "video-jpeg-uuid"])
 async def test_video_jpeg_image_media_io_kwargs_change_cache_key(
-    client: openai.AsyncOpenAI, model_name: str
+    client: openai.AsyncOpenAI, model_name: str, video_uuid: str | None
 ):
     # Transparent frames with an opaque square: rgba_background_color changes
     # the decoded pixels, so the two requests must not share a cache entry.
@@ -247,16 +248,17 @@ async def test_video_jpeg_image_media_io_kwargs_change_cache_key(
     buf = BytesIO()
     frame.save(buf, format="PNG")
     frame_b64 = base64.b64encode(buf.getvalue()).decode()
+    video_part = {
+        "type": "video_url",
+        "video_url": {"url": "data:video/jpeg;base64," + ",".join([frame_b64] * 2)},
+    }
+    if video_uuid is not None:
+        video_part["uuid"] = video_uuid
     messages = [
         {
             "role": "user",
             "content": [
-                {
-                    "type": "video_url",
-                    "video_url": {
-                        "url": "data:video/jpeg;base64," + ",".join([frame_b64] * 2)
-                    },
-                },
+                video_part,
                 {"type": "text", "text": "What color is the background?"},
             ],
         }

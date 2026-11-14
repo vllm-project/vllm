@@ -1628,6 +1628,37 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
     }
 
 
+@pytest.mark.parametrize("video_uuid", [None, "video-uuid"], ids=["no-uuid", "uuid"])
+@pytest.mark.parametrize(
+    "video_media_io_kwargs",
+    [{}, {"num_frames": 16}],
+    ids=["no-video-kwargs", "video-kwargs"],
+)
+def test_processor_inputs_video_hashes_include_image_media_io_kwargs(
+    video_uuid, video_media_io_kwargs
+):
+    """`video/jpeg` frames are decoded with `media_io_kwargs["image"]`, so
+    those options must reach the video hash, also when a uuid is given."""
+    mm_data_items = MultiModalDataParser().parse_mm_data(
+        {"video": [np.zeros((2, 8, 8, 3), dtype=np.uint8)]}
+    )
+
+    def video_hash(background: list[int]) -> str:
+        media_io_kwargs = {"image": {"rgba_background_color": background}}
+        if video_media_io_kwargs:
+            media_io_kwargs["video"] = video_media_io_kwargs
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=mm_data_items,
+            mm_uuid_items={"video": [video_uuid]},
+            media_io_kwargs=media_io_kwargs,
+        ).get_mm_hashes("test-model", "blake3")["video"][0]
+
+    white = video_hash([255, 255, 255])
+    assert white != video_hash([0, 0, 0])
+    assert white == video_hash([255, 255, 255])
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     [

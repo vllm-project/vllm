@@ -16,6 +16,15 @@ _HF_MODALITY_PROCESSOR_KWARGS = {
     "audio": "audio_kwargs",
 }
 
+# `media_io_kwargs` keys that affect how each modality is decoded. Video
+# frames sent as a `video/jpeg` frame list are decoded with the image
+# options, so those also apply to video items.
+_MODALITY_MEDIA_IO_KWARGS = {
+    "image": ("image",),
+    "video": ("video", "image"),
+    "audio": ("audio",),
+}
+
 # Domain tags for multimodal cache keys. Content-addressed digests and
 # caller-chosen UUIDs share one string keyspace downstream
 # (MultiModalProcessorCache, EncoderCacheManager, prefix-cache block keys),
@@ -56,12 +65,11 @@ class ProcessorInputs:
             # modality-scoped options out of unrelated entries, while
             # retaining flat processor kwargs because they are shared by HF.
             if modality in _HF_MODALITY_PROCESSOR_KWARGS:
-                modality_media_io_kwargs = self.media_io_kwargs.get(modality, {})
-                media_io_kwargs = (
-                    {modality: modality_media_io_kwargs}
-                    if modality_media_io_kwargs
-                    else {}
-                )
+                media_io_kwargs = {
+                    key: self.media_io_kwargs[key]
+                    for key in _MODALITY_MEDIA_IO_KWARGS[modality]
+                    if self.media_io_kwargs.get(key)
+                }
                 scoped_key = _HF_MODALITY_PROCESSOR_KWARGS[modality]
                 mm_processor_kwargs = {
                     key: value
