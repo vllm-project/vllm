@@ -38,6 +38,11 @@ MNK_FACTORS = [
     (512, 8192, 4096),
     (512, 16384, 128),
     (512, 24576, 128),
+    # 0 < M % 256 <= 192 takes the SM90 FP8 64x256 "tail" config
+    (160, 4096, 4096),
+    (272, 8192, 4096),
+    (528, 4096, 4096),
+    (784, 16384, 1024),
 ]
 
 # Shapes with N or K not divisible by 16.  These exercise the padding path
