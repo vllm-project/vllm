@@ -84,6 +84,7 @@ def create_scheduler(
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
+    enable_expert_parallel: bool = False,
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
@@ -219,6 +220,7 @@ def create_scheduler(
         parallel_config=ParallelConfig(
             pipeline_parallel_size=pipeline_parallel_size,
             data_parallel_size=data_parallel_size,
+            enable_expert_parallel=enable_expert_parallel,
         ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,

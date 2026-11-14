@@ -99,6 +99,7 @@ steps:
   - vllm/v1/executor/
   - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
+  - vllm/v1/core/sched/
   - vllm/v1/worker/
   - tests/v1/distributed
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
@@ -131,6 +132,7 @@ steps:
       - vllm/v1/executor/
       - vllm/v1/worker/worker_base.py
       - vllm/v1/engine/
+      - vllm/v1/core/sched/
       - vllm/v1/worker/
       - tests/v1/distributed
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py

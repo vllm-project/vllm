@@ -232,7 +232,9 @@ class SchedulerConfig:
 
     A deferred step carries no prefill at all, including chunks of an
     already-admitted prompt, so a long prompt can take up to N times as many
-    steps to finish prefilling."""
+    steps to finish prefilling. With data and expert parallelism, all ranks
+    honor the same cadence even when a rank has only prefill requests or a
+    full prefill queue; its prefill work would otherwise stall peer decodes."""
 
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting
