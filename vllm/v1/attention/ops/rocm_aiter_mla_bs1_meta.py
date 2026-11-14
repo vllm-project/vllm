@@ -87,10 +87,19 @@ def _mla_bs1_meta_kernel(
     tl.store(base + 6, kv_len - kv_end, mask=row_mask)
     tl.store(base + 7, zeros, mask=row_mask)
 
-    # Reduce plan: one qo tile, split num_works ways when k > 0.
+    # Reduce plan: one qo tile, split num_works ways when k > 0. aiter fills
+    # reduce_indptr to its full size (max_num_seqs * qo tiles + 1, which can
+    # exceed BLOCK), so the tail past the first BLOCK lanes is written too.
     split = k > 0
-    ri = tl.where(lanes == 0, 0, tl.where(split, num_works, 0))
+    ri_tail = tl.where(split, num_works, 0)
+    ri = tl.where(lanes == 0, 0, ri_tail)
     tl.store(reduce_indptr_ptr + lanes, ri, mask=lanes < REDUCE_INDPTR_SIZE)
+    for off in range(BLOCK, REDUCE_INDPTR_SIZE, BLOCK):
+        tl.store(
+            reduce_indptr_ptr + off + lanes,
+            zeros + ri_tail,
+            mask=off + lanes < REDUCE_INDPTR_SIZE,
+        )
     tl.store(
         reduce_final_map_ptr + lanes,
         tl.where(lanes == 0, 0, QLEN),

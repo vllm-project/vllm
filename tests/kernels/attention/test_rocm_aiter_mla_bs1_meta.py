@@ -19,11 +19,11 @@ H = 16  # draft heads per rank, asm-padded (DSpark 96 heads / TP8 -> 12 -> 16)
 MAX_QLEN = 8
 
 
-def _bufs(dtype):
+def _bufs(dtype, max_num_seqs=1):
     from aiter import get_mla_metadata_info_v1
 
     info = get_mla_metadata_info_v1(
-        1, MAX_QLEN, H, dtype, dtype, is_sparse=False, fast_mode=True
+        max_num_seqs, MAX_QLEN, H, dtype, dtype, is_sparse=False, fast_mode=True
     )
     return [
         torch.zeros(s if isinstance(s, tuple) else (s,), dtype=t, device="cuda")
@@ -72,6 +72,22 @@ def test_bs1_planner_matches_aiter(qlen, causal):
     kv_lens = list(range(0, 20000)) + list(range(20000, 1_050_000, 1013))
     assert planner.verify(qlen, H, causal, fp8, fp8, kv_lens=kv_lens)
     assert planner.is_verified(qlen, H, causal, fp8, fp8)
+
+
+@pytest.mark.parametrize("max_num_seqs", [1, 8, 64, 256, 1024])
+@pytest.mark.parametrize("qlen", [7, 8])
+@pytest.mark.parametrize("causal", [True, False])
+def test_bs1_planner_verifies_on_builder_sized_buffers(max_num_seqs, qlen, causal):
+    """The builder sizes the schedule for max_num_seqs requests; aiter fills
+    reduce_indptr to its full length (past 512 entries from ~64 requests), so
+    the closed-form plan has to as well or verify turns the planner off."""
+    from aiter import dtypes
+
+    from vllm.v1.attention.ops.rocm_aiter_mla_bs1_meta import AiterMlaBs1Planner
+
+    fp8 = dtypes.fp8
+    planner = AiterMlaBs1Planner(*_bufs(fp8, max_num_seqs))
+    assert planner.verify(qlen, H, causal, fp8, fp8)
 
 
 @pytest.mark.parametrize("kv_len", [7, 23, 1000, 4000, 65537, 360000])
