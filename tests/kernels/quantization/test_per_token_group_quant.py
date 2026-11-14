@@ -9,6 +9,11 @@ from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 
+requires_fp8_triton = pytest.mark.skipif(
+    current_platform.is_cuda() and not current_platform.has_device_capability(89),
+    reason="Triton fp8e4nv requires CUDA compute capability 8.9+",
+)
+
 
 @pytest.mark.parametrize(
     "shape",
@@ -39,6 +44,7 @@ from vllm.platforms import current_platform
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Only test on CUDA/ROCm/XPU.",
 )
+@requires_fp8_triton
 def test_per_token_group_quant_fp8(
     shape,
     dtype: torch.dtype,
@@ -160,6 +166,7 @@ def test_per_token_group_quant_fp8_register_matches_smem(
     not current_platform.is_cuda_alike(),
     reason="DeepGEMM not available on this platform",
 )
+@requires_fp8_triton
 def test_per_token_group_quant_fp8_packed(
     num_tokens, hidden_dim, group_size, poisoned_scales
 ):
@@ -240,6 +247,7 @@ def test_per_token_group_quant_fp8_packed(
     not current_platform.is_cuda_alike(),
     reason="DeepGEMM not available on this platform",
 )
+@requires_fp8_triton
 def test_per_token_group_quant_fp8_packed_all_zero():
     """All-zero input must produce well-defined UE8M0 scale bytes via the eps
     floor in the kernel's UE8M0 path. Locks down the all-zero behavior before
@@ -299,6 +307,7 @@ def test_per_token_group_quant_fp8_packed_all_zero():
     not current_platform.is_cuda_alike(),
     reason="DeepGEMM not available on this platform",
 )
+@requires_fp8_triton
 def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     """Inputs whose absmax/max_8bit produces a non-power-of-2 force the
     mantissa-rounding-up branch (exp_byte += 1). Locks down this behavior
@@ -369,6 +378,7 @@ def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     not current_platform.is_cuda_alike(),
     reason="DeepGEMM not available on this platform",
 )
+@requires_fp8_triton
 def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
     num_tokens, hidden_dim
 ):
@@ -422,6 +432,7 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
     not current_platform.is_cuda_alike(),
     reason="packed FP8 per-token-group quant kernel requires a CUDA-alike GPU",
 )
+@requires_fp8_triton
 def test_per_token_group_quant_fp8_packed_large_mn():
     """Regression test for https://github.com/vllm-project/vllm/issues/45099.
 
