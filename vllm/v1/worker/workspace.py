@@ -187,6 +187,21 @@ class WorkspaceManager:
             )
         return workspace
 
+    def reserve_ubatch_workspaces(self) -> None:
+        """Grow each lane's other microbatch slots to microbatch 0's capacity.
+
+        Call after profiling, before measuring memory usage or capturing CUDA
+        graphs. Only scratch capacity is reserved; persistent resources still
+        need to be initialized separately in each execution slot.
+        """
+        for lane in range(self._num_lanes):
+            required_bytes = self._workspace_size_bytes(self._current_workspaces[lane])
+            for ubatch in range(1, self._num_ubatches):
+                if required_bytes:
+                    self._ensure_workspace_size(
+                        required_bytes, ubatch * self._num_lanes + lane
+                    )
+
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
     ) -> list[torch.Tensor]:
@@ -250,17 +265,21 @@ class WorkspaceManager:
         view = current_workspace[start : start + num_bytes].view(dtype).reshape(shape)
         return view, intact
 
-    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
+    def _ensure_workspace_size(
+        self, required_bytes: int, workspace_id: int | None = None
+    ) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
         Args:
             required_bytes: The number of bytes required.
+            workspace_id: Slot to reserve, or the current execution slot.
 
         Returns:
             The current workspace tensor.
 
         """
-        workspace_id = self._get_workspace_id()
+        if workspace_id is None:
+            workspace_id = self._get_workspace_id()
         current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
 

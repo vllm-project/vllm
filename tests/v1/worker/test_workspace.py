@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
 from typing import cast
 from unittest.mock import Mock
 
@@ -251,3 +252,153 @@ def test_retained_span_is_per_slot(monkeypatch) -> None:
         assert not intact
     _, intact = manager.get_retained("kv", (256,), torch.int32)
     assert intact
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("num_ubatches", [1, 2, 3])
+def test_profile_reservation_preserves_lane_capacity(monkeypatch, device, num_ubatches):
+    """Unwarmed microbatches inherit each lane's aligned capacity independently."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(
+        torch.device(device), num_ubatches=num_ubatches, num_lanes=3
+    )
+    specs = (((3, 7), torch.float32), ((257,), torch.uint8))
+    manager.get_simultaneous(*specs)
+    with workspace.use_workspace_lane(1):
+        manager.get_simultaneous(((257,), torch.uint8))
+    manager.reserve_ubatch_workspaces()
+    manager.lock()
+    buffers = []
+    for ubatch in range(num_ubatches):
+        active_ubatch = ubatch
+        first, second = manager.get_simultaneous(*specs)
+        assert second.data_ptr() - first.data_ptr() == 256
+        first.fill_(ubatch + 1)
+        buffers.append(first)
+        with pytest.raises(AssertionError, match="Workspace is locked"):
+            manager.get_simultaneous(((769,), torch.uint8))
+        with workspace.use_workspace_lane(1):
+            (draft,) = manager.get_simultaneous(((512,), torch.uint8))
+            buffers.append(draft)
+            draft.fill_(17)
+            with pytest.raises(AssertionError, match="Workspace is locked"):
+                manager.get_simultaneous(((513,), torch.uint8))
+        with (
+            workspace.use_workspace_lane(2),
+            pytest.raises(AssertionError, match="Workspace is locked"),
+        ):
+            manager.get_simultaneous(((1,), torch.uint8))
+    assert len({buffer.data_ptr() for buffer in buffers}) == 2 * num_ubatches
+    for ubatch in range(num_ubatches):
+        torch.testing.assert_close(
+            buffers[2 * ubatch], torch.full_like(buffers[2 * ubatch], ubatch + 1)
+        )
+        assert torch.all(buffers[2 * ubatch + 1] == 17)
+    # Repeating a satisfied reservation does not replace graph-visible storage.
+    manager.reserve_ubatch_workspaces()
+
+
+def test_profile_reservation_keeps_larger_peers_and_persistent_resources(monkeypatch):
+    """Capacity replication neither shrinks scratch nor copies persistent state."""
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_ubatches=3)
+    (source,) = manager.get_simultaneous(((256,), torch.uint8))
+    source.fill_(23)
+    manager.get_persistent("state", (8,), torch.int32)
+    active_ubatch = 1
+    (larger,) = manager.get_simultaneous(((1024,), torch.uint8))
+    larger.fill_(17)
+    manager.reserve_ubatch_workspaces()
+    manager.lock()
+    (same,) = manager.get_simultaneous(((1024,), torch.uint8))
+    assert same.data_ptr() == larger.data_ptr()
+    assert torch.all(same == 17)
+    with pytest.raises(AssertionError, match="was not allocated during warmup"):
+        manager.get_persistent("state", (8,), torch.int32)
+    active_ubatch = 0
+    (same_source,) = manager.get_simultaneous(((256,), torch.uint8))
+    assert same_source.data_ptr() == source.data_ptr()
+    assert torch.all(same_source == 23)
+    active_ubatch = 2
+    (reserved,) = manager.get_simultaneous(((256,), torch.uint8))
+    assert reserved.data_ptr() not in (source.data_ptr(), larger.data_ptr())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_profile_reserved_slots_replay_cuda_graphs(monkeypatch):
+    """Post-profile allocations give each captured slot a stable scratch address."""
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    manager = workspace.WorkspaceManager(
+        torch.device("cuda"), num_ubatches=2, num_lanes=2
+    )
+    spec = ((64,), torch.float32)
+    for lane in range(2):
+        with workspace.use_workspace_lane(lane):
+            manager.get_simultaneous(spec)
+    manager.reserve_ubatch_workspaces()
+    manager.lock()
+    graphs: list[torch.cuda.CUDAGraph] = []
+    outputs: list[torch.Tensor] = []
+    pointers: set[int] = set()
+    for ubatch in range(2):
+        active_ubatch = ubatch
+        for lane in range(2):
+            with workspace.use_workspace_lane(lane):
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    (scratch,) = manager.get_simultaneous(spec)
+                    scratch.fill_(len(graphs) + 1)
+                    output = scratch.square()
+                pointers.add(scratch.data_ptr())
+                graphs.append(graph)
+                outputs.append(output)
+    assert len(pointers) == 4
+    for _ in range(3):
+        manager.reserve_ubatch_workspaces()
+        for graph in reversed(graphs):
+            graph.replay()
+        for value, output in enumerate(outputs, 1):
+            torch.testing.assert_close(output, torch.full_like(output, value**2))
+
+
+def test_profile_reservation_uses_allocation_context_and_invalidates_retained(
+    monkeypatch,
+):
+    """Growing a peer uses its allocation context and invalidates its tail cache."""
+    active_ubatch = 0
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch)
+    allocations = []
+
+    @contextmanager
+    def allocation_context():
+        allocations.append(True)
+        yield
+
+    manager = workspace.WorkspaceManager(
+        torch.device("cpu"), num_ubatches=2, alloc_context=allocation_context
+    )
+    manager.get_simultaneous(((1024,), torch.uint8))
+    active_ubatch = 1
+    manager.get_simultaneous(((256,), torch.uint8))
+    manager.get_retained("cache", (64,), torch.int32)
+    manager.reserve_ubatch_workspaces()
+    assert len(allocations) == 3
+    _, intact = manager.get_retained("cache", (64,), torch.int32)
+    assert not intact
+    manager.lock()
+    manager.reserve_ubatch_workspaces()
+    assert len(allocations) == 3
+    manager.unlock()
+    active_ubatch = 0
+    manager.get_simultaneous(((2048,), torch.uint8))
+    manager.lock()
+    with pytest.raises(AssertionError, match="Workspace is locked"):
+        manager.reserve_ubatch_workspaces()
+    active_ubatch = 1
+    (peer,) = manager.get_simultaneous(((1024,), torch.uint8))
+    assert peer.numel() == 1024
