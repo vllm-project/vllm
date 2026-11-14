@@ -387,6 +387,13 @@ class FrontendArgs(BaseFrontendArgs):
     When disabled, the setting is also propagated to the engine's
     `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
     path instead of the fused Triton kernel."""
+    max_vad_workers: int = 0
+    """Number of threads that run voice activity detection (VAD) for
+    transcription and translation requests with VAD enabled. With 0
+    (default), VAD runs on the audio preprocessing pool together with audio
+    decoding. With more than 0, VAD runs on a dedicated pool of this size, so
+    it scales independently of decoding. For high-concurrency long-audio
+    workloads with VAD enabled, 4 gave the best throughput in profiling."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -570,6 +577,11 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise ValueError(
             "Error: --sse-keep-alive-interval must be a non-negative integer "
             "(0 disables keep-alive comments)."
+        )
+    if getattr(args, "max_vad_workers", 0) < 0:
+        raise ValueError(
+            "Error: --max-vad-workers must be a non-negative integer "
+            "(0 runs VAD on the audio preprocessing pool)."
         )
 
     if getattr(args, "enable_per_request_metrics", False) and getattr(

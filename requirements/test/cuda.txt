@@ -1663,6 +1663,9 @@ filelock==4.2.6 \
     #   ray
     #   torch
     #   virtualenv
+flatbuffers==25.12.19 \
+    --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
+    # via onnxruntime
 fonttools==4.66.1 \
     --hash=sha256:058cd823b80bac59e64dfad9e3b6fcd677852f9a3804971bbf6b48cc611e785c \
     --hash=sha256:05aeb146451f37289f782c3c861f3d0f4b86c2dd2e4620b46683544c7406640e \
@@ -3794,6 +3797,7 @@ numpy==2.2.6 \
     #   mistral-common
     #   mteb
     #   numba
+    #   onnxruntime
     #   opencv-python-headless
     #   optuna
     #   pandas
@@ -3902,6 +3906,32 @@ nvidia-nvtx==13.2.75 \
     --hash=sha256:b0a85fe36c3e9d56225fc30297577535a5a35f19545c8073926fe89807617e52 \
     --hash=sha256:d8e1c4a14a21d6dd4bc2fc59eb1e3f42447db40edf5d0f580c0eba5f9abb606c
     # via cuda-toolkit
+onnxruntime==1.27.0 \
+    --hash=sha256:0874edc171f470fc4dd2bbb60bc0989612ed1a8b89b365cda016630a93227f13 \
+    --hash=sha256:1b215aa662c8f983f7d6dedafe65a9be72c26e5338e0fe98b3e0422c32c85428 \
+    --hash=sha256:20c321cf187ba496e648acf6b4cf90b4d398b0d17c2a77fdaeba365b908cc1c1 \
+    --hash=sha256:2eb083321af8a236a84c7c140a7f4cecbfa2a987a18c07c78db471c20cd390ef \
+    --hash=sha256:2fdfa9df40a0ded0028ce6f9cd863264237f3970559dea2b81456e9ac4622b94 \
+    --hash=sha256:370d211e1ceeac4cd5f45301655463ac59e27cdc74d9f7aeb2d19ff4b7a76715 \
+    --hash=sha256:445fb702ea5241ba813a3ce2febe2e9408a64f6ad2eb610924322c536165f7cd \
+    --hash=sha256:48b3d87eb560ff6a772240506f3c78d6d27c63cafedd5c775672e1194f968cfd \
+    --hash=sha256:49e416be0d717338b6d041b99911b716d70c397d277056450724f93bdded3fc2 \
+    --hash=sha256:54c0c4e9202c36c4ecdb1f3443f5dfbfd5ee3b54d1362c4b4c6134110e74fb32 \
+    --hash=sha256:5b51c014cf1a4fcd93c29a97eac8071fa27710dae05a4d0380bb60a66d60a62c \
+    --hash=sha256:6872443f236a554921cda6f318c900e2d0c226792cf3534d00e5057c6926e5d2 \
+    --hash=sha256:75fbc1e1fb43a39a856c8209c544cca7817b5de7ac16b15b1bdf55d1cc67b9df \
+    --hash=sha256:760021bca514d64a811837820d351a08a41741f16f8b4c26450da708fecf14e6 \
+    --hash=sha256:7c65a7438632d55dfbc8a02ee60bd6cf7dd9d1ba05a43d4b851452f32338e194 \
+    --hash=sha256:856032937dd3bc7a7c141909c8d7ae4fde3e3f59bddf061ae627b9a051bda95c \
+    --hash=sha256:8ba14a38c570087f3cdb8cfba33f7a38a1e826c1e5b29e17c28ceda0cc910016 \
+    --hash=sha256:a14c2ce45312def86b77aea651f46565e45960cf5f0721bfdff449165086ab76 \
+    --hash=sha256:b3e5b58b8c89c2b20e086e890aa9527377e5c240dc3ecc1640d18e07705eeb1c \
+    --hash=sha256:c6197a02e3f620c4dc13cff51b80672409fc1ffab3aa2593911b19fd322ff48b \
+    --hash=sha256:c6fddce0539a4898c7bef35b052ffd37935b2190e35488eab99ce91887743ea1 \
+    --hash=sha256:d0d1f68868e2ef30ef70998ba9bbbc5c305e9b17041e3936751c1b8aa6aade06 \
+    --hash=sha256:e4f7b0e90d2d212e2c2deaa6c8291616183ab815d3ec558ea12d3ac8b26d36f4 \
+    --hash=sha256:ff050e4f6bf7f12918fa14dcb047c0b02e295f35e86d42532552be4b3d54e977
+    # via -r requirements/test/cuda.in
 open-clip-torch==2.32.0 \
     --hash=sha256:0220bc111162527eb738c1fe20dbfd6ea45dfe44726b54a4de18d3945d8f2f00 \
     --hash=sha256:80b35b43e37afc2b6173aa5ab0ad68744ab3a3211e624f72dfe743a162707637
@@ -4173,6 +4203,7 @@ packaging==26.3 \
     #   lazy-loader
     #   lm-format-enforcer
     #   matplotlib
+    #   onnxruntime
     #   optuna
     #   peft
     #   plotly
@@ -4181,6 +4212,7 @@ packaging==26.3 \
     #   pytest-rerunfailures
     #   ray
     #   scikit-image
+    #   silero-vad
     #   statsmodels
     #   transformers
     #   typepy
@@ -4577,6 +4609,7 @@ protobuf==6.33.6 \
     #   google-api-core
     #   googleapis-common-protos
     #   grpcio-reflection
+    #   onnxruntime
     #   opentelemetry-proto
     #   proto-plus
     #   ray
@@ -6584,6 +6617,10 @@ shellingham==1.5.4 \
     # via
     #   perceptron
     #   typer
+silero-vad==6.2.3 \
+    --hash=sha256:7b7f5436cfcb02fae583a05b512ea96467fd449fe54cb49a5e4f06c51a1e43b8 \
+    --hash=sha256:d7a23b09202be4953915cb9173089bb307eed0418a9bd4794d9ec5af07fa1996
+    # via -r requirements/test/cuda.in
 six==1.16.0 \
     --hash=sha256:1e61c37477a1626458e36f7b1d82aa5c9b094fa4802892072e49de9c60c4c926 \
     --hash=sha256:8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254
@@ -6957,6 +6994,7 @@ torch==2.14.0+cu132 \
     #   runai-model-streamer
     #   segmentation-models-pytorch
     #   sentence-transformers
+    #   silero-vad
     #   tensorizer
     #   timm
     #   torchaudio

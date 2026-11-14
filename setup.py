@@ -1727,6 +1727,11 @@ setup(
             "scipy",
             "soundfile",
             "soxr",
+            "silero-vad>=6.2.3",
+            (
+                "onnxruntime>=1.19.0; platform_machine != 'ppc64le' and "
+                "platform_machine != 's390x' and platform_machine != 'riscv64'"
+            ),
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
