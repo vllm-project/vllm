@@ -6,6 +6,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.kernels.utils import opcheck
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.models.qwen4_exp.amd import hyperconnection  # noqa: F401
 from vllm.models.qwen4_exp.amd.ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -129,3 +132,74 @@ def test_hc_combine_norm(num_tokens: int, norm_size: int) -> None:
     torch.testing.assert_close(
         actual_norm, _ref_grouped_gemma_rmsnorm(expected, weight)
     )
+
+
+@pytest.fixture
+def aiter_enabled(monkeypatch: pytest.MonkeyPatch):
+    # CI does not set VLLM_ROCM_USE_AITER, which gates the two-stage kernels.
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    yield
+    monkeypatch.undo()
+    rocm_aiter_ops.refresh_env_variables()
+
+
+# 1-8 run the two-stage skinny decode kernels, 9 and 64 the Triton chain.
+@pytest.mark.parametrize("norm_size", NORM_SIZES)
+@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8, 9, 64])
+def test_hc_two_stage_combine_and_mix(
+    aiter_enabled: None, num_tokens: int, norm_size: int
+) -> None:
+    if not rocm_aiter_ops.is_hc_two_stage_enabled():
+        pytest.skip("AITER FlyDSL two-stage HC kernels are not supported here")
+    set_random_seed(0)
+    residual = _randn(num_tokens, HYPER_HIDDEN_SIZE)
+    block_output = _randn(num_tokens, HIDDEN_SIZE)
+    injection = _randn(num_tokens, DOWN_N)[:, LORA_RANK : LORA_RANK + HC]
+    norm_weight = _randn(norm_size)
+    w_down_inject = _randn(DOWN_N, HYPER_HIDDEN_SIZE) / HYPER_HIDDEN_SIZE**0.5
+    w_up = _randn(HYPER_HIDDEN_SIZE, LORA_RANK) / LORA_RANK**0.5
+    w_down_inject_folded = rocm_aiter_ops.hc_fold_norm_weight(
+        w_down_inject, norm_weight, HC
+    )
+    max_tokens = rocm_aiter_ops.hc_two_stage_max_tokens(
+        HYPER_HIDDEN_SIZE, DOWN_N, HC, LORA_RANK
+    )
+    assert max_tokens >= 8
+    args = (
+        residual,
+        block_output,
+        injection,
+        norm_weight,
+        w_down_inject,
+        w_down_inject_folded,
+        w_up,
+        EPS,
+        HC,
+        LORA_RANK,
+        max_tokens,
+    )
+    op = torch.ops.vllm.qwen4_exp_hc_two_stage_combine_and_mix
+
+    actual, actual_input, actual_injection = op(*args)
+
+    expected = _ref_hc_combine(residual, block_output, injection)
+    xn = _ref_grouped_gemma_rmsnorm(expected, norm_weight).float()
+    down = xn @ w_down_inject.float().T
+    gate = F.silu(down[:, :LORA_RANK] / HC) @ w_up.float().T
+    expected_input = (
+        torch.sigmoid(gate.unflatten(-1, (HC, HIDDEN_SIZE)))
+        * xn.unflatten(-1, (HC, HIDDEN_SIZE))
+    ).mean(-2)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        actual_input, expected_input.to(torch.bfloat16), atol=3e-2, rtol=2e-2
+    )
+    torch.testing.assert_close(
+        actual_injection,
+        down[:, LORA_RANK : LORA_RANK + HC].to(torch.bfloat16),
+        atol=3e-2,
+        rtol=2e-2,
+    )
+    if num_tokens in (2, 9):
+        opcheck(op, args)
