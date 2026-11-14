@@ -266,6 +266,27 @@ impl BenchConfig {
             ));
         }
 
+        if args.prompt_token_ids {
+            if args.dataset_name != DatasetName::Random {
+                return Err(BenchError::Config(
+                    "--prompt-token-ids is only supported with --dataset-name random".into(),
+                ));
+            }
+            if !matches!(
+                args.backend,
+                BackendKind::Vllm
+                    | BackendKind::Openai
+                    | BackendKind::OpenaiEmbeddings
+                    | BackendKind::VllmPooling
+            ) {
+                return Err(BenchError::Config(format!(
+                    "--prompt-token-ids is not supported with --backend {}; choose --backend \
+                     vllm, openai, openai-embeddings, or vllm-pooling",
+                    args.backend
+                )));
+            }
+        }
+
         let base_url = args.resolve_base_url();
         let api_url = args.resolve_api_url();
 
@@ -1578,6 +1599,50 @@ mod tests {
         let args = parse_args(args);
 
         assert!(BenchConfig::from_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_prompt_token_ids_backend_compatibility() {
+        for backend in ["vllm", "openai", "openai-embeddings", "vllm-pooling"] {
+            let args = parse_args(["vllm-bench", "--backend", backend, "--prompt-token-ids"]);
+            assert!(
+                BenchConfig::from_args(&args).is_ok(),
+                "{backend} should support --prompt-token-ids"
+            );
+        }
+
+        for backend in [
+            "openai-chat",
+            "openai-responses",
+            "openai-embeddings-chat",
+            "vllm-rerank",
+        ] {
+            let args = parse_args(["vllm-bench", "--backend", backend, "--prompt-token-ids"]);
+            let err = BenchConfig::from_args(&args)
+                .expect_err("text-only backends must reject --prompt-token-ids");
+            let BenchError::Config(message) = err else {
+                panic!("expected a configuration error, got {err:?}");
+            };
+            assert!(message.contains(backend), "{backend}: {message}");
+        }
+    }
+
+    #[test]
+    fn test_prompt_token_ids_requires_random_dataset() {
+        let args = parse_args([
+            "vllm-bench",
+            "--backend",
+            "vllm",
+            "--dataset-name",
+            "sharegpt",
+            "--prompt-token-ids",
+        ]);
+        let err = BenchConfig::from_args(&args)
+            .expect_err("non-random datasets must reject --prompt-token-ids");
+        let BenchError::Config(message) = err else {
+            panic!("expected a configuration error, got {err:?}");
+        };
+        assert!(message.contains("--dataset-name random"), "{message}");
     }
 
     #[test]
