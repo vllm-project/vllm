@@ -1,5 +1,10 @@
 # Features
 
+## MoE Expert Offloading
+
+- [MoE Expert Pool](moe_expert_pool.md): keep ModelOpt NVFP4 expert weights in
+  host memory and use a shared GPU bank with the Marlin backend.
+
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)

@@ -645,6 +645,7 @@ steps:
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
+  - tests/kernels/expert_pool
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/model_loader/reload/
   - vllm/models/muse_spark/common/
@@ -653,8 +654,12 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py
+    - >-
+      pytest -v -s
+      kernels/moe
+      --ignore=kernels/moe/test_modular_oai_triton_moe.py
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+    - pytest -v -s kernels/expert_pool
   mirror:
     amd:
       label: ":amd: (MI300) MoE Kernels"
@@ -666,6 +671,7 @@ steps:
       - csrc/quantization/w8a8/cutlass/moe/
       - csrc/moe/
       - tests/kernels/moe
+      - tests/kernels/expert_pool
       - vllm/model_executor/layers/fused_moe/
       - vllm/models/muse_spark/common/
       - vllm/models/muse_spark/nvidia/

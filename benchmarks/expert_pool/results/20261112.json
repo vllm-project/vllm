@@ -1,0 +1,289 @@
+{
+  "schema_version": 1,
+  "generated_utc": "2026-11-12T06:24:12.109491+00:00",
+  "campaign": "Same-head staging A/B with fixed 768 MiB KV in both arms",
+  "complete": true,
+  "valid": true,
+  "errors": [],
+  "pending_runs": [],
+  "original_campaign_mechanically_passed": true,
+  "provenance": {
+    "tested_source_commit": "27e2470a154b790f67ad184d63a6796ba8371007",
+    "upstream_base_commit": "dac51063cc1295a2a8426998c4c372b19c42a0f9",
+    "source_tar_sha256": "384942d462664a46410fc18f9f4e05753afc83dfcd0b1da3baf1c5c0337b90c6",
+    "wheel_commit": "c9c36486c3f7c767c25bb37f087e38d101edf1ef",
+    "wheel_sha256": "822c70755b5f315d338def6eeadef142ccde96e6f9a0feff077bcbd200a0add3",
+    "package_versions": {"vllm": "0.34.0rc1.dev295+g2a14a5e477.precompiled", "torch": "2.14.0+cu132", "triton": "3.8.0", "flashinfer-python": "0.7.3", "transformers": "5.22.0", "pytest": "9.2.0"},
+    "environment_caveat": "Current candidate Python sources over the c9c36486c precompiled wheel. Package version labels retain 2a14a5e metadata; the tested source head is recorded separately. Native/build dependencies were compared before testing; two unrelated Rust MiniMax parser files differ from the wheel.",
+    "python": "3.12.13"
+  },
+  "configuration": {
+    "model": "/data/models/Qwen3.8-Flash-Next-NVFP4-nvidia",
+    "served_model_name": "flashnext",
+    "tensor_parallel_size": 1,
+    "quantization": "modelopt",
+    "dtype": "bfloat16",
+    "moe_backend": "marlin",
+    "moe_expert_pool_rows": 258,
+    "max_model_len": 4096,
+    "max_num_seqs": 1,
+    "max_num_batched_tokens": 512,
+    "kv_cache_memory_bytes": 805306368,
+    "extensible_kv": false,
+    "engram_config": {"disk_offload": true},
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "thinking": false,
+    "mtp": false,
+    "seed": 0,
+    "generation_config": "vllm",
+    "tool_call_parser": "qwen3_xml",
+    "auto_tool_choice": true,
+    "reasoning_parser": "qwen3",
+    "capacity": {
+      "gpu_memory_utilization": 0.49,
+      "container_memory_limit_gib": 100,
+      "kv_cache_memory_bytes": 805306368,
+      "kv_sizing": "Fixed 768MiB in both arms; this disables extensible sizing and overrides utilization for KV allocation.",
+      "fixed_kv_reason": "The original extensible-KV pilot completed four runs but on-2 failed startup: physical headroom minus a 1GiB margin and 0.56GiB transient left less than the 0.60GiB required for 4096 context. Preserve that pilot separately; all six final measurements restart with equal fixed KV capacity.",
+      "budget_change_reason": "Both final arms request fixed 805306368-byte KV capacity. Utilization 0.49 remains the startup availability check; explicit KV disables extensible-KV allocation and automatic profiling-based KV sizing. The balloon was reset for this campaign; pre-start free-memory readings vary as recorded.",
+      "nominal_gpu_budget_gib": 48,
+      "initial_cuda_target_bytes": 51539607552,
+      "initial_balloon_cuda_reading": {"held_bytes": 45283737600, "free_bytes": 51539542016, "total_bytes": 101970345984},
+      "vllm_requested_memory_gib_from_initial_cuda_total": 46.533969726562496,
+      "exact_48_gib_free_before_every_observed_run": false,
+      "caveat": "Nominal 48 GiB GPU budget established by a separate balloon. Pre-start free memory varies across launches; exact readings and deltas are recorded, without a post-hoc tolerance acceptance rule. This is not a strict per-process VRAM cap."
+    },
+    "order": ["on-0", "off-0", "on-1", "off-1", "on-2", "off-2"],
+    "environment": {"PYTORCH_ALLOC_CONF": "pinned_max_round_threshold_mb:1,pinned_max_cached_size_mb:1", "OMP_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "2", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "VLLM_DEBUG_WORKSPACE": "1", "VLLM_LOGGING_LEVEL": "DEBUG", "PYTHONNOUSERSITE": "1", "FLASHINFER_WORKSPACE_BASE": "/home/hello/work/lab/results/pr51-main-20261112/cache/flashinfer-workspace"},
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+  },
+  "protocol": {
+    "pair_sha256": "3d4e64ecde61dd943d431a90b6b2bf6c32e89e7f1a3901cc7fb9b41a0856926a",
+    "request": {"max_tokens": 2048, "temperature": 0, "top_p": 1, "seed": 0},
+    "decode_metric": "Client-observed (completion_tokens - 1) / (last text event - first text event); excludes prefill.",
+    "e2e_metric": "Completion tokens / complete request elapsed seconds; includes prefill.",
+    "quality_scope": "Four lightweight API checks once per arm; frozen issue-text requests are not officially graded SWE-Lancer tasks."
+  },
+  "runs": [
+    {
+      "label": "on-0",
+      "comparison_slot": "on-0",
+      "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/final-ab/27e2470a-kv768/on-0",
+      "benchmark": [
+        {"role": "warmup", "task_id": "28096_836", "completion_tokens": 726, "first_token_s": 13.231245920062065, "decode_tok_s": 59.86404963683127, "e2e_tok_s": 28.629121854908238, "output_sha256": "b2ca847469c122ca9e3e70a612825611b761514e500ecd5281a2b5810d2439f0", "finish_reason": "stop", "prompt_tokens": 1070},
+        {"role": "measure", "task_id": "18827_741", "completion_tokens": 1359, "first_token_s": 9.303398611955345, "decode_tok_s": 65.89978806981047, "e2e_tok_s": 45.41335248588947, "output_sha256": "bf0810eb6723bc35bb3680cde6889899d0bff399d7bd4a8ccddf4f9ee922c49d", "finish_reason": "stop", "prompt_tokens": 753}
+      ],
+      "quality": {
+        "scheduled": true,
+        "passed": true,
+        "cases": ["historical_chat_sanity", "historical_tool_sanity", "five_fact_prefill_retrieval", "bounded_structured_output"]
+      },
+      "memory": {"gpu_free_before_mib": 49152, "gpu_nominal_delta_mib": 0, "server_max_saved_nvml_mib": 47406, "kv_tokens": 4864, "ram_peak_bytes": 107374182400},
+      "exit": {"code": 0, "oom_killed": false, "restarts": 0},
+      "benchmark_jsonl_sha256": "64fc99e860695bc2180d5e743b04b6ffea4935b21b1b38b05566a56d715f8352"
+    },
+    {
+      "label": "off-0",
+      "comparison_slot": "off-0",
+      "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/final-ab/27e2470a-kv768/off-0",
+      "benchmark": [
+        {"role": "warmup", "task_id": "28096_836", "completion_tokens": 880, "first_token_s": 12.368527987971902, "decode_tok_s": 60.78503262659185, "e2e_tok_s": 32.78110522613748, "output_sha256": "2f73972c9e4e4e22a0bc1a22204c34ace87b3865e02a7d67d073511868462adc", "finish_reason": "stop", "prompt_tokens": 1070},
+        {"role": "measure", "task_id": "18827_741", "completion_tokens": 1261, "first_token_s": 7.076023363973945, "decode_tok_s": 65.5667097979828, "e2e_tok_s": 47.92800120647419, "output_sha256": "f2dc3ad7eecadd6e3aca181b9a9ac29ceb3b79cb81ab8ed58b5c819b6f2cd1df", "finish_reason": "stop", "prompt_tokens": 753}
+      ],
+      "quality": {
+        "scheduled": true,
+        "passed": true,
+        "cases": ["historical_chat_sanity", "historical_tool_sanity", "five_fact_prefill_retrieval", "bounded_structured_output"]
+      },
+      "memory": {"gpu_free_before_mib": 49276, "gpu_nominal_delta_mib": 124, "server_max_saved_nvml_mib": 44772, "kv_tokens": 4864, "ram_peak_bytes": 107374182400},
+      "exit": {"code": 0, "oom_killed": false, "restarts": 0},
+      "benchmark_jsonl_sha256": "63a7e4aefc4512d468801647e14ab5519a200f12e3c56769b76fd2463850b40f"
+    },
+    {
+      "label": "on-1",
+      "comparison_slot": "on-1",
+      "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/final-ab/27e2470a-kv768/on-1",
+      "benchmark": [
+        {"role": "warmup", "task_id": "28096_836", "completion_tokens": 839, "first_token_s": 13.191806739196181, "decode_tok_s": 59.46813001166281, "e2e_tok_s": 30.729315761016583, "output_sha256": "b61a2ce38e9ca51df29018d45acfa0bbd3a8a97ebcc74028afe5e4cb08472c11", "finish_reason": "stop", "prompt_tokens": 1070},
+        {"role": "measure", "task_id": "18827_741", "completion_tokens": 1558, "first_token_s": 9.220455487724394, "decode_tok_s": 64.15373108138176, "e2e_tok_s": 46.49780207588583, "output_sha256": "a75abf5d35831c3275632a848a2c21fea6c63f9f62266a9be98b5c5125e5cb34", "finish_reason": "stop", "prompt_tokens": 753}
+      ],
+      "quality": {
+        "scheduled": false,
+        "passed": null,
+        "cases": []
+      },
+      "memory": {"gpu_free_before_mib": 49276, "gpu_nominal_delta_mib": 124, "server_max_saved_nvml_mib": 47406, "kv_tokens": 4864, "ram_peak_bytes": 107374182400},
+      "exit": {"code": 0, "oom_killed": false, "restarts": 0},
+      "benchmark_jsonl_sha256": "85c46a6976d74de9ac84a8ec7a1652372945fa36d0501efe3d814f823319f415"
+    },
+    {
+      "label": "off-1",
+      "comparison_slot": "off-1",
+      "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/final-ab/27e2470a-kv768/off-1",
+      "benchmark": [
+        {"role": "warmup", "task_id": "28096_836", "completion_tokens": 884, "first_token_s": 12.40586714586243, "decode_tok_s": 59.88649467236589, "e2e_tok_s": 32.5402856152022, "output_sha256": "780a6507bba6e1b906615cd8728c106d8f63f75d7318ef709efaa820728b9810", "finish_reason": "stop", "prompt_tokens": 1070},
+        {"role": "measure", "task_id": "18827_741", "completion_tokens": 1549, "first_token_s": 6.825365946162492, "decode_tok_s": 64.85780412357781, "e2e_tok_s": 50.43644824238317, "output_sha256": "dcf0102a1393bef8be1c6aff8d4d2e2d50e73bb310f0788f89cc25cd242e4c6c", "finish_reason": "stop", "prompt_tokens": 753}
+      ],
+      "quality": {
+        "scheduled": false,
+        "passed": null,
+        "cases": []
+      },
+      "memory": {"gpu_free_before_mib": 49276, "gpu_nominal_delta_mib": 124, "server_max_saved_nvml_mib": 44772, "kv_tokens": 4864, "ram_peak_bytes": 107374182400},
+      "exit": {"code": 0, "oom_killed": false, "restarts": 0},
+      "benchmark_jsonl_sha256": "d11995601118a279be15c5a343ce61ccdbcb9073912eb369b835a7885b74bc7a"
+    },
+    {
+      "label": "on-2-replacement",
+      "comparison_slot": "on-2",
+      "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/replacement/27e2470a-kv768/on-2",
+      "benchmark": [
+        {"role": "warmup", "task_id": "28096_836", "completion_tokens": 770, "first_token_s": 13.29483995679766, "decode_tok_s": 59.992091864517846, "e2e_tok_s": 29.463582060054424, "output_sha256": "a3a1dd543a984f746e2dcf0cfd4ed8004a5d464b072506bf65272b977301905d", "finish_reason": "stop", "prompt_tokens": 1070},
+        {"role": "measure", "task_id": "18827_741", "completion_tokens": 1171, "first_token_s": 9.402340663596988, "decode_tok_s": 64.98475617826021, "e2e_tok_s": 42.70251722594121, "output_sha256": "93a0163e1022e780ca3994f63196294cd4a27e67b65e9b9af859bdb8d14d91b4", "finish_reason": "stop", "prompt_tokens": 753}
+      ],
+      "quality": {
+        "scheduled": false,
+        "passed": null,
+        "cases": []
+      },
+      "memory": {"gpu_free_before_mib": 49276, "gpu_nominal_delta_mib": 124, "server_max_saved_nvml_mib": 47406, "kv_tokens": 4864, "ram_peak_bytes": 107374182400},
+      "exit": {"code": 0, "oom_killed": false, "restarts": 0},
+      "benchmark_jsonl_sha256": "b0288e88aa5512b75bedc6d4aeecf7f63b5f22a2e0878b129b2dcc21cb4cc672"
+    },
+    {
+      "label": "off-2",
+      "comparison_slot": "off-2",
+      "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/final-ab/27e2470a-kv768/off-2",
+      "benchmark": [
+        {"role": "warmup", "task_id": "28096_836", "completion_tokens": 713, "first_token_s": 12.418316135182977, "decode_tok_s": 59.33788731945028, "e2e_tok_s": 29.18473892841799, "output_sha256": "6fafa2cad373e72e9dbdc3540057a4971104282a7a811ac3fc806060d140e990", "finish_reason": "stop", "prompt_tokens": 1070},
+        {"role": "measure", "task_id": "18827_741", "completion_tokens": 1542, "first_token_s": 6.93981202878058, "decode_tok_s": 62.114180048229294, "e2e_tok_s": 48.54346162377214, "output_sha256": "47010f7c1678c465736acd68fa7289edcf384d23ebe414c0855a6c8f7a37cebd", "finish_reason": "stop", "prompt_tokens": 753}
+      ],
+      "quality": {
+        "scheduled": false,
+        "passed": null,
+        "cases": []
+      },
+      "memory": {"gpu_free_before_mib": 49276, "gpu_nominal_delta_mib": 124, "server_max_saved_nvml_mib": 44772, "kv_tokens": 4864, "ram_peak_bytes": 107374182400},
+      "exit": {"code": 0, "oom_killed": false, "restarts": 0},
+      "benchmark_jsonl_sha256": "ed8bc66d28f02b648b4c716d8468551869c901ef3e3825827e66f2fcf3089055"
+    }
+  ],
+  "summary": {
+    "on": {
+      "warmup": {
+        "first_token_s": {"median": 13.231245920062065, "min": 13.191806739196181, "max": 13.29483995679766},
+        "decode_tok_s": {"median": 59.86404963683127, "min": 59.46813001166281, "max": 59.992091864517846},
+        "e2e_tok_s": {"median": 29.463582060054424, "min": 28.629121854908238, "max": 30.729315761016583}
+      },
+      "measure": {
+        "first_token_s": {"median": 9.303398611955345, "min": 9.220455487724394, "max": 9.402340663596988},
+        "decode_tok_s": {"median": 64.98475617826021, "min": 64.15373108138176, "max": 65.89978806981047},
+        "e2e_tok_s": {"median": 45.41335248588947, "min": 42.70251722594121, "max": 46.49780207588583}
+      }
+    },
+    "off": {
+      "warmup": {
+        "first_token_s": {"median": 12.40586714586243, "min": 12.368527987971902, "max": 12.418316135182977},
+        "decode_tok_s": {"median": 59.88649467236589, "min": 59.33788731945028, "max": 60.78503262659185},
+        "e2e_tok_s": {"median": 32.5402856152022, "min": 29.18473892841799, "max": 32.78110522613748}
+      },
+      "measure": {
+        "first_token_s": {"median": 6.93981202878058, "min": 6.825365946162492, "max": 7.076023363973945},
+        "decode_tok_s": {"median": 64.85780412357781, "min": 62.114180048229294, "max": 65.5667097979828},
+        "e2e_tok_s": {"median": 48.54346162377214, "min": 47.92800120647419, "max": 50.43644824238317}
+      }
+    }
+  },
+  "measurement_replacement": {"reason": "Concurrent CPU loader-proof tests overlapped the original ON-2 measured request. It was excluded before the replacement ran, irrespective of measured speed.", "selection": "Primary ON samples are original on-0, original on-1, and one clean replacement. Original on-2 is retained separately, never included in the primary median.", "replacement_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/replacement/27e2470a-kv768", "expected_replacement_run_id": "27e2470a-kv768-repeat", "concurrent_cpu_evidence": "43 CPU tests took about 9.05 seconds, ending 2026-11-12T06:03:27.888Z.", "original_start_utc": "2026-11-12T06:03:05.516502+00:00", "original_end_utc": "2026-11-12T06:03:36.220691+00:00", "original_elapsed_s": 30.704189146868885, "original_decode_tok_s": 62.10771982778213, "passed": true, "metadata_sha256": "753c871f9580112c561949a3af1206839189a76ec9a8445248bbc17ad3e1fa47", "predeclared_reason_sha256": "71462e4ebb464d9906124436456e0a4cd0fc9614fe49e074fa394afc3ca51f8d", "cpu_log_sha256": "56911cf0c31254c6bfa1e0b533dd4e2cfee844b446859703318f360542dafaae", "cpu_log_mtime_utc": "2026-11-12T06:03:27.888719+00:00", "started_utc": "2026-11-12T06:08:48.341866+00:00", "completed_utc": "2026-11-12T06:13:49.788103+00:00"},
+  "excluded_non_isolated_run": {
+    "label": "on-2",
+    "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/final-ab/27e2470a-kv768/on-2",
+    "benchmark": [
+      {"role": "warmup", "timestamp": "2026-11-12T06:02:37.243377+00:00", "completion_tokens": 908, "first_token_s": 13.126265079248697, "elapsed_s": 28.271968240384012, "decode_tok_s": 59.950231279059736, "e2e_tok_s": 32.11661785552667, "output_sha256": "04429bef277ed02ad9c5eb2481cc919210902bf9634b96e589e9102092a54a48", "finish_reason": "stop"},
+      {"role": "measure", "timestamp": "2026-11-12T06:03:05.516502+00:00", "completion_tokens": 1325, "first_token_s": 9.359785900916904, "elapsed_s": 30.704189146868885, "decode_tok_s": 62.10771982778213, "e2e_tok_s": 43.1537206099813, "output_sha256": "8b63986a0ff19d93108d60b42daea2d16b262be28894bab9000f372dac3b8a71", "finish_reason": "stop"}
+    ],
+    "benchmark_jsonl_sha256": "be8ee0b634d0d5e42322d3eaedcf0e77c5a2fa3ffd5be1408b567396abe2ae97"
+  },
+  "output_identity": {
+    "warmup": {
+      "within_arm": {
+        "on": {"observed_runs": 3, "all_equal": false},
+        "off": {"observed_runs": 3, "all_equal": false}
+      },
+      "paired_on_off": {"0": false, "1": false, "2": false}
+    },
+    "measure": {
+      "within_arm": {
+        "on": {"observed_runs": 3, "all_equal": false},
+        "off": {"observed_runs": 3, "all_equal": false}
+      },
+      "paired_on_off": {"0": false, "1": false, "2": false}
+    }
+  },
+  "output_identity_interpretation": "Generated text differs across fresh servers even within the same staging arm. The observed nonrepeatability is not exclusive to toggling staging; its numerical cause is not established. These throughput measurements compare the same prompts but different generated continuations and lengths.",
+  "excluded_pilot": {
+    "directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/final-ab/27e2470a",
+    "successful_runs": ["on-0", "off-0", "on-1", "off-1"],
+    "failed_run": "on-2",
+    "docker_exit_code": 1,
+    "docker_oom_killed": false,
+    "reason": "Extensible-KV startup headroom after warmup and its reserve was insufficient for 4096 context. The pilot stopped after four successful runs; it is not a completed A/B result.",
+    "excluded_from_final_samples": true,
+    "status_sha256": "f555a21f2c2262cbf9ca834131a94dc1512bcad414372f7c100404f3998300b0"
+  },
+  "limitations": ["Historical 63.2 tok/s used another vLLM and deferred PLE implementation; this is a same-current-head staging comparison, not a controlled historical speed comparison.", "Three fresh servers per arm share model files and compilation caches, including a persistent FlashInfer workspace cache; this is not a cold filesystem-cache benchmark.", "Both arms use fixed 768 MiB KV capacity. Staging consumes additional VRAM but does not reduce the configured KV allocation in this campaign.", "Memory pressure (memory.events max) may occur without OOM; per-run counters and peaks are retained.", "GPU budget is nominal 48 GiB, not an exact per-process cap. Maximum saved NVML process-memory snapshots are not continuous peak measurements.", "The speed measurements disable MTP. The separate MTP smoke establishes API operation and positive acceptance only; no MTP speedup, long-context, concurrent-throughput, or official SWE-Lancer score is established.", "Original fixed-KV ON-2 overlapped CPU proof tests and is excluded from the primary median. One predeclared fresh ON replacement uses the same source and settings; all seven raw measurements remain available for audit.", "UVA is one fresh-server configuration comparison with the pool disabled and eager execution; it does not isolate staging or estimate variability across restarts."],
+  "raw_artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/final-ab/27e2470a-kv768",
+  "revision_scope": {"performance_source_commit": "27e2470a154b790f67ad184d63a6796ba8371007", "later_production_commit": "3abbddc9dfaf31149f505fce4d2d4edeeb5ee9cb", "later_changed_file": "vllm/model_executor/model_loader/utils.py", "later_change": "Skip expert-pool setup when no pooled layers exist. The pooled installation body and inference kernels are unchanged.", "performance_repeated_on_later_commit": false, "later_commit_tests": "89 pytest tests passed in 29.54s (44 expert-pool/configuration and 45 loader tests); 2 benchmark-client unittest tests passed. Logs: logs/final-3abb-pytest.log and logs/final-3abb-benchmark-unittest.log.", "mtp_validation": "Passed four API smoke checks at 3abbddc9 with N240, prefill staging disabled, fixed 1.5 GiB KV and INFO logging. 1119 of 1368 draft tokens were accepted across 456 drafting steps; this is functional evidence, not a speed benchmark."},
+  "uva_comparison": {
+    "source_commit": "27e2470a154b790f67ad184d63a6796ba8371007",
+    "fresh_server_runs": 1,
+    "passed": true,
+    "scope": "One current-main integrated UVA/eager baseline. Pool disabled, 40GiB expert CPU offload, graphs disabled. This differs from the pool A/B in offload and graph configuration; it does not isolate prefill staging and is not a three-run historical replication.",
+    "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/uva-baseline/27e2470a-kv768",
+    "configuration_changes_from_pool": {"moe_expert_pool_rows": 0, "prefill_staging": false, "offload_backend": "uva", "cpu_offload_gb": 40, "cpu_offload_params": "experts", "enforce_eager": true},
+    "kv_cache_memory_bytes": 805306368,
+    "benchmark": [
+      {"role": "warmup", "task_id": "28096_836", "timestamp": "2026-11-12T06:18:21.832897+00:00", "completion_tokens": 823, "first_token_s": 16.191481322981417, "elapsed_s": 125.5960444258526, "decode_tok_s": 7.5225570175796435, "e2e_tok_s": 6.552754139369968, "output_sha256": "1386f52d2aa72b6d7c3b96810d7a2d90651377523404fad64056431f21fa22f8", "finish_reason": "stop", "prompt_tokens": 1070},
+      {"role": "measure", "task_id": "18827_741", "timestamp": "2026-11-12T06:20:27.430057+00:00", "completion_tokens": 1406, "first_token_s": 13.067264997866005, "elapsed_s": 199.9672676748596, "decode_tok_s": 7.522748341484572, "e2e_tok_s": 7.031150729558955, "output_sha256": "ea264b849f6e9aaf13d62a8cbbf71dd43d02382258b8cabb920e318a4360bcdc", "finish_reason": "stop", "prompt_tokens": 753}
+    ],
+    "exit": {"code": 0, "oom_killed": false, "restarts": 0},
+    "memory": {
+      "server_nvml_snapshot_mib": {"ready": 35554, "after-request": 35576},
+      "ram_peak_bytes": 102655123456,
+      "cgroup_memory_events": {"low": 0, "high": 0, "max": 0, "oom": 0, "oom_kill": 0, "oom_group_kill": 0, "sock_throttled": 0}
+    },
+    "artifact_sha256": {"status.json": "0f5daf160976d4e808b8fc41c774a1d24911b20d02e08604a2359c64ed812848", "benchmark.jsonl": "8b586687bb82beabe64e95b3467790e0b09ab505e83e99c2f1ec16e504b525cd", "docker-inspect-after-stop.json": "eb325ed2f1040cf60ebbbe3477d6643e82d9b612cc832d3516e7796cbc356f19"}
+  },
+  "mtp_smoke": {
+    "source_commit": "3abbddc9dfaf31149f505fce4d2d4edeeb5ee9cb",
+    "scope": "Separate functional API smoke, not a performance benchmark. Uses N=240 and staging disabled, unlike the N=258 performance runs.",
+    "configuration": {"moe_expert_pool_rows": 240, "prefill_staging": false, "method": "mtp", "num_speculative_tokens": 3, "draft_moe_backend": "triton", "max_model_len": 4096, "kv_cache_memory_bytes": 1610612736, "VLLM_LOGGING_LEVEL": "INFO", "max_num_seqs": 1, "max_num_batched_tokens": 512, "tensor_parallel_size": 1, "thinking": false, "seed": 0},
+    "attempts": [
+      {"run_id": "3abbddc9-kv768", "kv_cache_memory_bytes": 805306368, "passed": false, "phase": "startup before API readiness", "reason": "KV planning required about 1.15 GiB but only about 0.71 GiB was available for 4096 context.", "exit_code": 1, "oom_killed": false, "started_utc": "2026-11-12T06:26:16.135745+00:00", "completed_utc": "2026-11-12T06:30:46.955833+00:00", "status_sha256": "dd37bd7b7369ccbaf7cffb3bb0096253cc67e4a88fab6dc0e018897356aeb88d", "docker_inspect_sha256": "e06582b1f9e91a372c052a7871feaba0e279e24432f18eaab06e62eab1bab0ba", "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/mtp-smoke/3abbddc9-kv768"},
+      {"run_id": "3abbddc9-kv1536", "kv_cache_memory_bytes": 1610612736, "log_level": "DEBUG", "passed": false, "phase": "startup draft graph capture before API readiness", "reason": "DEBUG tensor formatting in the upstream IR logging path reached torch.masked_select during CUDA graph capture, invalidating capture. INFO logging succeeded without a production-code change.", "exit_code": 1, "oom_killed": false, "started_utc": "2026-11-12T06:31:17.331907+00:00", "completed_utc": "2026-11-12T06:36:08.238165+00:00", "status_sha256": "c38b8b991b6c90a16b16090030f6e6c8a031614451cc84323f18efd32bc3a6df", "docker_inspect_sha256": "eff626942578288831313ec2046a748b7307b0990cce6ddb4359b5f6d8175fd2", "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/mtp-smoke/3abbddc9-kv1536"}
+    ],
+    "result": {
+      "run_id": "3abbddc9-kv1536-info",
+      "passed": true,
+      "exit_code": 0,
+      "oom_killed": false,
+      "started_utc": "2026-11-12T06:37:54.645991+00:00",
+      "completed_utc": "2026-11-12T06:42:28.920267+00:00",
+      "counters_before": {"drafts": 0, "draft_tokens": 0, "accepted_tokens": 0},
+      "counter_deltas": {"drafts": 456, "draft_tokens": 1368, "accepted_tokens": 1119},
+      "acceptance_rate": 0.8179824561403509,
+      "mean_acceptance_length": 3.4539473684210527,
+      "accepted_tokens_per_position": [411, 373, 335],
+      "cases": [
+        {"name": "historical_chat_sanity", "passed": true, "elapsed_s": 2.5649089459329844, "prompt_tokens": 33, "completion_tokens": 11, "reasoning_tokens": 0, "finish_reason": "stop"},
+        {"name": "historical_tool_sanity", "passed": true, "elapsed_s": 6.517077532131225, "prompt_tokens": 284, "completion_tokens": 26, "reasoning_tokens": 0, "finish_reason": "tool_calls"},
+        {"name": "five_fact_prefill_retrieval", "passed": true, "elapsed_s": 17.162997943814844, "prompt_tokens": 1601, "completion_tokens": 72, "reasoning_tokens": 0, "finish_reason": "stop"},
+        {"name": "bounded_structured_output", "passed": true, "elapsed_s": 15.011412952560931, "prompt_tokens": 77, "completion_tokens": 1463, "reasoning_tokens": 0, "finish_reason": "stop"}
+      ],
+      "boot_evidence": {"pool_layers": 48, "resident_rows_per_layer": 240, "total_experts_per_layer": 512, "decode_staging_rows": 40, "verification_tokens_per_request": 4, "top_k": 10, "bank_gib_reported": 29.8, "draft_method": "Fp8MoEMethod", "draft_backend": "TRITON", "draft_experts_remain_on_gpu": true, "full_graph_capture_completed": true, "prefill_graph_capture_completed": true, "decode_graph_capture_completed": true, "graph_capture_gib_reported": 0.15},
+      "artifact_directory": "/home/hello/work/lab/results/pr51-main-20261112/benchmarks/mtp-smoke/3abbddc9-kv1536-info",
+      "artifact_sha256": {"status.json": "e24a34a56f5425fb36cd1f9163ba8237ab245da37c83083cf32c2a7dd7b163ed", "docker-inspect-after-stop.json": "08c4ca16e2ad72933da47a0adc58a7f1344c34d1cdef53c1db6bdbea5e152e26", "smoke.json": "0122b2080454a6a4a98312588d7f5930df5c88834fe76778b79290373bff063f"}
+    },
+    "limitation": "Acceptance reflects these four short functional checks, dominated by the structured-output request; it is not a representative acceptance-rate estimate. No matched MTP-off speed comparison or accuracy evaluation was performed."
+  }
+}

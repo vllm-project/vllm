@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -229,6 +230,19 @@ class RoutedExperts(PluggableLayer):
             "global_num_experts": moe_config.num_experts,
         }
 
+        # Expert pool (offload_config.moe_expert_pool_rows > 0): the quant
+        # method allocates the per-expert tensors in pinned host memory, marks
+        # the layer pending after its weights reach their kernel layout, and
+        # expert_pool.install_expert_pool binds every pending layer to one
+        # shared bank at the model level.
+        self._moe_expert_pool_rows = (
+            get_current_vllm_config().offload_config.moe_expert_pool_rows
+        )
+        self.expert_pool_pending = False
+        self.expert_pool_layer: Any = None
+        if self._moe_expert_pool_rows > 0:
+            self._validate_expert_pool_supported()
+
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         loader = self.shared_expert_online_loader
@@ -236,6 +250,55 @@ class RoutedExperts(PluggableLayer):
             loader.create_staging(self, params_dtype, weight_loader=self.weight_loader)
 
         self.lora_base_layer_prefix = ""
+
+    def _validate_expert_pool_supported(self) -> None:
+        """Reject what the pool cannot serve before any weight is allocated:
+        the pool binds one consumer (NVFP4 Marlin), plans top_k rows per
+        token, and keys rows by (layer, expert) without an expert map."""
+        top_k = self.moe_config.experts_per_token
+        if self._moe_expert_pool_rows < top_k:
+            raise ValueError(
+                f"moe_expert_pool_rows={self._moe_expert_pool_rows} is fewer "
+                f"than the {top_k} experts a single token routes to. Set "
+                f"--moe-expert-pool-rows >= {top_k}."
+            )
+        parallel = self.moe_config.moe_parallel_config
+        if parallel.use_ep:
+            raise ValueError(
+                "moe_expert_pool_rows is not compatible with expert "
+                f"parallelism (ep_size={parallel.ep_size})."
+            )
+        if parallel.dp_size > 1 or parallel.is_sequence_parallel:
+            raise ValueError(
+                "moe_expert_pool_rows is not compatible with data parallelism "
+                "or sequence parallelism."
+            )
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            NvFp4MoeBackend,
+        )
+        from vllm.model_executor.layers.quantization.modelopt import (
+            ModelOptNvFp4FusedMoE,
+        )
+
+        if not isinstance(self.quant_method, ModelOptNvFp4FusedMoE):
+            # e.g. a BF16 MTP head that the checkpoint leaves unquantized.
+            logger.warning_once(
+                "MoE layers using %s are not served by the expert pool; their "
+                "experts stay on the GPU.",
+                type(self.quant_method).__name__,
+            )
+            self._moe_expert_pool_rows = 0
+            return
+        if type(self.quant_method) is not ModelOptNvFp4FusedMoE:
+            raise ValueError(
+                "moe_expert_pool_rows does not support specialized ModelOpt "
+                f"MoE methods, got {type(self.quant_method).__name__}"
+            )
+        if self.quant_method.nvfp4_backend != NvFp4MoeBackend.MARLIN:
+            raise ValueError(
+                "moe_expert_pool_rows supports the ModelOpt NVFP4 Marlin MoE "
+                f"backend only, got {self.quant_method.nvfp4_backend.value}"
+            )
 
     def padding_fill_params(self) -> list[str]:
         """Params a direct reload zero-fills; read at cold start, before PWAL."""
