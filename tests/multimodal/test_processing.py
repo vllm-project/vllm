@@ -1337,6 +1337,16 @@ def test_effective_mm_processor_kwargs_fill_in_processor_defaults():
     assert "temporal_patch_size" not in merged["videos_kwargs"]
 
 
+def test_effective_mm_processor_kwargs_apply_processor_level_defaults():
+    ctx = build_model_context("OpenGVLab/InternVL3-1B-hf")
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+
+    effective = info._get_effective_mm_processor_kwargs({})
+
+    assert info.get_hf_processor().image_processor.crop_to_patches is False
+    assert effective["images_kwargs"]["crop_to_patches"] is True
+
+
 def test_resolve_mm_processor_kwargs_routes_supported_flat_kwargs():
     kwargs = {
         "size": {"shortest_edge": 64},

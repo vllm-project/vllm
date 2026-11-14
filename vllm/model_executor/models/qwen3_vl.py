@@ -948,7 +948,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             "size": self._get_vision_size(
                 video_kwargs, default_size=video_processor.size
             ),
-            "max_video_tokens": getattr(video_processor, "max_video_tokens", None),
+            "max_video_tokens": getattr(video_processor, "max_video_tokens", 768),
         }
 
     def get_data_parser(self):

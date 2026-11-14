@@ -520,12 +520,17 @@ class BaseProcessingInfo:
             "images_kwargs": getattr(processor, "image_processor", None),
             "videos_kwargs": getattr(processor, "video_processor", None),
         }
+        processor_defaults = getattr(
+            getattr(processor, "valid_processor_kwargs", None), "_defaults", {}
+        )
 
         return {
             scope: {
                 key: getattr(sub_processor, key, None)
                 for key in sub_processor.valid_kwargs.__annotations__
             }
+            | processor_defaults.get(scope, {})
+            | processor_defaults.get("common_kwargs", {})
             for scope, sub_processor in sub_processors.items()
             if hasattr(sub_processor, "valid_kwargs")
         }
