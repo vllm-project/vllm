@@ -52,7 +52,7 @@ vllm serve Qwen/Qwen3.8-27B \
   --language-model-only \
   --speculative-config '{
     "method": "dflash",
-    "model": "/path/to/Qwen3.8-27B-DSpine-b16",
+    "model": "tencent/Qwen3.8-27B-DSpine-b16",
     "num_speculative_tokens": 15
   }'
 ```
@@ -160,7 +160,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, and `dflash`. If omitted, vLLM infers the method from the provided configuration when possible. |
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
-| `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. DSpine uses the target's TP size; omit this field to inherit the target's size. |
+| `draft_tensor_parallel_size` | `integer >= 1` | `None` | Draft tensor parallel size. For DSpine, this must match the target. |
 | `draft_decode_context_parallel_size` | `integer >= 1` | `None` | Decode context parallel size for the draft model: `1` or the target's `decode_context_parallel_size`. Defaults to the target's, except `dflash`/`dspark` drafts, which default to `1` unless they are full-attention MLA. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
 | `parallel_drafting` | `boolean` | `null` | Deprecated and has no effect. `dflash` and `dspark` always draft in parallel, and no other method supports it. |
