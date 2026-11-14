@@ -234,6 +234,7 @@ class ECMooncakeWorker:
             peer_ports=[base_port + rank for rank in range(self._tp_size)],
             device=consumer_pool.device,
             drain_ready=self._reservations.drain_ready,
+            drain_abandoned=self._reservations.drain_abandoned,
         )
         try:
             self._control_server.start()
