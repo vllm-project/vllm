@@ -1681,6 +1681,56 @@ async def test_e2e_parser_uses_caller_prompt_token_ids(qwen3_client):
 
 
 # ---------------------------------------------------------------------------
+# E2E: HY V3 tool parser
+# ---------------------------------------------------------------------------
+
+HY_V3_MODEL = "tencent/Hy3-preview"
+
+
+@pytest.fixture(scope="module")
+def hy_v3_server():
+    args = ["--enable-auto-tool-choice", "--tool-call-parser", "hy_v3"]
+    with RemoteLaunchRenderServer(HY_V3_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def hy_v3_client(hy_v3_server):
+    async with httpx.AsyncClient(
+        base_url=hy_v3_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_hy_v3_unparsed_tool_calls_kept_as_content(hy_v3_client):
+    """A tool calls section with no parsable call is returned as content."""
+    messages = [{"role": "user", "content": "Weather in Paris?"}]
+    gen_req = await _e2e_render_chat(hy_v3_client, HY_V3_MODEL, messages)
+    output_text = '<tool_calls>get_weather {"city": "Paris"}</tool_calls>'
+    output_ids = _encode(get_tokenizer(HY_V3_MODEL), output_text)
+
+    resp = await hy_v3_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HY_V3_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": HY_V3_MODEL,
+                "messages": messages,
+                "tools": _E2E_TOOLS,
+                "tool_choice": "auto",
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    message = resp.json()["choices"][0]["message"]
+    assert not message.get("tool_calls")
+    assert message["content"] == output_text
+
+
+# ---------------------------------------------------------------------------
 # E2E: HarmonyParser + GPT-OSS
 # ---------------------------------------------------------------------------
 
