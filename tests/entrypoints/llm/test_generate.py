@@ -40,6 +40,15 @@ def llm(vllm_runner):
 
 
 @pytest.mark.skip_global_cleanup
+def test_rejects_torch_sdpa_for_decoder(vllm_runner):
+    with pytest.raises(
+        ValueError,
+        match="only supported for multi-modal encoder attention",
+    ):
+        vllm_runner(MODEL_NAME, attention_backend="TORCH_SDPA")
+
+
+@pytest.mark.skip_global_cleanup
 def test_multiple_sampling_params(llm: LLM):
     sampling_params = [
         SamplingParams(temperature=0.01, top_p=0.95),
