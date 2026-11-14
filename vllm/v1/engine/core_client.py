@@ -422,11 +422,15 @@ class InprocClient(EngineCoreClient):
         self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
 
     def get_output(self) -> EngineCoreOutputs:
+        pending = self.engine_core.take_pending_outputs()
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
         # Read by LLMEngine.step() to keep the DP ranks' collectives aligned.
         self.last_step_model_executed = model_executed
-        return outputs and outputs.get(0) or EngineCoreOutputs()
+        engine_core_outputs = outputs and outputs.get(0) or EngineCoreOutputs()
+        if pending:
+            engine_core_outputs.outputs = pending + engine_core_outputs.outputs
+        return engine_core_outputs
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
