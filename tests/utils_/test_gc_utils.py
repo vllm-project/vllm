@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import weakref
 from array import array
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
+from vllm.platforms import current_platform
 from vllm.utils.gc_utils import (
     GCDebugConfig,
     _compute_detailed_type,
     _compute_top_gc_collected_objects,
+    freeze_gc_for_cudagraph_capture,
     gc_untrack,
     untracked_list,
 )
@@ -101,3 +106,27 @@ def test_untracked_list_stays_untracked():
 def test_gc_untrack_ignores_untracked_objects():
     ids = array("i", range(4))
     assert gc_untrack(ids) is ids and gc_untrack(None) is None
+
+
+class _CyclicProgram:
+    def __init__(self) -> None:
+        self.cycle = self
+
+
+@pytest.mark.parametrize("sm12x", [True, False])
+def test_cudagraph_capture_retains_b12x_programs_on_sm12x(monkeypatch, sm12x):
+    compile_plan = pytest.importorskip("b12x._lib.compile_plan")
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda family: sm12x
+    )
+
+    with freeze_gc_for_cudagraph_capture():
+        program = _CyclicProgram()
+        # What a B12X program records when it is launched.
+        compile_plan.record_program(compile_plan.ProgramKey("cute", "test"), program)
+        program_ref = weakref.ref(program)
+        del program
+    gc.collect()
+
+    assert (program_ref() is not None) == sm12x
