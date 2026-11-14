@@ -40,6 +40,12 @@ Per-request canvas widths may be smaller than the served canvas with either
 synchronous or asynchronous scheduling. Omit `diffusion_canvas_length` to use
 the served canvas width.
 
+On CPU, `--diffusion-config '{"canvas_length": 64, "single_pass_reads": true}'`
+runs a read with `diffusion_read_only` and `diffusion_max_steps: 1` in the step
+that finishes its prompt, saving one forward pass. Reads with prompt logprobs
+keep the two-step path. Outputs can differ slightly. Validate them on your
+workload before enabling the flag.
+
 Question types: `noul` (yes/no), `choice` with `options`, `score` with
 ordered `levels`. Each label must be a single token in the answer template,
 which the server checks with the tokenizer when a request uses the schema.
