@@ -61,9 +61,87 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     },
 }
 
+# Hopper, measured on H100 and H200 with GLM-5.3-Flash local shapes at TP=4 and
+# TP=8.
+SM90_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
+    # Indexer fused wk + weights projection (replicated).
+    (160, 4096): {
+        1: SkinnyGemmConfig(1, 128, 2, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=4096),
+        3: SkinnyGemmConfig(3, 128, 1, vector_width=4, static_k=4096),
+        4: SkinnyGemmConfig(4, 128, 1, vector_width=4, static_k=4096),
+    },
+    # KDA f_b / g_b gate projections, TP=8.
+    (1024, 128): {
+        1: SkinnyGemmConfig(1, 32, 2, k_unroll=2, vector_width=4),
+        2: SkinnyGemmConfig(2, 32, 2, k_unroll=2, vector_width=4),
+        3: SkinnyGemmConfig(3, 32, 2, k_unroll=2, vector_width=4),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=2, vector_width=4),
+    },
+    # MLA q_b projection, TP=8.
+    (2048, 1536): {
+        1: SkinnyGemmConfig(1, 64, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2),
+        3: SkinnyGemmConfig(3, 64, 2, k_unroll=2),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=2),
+    },
+    # MLA fused q_a/kv_a projection (replicated).
+    (2048, 4096): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=2),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=2),
+        3: SkinnyGemmConfig(3, 64, 2, static_k=4096),
+        4: SkinnyGemmConfig(4, 128, 4, vector_width=4, static_k=4096),
+    },
+    # KDA fused QKV/beta/f_a/g_a input projection, TP=8.
+    (3336, 4096): {
+        1: SkinnyGemmConfig(1, 128, 2),
+        2: SkinnyGemmConfig(2, 256, 1, static_k=4096),
+        3: SkinnyGemmConfig(3, 128, 2),
+        4: SkinnyGemmConfig(4, 64, 3, vector_width=4, static_k=4096),
+    },
+    # KDA output projection, TP=8.
+    (4096, 1024): {
+        1: SkinnyGemmConfig(1, 64, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2),
+    },
+    # MLA q_b projection at TP=4 and indexer wq_b (replicated).
+    (4096, 1536): {
+        1: SkinnyGemmConfig(1, 128, 2, vector_width=4, static_k=1536),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=1536),
+    },
+    # KDA output projection at TP=4, MLA output projection at TP=8.
+    (4096, 2048): {
+        1: SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 128, 2, static_k=2048),
+    },
+    # MLA output projection, TP=4.
+    (4096, 4096): {
+        1: SkinnyGemmConfig(1, 256, 1, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 1, vector_width=4, static_k=4096),
+        3: SkinnyGemmConfig(3, 32, 2, vector_width=4, static_k=4096),
+        4: SkinnyGemmConfig(4, 64, 2),
+    },
+    # KDA fused QKV/beta/f_a/g_a input projection, TP=4.
+    (6416, 4096): {
+        1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 1, vector_width=4, static_k=4096),
+    },
+    # LM head, TP=8.
+    (19360, 4096): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=2),
+    },
+    # LM head, TP=4.
+    (38720, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, static_k=4096),
+        2: SkinnyGemmConfig(2, 256, 2, vector_width=4, static_k=4096),
+        3: SkinnyGemmConfig(3, 32, 4, vector_width=4, static_k=4096),
+    },
+}
+
 SKINNY_GEMM_PLANS_BY_CAPABILITY: dict[
     tuple[int, int] | None, dict[tuple[int, int], SkinnyGemmPlan]
 ] = {
+    (9, 0): SM90_SKINNY_GEMM_PLANS,
     (12, 1): SM121_SKINNY_GEMM_PLANS,
 }
 
