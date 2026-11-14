@@ -4,6 +4,8 @@
 from copy import copy
 from typing import cast
 
+import torch
+
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreRequest
@@ -33,6 +35,9 @@ class ParentRequest:
     # To efficiently obtain child sampling params
     cached_child_sampling_params: SamplingParams | None
 
+    # Encoder outputs of the prompt's items, from whichever child returned them
+    encoder_outputs: dict[int, dict[str, torch.Tensor]] | None
+
     def __init__(self, request: EngineCoreRequest) -> None:
         assert request.external_req_id is not None
         sampling_params = request.params
@@ -48,6 +53,7 @@ class ParentRequest:
         )
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
+        self.encoder_outputs = None
 
     def _get_child_sampling_params(
         self,

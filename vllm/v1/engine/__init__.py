@@ -311,6 +311,9 @@ class EngineCoreOutput(
     # Sent once, on the first output, when watermark_config is set. Appended last
     # for array_like compatibility.
     watermarking: bool | None = None
+    # MM item index -> outputs of its encoder pass; attached only on the final
+    # output. Appended last for array_like compatibility.
+    encoder_outputs: dict[int, dict[str, torch.Tensor]] | None = None
 
     @property
     def finished(self) -> bool:

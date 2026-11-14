@@ -235,6 +235,7 @@ class RequestState:
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+        self.encoder_outputs: dict[int, dict[str, torch.Tensor]] | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -459,6 +460,13 @@ class RequestState:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
             prompt_token_id_logprobs = self.logprobs_processor.prompt_token_id_logprobs
 
+        encoder_outputs = None
+        if finished:
+            encoder_outputs = (
+                self.encoder_outputs
+                if self.parent_req is None
+                else self.parent_req.encoder_outputs
+            )
         return RequestOutput(
             request_id=external_req_id,  # request_id is what was provided externally
             lora_request=self.lora_request,
@@ -470,6 +478,7 @@ class RequestState:
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
+            encoder_outputs=encoder_outputs,
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
@@ -804,6 +813,15 @@ class OutputProcessor:
 
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
+            if (encoder_outputs := engine_core_output.encoder_outputs) is not None:
+                req_state.encoder_outputs = encoder_outputs
+                if (parent := req_state.parent_req) is not None:
+                    # Siblings share the prompt, and one that reuses its KV
+                    # prefix returns none, so the parent keeps them.
+                    parent.encoder_outputs = {
+                        **(parent.encoder_outputs or {}),
+                        **encoder_outputs,
+                    }
 
             request_error = None
             if (
