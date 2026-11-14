@@ -44,8 +44,14 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineMoEMethod,
     OnlineLinearBase,
 )
+from vllm.model_executor.layers.quantization.online.int4 import (
+    Int4PerGroup32AsymLMHeadMethod,
+)
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    OnlineLMHeadMethodBase,
 )
 from vllm.model_executor.layers.quantization.online.lut_b import (
     LutBOnlineMoEMethod,
@@ -76,6 +82,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static32,
+    kInt4Static32Asym,
     kInt8StaticChannelSym,
     kLutBStatic,
     kMxfp4Static,
@@ -102,6 +109,8 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+    # lm_head only (`OnlineLMHeadMethodBase`).
+    kInt4Static32Asym: Int4PerGroup32AsymLMHeadMethod,
 }
 
 # Online linear methods validated with `QuantSpec.hadamard_size`.
@@ -305,6 +314,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
+        if issubclass(cls, OnlineLMHeadMethodBase) and not issubclass(
+            layer_cls, ParallelLMHead
+        ):
+            raise ValueError(
+                f"weight={spec.weight} quantizes only the lm_head: select it "
+                "with a quantization_config.targets pattern naming the "
+                f"lm_head, not for {layer_cls.__name__} layers."
+            )
         # TODO: InputHadamardLinearMethod is format-agnostic; allow the
         # remaining linear methods and MoE once validated.
         if (
@@ -377,7 +394,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             raise NotImplementedError(
                 f"{prefix}: {quant_method_cls.__name__} does not support the "
                 "lm_head, use `fp8_per_channel` (or `fp8_per_channel_static` "
-                "with `activation: null`)."
+                "with `activation: null`) or `int4_per_group_32_asym`."
             )
         explicit = "activation" in quant_spec.fields_set
         quant_spec = QuantSpec(
