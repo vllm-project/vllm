@@ -394,10 +394,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub tool_server: Option<Unsupported>,
 
-    /// Path to logging config JSON file for both vllm and uvicorn
-    #[arg(long, /* env = "VLLM_LOGGING_CONFIG_PATH" */)]
-    pub log_config_file: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,

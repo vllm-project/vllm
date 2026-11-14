@@ -360,7 +360,7 @@ class RustFrontendProcessManager:
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
 
-        # `--log-level`, `--logging-config` and `--log-config-file` default to
+        # `--log-level` and `--logging-config` default to
         # argparse.SUPPRESS, so get_non_default_args() never sees them;
         # cli/main.py has already merged them into `args.logging_config`.
         if logging_config := getattr(args, "logging_config", None):
