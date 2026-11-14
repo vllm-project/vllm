@@ -155,7 +155,9 @@ class AttentionConfig:
     with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
     FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
     KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
-    sharded by head."""
+    sharded by head. On ROCm, DeepSeek-V4.1 shards only its indexer prefill
+    this way and all-gathers the top-k back; its attention stays sharded by
+    head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most

@@ -7,7 +7,7 @@ from typing import Any, ClassVar, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -88,6 +88,18 @@ def _trust_dsv4_extra_cache_nan_free(
         and kv_cache_dtype == "fp8_ds_mla"
         and not has_foreign_kv_writer
         and has_extra_cache
+    )
+
+
+def _indexer_shardq_enabled(vllm_config: VllmConfig) -> bool:
+    parallel = vllm_config.parallel_config
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    return (
+        vllm_config.attention_config.sparse_mla_shard_q
+        and parallel.tensor_parallel_size > 1
+        and parallel.decode_context_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
     )
 
 
@@ -618,6 +630,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
         if self._plain_fp8_kv:
             _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla)
+        if self.indexer is not None and _indexer_shardq_enabled(vllm_config):
+            # The indexer scores this rank's ShardQ tokens, then gathers the
+            # top-k back into token order: attention stays head-sharded.
+            k_cache = self.indexer.k_cache
+            k_cache.use_shardq = k_cache.gather_shardq_topk = True
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
