@@ -65,7 +65,8 @@ class _State:
     loaded: set[str] = field(default_factory=set)  # params holding a buffer
     unknown_key: bool = False  # a load whose shard key could not be derived
     defer: bool = False  # process only in `finalize_online`
-    # (params, buffers, non-persistent names) held when the update began
+    # (params, buffers, non-persistent names) held when the update began, each
+    # with the tensor it held: PWAL may rebind a kept parameter's `.data`
     kernel: tuple[dict, dict, set[str]] | None = None
 
 
@@ -222,6 +223,7 @@ def _make_loader(layer: torch.nn.Module, name: str, original: Callable) -> Calla
             _process(layer, state)
         return ret
 
+    online_buffer_loader.loads_into_buffer = True  # type: ignore[attr-defined]
     return online_buffer_loader
 
 
@@ -231,8 +233,8 @@ def begin_online_reload(model: torch.nn.Module, defer: bool = False) -> None:
     layers are processed only by `finalize_online`."""
     for layer, state in _online_layers(model):
         state.kernel = (
-            {n: p for n, p in layer._parameters.items() if p is not None},
-            {n: b for n, b in layer._buffers.items() if b is not None},
+            {n: (p, p.data) for n, p in layer._parameters.items() if p is not None},
+            {n: (b, b) for n, b in layer._buffers.items() if b is not None},
             set(layer._non_persistent_buffers_set),
         )
         state.seen.clear()
@@ -312,24 +314,29 @@ def _process(layer: torch.nn.Module, state: _State) -> None:
     _LOADING.discard(layer)
 
 
+def _layout(t: torch.Tensor) -> tuple:
+    return t.data_ptr(), t.shape, t.stride(), t.dtype
+
+
 def _copy_back(layer: torch.nn.Module, kernel: tuple[dict, dict, set[str]]) -> None:
     params, buffers, non_persistent = kernel
     for held, live in ((params, layer._parameters), (buffers, layer._buffers)):
-        for name, old in held.items():
+        for name, (_, data) in held.items():
             new = live.get(name)
-            if new is None or new is old:
-                continue
-            if new.shape != old.shape or new.dtype != old.dtype:
+            if new is None or _layout(new) == _layout(data):
+                continue  # dropped, or written in place
+            if new.shape != data.shape or new.dtype != data.dtype:
                 raise RuntimeError(
                     f"online quantization: reprocessing {type(layer).__name__}."
                     f"{name} gave {tuple(new.shape)} {new.dtype}, but it holds "
-                    f"{tuple(old.shape)} {old.dtype}"
+                    f"{tuple(data.shape)} {data.dtype}"
                 )
-            old.data.copy_(new.data)
+            data.copy_(new.data)
     for live in (layer._parameters, layer._buffers):
         for name in [n for n, t in live.items() if t is not None]:
             delattr(layer, name)
-    for name, param in params.items():
+    for name, (param, data) in params.items():
+        param.data = data
         layer.register_parameter(name, param)
-    for name, buffer in buffers.items():
+    for name, (buffer, _) in buffers.items():
         layer.register_buffer(name, buffer, persistent=name not in non_persistent)

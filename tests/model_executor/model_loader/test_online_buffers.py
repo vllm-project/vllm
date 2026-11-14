@@ -247,6 +247,33 @@ def test_update_equals_cold_start_at_startup_tensors():
     _assert_equal(layer, _reference(_rand(8, 4, seed=2)))
 
 
+def test_update_keeps_storage_a_kept_parameter_was_rebound_to():
+    """PWAL that rebinds an existing parameter to new storage (MXFP8 writes an
+    unswizzled scale, then a swizzled one of another shape) still leaves the
+    startup storage holding the result."""
+
+    class _Reswizzle(_ToyOnline):
+        def process_weights_after_loading(self, layer):
+            if getattr(layer, _GUARD, False):
+                return
+            had_scale = hasattr(layer, "weight_scale")
+            super().process_weights_after_loading(layer)
+            if had_scale:  # an update: the kept scale changes shape twice
+                scale = layer.weight_scale.data.clone()
+                replace_parameter(layer, "weight_scale", scale.repeat(2))
+                replace_parameter(layer, "weight_scale", scale)
+
+    layer = _QKV()
+    layer.quant_method = _Reswizzle("weight")
+    _load_qkv(layer, _rand(8, 4))
+    scale = layer.weight_scale
+    ptr = scale.data_ptr()
+    begin_online_reload(layer)
+    _load_qkv(layer, _rand(8, 4, seed=1))
+    assert layer.weight_scale is scale and scale.data_ptr() == ptr
+    _assert_equal(layer, _reference(_rand(8, 4, seed=1)))
+
+
 def test_partial_update_raises_when_strict():
     layer, full = _QKV(), _rand(8, 4)
     _load_qkv(layer, full)
