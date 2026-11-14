@@ -835,11 +835,17 @@ def test_qsa_decode_selection_correctness(
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
 @pytest.mark.parametrize("force_chunk", [False, True])
+@pytest.mark.parametrize(
+    "query_lens",
+    [[3, 33], [300] + [1, 2, 3, 4] * 25],
+    ids=["two_requests", "long_and_many_short"],
+)
 def test_qsa_prefill_selection_correctness(
     monkeypatch: pytest.MonkeyPatch,
     seq_len_slack: int,
     force_chunk: bool,
     dtype: torch.dtype,
+    query_lens: list[int],
 ) -> None:
     # page_size=24 (does not divide the 64-aligned clipped width) and an
     # oversized page table, so the clipped logits width comes from
@@ -848,22 +854,32 @@ def test_qsa_prefill_selection_correctness(
     # drives the logits budget to one row per chunk.
     if force_chunk:
         monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "0")
+    # The second layout is a mixed step: one long chunk beside many requests
+    # of one to four rows, which launches the compact row-tile grid.
     torch.manual_seed(2)
-    query_lens = [3, 33]
+    num_reqs = len(query_lens)
     rows, heads, head_dim = sum(query_lens), 4, 128
     q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
         dtype
     )
-    cache = torch.randn(128, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16).to(
-        dtype
-    )
-    page_table = torch.randperm(128, device="cuda", dtype=torch.int32).reshape(2, 64)
+    cache = torch.randn(
+        64 * num_reqs, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16
+    ).to(dtype)
+    page_table = torch.randperm(
+        64 * num_reqs, device="cuda", dtype=torch.int32
+    ).reshape(num_reqs, 64)
     token_to_req = torch.repeat_interleave(
-        torch.arange(2, device="cuda", dtype=torch.int32),
+        torch.arange(num_reqs, device="cuda", dtype=torch.int32),
         torch.tensor(query_lens, device="cuda"),
     )
-    query_start_loc = torch.tensor([0, 3, 36], device="cuda", dtype=torch.int32)
-    sequence_lengths = torch.tensor([5120, 4224], device="cuda", dtype=torch.int32)
+    query_start_loc = torch.tensor(
+        [0, *query_lens], device="cuda", dtype=torch.int32
+    ).cumsum(0, dtype=torch.int32)
+    sequence_lengths = torch.tensor(
+        [5120 - 896 * (i % 2) for i in range(num_reqs)],
+        device="cuda",
+        dtype=torch.int32,
+    )
     query_positions = torch.cat(
         [
             torch.arange(length - query_len, length, device="cuda", dtype=torch.int32)
