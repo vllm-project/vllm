@@ -200,20 +200,6 @@ def situ(g: Float32, u: Float32, beta_lb: Float32, inv_beta: Float32, inv_lb: Fl
     return code, "=f,f,f,f,f,f", (g, u, beta_lb, inv_beta, inv_lb)
 
 
-@cute.jit
-def shared_situ(gate, up, beta, inverse_beta, linear_beta, inverse_linear_beta):
-    denominator = Float32(1) + cute.math.exp(-gate, fastmath=False)
-    sigmoid = Float32(0)
-    if denominator != Float32(float("inf")):
-        sigmoid = Float32(reciprocal64(Float64(denominator)))
-    g = (beta * cute.math.tanh(gate * inverse_beta, fastmath=False)) * sigmoid
-    u = up
-    if linear_beta > 0:
-        divided = Float32(Float64(up) * inverse_linear_beta)
-        u = linear_beta * cute.math.tanh(divided, fastmath=False)
-    return g * u
-
-
 def bits_float(bits):
     return Float32(llvm.bitcast(T.f32(), Uint32(bits).ir_value()))
 
