@@ -27,6 +27,16 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
+from vllm.v1.sample.ops.topp_histogram_triton import (
+    MIN_BATCH_SIZE as _HIST_MIN_BATCH,
+)
+from vllm.v1.sample.ops.topp_histogram_triton import (
+    apply_top_p_histogram,
+    max_sampler_batch_size,
+)
+from vllm.v1.sample.ops.topp_histogram_triton import (
+    reset_workspace as reset_topp_histogram_workspace,
+)
 
 _TRITON_TABLE_CACHE: dict[tuple[torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
 _TRITON_BUFFER_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
@@ -878,21 +888,24 @@ def _topk_topp_kernel(
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 
-def _max_sampler_batch_size(vllm_config: Any) -> int:
-    return vllm_config.scheduler_config.max_num_seqs * (
-        vllm_config.num_speculative_tokens + 1
-    )
-
-
 def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
     split_enabled = current_platform.is_cuda_alike()
     mode: Any = WarmupChoices((True, False), (True, True), (False, True))
     logits_stride: Any = WarmupChoices(16, 2)
-    batch_size: Any = WarmupIntRange(1, _max_sampler_batch_size(vllm_config) + 1)
+    batch_size: Any = WarmupIntRange(1, max_sampler_batch_size(vllm_config) + 1)
     topk_enabled = mode[0]
     topp_enabled = mode[1]
-    _when(topk_enabled or not (split_enabled and batch_size <= _SPLIT_MAX_BATCH))
+    hist_enabled = current_platform.is_cuda()
+    # p-only rows go to the split (small batches) or, on CUDA, the histogram
+    # (large batches) pipeline instead of this kernel.
+    _when(
+        topk_enabled
+        or not (
+            (split_enabled and batch_size <= _SPLIT_MAX_BATCH)
+            or (hist_enabled and batch_size >= _HIST_MIN_BATCH)
+        )
+    )
     logits = TritonWarmupTensor(
         torch.float32,
         shape=(batch_size, vocab_size),
@@ -1056,9 +1069,11 @@ def _topp_split_stats_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
     batch_size: Any = WarmupIntRange(
-        1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
+        1, min(max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )
     has_k: Any = WarmupChoices(False, True)
+    hist_enabled = current_platform.is_cuda()
+    _when(has_k or not (hist_enabled and batch_size >= _HIST_MIN_BATCH))
     logits = TritonWarmupTensor(
         torch.float32,
         shape=(batch_size, vocab_size),
@@ -1345,10 +1360,12 @@ def _topp_split_step_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
     batch_size: Any = WarmupIntRange(
-        1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
+        1, min(max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )
     round: Any = WarmupIntRange(0, _SPLIT_ROUNDS)
     has_k: Any = WarmupChoices(False, True)
+    hist_enabled = current_platform.is_cuda()
+    _when(has_k or not (hist_enabled and batch_size >= _HIST_MIN_BATCH))
     logits = TritonWarmupTensor(
         torch.float32,
         shape=(batch_size, vocab_size),
@@ -1523,9 +1540,11 @@ def _topp_split_mask_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
     batch_size: Any = WarmupIntRange(
-        1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
+        1, min(max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )
     has_k: Any = WarmupChoices(False, True)
+    hist_enabled = current_platform.is_cuda()
+    _when(has_k or not (hist_enabled and batch_size >= _HIST_MIN_BATCH))
     logits = TritonWarmupTensor(
         torch.float32,
         shape=(batch_size, vocab_size),
@@ -1671,6 +1690,18 @@ def apply_top_k_top_p_triton(
 
     num_sm = num_compute_units(logits.device.index)
 
+    if (
+        topp_enabled
+        and not topk_enabled
+        and batch_size >= _HIST_MIN_BATCH
+        and logits.device.type == "cuda"
+        and current_platform.is_cuda()
+    ):
+        # Large p-only batches: the histogram pipeline finds the exact
+        # boundary in four streaming passes, where the monolithic kernel's
+        # pivot search sweeps each row many times with one program per row.
+        return apply_top_p_histogram(logits, p_ptr, mask_value, num_sm)
+
     # At small batch sizes the monolithic kernel's standalone top-p path is
     # latency-bound (one program per row, serial vocab sweeps), so use the
     # split-row pipeline for rows without an active top-k. Rows with an
@@ -1730,4 +1761,5 @@ def reset_buffer_cache():
     _TRITON_BUFFER_CACHE.clear()
     _TRITON_TABLE_CACHE.clear()
     _TRITON_SPLIT_CACHE.clear()
+    reset_topp_histogram_workspace()
     torch.accelerator.empty_cache()
