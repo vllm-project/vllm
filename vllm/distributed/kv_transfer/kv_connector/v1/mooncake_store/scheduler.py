@@ -249,6 +249,7 @@ class MooncakeStoreScheduler:
             request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
+            start_tokens=num_computed_tokens,
         )
         if lookup_result is None:
             # Lookup not ready yet; scheduler will retry on a later step.

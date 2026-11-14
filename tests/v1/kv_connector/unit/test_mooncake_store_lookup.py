@@ -17,8 +17,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  
     MooncakeLookupResult,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.protocol import (  # noqa: E501
+    LOOKUP_FROM_MSG,
+    LOOKUP_MSG,
     encode_lookup_response,
 )
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 pytestmark = pytest.mark.cpu_test
 
@@ -74,6 +77,125 @@ def _resolve_lookup(
             return result
         threading.Event().wait(0.001)
     raise AssertionError("lookup remained pending")
+
+
+@pytest.mark.parametrize("start_tokens", [0, 32])
+def test_lookup_sends_confirmed_local_prefix_and_preserves_legacy_frames(
+    lookup_service: tuple[worker.LookupKeyClient, zmq.Socket], start_tokens: int
+) -> None:
+    client, peer = lookup_service
+    frames: list[list[bytes]] = []
+    errors: list[Exception] = []
+
+    def serve() -> None:
+        try:
+            frames.append(peer.recv_multipart())
+            peer.send(encode_lookup_response(MooncakeLookupResult(64)))
+        except Exception as exc:
+            errors.append(exc)
+
+    server = threading.Thread(target=serve)
+    server.start()
+    hashes = [BlockHash(bytes([index]) * 4) for index in range(4)]
+    try:
+        result = client.lookup("request", 65, hashes, start_tokens=start_tokens)
+        assert result is not None and result.hit_length == 64
+    finally:
+        server.join(5)
+    assert not server.is_alive() and not errors
+    assert frames == [
+        [
+            LOOKUP_FROM_MSG if start_tokens else LOOKUP_MSG,
+            (65).to_bytes(4, "big"),
+            (4).to_bytes(2, "big"),
+            b"".join(hashes),
+            *([start_tokens.to_bytes(4, "big")] if start_tokens else []),
+        ]
+    ]
+
+
+def test_local_prefix_change_requeries_a_cached_prefetch_miss(
+    lookup_service: tuple[worker.LookupKeyClient, zmq.Socket],
+) -> None:
+    client, peer = lookup_service
+    frames: list[list[bytes]] = []
+    errors: list[Exception] = []
+
+    def serve() -> None:
+        try:
+            frames.append(peer.recv_multipart())
+            peer.send(encode_lookup_response(MooncakeLookupResult(0)))
+            frames.append(peer.recv_multipart())
+            peer.send(encode_lookup_response(MooncakeLookupResult(64)))
+        except Exception as exc:
+            errors.append(exc)
+
+    server = threading.Thread(target=serve)
+    server.start()
+    hashes = [BlockHash(bytes([index]) * 4) for index in range(4)]
+    try:
+        assert client.prefetch("request", 65, hashes)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            result = client.lookup("request", 65, hashes, non_block=True)
+            if result is not None:
+                assert result.hit_length == 0
+                break
+            threading.Event().wait(0.001)
+        else:
+            pytest.fail("The prefetched lookup did not complete")
+        result = client.lookup("request", 65, hashes, start_tokens=32)
+        assert result is not None and result.hit_length == 64
+    finally:
+        server.join(5)
+    assert not server.is_alive() and not errors
+    assert frames[0][0] == LOOKUP_MSG and len(frames[0]) == 4
+    assert frames[1][0] == LOOKUP_FROM_MSG and frames[1][4] == (32).to_bytes(4, "big")
+
+
+def test_local_prefix_change_does_not_reuse_an_inflight_reply(
+    lookup_service: tuple[worker.LookupKeyClient, zmq.Socket],
+) -> None:
+    client, peer = lookup_service
+    received, release = threading.Event(), threading.Event()
+    frames: list[list[bytes]] = []
+    errors: list[Exception] = []
+
+    def serve() -> None:
+        try:
+            frames.append(peer.recv_multipart())
+            received.set()
+            assert release.wait(5)
+            peer.send(encode_lookup_response(MooncakeLookupResult(64)))
+            frames.append(peer.recv_multipart())
+            peer.send(encode_lookup_response(MooncakeLookupResult(48)))
+        except Exception as exc:
+            errors.append(exc)
+
+    server = threading.Thread(target=serve)
+    server.start()
+    hashes = [BlockHash(bytes([index]) * 4) for index in range(4)]
+    try:
+        assert (
+            client.lookup("request", 65, hashes, non_block=True, start_tokens=16)
+            is None
+        )
+        assert received.wait(5)
+        assert (
+            client.lookup("request", 65, hashes, non_block=True, start_tokens=32)
+            is None
+        )
+        release.set()
+        result = client.lookup("request", 65, hashes, start_tokens=32)
+        assert result is not None and result.hit_length == 48
+    finally:
+        release.set()
+        server.join(5)
+    assert not server.is_alive() and not errors
+    assert [frame[4] for frame in frames] == [
+        (16).to_bytes(4, "big"),
+        (32).to_bytes(4, "big"),
+    ]
 
 
 @pytest.mark.parametrize("mode", ["blocking", "async", "prefetch"])
