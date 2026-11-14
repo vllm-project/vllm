@@ -133,6 +133,14 @@ class TokenizeChatRequest(OpenAIBaseModel):
             )
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_empty_tools(cls, data):
+        # Like ChatCompletionRequest, render an empty tools array as no tools.
+        if isinstance(data, dict) and data.get("tools") == []:
+            data = {**data, "tools": None}
+        return data
+
     def build_chat_params(
         self,
         default_template: str | None,

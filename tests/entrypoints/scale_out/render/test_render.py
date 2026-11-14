@@ -1076,6 +1076,25 @@ async def test_messages_render_error_invalid_model(client):
     assert "error" in data
 
 
+@pytest.mark.asyncio
+async def test_tokenize_matches_chat_render_with_empty_tools(client):
+    """`tools: []` renders like omitted tools in /tokenize, as on the chat route."""
+    body = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "tools": [],
+        "chat_template": (
+            "{% if tools is not none %}You can call tools.\n{% endif %}"
+            "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+        ),
+    }
+    render = await client.post("/v1/chat/completions/render", json=body)
+    tokenize = await client.post("/tokenize", json=body)
+
+    assert render.status_code == tokenize.status_code == 200
+    assert tokenize.json()["tokens"] == render.json()["token_ids"]
+
+
 @pytest.fixture(scope="module")
 def gpt_oss_server():
     with RemoteLaunchRenderServer(GPT_OSS_MODEL_NAME, []) as remote_server:
