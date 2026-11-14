@@ -299,6 +299,48 @@ def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
     np.testing.assert_allclose(ref_audio[:n], audio[:n], atol=1e-4)
 
 
+@pytest.mark.parametrize(
+    "subtype,sr,mono",
+    [
+        ("PCM_16", None, False),
+        ("PCM_16", 16000, True),
+        ("PCM_U8", None, True),
+        ("PCM_U8", 16000, False),
+    ],
+)
+def test_load_audio_pyav_normalizes_native_pcm(subtype, sr, mono):
+    """Native-rate PCM must be normalized and separated before channel averaging."""
+    samples = np.array(
+        [[-0.5, 0.25], [0.0, -0.5], [0.5, 0.0], [0.25, 0.5]],
+        dtype=np.float32,
+    )
+    buf = BytesIO()
+    sf.write(buf, samples, 16000, format="WAV", subtype=subtype)
+    buf.seek(0)
+
+    audio, sample_rate = load_audio(buf, sr=sr, mono=mono, backend="pyav")
+
+    expected = samples.mean(axis=1) if mono else samples.T
+    assert sample_rate == 16000
+    assert audio.dtype == np.float32
+    assert audio.shape == expected.shape
+    np.testing.assert_allclose(audio, expected, atol=1e-7)
+
+
+def test_audio_media_io_pyav_normalizes_unsigned_pcm():
+    """Media loading must preserve unsigned PCM silence and normalized amplitude."""
+    samples = np.array([-0.5, 0.0, 0.5], dtype=np.float32)
+    buf = BytesIO()
+    sf.write(buf, samples, 16000, format="WAV", subtype="PCM_U8")
+
+    audio, sample_rate = AudioMediaIO(audio_backend="pyav").load_bytes(buf.getvalue())
+
+    assert sample_rate == 16000
+    assert audio.dtype == np.float32
+    assert audio.shape == samples.shape
+    np.testing.assert_allclose(audio, samples, atol=1e-7)
+
+
 def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
     """Default decoding must not append Vorbis padding to the speech waveform."""
     expected, expected_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
