@@ -151,7 +151,9 @@ def test_lookahead_finish_saves_only_computed_kv(scheduled_compute, preempted):
     scheduler.request_finished(request, block_ids)
     output = SchedulerOutput.make_empty()
     output.finished_req_ids = {"r"}
-    plans = list(scheduler.build_connector_meta(output).iter_store_plans())
+    metadata = scheduler.build_connector_meta(output)
+    assert isinstance(metadata, UMBPConnectorMetadata)
+    plans = list(metadata.iter_store_plans())
     if scheduled_compute and not preempted:
         assert [plan.block_hash for plan in plans] == [request.block_hashes[1]]
         assert plans[0].token_ids == tuple(range(16, 33))
@@ -2205,7 +2207,10 @@ def test_scheduler_adopts_matching_worker_replicated_groups(monkeypatch):
             {rank: UMBPHandshakeMetadata("ns", (0,)) for rank in range(2)}
         )
 
-        assert scheduler.connector_scheduler.codec.replicated_groups == {0}
+        assert scheduler.connector_scheduler is not None
+        codec = scheduler.connector_scheduler.codec
+        assert isinstance(codec, BlockIdentityCodec)
+        assert codec.replicated_groups == {0}
     finally:
         scheduler.shutdown()
 

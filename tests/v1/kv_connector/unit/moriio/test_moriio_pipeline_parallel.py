@@ -100,9 +100,14 @@ def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
         )
 
 
-def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
+class _DecodeScheduler(MoRIIOConnectorScheduler):
+    notified: list[dict]
+    released: list[int]
+
+
+def _decode_scheduler(*, send: bool = False) -> _DecodeScheduler:
     """A decode scheduler that records its notifications, or sends them."""
-    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler = _DecodeScheduler.__new__(_DecodeScheduler)
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = False
     scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
@@ -163,8 +168,8 @@ def _decode_params(shape, pp_size, tp_size, host="10.0.0.1", notify_port=NOTIFY_
     if shape == "returned by prefill":
         # What the prefill's request_finished returns, forwarded as is.
         _, params = MoRIIOConnectorScheduler.request_finished(
-            _prefill_scheduler(pp_size, tp_size, host, notify_port),  # type: ignore[arg-type]
-            SimpleNamespace(  # type: ignore[arg-type]
+            _prefill_scheduler(pp_size, tp_size, host, notify_port),
+            SimpleNamespace(
                 request_id="req",
                 kv_transfer_params={"do_remote_decode": True, "transfer_id": "tA"},
                 status=RequestStatus.FINISHED_LENGTH_CAPPED,

@@ -47,6 +47,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.standalone import
     _ABANDONED_STORAGES,
     _DaemonTransferPool,
     _SharedPoolWorkerHandle,
+    _StandaloneSchedulerHandle,
+    _StandaloneWorkerHandle,
     normalize_endpoint,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
@@ -401,6 +403,7 @@ def test_async_load_past_its_deadline_stays_pending(monkeypatch, tmp_path):
         assert worker.get_finished(set()) == (None, None)
         refused = handle.store([BlockTransferPlan("next", 2)])
         assert refused.status is TransferJobStatus.FAILED
+        assert refused.error is not None
         assert refused.error.startswith(TRANSFER_NOT_ATTEMPTED)
 
         release.set()
@@ -515,16 +518,21 @@ def test_close_releases_the_client_kv_buffers_and_threads(server, role):
     """MORI drops a connection only once its client object is destroyed."""
     runtime = _runtime()
     if role == "scheduler":
-        handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
-        threads = handle._calls._threads
+        scheduler_handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        assert isinstance(scheduler_handle, _StandaloneSchedulerHandle)
+        threads = scheduler_handle._calls._threads
         storage = None
     else:
-        handle = runtime.create_worker_handle("ns", RankTopology(), None)
-        threads = handle._executor._threads
+        worker_handle = runtime.create_worker_handle("ns", RankTopology(), None)
+        assert isinstance(worker_handle, _StandaloneWorkerHandle)
+        executor = worker_handle._executor
+        assert isinstance(executor, _DaemonTransferPool)
+        threads = executor._threads
         source = torch.zeros(16, dtype=torch.uint8)
-        handle.register_buffers({"layer0": source})
+        worker_handle.register_buffers({"layer0": source})
         storage = ref(source.untyped_storage())
         del source
+    handle = scheduler_handle if role == "scheduler" else worker_handle
     client = ref(server.clients.pop())
 
     handle.close()
@@ -543,10 +551,13 @@ def test_close_releases_the_client_kv_buffers_and_threads(server, role):
 def test_close_waits_for_a_slow_but_live_server(server, monkeypatch, role, call):
     runtime = _runtime()
     if role == "scheduler":
-        handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        scheduler_handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        assert isinstance(scheduler_handle, _StandaloneSchedulerHandle)
     else:
-        handle = runtime.create_worker_handle("ns", RankTopology(), None)
-        handle.register_buffers({"layer0": torch.zeros(16, dtype=torch.uint8)})
+        worker_handle = runtime.create_worker_handle("ns", RankTopology(), None)
+        assert isinstance(worker_handle, _StandaloneWorkerHandle)
+        worker_handle.register_buffers({"layer0": torch.zeros(16, dtype=torch.uint8)})
+    handle = scheduler_handle if role == "scheduler" else worker_handle
     client = server.clients[0]
     original = getattr(client, call)
     called = threading.Event()
@@ -607,18 +618,23 @@ def _close_against_a_hung_server(role: str, stuck: str) -> None:
     sys.modules["mori.cpp"] = _fake_mori(pool)
     runtime = _runtime(lookup_timeout_ms=100, timeout_ms=100)
     if role == "scheduler":
-        handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        scheduler_handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
+        assert isinstance(scheduler_handle, _StandaloneSchedulerHandle)
         setattr(pool.clients[0], stuck, _hang)
         # A hung exists call is unavailable; with a hung close, "k" is absent.
-        assert handle.lookup(["k"]) == ([None] if stuck == "batch_exists" else [False])
+        assert scheduler_handle.lookup(["k"]) == (
+            [None] if stuck == "batch_exists" else [False]
+        )
     else:
-        handle = runtime.create_worker_handle("ns", RankTopology(), None)
+        worker_handle = runtime.create_worker_handle("ns", RankTopology(), None)
+        assert isinstance(worker_handle, _StandaloneWorkerHandle)
         source = torch.arange(16, dtype=torch.uint8)
-        handle.register_buffers({"layer0": source})
+        worker_handle.register_buffers({"layer0": source})
         setattr(pool.clients[0], stuck, _hang)
         if stuck == "batch_put_ranges_from_ptr":
-            job = handle.store([_block_plan("stuck", source)])
-            assert handle.poll(job) is None
+            job = worker_handle.store([_block_plan("stuck", source)])
+            assert worker_handle.poll(job) is None
+    handle = scheduler_handle if role == "scheduler" else worker_handle
     handle.close()
 
 
@@ -1004,6 +1020,7 @@ def test_scheduler_drops_its_client_once_a_stalled_call_returns(server, monkeypa
     handle = _runtime(lookup_timeout_ms=50).create_scheduler_handle(
         "ns", RankTopology(), None
     )
+    assert isinstance(handle, _StandaloneSchedulerHandle)
     release = threading.Event()
     _stall_scheduler_call(server, monkeypatch, "batch_exists", release)
     assert handle.lookup(["k"]) == [None]
@@ -1186,6 +1203,7 @@ def test_stalled_store_stays_pending_and_refuses_new_transfers(server, monkeypat
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(time, "monotonic", lambda: clock.now)
     worker = _runtime(timeout_ms=20).create_worker_handle("ns", RankTopology(), None)
+    assert isinstance(worker, _StandaloneWorkerHandle)
     source = torch.arange(16, dtype=torch.uint8)
     worker.register_buffers({"layer0": source})
     release = threading.Event()
@@ -1210,6 +1228,7 @@ def test_stalled_store_stays_pending_and_refuses_new_transfers(server, monkeypat
             for settle in (worker.wait, worker.cancel):
                 assert settle(refused) is refused
             assert refused.status is TransferJobStatus.FAILED
+            assert refused.error is not None
             assert refused.error.startswith(TRANSFER_NOT_ATTEMPTED)
 
         release.set()
