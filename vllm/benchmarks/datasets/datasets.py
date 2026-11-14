@@ -314,12 +314,17 @@ class BenchmarkDataset(ABC):
             random.seed(self.random_seed)
             needed = num_requests - len(requests)
             additional = []
-            for i in range(needed):
+            used_ids = {req.request_id for req in requests}
+            next_id = len(requests)
+            for _ in range(needed):
+                while request_id_prefix + str(next_id) in used_ids:
+                    next_id += 1
                 req = replace(
                     random.choice(requests),
-                    request_id=request_id_prefix + str(len(requests) + i),
+                    request_id=request_id_prefix + str(next_id),
                 )
                 additional.append(req)
+                next_id += 1
             requests.extend(additional)
             logger.info("Oversampled requests to reach %d total samples.", num_requests)
 

@@ -4,10 +4,15 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import requests
 import urllib3
+from datasets import Dataset
+
+from vllm.benchmarks.serve import add_cli_args, main
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from ..utils import RemoteOpenAIServer
 
@@ -183,3 +188,54 @@ def test_bench_serve_chat(server):
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+def test_bench_serve_oversamples_filtered_dataset(server):
+    """Filtering must not prevent the benchmark from sending every request."""
+    rows = Dataset.from_list(
+        [
+            {
+                "code": f"print({i})",
+                "change_request": f"Change {i}",
+                "norm_distance": distance,
+            }
+            for i, distance in enumerate([0.5, 1.0, 0.5])
+        ]
+    )
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--model",
+            MODEL_NAME,
+            "--base-url",
+            server.url_root,
+            "--backend",
+            "openai-chat",
+            "--endpoint",
+            "/v1/chat/completions",
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "vdaita/edit_5k_char",
+            "--blazedit-max-distance",
+            "0.9",
+            "--disable-shuffle",
+            "--skip-chat-template",
+            "--num-prompts",
+            "4",
+            "--hf-output-len",
+            "4",
+            "--request-id-prefix",
+            "bench-",
+            "--temperature",
+            "0",
+            "--ignore-eos",
+            "--disable-tqdm",
+        ]
+    )
+    with patch("vllm.benchmarks.datasets.datasets.load_dataset", return_value=rows):
+        result = main(args)
+
+    assert result["completed"] == 4
+    assert result["failed"] == 0
